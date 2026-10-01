@@ -301,6 +301,118 @@ class TestCalculator:
         assert "trust Canvas" in result
 
     @pytest.mark.asyncio
+    async def test_disagreement_caveat_names_a_grade_override(self):
+        course = course_json()
+        course["enrollments"][0]["computed_current_score"] = 86.5
+        result = await run("calculate_grade_scenarios", FakeCanvas(course=course), course_identifier="123")
+        assert "a final grade override entered by your instructor" in result
+
+    @pytest.mark.asyncio
+    async def test_override_signature_is_called_out(self):
+        """With an override, a student token gets the override score as both
+        computed_current_score and computed_final_score (course_json.rb
+        total_scores -> Enrollment#effective_*_score)."""
+        course = course_json()
+        course["enrollments"][0].update(computed_current_score=91.0, computed_final_score=91.0)
+        result = await run("calculate_grade_scenarios", FakeCanvas(course=course), course_identifier="123",
+                           target_percent=87)
+        assert "DISAGREES with Canvas by 7.00 points" in result
+        assert "looks like a final grade override entered by your instructor" in result
+        assert "see the override note above" in result
+        assert "this projects the calculated grade" in result
+
+    @pytest.mark.asyncio
+    async def test_plain_disagreement_is_not_called_an_override(self):
+        course = course_json()
+        course["enrollments"][0]["computed_current_score"] = 86.5
+        result = await run("calculate_grade_scenarios", FakeCanvas(course=course), course_identifier="123",
+                           target_percent=87)
+        assert "looks like a final grade override" not in result
+        assert "this projects the calculated grade" not in result
+
+    @pytest.mark.asyncio
+    async def test_score_at_a_letter_cutoff_rounds_like_canvas(self):
+        # 121.99/200 = 60.995%: Canvas (Ruby round) stores 61.0 -> D-.
+        groups = [{"id": 1, "name": "Exams", "rules": {},
+                   "assignments": [a(11, "Exam", 200, graded(121.99))]}]
+        course = course_json(apply_assignment_group_weights=False)
+        course["enrollments"][0].update(computed_current_score=61.0, computed_final_score=61.0,
+                                        computed_current_grade="D-")
+        result = await run("calculate_grade_scenarios", FakeCanvas(course=course, groups=groups),
+                           course_identifier="123")
+        assert "Computed here: 61.00% (D-)" in result
+        assert "matches Canvas" in result
+        assert "Canvas shows the letter" not in result
+        assert "DISAGREES" not in result
+
+    @pytest.mark.asyncio
+    async def test_unposted_excusal_is_not_applied(self):
+        # Canvas's posted final score ignores the unposted (excused) quiz: 10/20 = 50%.
+        groups = [{"id": 1, "name": "Work", "rules": {}, "assignments": [
+            a(11, "HW", 10, graded(10, posted_at="2026-09-01T00:00:00Z")),
+            a(12, "Quiz", 10, {"excused": True, "workflow_state": "graded", "posted_at": None}),
+        ]}]
+        course = course_json(apply_assignment_group_weights=False)
+        course["enrollments"][0].update(computed_current_score=100.0, computed_final_score=50.0,
+                                        computed_current_grade="A")
+        fake = FakeCanvas(course=course, groups=groups)
+        result = await run("calculate_grade_scenarios", fake, course_identifier="123")
+        assert "Computed here: 50.00% (F)" in result
+        assert "DISAGREES" not in result
+        assert "1 assignment(s) are graded or excused but not posted" in result
+
+        scores = await run("get_my_assignment_scores", FakeCanvas(course=course, groups=groups),
+                           course_identifier="123")
+        quiz = next(ln for ln in scores.splitlines() if "(ID 12)" in ln)
+        assert "-/10" in quiz and "grade not posted yet" in quiz
+        assert "excused" not in quiz
+
+    @pytest.mark.asyncio
+    async def test_non_monotone_drop_rules_target(self):
+        # Keep 1 of 3 (drop lowest 1 + highest 1): A 1/10, B ?/5, C 0/1.
+        # 8% on B gives 8%; 100% on B gives only 10% (B is kept only near 8-10%).
+        groups = [{"id": 1, "name": "Quizzes", "rules": {"drop_lowest": 1, "drop_highest": 1},
+                   "assignments": [a(11, "A", 10, graded(1)), a(12, "B", 5, ungraded()),
+                                   a(13, "C", 1, graded(0))]}]
+        course = course_json(apply_assignment_group_weights=False, enrollments=[])
+        result = await run("calculate_grade_scenarios", FakeCanvas(course=course, groups=groups),
+                           course_identifier="123", target_percent=8)
+        assert "You need at least 8.00% on every remaining assignment" in result
+        assert "Not reachable" not in result
+        assert "Approximate: a group drops both its lowest and highest scores" in result
+
+    @pytest.mark.asyncio
+    async def test_scenario_names_are_fenced(self):
+        """Every Canvas-authored string calculate_grade_scenarios prints is fenced."""
+        groups = weighted_groups()
+        groups[1]["assignments"].append(a(23, "Project", 50, ungraded()))  # stays remaining
+        for group in groups:
+            group["name"] = INJECTION + f" group {group['id']}"
+            for assignment in group["assignments"]:
+                assignment["name"] = INJECTION + f" assignment {assignment['id']}"
+        course = course_json(grading_standard_id=55,
+                             grading_scheme=[[INJECTION + " letter", 0.5], ["NP", 0]])
+        course["enrollments"][0].update(
+            computed_current_grade=INJECTION + " grade", computed_current_score=84.0,
+            has_grading_periods=True, current_grading_period_title=INJECTION + " period",
+            current_period_computed_current_score=84.0,
+        )
+        result = await run("calculate_grade_scenarios", FakeCanvas(course=course, groups=groups),
+                           course_identifier="123", hypothetical_scores={"22": 50, "11": 9},
+                           target_percent=60)
+        # Each kind of text actually appears, so the check below is not vacuous:
+        # group names, the dropped assignment (12), what-if names (22, 11),
+        # the remaining-work list (23), the period title, scheme letter, Canvas letter.
+        for marker in (" group 1", " group 2", " assignment 12", " assignment 22", " assignment 11",
+                       " assignment 23", " period", " letter", " grade"):
+            assert INJECTION + marker in result, marker
+        for line in result.splitlines():
+            rest = line
+            while INJECTION in rest:
+                before, rest = rest.split(INJECTION, 1)
+                assert FENCE_TEXT_START in before, line
+
+    @pytest.mark.asyncio
     async def test_unweighted_calculation(self):
         # (9 + 80) / (10 + 100) after HW 2 is dropped = 89/110 = 80.91%
         course = course_json(apply_assignment_group_weights=False)
@@ -374,6 +486,8 @@ class TestCalculator:
             {"hypothetical_scores": {"12/../users": 5}},
             {"hypothetical_scores": {"22": -3}},
             {"hypothetical_scores": {"22": "lots"}},
+            {"hypothetical_scores": {"22": 1e308, "21": 1e308}},
+            {"hypothetical_scores": {"22": 1_000_001}},
         ]
         for kwargs in cases:
             fake = FakeCanvas()
@@ -405,7 +519,7 @@ class TestCalculator:
         )
         result = await run("calculate_grade_scenarios", FakeCanvas(course=course, groups=groups),
                            course_identifier="123", target_percent=80)
-        assert "1 assignment(s) are graded but not posted" in result
+        assert "1 assignment(s) are graded or excused but not posted" in result
         # The target list says which "remaining" items are really waiting on the instructor.
         assert "Quiz>>> [graded, not posted yet]" in result
         assert "Essay quiz>>> [pending review]" in result
@@ -486,6 +600,72 @@ class TestLetterScheme:
         result = await run("calculate_grade_scenarios", fake, course_identifier="123")
         assert not any("grading_standards" in e for _, e, _, _ in fake.calls)
         assert "FALLBACK" in result
+        # The rejected id is not echoed into model-facing output.
+        assert "77/../../users" not in result
+        assert "unrecognised grading standard id" in result
+
+    @pytest.mark.asyncio
+    async def test_null_standard_id_uses_the_institution_scheme_canvas_returns(self):
+        """grading_standard_id null: Canvas serializes the account-chain default
+        (Course#grading_standard_or_default), so its cutoffs drive the letters."""
+        uci = [["A+", 0.97], ["A", 0.93], ["A-", 0.9], ["B+", 0.87], ["B", 0.83], ["B-", 0.8],
+               ["C+", 0.77], ["C", 0.73], ["C-", 0.7], ["D+", 0.67], ["D", 0.63], ["D-", 0.6], ["F", 0]]
+        course = course_json(grading_standard_id=None, grading_scheme=uci)
+        fake = FakeCanvas(course=course)
+        result = await run("calculate_grade_scenarios", fake, course_identifier="123", target_letter="A")
+        assert "Target: 93.00% (lower bound of A)" in result
+        assert "institution default scheme, as returned by Canvas" in result
+        assert "may show you no letter grade" not in result
+        # 84% is a B under the institution scheme (B at 83), as in Canvas.
+        assert "Computed here: 84.00% (B)" in result
+        assert not any("grading_standards" in e for _, e, _, _ in fake.calls)
+
+    @pytest.mark.asyncio
+    async def test_null_standard_id_with_default_scheme_and_no_letter(self):
+        course = course_json(grading_standard_id=None)
+        course["enrollments"][0]["computed_current_grade"] = None
+        result = await run("calculate_grade_scenarios", FakeCanvas(course=course), course_identifier="123")
+        assert "no grading scheme enabled" in result
+        assert "may show you no letter grade" in result
+
+    @pytest.mark.asyncio
+    async def test_null_standard_id_with_default_scheme_and_a_letter(self):
+        # Canvas shows a letter, so some scheme is enabled (the institution's).
+        course = course_json(grading_standard_id=None)
+        result = await run("calculate_grade_scenarios", FakeCanvas(course=course), course_identifier="123")
+        assert "may show you no letter grade" not in result
+        assert "institution default scheme, as returned by Canvas" in result
+
+    @pytest.mark.asyncio
+    async def test_points_based_scheme_letters_follow_canvas_rounding(self):
+        # One 100-point exam at 89.9. GPA scheme (scaling_factor 4): Canvas turns
+        # 89.9% into 3.596 -> 3.60 points = 90% -> A. As a plain percentage it is a B.
+        groups = [{"id": 1, "name": "Exams", "rules": {},
+                   "assignments": [a(11, "Exam", 100, graded(89.9))]}]
+        course = course_json(
+            apply_assignment_group_weights=False, grading_standard_id=55,
+            grading_scheme=[["A", 0.9], ["B", 0.8], ["C", 0.7], ["F", 0]],
+            points_based_grading_scheme=True, scaling_factor=4.0,
+        )
+        course["enrollments"][0].update(computed_current_score=89.9, computed_current_grade="A")
+        result = await run("calculate_grade_scenarios", FakeCanvas(course=course, groups=groups),
+                           course_identifier="123")
+        assert "Computed here: 89.90% (A)" in result
+        assert "Canvas shows the letter" not in result
+
+    @pytest.mark.asyncio
+    async def test_points_based_scheme_from_the_standards_api(self):
+        groups = [{"id": 1, "name": "Exams", "rules": {},
+                   "assignments": [a(11, "Exam", 100, graded(89.9))]}]
+        course = course_json(apply_assignment_group_weights=False, grading_standard_id=77,
+                             grading_scheme=None)
+        standard = {"id": 77, "title": "GPA", "points_based": True, "scaling_factor": 4.0,
+                    "grading_scheme": [{"name": "A", "value": 0.9}, {"name": "B", "value": 0.8},
+                                       {"name": "F", "value": 0}]}
+        result = await run("calculate_grade_scenarios",
+                           FakeCanvas(course=course, groups=groups, standard=standard),
+                           course_identifier="123")
+        assert "Computed here: 89.90% (A)" in result
 
 
 @pytest.fixture

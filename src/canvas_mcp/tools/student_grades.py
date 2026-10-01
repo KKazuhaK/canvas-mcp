@@ -21,6 +21,7 @@ the output boundary.
 """
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,6 +46,10 @@ COURSE_INCLUDES = [
     "restrict_quantitative_data",
 ]
 MAX_HYPOTHETICAL_SCORES = 500
+# Upper bound on one what-if score, in points. Far above any real assignment
+# (extra credit included) and small enough that sums of 500 of them stay
+# finite and the drop-rule ranking never sees inf or NaN.
+MAX_HYPOTHETICAL_POINTS = 1e6
 MAX_TARGET_PERCENT = 200.0
 # Canvas stores course scores to two decimals.
 DISAGREEMENT_TOLERANCE = 0.01
@@ -70,7 +75,9 @@ def _fmt(value: float | None, decimals: int = 2) -> str:
 
 
 def _pct(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.2f}%"
+    # Rounded the way Canvas rounds stored scores, so 60.995 shows as 61.00
+    # (Python's formatting would print the binary value's 60.99).
+    return "n/a" if value is None else f"{gc.canvas_round(value):.2f}%"
 
 
 def _letter_label(name: str | None) -> str:
@@ -82,10 +89,10 @@ def _letter_label(name: str | None) -> str:
     return fence_untrusted_inline(name, "grading scheme letter")
 
 
-def _with_letter(percent: float | None, scheme: tuple[tuple[str, float], ...]) -> str:
+def _with_letter(percent: float | None, scheme: "_Scheme") -> str:
     if percent is None:
         return "n/a (no graded work counts yet)"
-    return f"{_pct(percent)} ({_letter_label(gc.letter_for_percent(percent, scheme))})"
+    return f"{_pct(percent)} ({_letter_label(scheme.letter(percent))})"
 
 
 def _student_enrollment(course: dict[str, Any]) -> dict[str, Any] | None:
@@ -141,57 +148,115 @@ async def _load_course(
     )
 
 
-async def _resolve_letter_scheme(
-    course_id: str, course: dict[str, Any]
-) -> tuple[tuple[tuple[str, float], ...], str]:
-    """Pick the letter scheme Canvas would use and say where it came from."""
+@dataclass(frozen=True)
+class _Scheme:
+    """The letter scheme in use, how Canvas applies it, and where it came from."""
+
+    entries: tuple[tuple[str, float], ...]
+    source: str
+    points_based: bool = False
+    scaling_factor: float | None = None
+
+    def letter(self, percent: float | None) -> str | None:
+        return gc.letter_for_percent(
+            percent, self.entries, self.points_based, self.scaling_factor
+        )
+
+
+def _scheme_from(
+    payload: dict[str, Any], scheme_key: str, points_based_key: str, source: str
+) -> _Scheme | None:
+    """Parse a scheme plus its points-based settings from a Canvas payload."""
+    scaling = _number(payload.get("scaling_factor"))
+    entries = gc.parse_grading_scheme(payload.get(scheme_key), scaling)
+    if entries is None:
+        return None
+    return _Scheme(entries, source, payload.get(points_based_key) is True, scaling)
+
+
+async def _resolve_letter_scheme(course_id: str, course: dict[str, Any]) -> _Scheme:
+    """Pick the letter scheme Canvas would use and say where it came from.
+
+    With ``include[]=grading_scheme`` Canvas returns the scheme it actually
+    applies (``Course#grading_standard_or_default``): the course's own
+    standard, else the account chain's (institution) default, else Canvas's
+    built-in scheme. That answer is used whenever it parses, whatever
+    ``grading_standard_id`` says; the id only decides how the source is
+    described. The grading standards API is a fallback for a payload without
+    the scheme.
+    """
     standard_id = course.get("grading_standard_id")
-    from_include = gc.parse_grading_scheme(
-        course.get("grading_scheme"), _number(course.get("scaling_factor"))
-    )
+    no_standard = standard_id in (None, "")
+    from_include = _scheme_from(course, "grading_scheme", "points_based_grading_scheme", "")
 
-    if "grading_standard_id" not in course and from_include:
-        return from_include, (
-            "the scheme Canvas returned for this course (Canvas did not say whether the "
-            "course has letter grades enabled)."
+    if from_include is not None:
+        if "grading_standard_id" not in course:
+            source = (
+                "the scheme Canvas returned for this course (Canvas did not say whether the "
+                "course has letter grades enabled)."
+            )
+        elif no_standard:
+            enrollment = _student_enrollment(course)
+            shows_letter = bool(enrollment and enrollment.get("computed_current_grade"))
+            if gc.same_scheme(from_include.entries, gc.CANVAS_DEFAULT_SCHEME) and not shows_letter:
+                source = (
+                    "Canvas default scheme. This course has no grading scheme enabled and "
+                    "Canvas returned no institution default, so Canvas may show you no letter "
+                    "grade; letters here are for reference only."
+                )
+            else:
+                source = (
+                    "the course or institution default scheme, as returned by Canvas (the "
+                    "course sets no scheme of its own, so Canvas uses the institution's)."
+                )
+        elif str(standard_id) == "0":
+            source = "Canvas default scheme (the scheme this course uses)."
+        else:
+            source = "the course's own grading scheme (from the course record)."
+        return _Scheme(
+            from_include.entries, source, from_include.points_based, from_include.scaling_factor
         )
-    if standard_id in (None, ""):
-        return gc.CANVAS_DEFAULT_SCHEME, (
-            "Canvas default scheme. This course has no grading scheme enabled, so "
-            "Canvas may show you no letter grade; letters here are for reference only."
-        )
+
+    if no_standard:
+        return _Scheme(gc.CANVAS_DEFAULT_SCHEME, (
+            "Canvas default scheme. Canvas returned no scheme and the course itself has no "
+            "grading scheme enabled; Canvas may apply an institution default or show you no "
+            "letter grade, so letters here are for reference only."
+        ))
     if str(standard_id) == "0":
-        return from_include or gc.CANVAS_DEFAULT_SCHEME, (
-            "Canvas default scheme (the scheme this course uses)."
-        )
-    if from_include:
-        return from_include, "the course's own grading scheme (from the course record)."
+        return _Scheme(gc.CANVAS_DEFAULT_SCHEME, "Canvas default scheme (the scheme this course uses).")
 
-    safe_id = coerce_canvas_id(standard_id)
+    safe_id = (
+        coerce_canvas_id(standard_id)
+        if isinstance(standard_id, (str, int)) and not isinstance(standard_id, bool)
+        else None
+    )
     if safe_id is not None:
         standard = await make_canvas_request(
             "get", f"/courses/{course_id}/grading_standards/{safe_id}"
         )
         if isinstance(standard, dict) and "error" not in standard:
-            parsed = gc.parse_grading_scheme(
-                standard.get("grading_scheme"), _number(standard.get("scaling_factor"))
+            title = standard.get("title") or f"#{safe_id}"
+            parsed = _scheme_from(
+                standard, "grading_scheme", "points_based",
+                "the course's grading standard "
+                f"{fence_untrusted_inline(title, 'grading standard title')} "
+                "(from the grading standards API).",
             )
-            if parsed:
-                title = standard.get("title") or f"#{safe_id}"
-                return parsed, (
-                    "the course's grading standard "
-                    f"{fence_untrusted_inline(title, 'grading standard title')} "
-                    "(from the grading standards API)."
-                )
-    return gc.CANVAS_DEFAULT_SCHEME, (
-        f"Canvas default scheme as a FALLBACK: the course uses grading standard {standard_id}, "
+            if parsed is not None:
+                return parsed
+    which = f"grading standard {safe_id}" if safe_id is not None else "an unrecognised grading standard id"
+    return _Scheme(gc.CANVAS_DEFAULT_SCHEME, (
+        f"Canvas default scheme as a FALLBACK: the course uses {which}, "
         "which could not be read with your token (it is probably defined at the "
         "institution level). Letters here may differ from what Canvas shows you."
-    )
+    ))
 
 
-def _score_text(assignment: dict[str, Any], submission: dict[str, Any] | None) -> str:
+def _score_text(assignment: Mapping[str, Any], submission: Mapping[str, Any] | None) -> str:
     points = _number(assignment.get("points_possible")) or 0.0
+    if gc.grade_not_posted(submission):
+        return f"-/{_fmt(points)}"
     score = _number(submission.get("score")) if submission else None
     if submission and submission.get("excused"):
         return "excused"
@@ -203,12 +268,15 @@ def _score_text(assignment: dict[str, Any], submission: dict[str, Any] | None) -
 
 
 def _rules_text(group: dict[str, Any]) -> str:
-    rules = group.get("rules") if isinstance(group.get("rules"), dict) else {}
+    raw_rules = group.get("rules")
+    rules: dict[str, Any] = raw_rules if isinstance(raw_rules, dict) else {}
     parts = []
-    if rules.get("drop_lowest"):
-        parts.append(f"drop lowest {rules['drop_lowest']}")
-    if rules.get("drop_highest"):
-        parts.append(f"drop highest {rules['drop_highest']}")
+    drop_lowest = int(_number(rules.get("drop_lowest")) or 0)
+    drop_highest = int(_number(rules.get("drop_highest")) or 0)
+    if drop_lowest:
+        parts.append(f"drop lowest {drop_lowest}")
+    if drop_highest:
+        parts.append(f"drop highest {drop_highest}")
     never = rules.get("never_drop") or []
     if never and parts:
         parts.append(f"never drop {len(never)} assignment(s)")
@@ -316,8 +384,7 @@ def _group_lines(
 
 def _render_grade_scenarios(
     data: _CourseData,
-    scheme: tuple[tuple[str, float], ...],
-    scheme_source: str,
+    scheme: _Scheme,
     hypothetical: dict[str, float],
     target: float | None,
     target_note: str,
@@ -356,23 +423,43 @@ def _render_grade_scenarios(
             "Note: Canvas did not say whether groups are weighted; assumed unweighted."
         )
 
+    # A final grade override replaces both of Canvas's student-visible scores
+    # with the override score, so Canvas reports the same current and final
+    # score even though the calculated ones differ.
+    override_suspected = (
+        canvas_current is not None
+        and canvas_final is not None
+        and abs(canvas_current - canvas_final) <= DISAGREEMENT_TOLERANCE / 2
+        and current.percent is not None
+        and final.percent is not None
+        and abs(gc.canvas_round(current.percent) - gc.canvas_round(final.percent))
+        > DISAGREEMENT_TOLERANCE
+        and _disagrees(current.percent, canvas_current)
+    )
+
     disagreements: list[str] = []
     lines.append("\nCurrent grade (graded work only)")
     lines.append(f"  Computed here: {_with_letter(current.percent, scheme)}")
     if canvas_current is not None:
         letter = f" ({_letter_label(canvas_letter)})" if canvas_letter else ""
         lines.append(f"  Canvas reports: {_pct(canvas_current)}{letter}")
-        if current.percent is None or abs(round(current.percent, 2) - canvas_current) > DISAGREEMENT_TOLERANCE:
+        if _disagrees(current.percent, canvas_current):
             gap = (
-                f"by {abs(round(current.percent, 2) - canvas_current):.2f} points"
+                f"by {abs(gc.canvas_round(current.percent) - canvas_current):.2f} points"
                 if current.percent is not None
                 else "(this tool found no graded work that counts)"
             )
             lines.append(f"  WARNING: the computed current grade DISAGREES with Canvas {gap}.")
+            if override_suspected:
+                lines.append(
+                    "  This looks like a final grade override entered by your instructor: "
+                    "Canvas reports the same score as current and final, which is what it "
+                    "does when an override replaces the calculated grade."
+                )
             disagreements.append("current")
         else:
             lines.append("  Agreement: the computed grade matches Canvas.")
-            ours = gc.letter_for_percent(current.percent, scheme)
+            ours = scheme.letter(current.percent)
             if canvas_letter and ours is not None and str(canvas_letter) != ours:
                 lines.append(
                     f"  Note: Canvas shows the letter {_letter_label(str(canvas_letter))} but the "
@@ -386,8 +473,9 @@ def _render_grade_scenarios(
     lines.append(f"  Computed here: {_with_letter(final.percent, scheme)}")
     if canvas_final is not None:
         lines.append(f"  Canvas reports: {_pct(canvas_final)}")
-        if final.percent is None or abs(round(final.percent, 2) - canvas_final) > DISAGREEMENT_TOLERANCE:
-            lines.append("  WARNING: the computed final grade DISAGREES with Canvas.")
+        if _disagrees(final.percent, canvas_final):
+            note = " (see the override note above)" if override_suspected else ""
+            lines.append(f"  WARNING: the computed final grade DISAGREES with Canvas{note}.")
             disagreements.append("final")
 
     lines.append("\nGroups (current grade)")
@@ -426,6 +514,11 @@ def _render_grade_scenarios(
         lines.append(f"\nTarget: {_pct(target)}{target_note}")
         if hypothetical:
             lines.append("  (computed on top of the what-if scores above)")
+        if override_suspected:
+            lines.append(
+                "  (this projects the calculated grade; while an instructor override is in "
+                "place, Canvas shows the override instead)"
+            )
         if result.remaining_ids:
             listed = ", ".join(
                 _remaining_label(names.get(a, a), assignments.get(a))
@@ -462,6 +555,13 @@ def _render_grade_scenarios(
                 f"  Projection: 0% on remaining gives {_with_letter(result.projected_at_zero, scheme)}; "
                 f"100% gives {_with_letter(result.projected_at_full, scheme)}."
             )
+            if result.non_monotone:
+                lines.append(
+                    "  Approximate: a group drops both its lowest and highest scores, so a higher "
+                    "score on remaining work can LOWER the grade (it changes which scores are "
+                    "dropped). The figure above was searched on a 0.5% grid and checked; a "
+                    "different mix of scores may do better."
+                )
         else:
             status = "met" if result.required_percent == 0.0 else "not met"
             lines.append(
@@ -469,10 +569,15 @@ def _render_grade_scenarios(
                 f"through remaining work: {_with_letter(result.projected_at_zero, scheme)}, target {status}."
             )
 
-    lines.append(f"\nLetter scheme: {scheme_source}")
+    lines.append(f"\nLetter scheme: {scheme.source}")
     lines.append("\nCaveats")
     lines.extend(f"  - {c}" for c in _caveats(data, groups, items, current, enrollment, disagreements, target))
     return "\n".join(lines)
+
+
+def _disagrees(computed: float | None, canvas: float) -> bool:
+    """Whether a computed percent, rounded as Canvas rounds, differs from Canvas's."""
+    return computed is None or abs(gc.canvas_round(computed) - canvas) > DISAGREEMENT_TOLERANCE
 
 
 def _caveats(
@@ -494,16 +599,14 @@ def _caveats(
         for assignment in group.get("assignments") or []:
             if not isinstance(assignment, dict):
                 continue
-            submission = gc.own_submission(assignment)
-            if submission and submission.get("workflow_state") == "graded" and (
-                _number(submission.get("score")) is None
-            ) and not submission.get("excused"):
+            if gc.grade_not_posted(gc.own_submission(assignment)):
                 hidden += 1
     if hidden:
         caveats.append(
-            f"{hidden} assignment(s) are graded but not posted. Canvas hides those scores "
-            "from students, so they count as ungraded here (a target treats them as still "
-            "to be scored) and Canvas's own current score leaves them out too."
+            f"{hidden} assignment(s) are graded or excused but not posted. Canvas hides those "
+            "results from students, so they count as ungraded here (a target treats them as "
+            "still to be scored, and an unposted excusal is not applied yet) and Canvas's own "
+            "score leaves them out too."
         )
     pending = sum(1 for item in items if item.pending_review and not item.excused)
     if pending:
@@ -553,8 +656,10 @@ def _caveats(
     if disagreements:
         caveats.append(
             "Where the computed grade disagrees with Canvas, trust Canvas. Usual causes: "
-            "grading periods, assignments assigned only to some students, scores you cannot "
-            "see yet, or a recent change Canvas has not recalculated."
+            "a final grade override entered by your instructor (Canvas then reports the "
+            "override, not the calculated score), grading periods, assignments assigned only "
+            "to some students, scores you cannot see yet, or a recent change Canvas has not "
+            "recalculated."
         )
     if target is not None:
         caveats.append(
@@ -564,7 +669,9 @@ def _caveats(
     return caveats
 
 
-def _parse_hypotheticals(raw: dict[str, Any] | None) -> tuple[dict[str, float], str | None]:
+def _parse_hypotheticals(raw: object) -> tuple[dict[str, float], str | None]:
+    # ``raw`` is typed loosely on purpose: direct callers bypass FastMCP's
+    # schema validation, so the isinstance check below is a real guard.
     if not raw:
         return {}, None
     if not isinstance(raw, dict):
@@ -577,10 +684,10 @@ def _parse_hypotheticals(raw: dict[str, Any] | None) -> tuple[dict[str, float], 
         if assignment_id is None:
             return {}, f"Error: hypothetical_scores key {key!r} is not a Canvas assignment ID (digits only)."
         score = _number(value)
-        if score is None or score < 0:
+        if score is None or score < 0 or score > MAX_HYPOTHETICAL_POINTS:
             return {}, (
                 f"Error: hypothetical score for assignment {assignment_id} must be a "
-                "non-negative number of points."
+                f"non-negative number of points, at most {MAX_HYPOTHETICAL_POINTS:g}."
             )
         parsed[assignment_id] = score
     return parsed, None
@@ -663,21 +770,19 @@ def register_student_grade_tools(mcp: FastMCP) -> None:
                 f"{', '.join(unknown)}. Use get_my_assignment_scores to see valid IDs."
             )
 
-        scheme, scheme_source = await _resolve_letter_scheme(data.course_id, data.course)
+        scheme = await _resolve_letter_scheme(data.course_id, data.course)
 
         target: float | None = target_percent
         target_note = ""
         if target_letter is not None:
-            found = gc.find_letter(target_letter, scheme)
+            found = gc.find_letter(target_letter, scheme.entries)
             if found is None:
-                available = ", ".join(_letter_label(name) for name, _ in scheme)
+                available = ", ".join(_letter_label(name) for name, _ in scheme.entries)
                 return (
                     f"Error: the letter scheme in use has no letter {target_letter.strip()!r}. "
-                    f"Available: {available}. Scheme: {scheme_source}"
+                    f"Available: {available}. Scheme: {scheme.source}"
                 )
             letter_name, target = found
             target_note = f" (lower bound of {_letter_label(letter_name)})"
 
-        return _render_grade_scenarios(
-            data, scheme, scheme_source, hypothetical, target, target_note
-        )
+        return _render_grade_scenarios(data, scheme, hypothetical, target, target_note)

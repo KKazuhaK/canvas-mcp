@@ -325,11 +325,16 @@ from; and caveats.
 and the rest rescaled to 100% when their weights total less), or total points
 when groups are not weighted; drop lowest/highest and never-drop rules using
 Canvas's best-ratio method; excused, `omit_from_final_grade` and ungraded
-assignments excluded from the current grade. Letters come from the course's
-grading scheme (`include[]=grading_scheme`, then the grading standards API),
-falling back to Canvas's default scheme when the course has none or your token
-cannot read it. Not reproduced: grading-period weighting, unposted grades
-(hidden from students) and assignments Canvas does not show you.
+assignments excluded from the current grade; unposted results (including an
+unposted excusal) count as ungraded, as in Canvas's student-visible score.
+Scores are rounded as Canvas rounds them before a letter is assigned (and in
+points first for a points-based scheme). Letters come from the scheme Canvas
+returns with `include[]=grading_scheme` (the course's own, else the
+institution default), then the grading standards API, falling back to
+Canvas's default scheme when neither is readable. A suspected final grade
+override is pointed out. Not reproduced: grading-period weighting, override
+scores, unposted scores and assignments Canvas does not show you. When a group
+drops both lowest and highest scores the target search is approximate.
 
 ---
 

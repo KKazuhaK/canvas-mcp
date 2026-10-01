@@ -533,3 +533,138 @@ class TestStatusesAndModel:
         assert by_id["106"].pending_review and not by_id["106"].is_graded
         assert not by_id["107"].counts_toward_grade
         assert not by_id["108"].counts_toward_grade
+
+
+class TestCanvasRounding:
+    """Canvas rounds stored course scores with Ruby's Float#round(2), which
+    rounds half up on the decimal value (float.c round_half_up). Expected
+    values are what Ruby prints, e.g. ``60.995.round(2) # => 61.0``."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(121.99 / 200 * 100, 61.0), (59.995, 60.0), (60.995, 61.0), (63.995, 64.0),
+         (1.005, 1.01), (2.675, 2.68), (84.0, 84.0), (93.994, 93.99), (0.0, 0.0),
+         (-1.005, -1.01)],
+    )
+    def test_matches_ruby_round_half_up(self, value, expected):
+        assert gc.canvas_round(value) == expected
+
+    def test_letter_at_a_cutoff_uses_ruby_rounding(self):
+        # One 200-point exam scored 121.99: Canvas stores 61.0 and shows D-
+        # (default D- cutoff 61%). Python's round() would give 60.99 -> F.
+        percent = course([G1], [item(1, points=200, score=121.99)]).percent
+        assert gc.letter_for_percent(percent, gc.CANVAS_DEFAULT_SCHEME) == "D-"
+
+
+class TestPointsBasedScheme:
+    # GPA-style scheme: Canvas stores bounds as fractions with scaling_factor 4.
+    GPA = (("A", 0.9), ("B", 0.8), ("C", 0.7), ("F", 0.0))
+
+    def test_score_just_under_a_cutoff_rounds_up_in_points(self):
+        # GradingStandard#scale_score: 89.9% / (100 / 4) = 3.596 -> 3.60 points
+        # -> 3.60 / 4 * 100 = 90.00% -> A. As a percentage scheme it is a B.
+        assert gc.letter_for_percent(89.9, self.GPA, points_based=True, scaling_factor=4.0) == "A"
+        assert gc.letter_for_percent(89.9, self.GPA) == "B"
+
+    def test_score_further_below_stays_below(self):
+        # 89.79% -> 3.5916 -> 3.59 points -> 89.75% -> B
+        assert gc.letter_for_percent(89.79, self.GPA, points_based=True, scaling_factor=4.0) == "B"
+
+    def test_scaling_factor_100_is_left_alone(self):
+        # scale_score returns the score unchanged when scaling_factor is 100.
+        assert gc.letter_for_percent(89.9, self.GPA, points_based=True, scaling_factor=100.0) == "B"
+
+    def test_same_scheme(self):
+        assert gc.same_scheme(gc.parse_grading_scheme([list(e) for e in gc.CANVAS_DEFAULT_SCHEME]),
+                              gc.CANVAS_DEFAULT_SCHEME)
+        assert not gc.same_scheme((("A", 0.93), ("F", 0.0)), gc.CANVAS_DEFAULT_SCHEME)
+        assert not gc.same_scheme(None, gc.CANVAS_DEFAULT_SCHEME)
+
+
+class TestNonMonotoneTarget:
+    """drop_lowest + drop_highest makes the grade non-monotone in the score on
+    remaining work. Group keeps 1 of 3: A 1/10 graded, B ?/5 remaining, C 0/1.
+
+    At p% on B: Canvas first keeps the best 2 by ratio, then the worst 1 of
+    those. {A,B} = (1 + 0.05p)/15 beats {A,C} = 1/11 once p > 7.27, and then
+    the worse of A (10%) and B (p%) is kept. So the grade is 0 for p <= 7.27,
+    p for 7.27 < p <= 10, and 10 above: 8% gives 8%, 100% gives only 10%.
+    """
+
+    RULES = [GroupRules("g1", drop_lowest=1, drop_highest=1)]
+    ITEMS = [item("A", points=10, score=1), item("B", points=5), item("C", points=1, score=0)]
+
+    def test_grade_is_not_monotone(self):
+        def at(p):
+            return gc.project_uniform(self.RULES, self.ITEMS, False, p).percent
+
+        assert at(8) == pytest.approx(8.0)
+        assert at(0) == pytest.approx(0.0)
+        assert at(5) == pytest.approx(0.0)
+
+    def test_reachable_target_is_found(self):
+        result = gc.required_uniform_percent(self.RULES, self.ITEMS, False, 8.0)
+        assert result.non_monotone
+        assert result.required_percent == pytest.approx(8.0)
+        assert gc.project_uniform(self.RULES, self.ITEMS, False, result.required_percent).percent >= 8.0
+
+    def test_unreachable_target_is_none(self):
+        # Nothing beats 10%: 10.5% is out of reach at any uniform score.
+        result = gc.required_uniform_percent(self.RULES, self.ITEMS, False, 10.5)
+        assert result.required_percent is None
+
+    def test_monotone_groups_are_not_flagged(self):
+        rules = [GroupRules("g1", drop_lowest=1)]
+        assert not gc.required_uniform_percent(rules, self.ITEMS, False, 8.0).non_monotone
+
+
+class TestUnposted:
+    """Canvas's student-visible grade ignores submissions without posted_at
+    (GradeCalculator#ignore_submission?), excused flag included."""
+
+    def test_unposted_excused_counts_as_ungraded(self):
+        # HW 10/10 posted; Quiz excused but not posted. Canvas: current 100%,
+        # final (10 + 0) / 20 = 50%. Treating the excusal as applied gives 100%.
+        groups_json = [{
+            "id": 1, "rules": {},
+            "assignments": [
+                {"id": 11, "points_possible": 10,
+                 "submission": {"score": 10, "workflow_state": "graded", "posted_at": "2026-09-01T00:00:00Z"}},
+                {"id": 12, "points_possible": 10,
+                 "submission": {"excused": True, "workflow_state": "graded", "posted_at": None}},
+            ],
+        }]
+        groups, items = gc.build_grade_model(groups_json)
+        quiz = next(i for i in items if i.assignment_id == "12")
+        assert not quiz.excused and quiz.score is None
+        assert course(groups, items).percent == pytest.approx(100.0)
+        assert course(groups, items, include_ungraded=True).percent == pytest.approx(50.0)
+
+    def test_posted_excused_is_still_excused(self):
+        _, items = gc.build_grade_model([{
+            "id": 1, "assignments": [{"id": 12, "points_possible": 10, "submission": {
+                "excused": True, "workflow_state": "graded", "posted_at": "2026-09-01T00:00:00Z"}}],
+        }])
+        assert items[0].excused
+
+    def test_payload_without_posted_at_keeps_old_behaviour(self):
+        _, items = gc.build_grade_model([{
+            "id": 1, "assignments": [{"id": 12, "points_possible": 10, "submission": {
+                "excused": True, "workflow_state": "graded"}}],
+        }])
+        assert items[0].excused
+
+    @pytest.mark.parametrize(
+        ("sub", "expected"),
+        [
+            ({"excused": True, "workflow_state": "graded", "posted_at": None},
+             ["grade not posted yet (hidden from you)"]),
+            ({"workflow_state": "graded", "posted_at": None},
+             ["grade not posted yet (hidden from you)"]),
+            ({"excused": True, "workflow_state": "graded", "posted_at": "2026-09-01T00:00:00Z"},
+             ["excused"]),
+            ({"score": None, "workflow_state": "unsubmitted", "posted_at": None}, ["unsubmitted"]),
+        ],
+    )
+    def test_statuses(self, sub, expected):
+        assert gc.submission_statuses({}, sub) == expected
