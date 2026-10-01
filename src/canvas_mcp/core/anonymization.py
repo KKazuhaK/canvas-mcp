@@ -127,10 +127,15 @@ USER_SIGNAL_FIELDS = frozenset({
 #: Keys that positively identify a record as NOT a person. Course objects also
 #: carry an ``enrollments`` list, which would otherwise corroborate them as a
 #: user and get the course title rewritten as a student pseudonym.
+#: ``group_category_id`` marks a Canvas Group: group records always carry an
+#: ``avatar_url`` key (a user signal), so on ``/users/self/groups`` — gated by
+#: its ``users`` segment — the group's own name was rewritten as a student
+#: pseudonym. Canvas user and group-membership records never carry it.
 NON_USER_MARKER_FIELDS = frozenset({
     'course_code',
     'sis_course_id',
     'enrollment_term_id',
+    'group_category_id',
 })
 
 #: Dict keys whose *value* is by convention a user record. Children reached

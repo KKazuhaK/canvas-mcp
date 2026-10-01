@@ -295,6 +295,38 @@ class TestNonUserObjectsPreserved:
         assert result["name"] == "Project Teams"
         assert result["members_count"] == 4
 
+    def test_group_record_from_users_self_groups_keeps_its_name(self):
+        """/users/self/groups is gated by its 'users' segment, and every Canvas
+        Group record carries an ``avatar_url`` key, a user signal. Without a
+        non-person marker the scrubber renamed the group "Student_<hash>"."""
+        group = {
+            "id": 77,
+            "name": "Team Rocket",
+            "description": "ICS 33 project team",
+            "avatar_url": None,
+            "group_category_id": 12,
+            "members_count": 4,
+            "context_type": "Course",
+            "course_id": 101,
+        }
+        [result], _ = _anonymize_for_endpoint([group], "/users/self/groups")
+        assert result["name"] == "Team Rocket"
+        assert result["members_count"] == 4
+        assert result["course_id"] == 101
+
+    def test_users_nested_in_a_group_record_are_still_scrubbed(self):
+        """The group marker covers the group dict only, never its members."""
+        group = {
+            "id": 77,
+            "name": "Team Rocket",
+            "group_category_id": 12,
+            "users": [{"id": 501, "name": "Jane Classmate", "sortable_name": "Classmate, Jane"}],
+        }
+        [result], _ = _anonymize_for_endpoint([group], "/users/self/groups")
+        assert result["name"] == "Team Rocket"
+        assert "Jane" not in json.dumps(result)
+        assert result["users"][0]["id"] == 501
+
     def test_course_name_not_rewritten(self):
         course = {"id": 55, "name": "BADM 350 Fall 2026", "course_code": "BADM350"}
         result = anonymize_response_data(course, data_type="users")

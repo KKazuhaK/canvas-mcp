@@ -245,7 +245,9 @@ def _endpoint_anonymization_mode(endpoint: str) -> str:
     Intentionally NOT matched at all:
     - /groups listings — carry group names, not student names; generic
       anonymization would mangle them. Membership goes via /groups/{id}/users,
-      which the '/users' rule covers.
+      which the '/users' rule covers. (/users/self/groups IS matched, by its
+      'users' segment; group records survive the full tier because
+      'group_category_id' is a non-person marker in core/anonymization.py.)
     - /discussion_topics listings (incl. announcements) — typically
       instructor-authored; student content lives under the content endpoints
       matched below.
