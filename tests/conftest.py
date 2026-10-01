@@ -1,5 +1,6 @@
 """Shared pytest fixtures for Canvas MCP tests."""
 
+import io
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -184,3 +185,109 @@ def sample_announcement_data():
         "posted_at": "2024-02-01T12:00:00Z",
         "author": {"id": 2000, "display_name": "Prof. Smith"}
     }
+
+
+# --- Course document builders (read_course_file_text tests) -----------------
+# Built in-process so expected text is known independently of the extractor.
+# python-pptx / python-docx come from the optional "documents" extra; tests
+# that use those builders skip when it is not installed.
+
+
+def _make_pdf(pages: list[str]) -> bytes:
+    """A minimal valid PDF whose page i shows the literal text pages[i].
+
+    An empty string makes a page with no text (what a scanned page looks like
+    to a text extractor).
+    """
+    objects: list[bytes] = []
+    count = len(pages)
+    kids = " ".join(f"{4 + 2 * i} 0 R" for i in range(count))
+    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    objects.append(f"<< /Type /Pages /Kids [{kids}] /Count {count} >>".encode())
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    for i, text in enumerate(pages):
+        content = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode() if text else b""
+        objects.append(
+            (
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                "/Resources << /Font << /F1 3 0 R >> >> "
+                f"/Contents {5 + 2 * i} 0 R >>"
+            ).encode()
+        )
+        objects.append(
+            b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream"
+        )
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n" % (len(objects) + 1) + b"0000000000 65535 f \n"
+    for offset in offsets:
+        out += b"%010d 00000 n \n" % offset
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
+        len(objects) + 1,
+        xref,
+    )
+    return bytes(out)
+
+
+def _make_pptx() -> bytes:
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    prs = Presentation()
+    first = prs.slides.add_slide(prs.slide_layouts[1])  # title + content
+    first.shapes.title.text = "Intro to Graphs"
+    first.placeholders[1].text = "Vertices and edges"
+    table = first.shapes.add_table(
+        2, 2, Inches(1), Inches(4), Inches(4), Inches(1)
+    ).table
+    table.cell(0, 0).text = "BFS"
+    table.cell(0, 1).text = "O(V+E)"
+    first.notes_slide.notes_text_frame.text = "Mention the midterm"
+    second = prs.slides.add_slide(prs.slide_layouts[5])  # title only
+    second.shapes.title.text = "Shortest Paths"
+    third = prs.slides.add_slide(prs.slide_layouts[5])
+    third.shapes.title.text = "Dijkstra"
+    buffer = io.BytesIO()
+    prs.save(buffer)
+    return buffer.getvalue()
+
+
+def _make_docx() -> bytes:
+    from docx import Document
+
+    document = Document()
+    document.add_heading("Course Policies", 1)
+    document.add_paragraph("Late work loses 10% per day.")
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Week 1"
+    table.cell(0, 1).text = "Introduction"
+    document.add_paragraph("Office hours are on Fridays.")
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+
+
+@pytest.fixture
+def make_pdf():
+    """Builder: list of page strings -> PDF bytes ("" = a page with no text)."""
+    return _make_pdf
+
+
+@pytest.fixture
+def make_pptx():
+    """Builder: a 3-slide deck (title/body/table/notes, then two title slides)."""
+    pytest.importorskip("pptx")
+    return _make_pptx
+
+
+@pytest.fixture
+def make_docx():
+    """Builder: heading, paragraph, table, paragraph."""
+    pytest.importorskip("docx")
+    return _make_docx
