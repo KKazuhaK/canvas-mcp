@@ -1959,14 +1959,18 @@ the server: `pip install 'canvas-mcp[documents]'`. Without it the tool answers
 with that install hint. Legacy `.ppt`/`.doc` files are not supported.
 
 The reported file size is checked before anything is downloaded (50 MB cap,
-lowered by `READ_FILE_MAX_SIZE_MB`). The Canvas token is only sent to the
-Canvas host; the redirect to file storage is fetched without credentials.
+lowered by `READ_FILE_MAX_SIZE_MB`). Office files whose XML would inflate past
+20 MB, or with any part that inflates more than 100x, are refused before
+parsing, and at most two files are parsed at once. The Canvas token is only
+sent to the Canvas host; the redirect to file storage is fetched without
+credentials.
 
 **Parameters:**
 - `course_identifier`: Course code or ID
 - `file_id`: Canvas file ID (find it with `list_course_files` or `list_module_items`)
 - `max_chars` (optional): Maximum characters of text to return (default 40000, max 200000)
 - `start_page` / `end_page` (optional): 1-based inclusive page (PDF) or slide (PPTX) range
+- `start_char` (optional): for files without pages (DOCX, text, HTML), the 0-based character offset to start from
 
 **Example:**
 ```
@@ -1974,8 +1978,11 @@ Canvas host; the redirect to file storage is fetched without credentials.
 "What does page 12 of the lab manual say about late work?"
 ```
 
-**Returns:** File name, type, size, the page/slide range read, and the text. When
-the text is cut at `max_chars`, a note gives the `start_page` to continue from.
+**Returns:** File name, type, size, the page/slide (or character) range shown, and
+the text. When the text is cut at `max_chars`, a note gives the `start_page` (PDF,
+PPTX) or `start_char` (everything else) to continue from. A single page or slide
+longer than `max_chars` is shown in part, and the note points past it rather
+than back at it.
 
 ---
 

@@ -14,8 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notes, Word paragraphs and tables, and plain text, Markdown, CSV, JSON and
   HTML. The reported size is checked before downloading (50 MB, lowered by
   `READ_FILE_MAX_SIZE_MB`), output is fenced as untrusted Canvas content, and
-  long files are cut at `max_chars` with a note naming the page to continue
-  from. PDF/PPTX/DOCX parsing needs the new optional `documents` extra
+  long files are cut at `max_chars` with a note naming the page (`start_page`)
+  or character offset (`start_char`) to continue from. PDF/PPTX/DOCX parsing needs the new optional `documents` extra
   (`pip install 'canvas-mcp[documents]'`); without it the tool returns an
   install hint.
 - Hidden Files tab fallback: when Canvas refuses `GET /courses/:id/files` with
@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out without credentials and must be HTTPS.
 - The file tools now reject a non-numeric `file_id` before it reaches a
   request path.
+- `read_course_file_text` refuses Office files whose XML would inflate past
+  20 MB, or with any part that inflates more than 100x, before a parser runs,
+  parses at most two files at once, and prints only a validated MIME token for
+  the uploader-supplied content type.
+- `uv.lock` now pins the `documents` extra, and the security workflow fails on
+  a stale lock (`uv lock --check`) so new dependencies always reach pip-audit.
 
 ## [1.13.0] — 2026-09-27
 

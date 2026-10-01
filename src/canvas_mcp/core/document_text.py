@@ -24,14 +24,34 @@ DOCUMENTS_EXTRA_HINT = (
     "pip install 'canvas-mcp[documents]' (or: pip install pypdf python-pptx python-docx)."
 )
 
-#: Refuse an Office file whose members inflate past this many bytes.
-MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
+#: Refuse an Office file whose members together inflate past this many bytes.
+#: python-pptx/python-docx hold every part in memory, but non-XML parts
+#: (images, media, embedded objects) are kept as raw bytes, roughly 1x their
+#: size. Media in a deck barely compresses, so a legitimate file near the
+#: 50 MB download cap can inflate a little past 50 MB; 2x leaves room for that.
+MAX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+#: Refuse when the XML parts together inflate past this many bytes. These are
+#: the parts lxml parses in full before any text budget applies, at many times
+#: their size in memory (a 190 MB document.xml peaked at ~3.4 GB), so this cap,
+#: not the total, bounds parser memory. A long Word thesis or a 100-slide deck
+#: stays well under it.
+MAX_XML_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
+#: Refuse a member that inflates more than this many times its compressed size
+#: (once it is over ``_RATIO_CHECK_MIN_BYTES``). Real Office XML compresses
+#: roughly 5-20x; a crafted part of repeated elements compresses hundreds of
+#: times.
+MAX_COMPRESSION_RATIO = 100
+_RATIO_CHECK_MIN_BYTES = 1024 * 1024
+_XML_SUFFIXES = (".xml", ".rels", ".vml")
 
 KIND_PDF = "pdf"
 KIND_PPTX = "pptx"
 KIND_DOCX = "docx"
 KIND_HTML = "html"
 KIND_TEXT = "text"
+
+#: Formats split into numbered pages or slides (``start_page`` applies).
+PAGED_KINDS = frozenset({KIND_PDF, KIND_PPTX})
 
 KIND_LABELS = {
     KIND_PDF: "PDF",
@@ -131,17 +151,46 @@ def _resolve_range(
 
 
 def _check_zip_container(data: bytes, kind: str) -> None:
+    """Refuse an Office ZIP whose declared sizes would make parsing too costly.
+
+    Uses the sizes in the ZIP central directory, so nothing is inflated here.
+    A member that lies about its size fails the parser's CRC/size check
+    instead of inflating past the declared value.
+    """
+    label = KIND_LABELS[kind]
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            inflated = sum(info.file_size for info in archive.infolist())
+            members = archive.infolist()
     except zipfile.BadZipFile as exc:
         raise DocumentTextError(
-            f"The file is not a valid {KIND_LABELS[kind]} document (not a ZIP container)."
+            f"The file is not a valid {label} document (not a ZIP container)."
         ) from exc
+
+    inflated = 0
+    xml_inflated = 0
+    for info in members:
+        inflated += info.file_size
+        if info.filename.lower().endswith(_XML_SUFFIXES):
+            xml_inflated += info.file_size
+        if (
+            info.file_size > _RATIO_CHECK_MIN_BYTES
+            and info.file_size > MAX_COMPRESSION_RATIO * max(info.compress_size, 1)
+        ):
+            raise DocumentTextError(
+                f"The {label} document has a part that expands more than "
+                f"{MAX_COMPRESSION_RATIO}x when unpacked (a compression bomb pattern); "
+                "refusing to parse it."
+            )
     if inflated > MAX_UNCOMPRESSED_BYTES:
         raise DocumentTextError(
-            f"The {KIND_LABELS[kind]} document expands to more than "
+            f"The {label} document expands to more than "
             f"{MAX_UNCOMPRESSED_BYTES // (1024 * 1024)} MB when unpacked; refusing to parse it."
+        )
+    if xml_inflated > MAX_XML_UNCOMPRESSED_BYTES:
+        raise DocumentTextError(
+            f"The {label} document's XML expands to more than "
+            f"{MAX_XML_UNCOMPRESSED_BYTES // (1024 * 1024)} MB when unpacked; "
+            "refusing to parse it."
         )
 
 

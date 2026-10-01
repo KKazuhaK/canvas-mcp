@@ -7,6 +7,8 @@ independently of the extractor under test.
 
 import builtins
 import io
+import os
+import random
 import zipfile
 
 import pytest
@@ -146,6 +148,72 @@ class TestPptx:
             archive.writestr("ppt/slides/slide1.xml", "0" * 50_000)
         with pytest.raises(dt.DocumentTextError, match="refusing to parse"):
             dt.extract_text(buffer.getvalue(), dt.KIND_PPTX)
+
+
+def _zip(members: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, payload in members.items():
+            archive.writestr(name, payload)
+    return buffer.getvalue()
+
+
+class TestZipGuard:
+    """Inflation limits checked from the ZIP directory, before any parser runs."""
+
+    def test_limits_are_tight_relative_to_the_download_cap(self):
+        mb = 1024 * 1024
+        assert dt.MAX_UNCOMPRESSED_BYTES <= 100 * mb
+        assert dt.MAX_XML_UNCOMPRESSED_BYTES <= 20 * mb
+        assert dt.MAX_COMPRESSION_RATIO <= 100
+
+    @pytest.mark.parametrize("kind", [dt.KIND_DOCX, dt.KIND_PPTX])
+    def test_high_ratio_xml_part_is_refused(self, kind):
+        # A few hundred KB of zip that inflates to megabytes of tiny elements:
+        # the shape that drove python-docx to ~3.4 GB for a 0.6 MB upload.
+        data = _zip({"word/document.xml": b"<w:p/>" * 1_000_000})
+        assert len(data) < 100_000
+        with pytest.raises(dt.DocumentTextError, match="compression bomb"):
+            dt._check_zip_container(data, kind)
+
+    def test_xml_total_over_cap_is_refused_even_at_a_normal_ratio(self, monkeypatch):
+        monkeypatch.setattr(dt, "MAX_XML_UNCOMPRESSED_BYTES", 50_000)
+        rng = random.Random(7)
+        slide = "".join(rng.choice("abcdefgh <>/") for _ in range(30_000)).encode()
+        data = _zip({f"ppt/slides/slide{n}.xml": slide for n in range(1, 3)})
+        with pytest.raises(dt.DocumentTextError, match="XML expands to more than"):
+            dt._check_zip_container(data, dt.KIND_PPTX)
+
+    def test_media_does_not_count_against_the_xml_cap(self, monkeypatch):
+        monkeypatch.setattr(dt, "MAX_XML_UNCOMPRESSED_BYTES", 50_000)
+        image = os.urandom(200_000)  # incompressible, like a JPEG
+        data = _zip({"ppt/media/image1.jpeg": image, "ppt/slides/slide1.xml": b"<p:sld/>"})
+        dt._check_zip_container(data, dt.KIND_PPTX)  # no exception
+
+    def test_total_over_cap_is_refused(self, monkeypatch):
+        monkeypatch.setattr(dt, "MAX_UNCOMPRESSED_BYTES", 100_000)
+        data = _zip({"ppt/media/video.mp4": os.urandom(150_000)})
+        with pytest.raises(dt.DocumentTextError, match="expands to more than"):
+            dt._check_zip_container(data, dt.KIND_PPTX)
+
+    @needs_docx
+    def test_bomb_is_refused_before_the_parser_runs(self, monkeypatch):
+        import docx
+
+        def must_not_parse(*args, **kwargs):
+            raise AssertionError("parser ran on a refused file")
+
+        monkeypatch.setattr(docx, "Document", must_not_parse)
+        data = _zip({
+            "[Content_Types].xml": b"<Types/>",
+            "word/document.xml": b"<w:p/>" * 1_000_000,
+        })
+        with pytest.raises(dt.DocumentTextError, match="compression bomb"):
+            dt.extract_text(data, dt.KIND_DOCX)
+
+    def test_real_documents_pass(self, make_docx, make_pptx):
+        dt._check_zip_container(make_docx(), dt.KIND_DOCX)
+        dt._check_zip_container(make_pptx(), dt.KIND_PPTX)
 
 
 @needs_docx

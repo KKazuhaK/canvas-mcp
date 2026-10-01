@@ -3609,14 +3609,21 @@
           "required": false,
           "default": null,
           "description": "Last page or slide to read, inclusive"
+        },
+        {
+          "name": "start_char",
+          "type": "integer",
+          "required": false,
+          "default": 0,
+          "description": "For files without pages (DOCX, text, HTML), the 0-based character offset to start from"
         }
       ],
-      "returns": "Extracted text with page/slide markers inside an untrusted-content fence, plus file name, type, size, page/slide range, and a continuation hint when truncated",
+      "returns": "Extracted text with page/slide markers inside an untrusted-content fence, plus file name, type, size, the page/slide (or character) range shown, and a start_page or start_char continuation hint when truncated",
       "examples": [
         "Summarize the week 3 lecture slides",
         "What does page 12 of the lab manual say about grading?"
       ],
-      "notes": "Supports PDF (page text, no OCR), PPTX (slide titles, text, tables, speaker notes), DOCX (paragraphs and tables), and plain text/Markdown/CSV/JSON/HTML. Checks the reported size against a 50 MB cap (clamped to READ_FILE_MAX_SIZE_MB) before downloading. The Canvas token is sent only to the Canvas host; storage redirects are fetched without credentials. Works for files linked from modules when the course Files tab is hidden. PDF/PPTX/DOCX need the optional 'documents' extra: pip install 'canvas-mcp[documents]'."
+      "notes": "Supports PDF (page text, no OCR), PPTX (slide titles, text, tables, speaker notes), DOCX (paragraphs and tables), and plain text/Markdown/CSV/JSON/HTML. Checks the reported size against a 50 MB cap (clamped to READ_FILE_MAX_SIZE_MB) before downloading, and refuses Office files whose XML would inflate past 20 MB (or any part more than 100x) before parsing; at most two files are parsed at once. The Canvas token is sent only to the Canvas host; storage redirects are fetched without credentials. Works for files linked from modules when the course Files tab is hidden. PDF/PPTX/DOCX need the optional 'documents' extra: pip install 'canvas-mcp[documents]'."
     },
     {
       "name": "reply_to_discussion_entry",
