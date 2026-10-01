@@ -446,9 +446,16 @@ ENABLE_DATA_ANONYMIZATION=true
 This converts student names to anonymous IDs (e.g., `Student_a8f7e23d`) before data reaches the AI. A local mapping file allows educators to correlate IDs with real students.
 
 ### For Students
-Most student tools read only your own data via Canvas "self" endpoints. The exception is
-`get_group_members`, which lists classmates: it never shows emails, and with
-`ENABLE_DATA_ANONYMIZATION` on their names appear as pseudonyms (IDs stay real).
+Most student tools read only your own data via Canvas "self" endpoints. The group
+tools are the exception: they show classmates in groups you belong to.
+`get_group_members` lists their names and Canvas user IDs; `get_group_discussion`
+shows their posts and topic bodies and names the authors;
+`list_group_discussion_topics` and `list_group_announcements` show titles they wrote;
+`list_group_files` shows the names of files they uploaded. Emails, login IDs and SIS
+IDs are never shown. With `ENABLE_DATA_ANONYMIZATION` on, classmates' names appear
+as pseudonyms (IDs stay real), and emails, phone numbers and SSNs are redacted from
+group discussion posts, topic bodies and titles, and group descriptions. File names
+and group names are shown as Canvas returns them.
 
 ## Additional Resources
 

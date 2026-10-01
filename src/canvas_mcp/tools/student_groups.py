@@ -26,10 +26,15 @@ Privacy (CLAUDE.md "Privacy")
   member's ID and name — never an email, login ID or SIS ID — because the
   output is built from an explicit field allowlist.
 - ``/groups/{id}/discussion_topics/{id}/view`` matches the discussion-content
-  rule (``full`` tier), so participant names and the PII in entry bodies get
-  the same treatment as course discussions. The topic's own author is shown
-  through that anonymized participant list, never from the unanonymized topic
-  record.
+  rule (``full`` tier), so participant names and the PII in entry bodies
+  (including ``new_entries``) are scrubbed. Unlike course topics, the group
+  topic records themselves (``/groups/{id}/discussion_topics`` and
+  ``.../{topic_id}``) are written by group members, so they have their own
+  ``full``-tier rule in ``core/client.py``: the topic ``message`` and author
+  fields are scrubbed there. Topic and announcement titles and the group
+  description are not free-text fields at that layer, so this module applies
+  ``scrub_free_text`` to them when anonymization is on. The topic's author is
+  named from the anonymized ``/view`` participant list only.
 - ``/users/self/groups`` lands in the ``full`` tier through its ``users``
   segment. Group records carry ``avatar_url``, which used to make the scrubber
   mistake a group for a person and rename it ``Student_<hash>``;
@@ -49,7 +54,9 @@ from typing import Any
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from ..core.cache import get_course_code, get_course_id
+from ..core import cache as course_cache
+from ..core.anonymization import scrub_free_text
+from ..core.cache import get_course_code, get_course_id, refresh_course_cache
 from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.config import get_config
 from ..core.dates import format_date
@@ -72,6 +79,57 @@ _VALID_FILE_SORTS = frozenset(
 
 _HTTP_STATUS = re.compile(r"HTTP error: (\d{3})")
 _TAG = re.compile(r"<[^>]+>")
+# A bare MIME type (type/subtype). Group files are uploaded by classmates and
+# Canvas's upload preflight takes a client-supplied content_type, so anything
+# that is not a plain MIME token is not printed.
+_MIME_TYPE = re.compile(r"^[\w.+-]+/[\w.+-]+$")
+_SIS_COURSE_PREFIX = "sis_course_id:"
+
+
+def _scrub(text: str) -> str:
+    """Redact emails/phones/SSNs when data anonymization is on.
+
+    Covers group-member-authored text the client-layer tier does not scrub:
+    topic titles and group descriptions (``title`` / ``description`` are not
+    free-text fields there, because elsewhere they are instructor content).
+    """
+    if get_config().enable_data_anonymization:
+        return scrub_free_text(text)
+    return text
+
+
+async def _resolve_course_numeric_id(course_identifier: str | int) -> str | None:
+    """Resolve any accepted course identifier to a numeric Canvas course ID.
+
+    ``get_course_id`` passes some forms through unresolved (``sis_course_id:``
+    values, codes missing from a cold or stale cache, which it may also turn
+    into ``sis_course_id:<code>``). Other tools put that value in a URL and
+    let Canvas resolve it; list_my_groups compares IDs locally, so it must
+    have the number. Returns None when the course cannot be found.
+    """
+    raw = str(course_identifier).strip()
+    resolved = str(await get_course_id(raw)).strip()
+    numeric = coerce_canvas_id(resolved)
+    if numeric is not None:
+        return numeric
+
+    # A course code (with or without underscores): look it up in a fresh cache.
+    if not raw.startswith(_SIS_COURSE_PREFIX) and await refresh_course_cache():
+        cached = coerce_canvas_id(course_cache.course_code_to_id_cache.get(raw, ""))
+        if cached is not None:
+            return cached
+
+    # Canvas resolves SIS IDs on GET /courses/:id. Only a single path segment
+    # is ever sent.
+    if (
+        resolved.startswith(_SIS_COURSE_PREFIX)
+        and len(resolved) > len(_SIS_COURSE_PREFIX)
+        and "/" not in resolved
+    ):
+        course = await make_canvas_request("get", f"/courses/{resolved}")
+        if isinstance(course, dict) and "error" not in course:
+            return coerce_canvas_id(course.get("id", ""))
+    return None
 
 
 def _http_status(error: object) -> int | None:
@@ -160,41 +218,93 @@ async def _group_label(group: dict) -> str:
     return name
 
 
+def _merge_new_entries(view: list[dict], new_entries: Any) -> list[dict]:
+    """Fold /view ``new_entries`` into the entry tree.
+
+    The full-topic view is eventually consistent; entries not yet reflected in
+    it come back (with ``include_new_entries=1``) as a flat list in ascending
+    ``created_at`` order, each with a ``parent_id``. Each one is attached under
+    its parent when the parent is in the tree (including an earlier new entry)
+    and at top level otherwise; IDs already in the tree are skipped.
+    """
+    if not isinstance(new_entries, list) or not new_entries:
+        return view
+
+    by_id: dict[str, dict] = {}
+
+    def index(entries: list[Any]) -> None:
+        for entry in entries:
+            if isinstance(entry, dict):
+                by_id[str(entry.get("id"))] = entry
+                replies = entry.get("replies")
+                if isinstance(replies, list):
+                    index(replies)
+
+    index(view)
+    merged = list(view)
+    for entry in new_entries:
+        if not isinstance(entry, dict) or str(entry.get("id")) in by_id:
+            continue
+        node = dict(entry)
+        parent_id = entry.get("parent_id")
+        parent = by_id.get(str(parent_id)) if parent_id is not None else None
+        if parent is not None:
+            replies = parent.get("replies")
+            if not isinstance(replies, list):
+                replies = []
+                parent["replies"] = replies
+            replies.append(node)
+        else:
+            merged.append(node)
+        by_id[str(entry.get("id"))] = node
+    return merged
+
+
 def _render_view_entries(
     entries: list[Any], participants: dict[str, str], depth: int = 0
-) -> tuple[list[str], int]:
-    """Render a /view entry tree with each body fenced. Returns (lines, count)."""
+) -> tuple[list[str], int, int]:
+    """Render a /view entry tree with each body fenced.
+
+    Returns ``(lines, posts, deleted)``. Canvas omits ``user_id``,
+    ``user_name`` and ``message`` on deleted entries, so they get no author
+    line; their replies are still rendered.
+    """
     lines: list[str] = []
-    count = 0
+    posts = 0
+    deleted = 0
     indent = "    " * depth
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        count += 1
         entry_id = entry.get("id")
-        user_id = entry.get("user_id")
-        author = participants.get(str(user_id)) if user_id is not None else None
-        author_text = (
-            fence_untrusted_inline(author, "author name") if author
-            else "an unknown participant"
-        )
-        created = format_date(entry.get("created_at"))
-        lines.append(
-            f"{indent}Entry {entry_id} by {author_text} (user ID: {user_id}), {created}"
-        )
         if entry.get("deleted"):
-            lines.append(f"{indent}  [deleted]")
+            deleted += 1
+            lines.append(f"{indent}Entry {entry_id} [deleted]")
         else:
+            posts += 1
+            user_id = entry.get("user_id")
+            author = participants.get(str(user_id)) if user_id is not None else None
+            author_text = (
+                fence_untrusted_inline(author, "author name") if author
+                else "an unknown participant"
+            )
+            created = format_date(entry.get("created_at"))
+            lines.append(
+                f"{indent}Entry {entry_id} by {author_text} (user ID: {user_id}), {created}"
+            )
             body = _plain_text(entry.get("message")) or "[No content]"
             lines.append(
                 fence_untrusted(body, "group discussion entry by a group member")
             )
         replies = entry.get("replies")
         if isinstance(replies, list) and replies:
-            child_lines, child_count = _render_view_entries(replies, participants, depth + 1)
+            child_lines, child_posts, child_deleted = _render_view_entries(
+                replies, participants, depth + 1
+            )
             lines.extend(child_lines)
-            count += child_count
-    return lines, count
+            posts += child_posts
+            deleted += child_deleted
+    return lines, posts, deleted
 
 
 def register_student_group_tools(mcp: FastMCP) -> None:
@@ -217,7 +327,15 @@ def register_student_group_tools(mcp: FastMCP) -> None:
         params: dict[str, Any] = {}
         course_id: str | None = None
         if course_identifier is not None and str(course_identifier).strip():
-            course_id = str(await get_course_id(course_identifier))
+            # The filter below compares numeric IDs, so an unresolved code or
+            # SIS ID would silently match nothing; fail loudly instead.
+            course_id = await _resolve_course_numeric_id(course_identifier)
+            if course_id is None:
+                return (
+                    f"Error: could not find course '{course_identifier}' among "
+                    "your Canvas courses. Use a course code from list_courses "
+                    "or a numeric Canvas course ID."
+                )
             # Documented filter on /users/self/groups. Canvas has no course
             # filter on this endpoint, so the course match is done below.
             params["context_type"] = "Course"
@@ -246,7 +364,7 @@ def register_student_group_tools(mcp: FastMCP) -> None:
             lines.append(
                 f"  Members: {members if members is not None else 'unknown'}"
             )
-            description = _plain_text(group.get("description"))
+            description = _scrub(_plain_text(group.get("description")))
             if description:
                 lines.append("  Description:")
                 lines.append(fence_untrusted(description, "group description"))
@@ -269,8 +387,10 @@ def register_student_group_tools(mcp: FastMCP) -> None:
         if error or group is None:
             return error or _INVALID_GROUP_ID
 
+        # exclude_inactive defaults to false: without it, members whose course
+        # enrollment was deactivated or dropped are listed as current members.
         members = await fetch_all_paginated_results(
-            f"/groups/{group_id}/users", {"per_page": 100}
+            f"/groups/{group_id}/users", {"per_page": 100, "exclude_inactive": True}
         )
         if _is_error(members):
             return _access_error("list members", group_id, members.get("error"))
@@ -322,7 +442,7 @@ def register_student_group_tools(mcp: FastMCP) -> None:
         for topic in topics:
             if not isinstance(topic, dict):
                 continue
-            title = topic.get("title") or "Untitled topic"
+            title = _scrub(topic.get("title") or "Untitled topic")
             lines.append(f"ID: {topic.get('id')}")
             lines.append(f"Title:\n{fence_untrusted(title, 'group discussion topic title')}")
             lines.append(f"Posted: {format_date(topic.get('posted_at'))}")
@@ -361,9 +481,13 @@ def register_student_group_tools(mcp: FastMCP) -> None:
             return f"Error: unexpected response for topic {clean_topic_id}."
 
         # /view is the documented "full topic" read: all entries with bodies,
-        # plus a participants list. It is anonymized at the client layer.
+        # plus a participants list. It is anonymized at the client layer. The
+        # view is eventually consistent; include_new_entries=1 returns the
+        # entries not yet reflected in it, which are merged in below.
         view = await make_canvas_request(
-            "get", f"/groups/{group_id}/discussion_topics/{clean_topic_id}/view"
+            "get",
+            f"/groups/{group_id}/discussion_topics/{clean_topic_id}/view",
+            params={"include_new_entries": 1},
         )
         view_note: str | None = None
         participants: dict[str, str] = {}
@@ -390,9 +514,10 @@ def register_student_group_tools(mcp: FastMCP) -> None:
                         person.get("display_name") or "Unknown user"
                     )
             entries = [e for e in view.get("view") or [] if isinstance(e, dict)]
+            entries = _merge_new_entries(entries, view.get("new_entries"))
 
         kind = "Announcement" if topic.get("is_announcement") else "Discussion"
-        title = topic.get("title") or "Untitled topic"
+        title = _scrub(topic.get("title") or "Untitled topic")
         author_id = (topic.get("author") or {}).get("id") or topic.get("user_id")
         author_name = participants.get(str(author_id)) if author_id is not None else None
 
@@ -408,7 +533,10 @@ def register_student_group_tools(mcp: FastMCP) -> None:
                 else "name not shown"
             )
             lines.append(f"Author: {shown} (user ID: {author_id})")
-        body = _plain_text(topic.get("message"))
+        # The client layer already scrubs this record (group topics are in the
+        # full tier); scrubbing again after HTML stripping is idempotent and
+        # catches addresses split by markup.
+        body = _scrub(_plain_text(topic.get("message")))
         if body:
             lines.append(f"Body:\n{fence_untrusted(body, 'group discussion topic body')}")
         lines.append("")
@@ -418,8 +546,9 @@ def register_student_group_tools(mcp: FastMCP) -> None:
         elif not entries:
             lines.append("No posts yet.")
         else:
-            rendered, count = _render_view_entries(entries, participants)
-            lines.append(f"Posts ({count}):")
+            rendered, posts, deleted = _render_view_entries(entries, participants)
+            deleted_note = f", plus {deleted} deleted" if deleted else ""
+            lines.append(f"Posts ({posts}{deleted_note}):")
             lines.extend(rendered)
         return "\n".join(lines).rstrip()
 
@@ -452,7 +581,7 @@ def register_student_group_tools(mcp: FastMCP) -> None:
         for item in announcements:
             if not isinstance(item, dict):
                 continue
-            title = item.get("title") or "Untitled announcement"
+            title = _scrub(item.get("title") or "Untitled announcement")
             lines.append(f"ID: {item.get('id')}")
             lines.append(f"Title:\n{fence_untrusted(title, 'group announcement title')}")
             lines.append(f"Posted: {format_date(item.get('posted_at'))}")
@@ -509,7 +638,11 @@ def register_student_group_tools(mcp: FastMCP) -> None:
                 continue
             name = item.get("display_name") or item.get("filename") or "unknown"
             size = format_file_size(item.get("size") or 0)
-            content_type = item.get("content-type") or "unknown type"
+            raw_type = item.get("content-type")
+            content_type = (
+                raw_type if isinstance(raw_type, str) and _MIME_TYPE.fullmatch(raw_type)
+                else "unknown type"
+            )
             updated = format_date(item.get("updated_at"))
             lines.append(
                 f"  ID: {item.get('id')} | {fence_untrusted_inline(name, 'file name')} "

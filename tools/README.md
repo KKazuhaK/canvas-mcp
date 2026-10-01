@@ -132,7 +132,9 @@ fenced as untrusted Canvas content.
 List your groups with their course, group category ID and member count.
 
 **Parameters:**
-- `course_identifier` (optional): Only show your groups in this course
+- `course_identifier` (optional): Only show your groups in this course (course
+  code, `sis_course_id:...` or numeric ID). A course that cannot be found is
+  reported as an error, not as "no groups".
 
 **Example:**
 ```
@@ -141,8 +143,9 @@ List your groups with their course, group category ID and member count.
 
 #### `get_group_members`
 List the members of one of your groups: name and Canvas user ID. Emails, login
-IDs and SIS IDs are never shown. With `ENABLE_DATA_ANONYMIZATION` on (the
-default), classmates' names appear as stable pseudonyms.
+IDs and SIS IDs are never shown. Students whose enrollment is inactive are left
+out (`exclude_inactive`). With `ENABLE_DATA_ANONYMIZATION` on (the default),
+classmates' names appear as stable pseudonyms.
 
 **Parameters:**
 - `group_id` (required): Canvas group ID from `list_my_groups`
@@ -155,7 +158,9 @@ List the discussion topics in one of your groups.
 
 #### `get_group_discussion`
 Read a group discussion topic (or group announcement): title, body, and every
-entry and reply as a thread. If the topic requires you to post first, the tool
+entry and reply as a thread, including recent posts Canvas has not yet added
+to its cached view (`include_new_entries`). Deleted entries are marked
+`[deleted]` with no author. If the topic requires you to post first, the tool
 says so instead of showing the replies.
 
 **Parameters:**
