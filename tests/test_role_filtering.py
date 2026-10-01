@@ -17,6 +17,9 @@ STUDENT_ONLY_TOOLS = {
     "get_my_course_grades",
     "get_my_todo_items",
     "get_my_peer_reviews_todo",
+    # student grade insight (read-only, caller-scoped)
+    "get_my_assignment_scores",
+    "calculate_grade_scenarios",
 }
 
 SHARED_TOOLS = {
@@ -195,11 +198,11 @@ class TestRoleFiltering:
 
     @pytest.mark.asyncio
     async def test_student_tool_count(self):
-        """Student role should have approximately 37 tools."""
+        """Student role should have approximately 39 tools."""
         mcp = FastMCP(name="test-student")
         register_all_tools(mcp, role="student")
         tools = await _get_tool_names(mcp)
-        assert 25 <= len(tools) <= 40, f"Expected ~37 student tools, got {len(tools)}: {sorted(tools)}"
+        assert 25 <= len(tools) <= 40, f"Expected ~39 student tools, got {len(tools)}: {sorted(tools)}"
 
     @pytest.mark.asyncio
     async def test_educator_tool_count(self):
