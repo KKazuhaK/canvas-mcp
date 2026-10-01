@@ -48,6 +48,15 @@ Personal academic tracking uses Canvas "self" endpoints. Shared course-content t
 | `get_my_course_grades` | Current grades across courses |
 | `get_my_peer_reviews_todo` | Pending peer reviews to complete |
 | `get_my_submission` | Your submission for one assignment, with attempts used |
+| `list_my_groups` | Groups you belong to, with course and member count |
+| `get_group_members` | Members of one of your groups (no emails) |
+| `list_group_discussion_topics` | Discussion topics in one of your groups |
+| `get_group_discussion` | One group topic or announcement with all posts |
+| `list_group_announcements` | Announcements in one of your groups |
+| `list_group_files` | Files stored in one of your groups |
+
+The group tools only read groups you are a member of; they check your membership
+before every call and refuse other groups even when Canvas would allow the read.
 
 ### Student Write Tools (off by default)
 Let an agent act on Canvas for the student rather than only read. **None of these
@@ -437,7 +446,9 @@ ENABLE_DATA_ANONYMIZATION=true
 This converts student names to anonymous IDs (e.g., `Student_a8f7e23d`) before data reaches the AI. A local mapping file allows educators to correlate IDs with real students.
 
 ### For Students
-No anonymization needed - students only access their own data via Canvas "self" endpoints.
+Most student tools read only your own data via Canvas "self" endpoints. The exception is
+`get_group_members`, which lists classmates: it never shows emails, and with
+`ENABLE_DATA_ANONYMIZATION` on their names appear as pseudonyms (IDs stay real).
 
 ## Additional Resources
 
