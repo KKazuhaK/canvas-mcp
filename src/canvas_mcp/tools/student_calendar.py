@@ -23,7 +23,13 @@ Four properties are load-bearing:
 2. **Course policy where a course is involved.** A planner note linked to a
    course, or a planner item that is course content, goes through
    ``check_student_write_allowed`` for that course, re-checked immediately
-   before the write.
+   before the write. A calendar event's course is read from
+   ``effective_context_code`` as well as ``context_code`` (section events and
+   appointment reservations name the course only there) and from the owning
+   group; an event that cannot be tied to a course is refused. Marking course
+   content complete also needs ``mark_module_item_done`` permitted, because
+   Canvas syncs the planner override to the item's "Mark as done" module
+   requirement (and reverses it on unmark).
 3. **Preview, then confirm, for anything that removes or replaces.** Delete and
    update take the shared single-use ``ConfirmationGuard`` token, bound to the
    caller and to the exact state the preview showed, so a note edited between
@@ -56,7 +62,7 @@ from ..core.course_policy import (
     assert_no_identity_override,
     check_student_write_allowed,
 )
-from ..core.dates import format_date, parse_date
+from ..core.dates import format_date, output_timezone, parse_date
 from ..core.untrusted_content import (
     FENCE_LEAK_ERROR,
     contains_fence_markers,
@@ -104,7 +110,15 @@ _SELF_PLANNABLES = ("planner_note", "calendar_event")
 _PLANNABLE_TYPES = tuple(_COURSE_PLANNABLES) + _SELF_PLANNABLES
 
 _DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# Calendar date, then a time with at least hours and minutes; the rest
+# (seconds, fraction, offset or Z) is left to datetime.fromisoformat.
+_ISO_DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
+_SIS_COURSE = re.compile(r"^sis_course_id:[A-Za-z0-9_.:-]+$")
 _COURSE_CONTEXT = re.compile(r"^course_(\d+)$")
+_SECTION_CONTEXT = re.compile(r"^course_section_\d+$")
+_GROUP_CONTEXT = re.compile(r"^group_(\d+)$")
+_USER_CONTEXT = re.compile(r"^user_(\d+)$")
+_ACCOUNT_CONTEXT = re.compile(r"^account_\d+$")
 
 _UPDATE_NOTE_GUARD = ConfirmationGuard(nothing_done="The note was not changed.")
 _DELETE_NOTE_GUARD = ConfirmationGuard(nothing_done="Nothing was deleted.")
@@ -133,6 +147,22 @@ def _error_detail(response: Any) -> str:
 # --- Dates -------------------------------------------------------------------
 
 
+def _now() -> dt.datetime:
+    """The current instant (a seam for tests)."""
+    return dt.datetime.now(dt.UTC)
+
+
+def _local_zone() -> dt.tzinfo | None:
+    """The operator's configured ``TIMEZONE``, or None when it is not known.
+
+    ``TIMEZONE`` defaults to UTC, and an unknown zone name also falls back to
+    UTC, so plain UTC here means "the student's zone is not known", not "the
+    student is in UTC".
+    """
+    zone = output_timezone()
+    return None if zone is dt.UTC else zone
+
+
 def _to_canvas_date(value: str, name: str) -> tuple[str | None, dt.datetime | None, str | None]:
     """Validate one caller-supplied date for a Canvas query or body.
 
@@ -140,7 +170,11 @@ def _to_canvas_date(value: str, name: str) -> tuple[str | None, dt.datetime | No
     ``YYYY-MM-DD`` passes through unchanged, because Canvas documents that form
     and resolves it in the user's own Canvas time zone; converting it to UTC
     midnight here would shift the day for anyone west of Greenwich. Anything
-    else must parse as a date-time and goes out as ISO 8601 UTC.
+    else must be an ISO 8601 date-time and goes out as ISO 8601 UTC.
+
+    A date-time without an offset is never assumed to be UTC: it is read in
+    the configured ``TIMEZONE`` when one is set, and refused otherwise, since
+    guessing would put a 2pm event at 7am for a student in California.
     """
     text = value.strip()
     if _DATE_ONLY.match(text):
@@ -149,14 +183,34 @@ def _to_canvas_date(value: str, name: str) -> tuple[str | None, dt.datetime | No
         except ValueError:
             return None, None, f"Error: {name} '{value}' is not a real date."
         return text, dt.datetime(day.year, day.month, day.day, tzinfo=dt.UTC), None
-    parsed = parse_date(text)
+    parsed: dt.datetime | None = None
+    if _ISO_DATETIME.match(text):
+        try:
+            parsed = dt.datetime.fromisoformat(text)
+        except ValueError:
+            parsed = None
     if parsed is None:
         return None, None, (
             f"Error: {name} '{value}' is not a recognised date. Use YYYY-MM-DD "
-            "or an ISO 8601 date-time such as 2026-10-05T14:00:00Z."
+            "or an ISO 8601 date-time with an offset, such as "
+            "2026-10-05T14:00:00-07:00 or 2026-10-05T21:00:00Z."
         )
+    if parsed.tzinfo is None:
+        zone = _local_zone()
+        if zone is None:
+            return None, None, (
+                f"Error: {name} '{value}' has no time zone, and none is configured "
+                "on this server. Add an offset (for example "
+                "2026-10-05T14:00:00-07:00) or use a plain YYYY-MM-DD date."
+            )
+        parsed = parsed.replace(tzinfo=zone)
     utc = parsed.astimezone(dt.UTC)
     return utc.strftime("%Y-%m-%dT%H:%M:%SZ"), utc, None
+
+
+def _upper_bound(wire: str, lower: dt.datetime) -> dt.datetime:
+    """Canvas reads a date-only end as the end of that day."""
+    return lower + dt.timedelta(days=1) if _DATE_ONLY.match(wire) else lower
 
 
 def _resolve_window(
@@ -167,30 +221,60 @@ def _resolve_window(
     Canvas's own defaults are unhelpful here: ``/calendar_events`` defaults
     ``end_date`` to ``start_date``, i.e. a single day, so the window is always
     made explicit.
+
+    The default start is *today* as a date-only value, not the current
+    instant. Canvas stores an all-day event at local midnight and a date-only
+    planner note's ``todo_date`` at local midnight too, so a window that opens
+    "now" would silently drop both for today. A date-only bound lets Canvas
+    apply ``beginning_of_day`` (and ``end_of_day`` for the end) in the
+    student's own Canvas zone. When the server has no ``TIMEZONE`` configured,
+    "today" is not known, so the window opens a day early rather than risk
+    starting tomorrow for anyone west of UTC.
     """
     if days < 1 or days > _MAX_WINDOW_DAYS:
         return "", "", f"Error: days must be between 1 and {_MAX_WINDOW_DAYS}."
+
+    zone = _local_zone()
+    today = _now().astimezone(zone).date() if zone else _now().date()
 
     if start_date:
         start_wire, start_dt, error = _to_canvas_date(start_date, "start_date")
         if error:
             return "", "", error
+        assert start_wire is not None and start_dt is not None
+        span_start = start_dt
     else:
-        start_dt = dt.datetime.now(dt.UTC).replace(microsecond=0)
-        start_wire = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        first_day = today if zone else today - dt.timedelta(days=1)
+        start_wire = first_day.isoformat()
+        start_dt = dt.datetime(first_day.year, first_day.month, first_day.day, tzinfo=dt.UTC)
+        # The slack day is a safety margin, not part of the requested span.
+        span_start = dt.datetime(today.year, today.month, today.day, tzinfo=dt.UTC)
 
     if end_date:
         end_wire, end_dt, error = _to_canvas_date(end_date, "end_date")
         if error:
             return "", "", error
+        assert end_wire is not None and end_dt is not None
+        end_upper = _upper_bound(end_wire, end_dt)
+    elif _DATE_ONLY.match(start_wire):
+        # Inclusive date-only end: `days` whole days counted from the anchor.
+        anchor = span_start.date()
+        last_day = anchor + dt.timedelta(days=days - 1)
+        end_wire = last_day.isoformat()
+        end_upper = dt.datetime(
+            last_day.year, last_day.month, last_day.day, tzinfo=dt.UTC
+        ) + dt.timedelta(days=1)
     else:
-        assert start_dt is not None
-        end_dt = start_dt + dt.timedelta(days=days)
-        end_wire = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_upper = start_dt + dt.timedelta(days=days)
+        end_wire = end_upper.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    assert start_dt is not None and end_dt is not None
-    if end_dt < start_dt:
+    if end_upper < start_dt:
         return "", "", "Error: end_date is before start_date."
+    if end_upper - span_start > dt.timedelta(days=_MAX_WINDOW_DAYS):
+        return "", "", (
+            f"Error: the date window is longer than {_MAX_WINDOW_DAYS} days. "
+            "Ask for a shorter range."
+        )
     return str(start_wire), str(end_wire), None
 
 
@@ -216,6 +300,12 @@ async def _resolve_numeric_course_id(
     Planner notes take ``course_id`` as an integer, and course policy and
     context codes are keyed by it, so a SIS-form identifier is looked up rather
     than passed on.
+
+    ``get_course_id`` returns an unrecognised string unchanged, so only the
+    ``sis_course_id:<token>`` form, with a token free of path and query
+    characters, is ever interpolated into a lookup path. Anything else (for
+    example ``101/assignments/4242``) could otherwise reach an arbitrary
+    sub-resource and have its ``id`` mistaken for a course id.
     """
     course_id = await get_course_id(course_identifier)
     if not course_id:
@@ -223,6 +313,8 @@ async def _resolve_numeric_course_id(
     numeric = coerce_canvas_id(course_id)
     if numeric is not None:
         return numeric, None
+    if not _SIS_COURSE.match(course_id) or ".." in course_id:
+        return None, f"Error: Could not find course {course_identifier}"
     course = await make_canvas_request("get", f"/courses/{course_id}")
     if not isinstance(course, dict) or _is_error(course):
         return None, (
@@ -253,6 +345,70 @@ async def _course_display(course_id: Any) -> str:
 def _course_of_context(context_code: Any) -> str | None:
     match = _COURSE_CONTEXT.match(str(context_code or ""))
     return str(match.group(1)) if match else None
+
+
+async def _calendar_event_courses(
+    event: dict, my_id: str
+) -> tuple[set[str], str | None]:
+    """Every course whose policy governs a calendar event, or a refusal.
+
+    The course is not always in ``context_code``. Canvas documents that a
+    section-level event carries ``course_section_<id>`` there and the course
+    in ``effective_context_code`` (which may list several calendars, comma
+    separated), and a student's appointment reservation sits in
+    ``user_<me>`` with the course again only in ``effective_context_code``.
+    A group event names only ``group_<id>``; the group's own record says
+    which course, if any, owns it. Anything that cannot be tied to a course
+    is refused rather than written without a policy check.
+    """
+    codes = [
+        code.strip()
+        for code in str(event.get("effective_context_code") or "").split(",")
+        if code.strip()
+    ]
+    context = str(event.get("context_code") or "").strip()
+    if context:
+        codes.append(context)
+
+    courses: set[str] = set()
+    sections = False
+    for code in codes:
+        if (course := _course_of_context(code)) is not None:
+            courses.add(course)
+        elif _SECTION_CONTEXT.match(code):
+            sections = True
+        elif match := _GROUP_CONTEXT.match(code):
+            group_id = coerce_canvas_id(match.group(1))
+            group = await make_canvas_request("get", f"/groups/{group_id}")
+            if not isinstance(group, dict) or _is_error(group):
+                return set(), (
+                    f"❌ Could not tell which course owns group {group_id}, so the "
+                    f"course policy cannot be checked: {_error_detail(group)}"
+                )
+            if group.get("context_type") == "Course":
+                group_course = coerce_canvas_id(group.get("course_id") or "")
+                if group_course is None:
+                    return set(), (
+                        f"❌ Could not tell which course owns group {group_id}, so "
+                        "the course policy cannot be checked."
+                    )
+                courses.add(group_course)
+        elif match := _USER_CONTEXT.match(code):
+            if match.group(1) != my_id:
+                return set(), "❌ This calendar event is on someone else's calendar."
+        elif _ACCOUNT_CONTEXT.match(code):
+            continue  # institution calendar: no course policy applies
+        else:
+            return set(), (
+                f"❌ This calendar event belongs to '{code}', which cannot be tied "
+                "to a course, so the course policy cannot be checked."
+            )
+    if sections and not courses:
+        return set(), (
+            "❌ This is a section event and Canvas did not say which course it "
+            "belongs to, so the course policy cannot be checked."
+        )
+    return courses, None
 
 
 def _has_fence_markers(*values: str | None) -> bool:
@@ -346,47 +502,97 @@ def _normalize_plannable_type(value: Any) -> str:
     return text.replace("_", "").lower()
 
 
+def _find_override(
+    overrides: list[Any], plannable_type: str, stored_ids: set[str], validated: str
+) -> dict | None:
+    """The caller's existing override for this item, if Canvas holds one.
+
+    Canvas rewrites ``(plannable_type, plannable_id)`` before saving
+    (PlannerOverride#link_to_submittable / #link_to_parent_topic): an
+    assignment that is a classic quiz, graded discussion or page is stored as
+    that quiz/topic/page, and a group discussion's child topic as its root
+    topic. The override JSON keeps the associated ``assignment_id``, so an
+    assignment is matched on that too; otherwise a second call would miss the
+    stored override and POST a duplicate that Canvas rejects (400).
+    """
+    wanted = _normalize_plannable_type(plannable_type)
+    exact: list[dict] = []
+    rewritten: list[dict] = []
+    for override in overrides:
+        if not isinstance(override, dict):
+            continue
+        if (
+            _normalize_plannable_type(override.get("plannable_type")) == wanted
+            and str(override.get("plannable_id")) in stored_ids
+        ):
+            exact.append(override)
+        elif plannable_type == "assignment" and str(override.get("assignment_id")) == validated:
+            rewritten.append(override)
+    found = exact or rewritten
+    return found[0] if found else None
+
+
 # --- Fetching ----------------------------------------------------------------
 
 
+def _chunks(codes: list[str]) -> list[list[str]]:
+    step = CALENDAR_CONTEXT_CODES_PER_REQUEST
+    return [codes[offset:offset + step] for offset in range(0, len(codes), step)]
+
+
 async def _fetch_events(
-    context_codes: list[str],
+    context_sets: list[list[str]],
     types: tuple[str, ...],
     start: str,
     end: str,
     include_descriptions: bool,
-) -> tuple[list[dict], list[str]]:
-    """Fetch calendar events for every context, 10 context codes per request."""
+) -> tuple[list[dict], list[str], int]:
+    """Fetch calendar events, 10 context codes per request.
+
+    Each set in ``context_sets`` is chunked on its own, so codes from
+    different sets never share a request. Canvas rejects a whole request (401)
+    when any one of its codes is outside the caller's visible contexts, so a
+    group Canvas will not accept must not take the personal and course
+    calendars down with it.
+
+    Returns ``(events, failures, successful_requests)``.
+    """
     events: list[dict] = []
     failures: list[str] = []
+    succeeded = 0
     seen: set[str] = set()
     for event_type in types:
-        for offset in range(0, len(context_codes), CALENDAR_CONTEXT_CODES_PER_REQUEST):
-            chunk = context_codes[offset:offset + CALENDAR_CONTEXT_CODES_PER_REQUEST]
-            params: dict[str, Any] = {
-                "type": event_type,
-                "start_date": start,
-                "end_date": end,
-                "context_codes[]": chunk,
-                "per_page": 100,
-            }
-            if not include_descriptions:
-                params["excludes[]"] = ["description", "child_events"]
-            result = await fetch_all_paginated_results("/calendar_events", params=params)
-            if _is_error(result) or not isinstance(result, list):
-                failures.append(
-                    f"{event_type} entries for {', '.join(chunk)}: {_error_detail(result)}"
-                )
-                continue
-            for event in result:
-                if not isinstance(event, dict):
+        for codes in context_sets:
+            for chunk in _chunks(codes):
+                params: dict[str, Any] = {
+                    "type": event_type,
+                    "start_date": start,
+                    "end_date": end,
+                    "context_codes[]": chunk,
+                    "per_page": 100,
+                    # child_events carries appointment-slot reservations,
+                    # i.e. classmates' identities; never fetch them.
+                    "excludes[]": (
+                        ["child_events"] if include_descriptions
+                        else ["description", "child_events"]
+                    ),
+                }
+                result = await fetch_all_paginated_results("/calendar_events", params=params)
+                if _is_error(result) or not isinstance(result, list):
+                    failures.append(
+                        f"{event_type} entries for {', '.join(chunk)}: {_error_detail(result)}"
+                    )
                     continue
-                key = str(event.get("id"))
-                if key in seen:
-                    continue
-                seen.add(key)
-                events.append(event)
-    return events, failures
+                succeeded += 1
+                for event in result:
+                    if not isinstance(event, dict):
+                        continue
+                    key = str(event.get("id"))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    events.append(event)
+    return events, failures, succeeded
 
 
 def _event_sort_key(event: dict) -> dt.datetime:
@@ -460,8 +666,10 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
         assignments use get_my_upcoming_assignments instead.
 
         Args:
-            start_date: Window start, YYYY-MM-DD or ISO 8601 (default: now)
-            end_date: Window end, inclusive (default: start + days)
+            start_date: Window start, YYYY-MM-DD or ISO 8601 with an offset
+                (default: today)
+            end_date: Window end, inclusive (default: start + days); the
+                window may span at most 366 days
             days: Look-ahead when end_date is omitted (default 14, max 366)
             course_identifier: Only this course's calendar (code or Canvas ID)
             event_type: "event", "assignment", or "all" (default)
@@ -481,6 +689,7 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
 
         labels: dict[str, str] = {my_context: "Personal calendar"}
         notes: list[str] = []
+        group_contexts: list[str] = []
         if course_identifier is not None:
             course_id, course_error = await _resolve_numeric_course_id(course_identifier)
             if course_error:
@@ -495,12 +704,14 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
             if _is_error(courses) or not isinstance(courses, list):
                 return f"Error fetching your courses: {_error_detail(courses)}"
             contexts = [my_context]
+            active_courses: set[str] = set()
             for course in courses:
                 course_id = coerce_canvas_id(course.get("id", "")) if isinstance(course, dict) else None
                 if course_id is None:
                     continue
                 code = f"course_{course_id}"
                 contexts.append(code)
+                active_courses.add(course_id)
                 labels[code] = str(course.get("course_code") or course.get("name") or code)
 
             groups = await fetch_all_paginated_results(
@@ -516,16 +727,25 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
                     group_id = coerce_canvas_id(group.get("id", "")) if isinstance(group, dict) else None
                     if group_id is None:
                         continue
+                    # /users/self/groups also lists groups from concluded
+                    # courses, which the calendar refuses (401 for the whole
+                    # request). Only groups of an active course, or groups
+                    # outside any course, are asked for.
+                    if (
+                        group.get("context_type") == "Course"
+                        and str(group.get("course_id")) not in active_courses
+                    ):
+                        continue
                     code = f"group_{group_id}"
-                    contexts.append(code)
+                    group_contexts.append(code)
                     labels[code] = (
                         f"Group {fence_untrusted_inline(group.get('name') or group_id, 'group name')}"
                     )
 
-        events, failures = await _fetch_events(
-            contexts, types, start, end, include_descriptions
+        events, failures, succeeded = await _fetch_events(
+            [contexts, group_contexts], types, start, end, include_descriptions
         )
-        if failures and not events:
+        if failures and not succeeded:
             return (
                 "Error fetching calendar events; nothing could be confirmed:\n"
                 + "\n".join(f"  • {failure}" for failure in failures)
@@ -602,8 +822,10 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
         """List your own planner notes (personal to-do items) in a date window.
 
         Args:
-            start_date: Window start, YYYY-MM-DD or ISO 8601 (default: now)
-            end_date: Window end, inclusive (default: start + days)
+            start_date: Window start, YYYY-MM-DD or ISO 8601 with an offset
+                (default: today)
+            end_date: Window end, inclusive (default: start + days); the
+                window may span at most 366 days
             days: Look-ahead when end_date is omitted (default 14, max 366)
             course_identifier: Only notes linked to this course
         """
@@ -655,7 +877,7 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
 
             Args:
                 title: Note title
-                todo_date: Day it shows on, YYYY-MM-DD (or ISO 8601)
+                todo_date: Day it shows on, YYYY-MM-DD (or ISO 8601 with an offset)
                 details: Optional note text
                 course_identifier: Optional course to file it under
                 linked_object_type: Optional: announcement, assignment,
@@ -741,7 +963,7 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
                 note_id: Planner note ID (from list_planner_notes)
                 title: New title
                 details: New note text (replaces the old text)
-                todo_date: New day, YYYY-MM-DD (or ISO 8601)
+                todo_date: New day, YYYY-MM-DD (or ISO 8601 with an offset)
                 course_identifier: File the note under this course instead
                 confirmation_token: Token from the preview call; omit to preview
             """
@@ -922,7 +1144,10 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
 
     if "mark_planner_item_complete" in enabled:
 
-        @mcp.tool(annotations=ToolAnnotations(destructive_hint=False, idempotent_hint=True))
+        # Destructive: complete=False removes a completion, and Canvas also
+        # un-completes the item's "Mark as done" module requirement, which
+        # can re-lock later modules. See internal/architecture.md.
+        @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True))
         @validate_params
         async def mark_planner_item_complete(
             plannable_type: str,
@@ -932,8 +1157,12 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
         ) -> str:
             """Tick (or untick) an item in YOUR OWN Canvas planner.
 
-            Only changes how the item shows in your planner. It does not submit
-            anything or mark a module item done.
+            Does not submit anything. For course content (assignment, quiz,
+            discussion, announcement, page) Canvas also syncs the item's
+            module progress: ticking it satisfies a "Mark as done" module
+            requirement, and unticking it reverses that, which can re-lock
+            later modules. Course content therefore also needs
+            mark_module_item_done to be permitted in that course.
 
             Args:
                 plannable_type: assignment, quiz, discussion_topic, announcement,
@@ -953,6 +1182,11 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
                 return _INVALID_ID.format(name="plannable_id")
 
             courses: set[str] = set()
+            # Course content is a ContextModuleItem; Canvas's override
+            # create/update run sync_module_requirement_done on it.
+            module_courses: set[str] = set()
+            # Ids Canvas may have stored this item's override under.
+            stored_ids = {validated}
             if plannable_type == "planner_note":
                 my_id, me_error = await _my_user_id()
                 if me_error:
@@ -970,16 +1204,15 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
                 my_id, me_error = await _my_user_id()
                 if me_error:
                     return me_error
+                assert my_id is not None
                 target = await make_canvas_request("get", f"/calendar_events/{validated}")
                 if not isinstance(target, dict) or _is_error(target):
                     return f"Error fetching calendar event {validated}: {_error_detail(target)}"
-                context = str(target.get("context_code") or "")
-                if context.startswith("user_") and context != f"user_{my_id}":
-                    return f"❌ Calendar event {validated} is on someone else's calendar."
+                event_courses, event_error = await _calendar_event_courses(target, my_id)
+                if event_error:
+                    return event_error
                 label = target.get("title")
-                course = _course_of_context(context)
-                if course:
-                    courses.add(course)
+                courses |= event_courses
             else:
                 if course_identifier is None:
                     return (
@@ -1000,12 +1233,27 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
                     )
                 label = target.get(title_key)
                 courses.add(course_id)
+                module_courses.add(course_id)
+                # PlannerOverride#link_to_parent_topic stores a group
+                # discussion's child topic under its root topic.
+                root = coerce_canvas_id(target.get("root_topic_id") or "")
+                if plannable_type in ("discussion_topic", "announcement") and root:
+                    stored_ids.add(root)
 
             policy_error = await _course_policy_error(
                 courses, "mark_planner_item_complete", "Update"
             )
             if policy_error:
                 return policy_error
+            module_error = await _course_policy_error(
+                module_courses, "mark_module_item_done", "Update"
+            )
+            if module_error:
+                return (
+                    f"{module_error}\nMarking course content complete in the planner "
+                    "also completes (or, when unmarking, reverses) its 'Mark as done' "
+                    "module requirement, so mark_module_item_done must be permitted too."
+                )
 
             overrides = await fetch_all_paginated_results(
                 "/planner/overrides", params={"per_page": 100}
@@ -1015,32 +1263,29 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
                     "❌ Could not read your existing planner overrides, so nothing "
                     f"was changed: {_error_detail(overrides)}"
                 )
-            wanted = _normalize_plannable_type(plannable_type)
-            matches = [
-                o for o in overrides
-                if isinstance(o, dict)
-                and str(o.get("plannable_id")) == validated
-                and _normalize_plannable_type(o.get("plannable_type")) == wanted
-            ]
-            # Prefer a live override; a soft-deleted one is reused rather than
-            # colliding with it on create.
-            matches.sort(key=lambda o: o.get("workflow_state") == "deleted")
-            existing = matches[0] if matches else None
+            existing = _find_override(overrides, plannable_type, stored_ids, validated)
 
             shown = fence_untrusted_inline(label or f"{plannable_type} {validated}", "planner item title")
             state = "complete" if complete else "not complete"
-            if (
-                existing is not None
-                and existing.get("workflow_state") != "deleted"
-                and bool(existing.get("marked_complete")) == complete
-            ):
+            if existing is not None and bool(existing.get("marked_complete")) == complete:
                 return f"✅ {shown} is already marked {state} in your planner."
 
             flag = "true" if complete else "false"
-            if existing is not None and coerce_canvas_id(existing.get("id", "")):
+            override_id = (
+                coerce_canvas_id(existing.get("id", "")) if existing is not None else None
+            )
+            if override_id is not None:
+                assert existing is not None
+                # Canvas's update sets dismissed from the request
+                # unconditionally, so the current value is sent back or a
+                # dismissed item would reappear in the student's list.
                 response = await make_canvas_request(
-                    "put", f"/planner/overrides/{existing['id']}",
-                    data={"marked_complete": flag}, use_form_data=True,
+                    "put", f"/planner/overrides/{override_id}",
+                    data={
+                        "marked_complete": flag,
+                        "dismissed": "true" if existing.get("dismissed") else "false",
+                    },
+                    use_form_data=True,
                 )
             else:
                 body = {
@@ -1052,6 +1297,16 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
                 response = await make_canvas_request(
                     "post", "/planner/overrides", data=body, use_form_data=True
                 )
+                if _is_error(response):
+                    # GET /planner/overrides lists only active overrides, but
+                    # a deleted one still counts for Canvas's uniqueness check.
+                    return (
+                        f"❌ Could not update your planner: {_error_detail(response)}\n"
+                        "If Canvas reports the item as already taken, it holds a "
+                        "planner record for this item that the API does not list "
+                        "(for example a removed one). Tick it in the Canvas planner "
+                        "instead."
+                    )
             if _is_error(response):
                 return f"❌ Could not update your planner: {_error_detail(response)}"
             if not isinstance(response, dict) or bool(response.get("marked_complete")) != complete:
@@ -1082,7 +1337,8 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
 
             Args:
                 title: Event title
-                start_at: Start, ISO 8601 date-time (or YYYY-MM-DD with all_day)
+                start_at: Start, ISO 8601 date-time with an offset such as
+                    2026-10-06T15:00:00-07:00 (or YYYY-MM-DD with all_day)
                 end_at: Optional end, same format
                 description: Optional description
                 location_name: Optional location

@@ -154,13 +154,13 @@
           "name": "start_date",
           "type": "string",
           "required": false,
-          "description": "Window start, YYYY-MM-DD or ISO 8601 (default: now)"
+          "description": "Window start, YYYY-MM-DD or ISO 8601 with an offset (default: today)"
         },
         {
           "name": "end_date",
           "type": "string",
           "required": false,
-          "description": "Window end, inclusive (default: start + days)"
+          "description": "Window end, inclusive (default: start + days); the window may span at most 366 days"
         },
         {
           "name": "days",
@@ -223,13 +223,13 @@
           "name": "start_date",
           "type": "string",
           "required": false,
-          "description": "Window start, YYYY-MM-DD or ISO 8601 (default: now)"
+          "description": "Window start, YYYY-MM-DD or ISO 8601 with an offset (default: today)"
         },
         {
           "name": "end_date",
           "type": "string",
           "required": false,
-          "description": "Window end, inclusive (default: start + days)"
+          "description": "Window end, inclusive (default: start + days); the window may span at most 366 days"
         },
         {
           "name": "days",
@@ -1306,7 +1306,7 @@
       "examples": [
         "Check off the week 5 reading in my planner"
       ],
-      "notes": "Disabled unless the operator lists it in STUDENT_WRITE_TOOLS. Planner display only: does not submit anything or complete a module requirement."
+      "notes": "Disabled unless the operator lists it in STUDENT_WRITE_TOOLS. Does not submit anything, but for course content Canvas syncs the item's \"Mark as done\" module requirement (unmarking reverses it), so mark_module_item_done must also be enabled and allowed by the course policy."
     },
     {
       "name": "create_personal_calendar_event",

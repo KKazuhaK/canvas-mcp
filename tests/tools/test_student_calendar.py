@@ -77,7 +77,11 @@ def get_tools(**env: str) -> dict[str, Any]:
 
 
 def write_tools(**extra: str) -> dict[str, Any]:
-    env = {"STUDENT_WRITE_TOOLS": ALL_WRITES, "COURSE_AGENT_POLICY_ENABLED": "false"}
+    # mark_module_item_done is not registered by this module, but the operator
+    # must enable it for mark_planner_item_complete on course content, whose
+    # override Canvas syncs to the item's "Mark as done" module requirement.
+    env = {"STUDENT_WRITE_TOOLS": f"{ALL_WRITES},mark_module_item_done",
+           "COURSE_AGENT_POLICY_ENABLED": "false"}
     env.update(extra)
     return get_tools(**env)
 
@@ -185,8 +189,9 @@ class TestListCalendarEvents:
         assert len(expected) == 14
         for event_type in ("event", "assignment"):
             calls = [p for p in calendar_calls if p["type"] == event_type]
-            # 14 contexts at Canvas's documented limit of 10 → two requests.
-            assert len(calls) == 2
+            # 13 personal+course contexts at Canvas's documented limit of 10 →
+            # two requests, plus the group calendar in a request of its own.
+            assert len(calls) == 3
             assert all(len(p["context_codes[]"]) <= 10 for p in calls)
             sent = [code for p in calls for code in p["context_codes[]"]]
             assert sorted(sent) == sorted(expected), "every calendar exactly once"
@@ -195,9 +200,10 @@ class TestListCalendarEvents:
         assert ("/courses", {"enrollment_state": "active", "per_page": 100}) in fake.paged
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(("n_courses", "requests_per_type"), [(8, 1), (9, 2)])
+    @pytest.mark.parametrize(("n_courses", "requests_per_type"), [(9, 2), (10, 3)])
     async def test_chunk_boundary(self, n_courses: int, requests_per_type: int) -> None:
-        # contexts = courses + personal + one group: 8 → 10 (one call), 9 → 11 (two).
+        # courses + personal: 9 → 10 (one call), 10 → 11 (two); the one group
+        # always goes in its own call.
         tools = get_tools()
         fake = _calendar_fake(n_courses=n_courses)
         with canvas(fake):
@@ -210,12 +216,14 @@ class TestListCalendarEvents:
     async def test_default_window_is_explicit_and_fourteen_days(self) -> None:
         tools = get_tools()
         fake = _calendar_fake(n_courses=1)
-        with canvas(fake):
+        with canvas(fake), clock(EVENING_OCT_1_PACIFIC):
             await tools["list_calendar_events"]()
         params = next(p for e, p in fake.paged if e == "/calendar_events")
-        start = dt.datetime.strptime(params["start_date"], "%Y-%m-%dT%H:%M:%SZ")
-        end = dt.datetime.strptime(params["end_date"], "%Y-%m-%dT%H:%M:%SZ")
+        start = dt.date.fromisoformat(params["start_date"])
+        end = dt.date.fromisoformat(params["end_date"])
         # Canvas would otherwise default end_date to start_date (one day).
+        # Date-only bounds; with no TIMEZONE configured the window opens a day
+        # early, then covers 14 whole days (Canvas reads the end as end_of_day).
         assert end - start == dt.timedelta(days=14)
         # Descriptions are excluded unless asked for.
         assert params["excludes[]"] == ["description", "child_events"]
@@ -303,7 +311,8 @@ class TestListCalendarEvents:
         assert f"{FENCE_TEXT_START} (calendar event description)" in result
         assert f"<p>{INJECTION}" not in result  # HTML stripped, text kept inside fence
         params = next(p for e, p in fake.paged if e == "/calendar_events")
-        assert "excludes[]" not in params
+        # Descriptions requested, but classmates' reservations never are.
+        assert params["excludes[]"] == ["child_events"]
 
     @pytest.mark.asyncio
     async def test_partial_failure_is_reported_not_hidden(self) -> None:
@@ -876,7 +885,8 @@ class TestMarkPlannerItemComplete:
                 plannable_type="discussion_topic", plannable_id="8", course_identifier=100)
         [(method, endpoint, kwargs)] = fake.writes()
         assert (method, endpoint) == ("put", "/planner/overrides/77")
-        assert kwargs["data"] == {"marked_complete": "true"}
+        # Canvas's update resets dismissed when the param is missing.
+        assert kwargs["data"] == {"marked_complete": "true", "dismissed": "false"}
 
     @pytest.mark.asyncio
     async def test_unmark(self) -> None:
@@ -893,7 +903,7 @@ class TestMarkPlannerItemComplete:
             result = await tools["mark_planner_item_complete"](
                 plannable_type="quiz", plannable_id=3, course_identifier=100, complete=False)
         assert "marked not complete" in result
-        assert fake.writes()[0][2]["data"] == {"marked_complete": "false"}
+        assert fake.writes()[0][2]["data"] == {"marked_complete": "false", "dismissed": "false"}
 
     @pytest.mark.asyncio
     async def test_already_in_requested_state_writes_nothing(self) -> None:
@@ -1164,3 +1174,388 @@ class TestDeletePersonalCalendarEvent:
             token = _token(await tools["delete_personal_calendar_event"](event_id=9))
             result = await tools["delete_personal_calendar_event"](event_id=9, confirmation_token=token)
         assert result.startswith("❌ Could not delete event 9") and "403" in result
+
+
+# --- Review regressions --------------------------------------------------------
+
+PACIFIC = dt.timezone(dt.timedelta(hours=-7))
+# 8pm on 1 Oct in California is already 2 Oct in UTC.
+EVENING_OCT_1_PACIFIC = dt.datetime(2026, 10, 2, 3, 0, tzinfo=dt.UTC)
+
+
+@contextmanager
+def clock(now: dt.datetime, zone: dt.tzinfo = dt.UTC) -> Any:
+    """Pin the tool's clock and the operator's configured TIMEZONE."""
+    with patch(f"{MOD}._now", new=lambda: now), patch(
+        f"{MOD}.output_timezone", new=lambda: zone
+    ):
+        yield
+
+
+class TestCalendarGroupContexts:
+    """Canvas 401s a whole /calendar_events request when any requested code is
+    outside the caller's visible contexts, and /users/self/groups lists groups
+    from concluded courses that the calendar no longer accepts."""
+
+    @pytest.mark.asyncio
+    async def test_group_from_a_course_that_is_not_active_is_never_sent(self) -> None:
+        tools = get_tools()
+        fake = _calendar_fake(n_courses=1, groups=[
+            {"id": 5, "name": "Lab team", "context_type": "Course", "course_id": 100},
+            {"id": 9, "name": "Last quarter", "context_type": "Course", "course_id": 55},
+            {"id": 11, "name": "Club", "context_type": "Account", "account_id": 1},
+        ])
+        with canvas(fake):
+            await tools["list_calendar_events"]()
+        sent = {c for e, p in fake.paged if e == "/calendar_events" for c in p["context_codes[]"]}
+        assert "group_9" not in sent
+        assert {"group_5", "group_11", "course_100", f"user_{ME}"} <= sent
+
+    @pytest.mark.asyncio
+    async def test_a_rejected_group_does_not_wipe_out_the_other_calendars(self) -> None:
+        tools = get_tools()
+        fake = _calendar_fake(n_courses=2, events_by_context={
+            f"user_{ME}": [{"id": 40, "title": "Gym", "start_at": "2026-10-02T15:00:00Z",
+                            "context_code": f"user_{ME}"}]})
+        inner = fake.paginated["/calendar_events"]
+
+        def strict(params: dict[str, Any]) -> Any:
+            # Canvas: render_unauthorized_action for the whole request.
+            if "group_5" in params["context_codes[]"]:
+                return _http_error(401)
+            return inner(params)
+
+        fake.paginated["/calendar_events"] = strict
+        with canvas(fake):
+            result = await tools["list_calendar_events"]()
+        assert "Gym" in result
+        assert "Could not fetch" in result and "group_5" in result
+        for _, params in fake.paged:
+            codes = params.get("context_codes[]", [])
+            groups = [c for c in codes if c.startswith("group_")]
+            assert not groups or len(groups) == len(codes), "groups get their own chunk"
+
+    @pytest.mark.asyncio
+    async def test_only_group_chunk_failing_with_no_events_is_not_a_total_failure(self) -> None:
+        tools = get_tools()
+        fake = _calendar_fake(n_courses=1)
+        inner = fake.paginated["/calendar_events"]
+        fake.paginated["/calendar_events"] = (
+            lambda p: _http_error(401) if "group_5" in p["context_codes[]"] else inner(p)
+        )
+        with canvas(fake):
+            result = await tools["list_calendar_events"]()
+        assert "nothing scheduled" in result and "group_5" in result
+        assert not result.startswith("Error")
+
+
+class TestDateWindow:
+    @pytest.mark.asyncio
+    async def test_default_start_is_today_date_only_in_the_configured_zone(self) -> None:
+        tools = get_tools()
+        fake = _calendar_fake(n_courses=1)
+        with canvas(fake), clock(EVENING_OCT_1_PACIFIC, PACIFIC):
+            await tools["list_calendar_events"]()
+        params = next(p for e, p in fake.paged if e == "/calendar_events")
+        # Date-only, so Canvas applies beginning_of_day in the user's zone and
+        # today's all-day events (start_at == end_at == local midnight) stay in.
+        assert params["start_date"] == "2026-10-01"
+        assert params["end_date"] == "2026-10-14"
+
+    @pytest.mark.asyncio
+    async def test_default_start_keeps_a_day_of_slack_when_no_zone_is_configured(self) -> None:
+        tools = get_tools()
+        fake = _calendar_fake(n_courses=1)
+        with canvas(fake), clock(EVENING_OCT_1_PACIFIC):
+            await tools["list_calendar_events"]()
+        params = next(p for e, p in fake.paged if e == "/calendar_events")
+        assert params["start_date"] == "2026-10-01"
+        assert params["end_date"] == "2026-10-15"
+
+    @pytest.mark.asyncio
+    async def test_planner_notes_default_start_is_date_only(self) -> None:
+        tools = get_tools()
+        fake = FakeCanvas(paginated={"/planner_notes": []})
+        with canvas(fake), clock(EVENING_OCT_1_PACIFIC, PACIFIC):
+            await tools["list_planner_notes"]()
+        assert fake.paged[0][1]["start_date"] == "2026-10-01"
+
+    @pytest.mark.asyncio
+    async def test_end_date_today_without_start_is_accepted(self) -> None:
+        tools = get_tools()
+        fake = _calendar_fake(n_courses=1)
+        notes = FakeCanvas(paginated={"/planner_notes": []})
+        with clock(EVENING_OCT_1_PACIFIC, PACIFIC):
+            with canvas(fake):
+                result = await tools["list_calendar_events"](end_date="2026-10-01")
+            with canvas(notes):
+                note_result = await tools["list_planner_notes"](end_date="2026-10-01")
+        assert not result.startswith("Error") and not note_result.startswith("Error")
+        params = next(p for e, p in fake.paged if e == "/calendar_events")
+        assert (params["start_date"], params["end_date"]) == ("2026-10-01", "2026-10-01")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool", ["list_calendar_events", "list_planner_notes"])
+    async def test_explicit_window_is_capped(self, tool: str) -> None:
+        tools = get_tools()
+        ok = _calendar_fake(n_courses=1)
+        ok.paginated["/planner_notes"] = []
+        with canvas(ok):
+            accepted = await tools[tool](start_date="2026-01-01", end_date="2027-01-01")
+        assert not accepted.startswith("Error")
+        assert ok.paged, "a 366-day window is allowed"
+        refused = _calendar_fake(n_courses=1)
+        with canvas(refused):
+            result = await tools[tool](start_date="1900-01-01", end_date="2199-12-31")
+        assert result.startswith("Error") and "366" in result
+        assert refused.calls == [] and refused.paged == []
+        with canvas(refused):
+            result = await tools[tool](start_date="2026-01-01", end_date="2027-01-02")
+        assert result.startswith("Error") and "366" in result
+        assert refused.calls == [] and refused.paged == []
+
+    @pytest.mark.asyncio
+    async def test_child_events_always_excluded(self) -> None:
+        tools = get_tools()
+        fake = _calendar_fake(n_courses=1)
+        with canvas(fake):
+            await tools["list_calendar_events"](include_descriptions=True)
+        for endpoint, params in fake.paged:
+            if endpoint == "/calendar_events":
+                assert params["excludes[]"] == ["child_events"]
+
+
+class TestDateInputs:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", ["10/05/2026", "2026-10-05 14:00:00", "2026-10-05T14:00:00"])
+    async def test_values_without_a_zone_are_not_assumed_utc(self, value: str) -> None:
+        tools = write_tools()
+        fake = FakeCanvas()
+        with canvas(fake), clock(EVENING_OCT_1_PACIFIC):
+            result = await tools["create_planner_note"](title="x", todo_date=value)
+        assert result.startswith("Error")
+        assert fake.writes() == []
+
+    @pytest.mark.asyncio
+    async def test_naive_datetime_uses_the_configured_zone(self) -> None:
+        tools = write_tools()
+        fake = FakeCanvas(routes={("post", "/calendar_events"): {"id": 1, "context_code": f"user_{ME}"}})
+        with canvas(fake), clock(EVENING_OCT_1_PACIFIC, PACIFIC):
+            result = await tools["create_personal_calendar_event"](
+                title="x", start_at="2026-10-05T14:00:00")
+        assert result.startswith("✅")
+        assert fake.writes()[0][2]["data"]["calendar_event[start_at]"] == "2026-10-05T21:00:00Z"
+
+    @pytest.mark.asyncio
+    async def test_iso_without_seconds_is_accepted(self) -> None:
+        tools = write_tools()
+        fake = FakeCanvas(routes={("post", "/calendar_events"): {"id": 1, "context_code": f"user_{ME}"}})
+        with canvas(fake):
+            await tools["create_personal_calendar_event"](title="x", start_at="2026-10-05T14:00Z")
+        assert fake.writes()[0][2]["data"]["calendar_event[start_at]"] == "2026-10-05T14:00:00Z"
+
+
+class TestCourseIdentifierPaths:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad", ["101/assignments/4242", "sis_course_id:X/../../users/self",
+                                     "sis_course_id:X?as_user_id=1", "sis_course_id:a b"])
+    async def test_crafted_identifiers_make_no_canvas_call(self, bad: str) -> None:
+        tools = get_tools()
+        fake = FakeCanvas()
+        with canvas(fake):
+            result = await tools["list_planner_notes"](course_identifier=bad)
+        assert result.startswith("Error: Could not find course")
+        assert fake.calls == [] and fake.paged == []
+
+
+class TestOverrideMatching:
+    """Canvas rewrites (plannable_type, plannable_id) before saving an override:
+    an assignment that is a classic quiz / graded discussion / page becomes
+    quiz|discussion_topic|wiki_page, and a group child topic becomes its root."""
+
+    @pytest.mark.asyncio
+    async def test_assignment_override_stored_as_quiz_is_found(self) -> None:
+        tools = write_tools()
+        fake = FakeCanvas(
+            routes={
+                ("get", "/courses/101/assignments/55"): {"id": 55, "name": "Quiz 1"},
+                ("put", "/planner/overrides/3"): {"id": 3, "marked_complete": False},
+            },
+            paginated={"/planner/overrides": [
+                {"id": 3, "plannable_type": "quiz", "plannable_id": 900, "assignment_id": 55,
+                 "marked_complete": True, "dismissed": False}]},
+        )
+        with canvas(fake):
+            result = await tools["mark_planner_item_complete"](
+                plannable_type="assignment", plannable_id=55, course_identifier=101, complete=False)
+        assert "marked not complete" in result
+        [(method, endpoint, kwargs)] = fake.writes()
+        assert (method, endpoint) == ("put", "/planner/overrides/3")
+        assert kwargs["data"] == {"marked_complete": "false", "dismissed": "false"}
+
+    @pytest.mark.asyncio
+    async def test_already_marked_through_rewritten_override(self) -> None:
+        tools = write_tools()
+        fake = FakeCanvas(
+            routes={("get", "/courses/101/assignments/55"): {"id": 55, "name": "Essay"}},
+            paginated={"/planner/overrides": [
+                {"id": 3, "plannable_type": "wiki_page", "plannable_id": 12, "assignment_id": "55",
+                 "marked_complete": True}]},
+        )
+        with canvas(fake):
+            result = await tools["mark_planner_item_complete"](
+                plannable_type="assignment", plannable_id=55, course_identifier=101)
+        assert "already marked complete" in result
+        assert fake.writes() == []
+
+    @pytest.mark.asyncio
+    async def test_group_child_topic_matches_root_topic_override(self) -> None:
+        tools = write_tools()
+        fake = FakeCanvas(
+            routes={
+                ("get", "/courses/100/discussion_topics/8"): {"id": 8, "title": "Week 3",
+                                                             "root_topic_id": 4},
+                ("put", "/planner/overrides/77"): {"id": 77, "marked_complete": False},
+            },
+            paginated={"/planner/overrides": [
+                {"id": 77, "plannable_type": "discussion_topic", "plannable_id": 4,
+                 "marked_complete": True}]},
+        )
+        with canvas(fake):
+            await tools["mark_planner_item_complete"](
+                plannable_type="discussion_topic", plannable_id=8, course_identifier=100,
+                complete=False)
+        assert [(m, e) for m, e, _ in fake.writes()] == [("put", "/planner/overrides/77")]
+
+    @pytest.mark.asyncio
+    async def test_put_preserves_dismissed(self) -> None:
+        """Canvas's update sets dismissed = value_to_boolean(params[:dismissed])
+        unconditionally, so omitting it would un-dismiss the item."""
+        tools = write_tools()
+        fake = FakeCanvas(
+            routes={
+                ("get", "/courses/100/quizzes/3"): {"id": 3, "title": "Quiz 1"},
+                ("put", "/planner/overrides/77"): {"id": 77, "marked_complete": True},
+            },
+            paginated={"/planner/overrides": [
+                {"id": 77, "plannable_type": "quiz", "plannable_id": 3, "marked_complete": False,
+                 "dismissed": True}]},
+        )
+        with canvas(fake):
+            await tools["mark_planner_item_complete"](
+                plannable_type="quiz", plannable_id=3, course_identifier=100)
+        assert fake.writes()[0][2]["data"] == {"marked_complete": "true", "dismissed": "true"}
+
+
+class TestPlannerModuleSync:
+    """Canvas's override create/update call sync_module_requirement_done, so a
+    course item's 'Mark as done' module requirement follows the planner tick."""
+
+    @pytest.mark.asyncio
+    async def test_course_item_also_needs_mark_module_item_done(self) -> None:
+        tools = write_tools()
+        fake = FakeCanvas(
+            routes={("get", "/courses/100/assignments/42"): {"id": 42, "name": "Lab"}},
+            paginated={"/planner/overrides": []},
+        )
+
+        async def policy(course_id: str, tool_name: str) -> tuple[bool, str]:
+            return (tool_name != "mark_module_item_done", "Module items are off here.")
+
+        mock = AsyncMock(side_effect=policy)
+        with canvas(fake), patch(f"{MOD}.check_student_write_allowed", new=mock):
+            result = await tools["mark_planner_item_complete"](
+                plannable_type="assignment", plannable_id=42, course_identifier=100)
+        assert result.startswith("❌") and "Mark as done" in result
+        assert ("100", "mark_module_item_done") in [c.args for c in mock.await_args_list]
+        assert fake.writes() == []
+
+    @pytest.mark.asyncio
+    async def test_operator_ceiling_applies_to_the_module_side_effect(self) -> None:
+        tools = get_tools(STUDENT_WRITE_TOOLS="mark_planner_item_complete",
+                          COURSE_AGENT_POLICY_ENABLED="false")
+        fake = FakeCanvas(
+            routes={("get", "/courses/100/assignments/42"): {"id": 42, "name": "Lab"}},
+            paginated={"/planner/overrides": []},
+        )
+        with canvas(fake):
+            result = await tools["mark_planner_item_complete"](
+                plannable_type="assignment", plannable_id=42, course_identifier=100)
+        assert result.startswith("❌") and "mark_module_item_done" in result
+        assert fake.writes() == []
+
+    @pytest.mark.asyncio
+    async def test_personal_items_do_not_need_it(self) -> None:
+        tools = get_tools(STUDENT_WRITE_TOOLS="mark_planner_item_complete",
+                          COURSE_AGENT_POLICY_ENABLED="false")
+        fake = FakeCanvas(
+            routes={("get", "/planner_notes/5"): _note(),
+                    ("post", "/planner/overrides"): {"id": 1, "marked_complete": True}},
+            paginated={"/planner/overrides": []},
+        )
+        with canvas(fake):
+            result = await tools["mark_planner_item_complete"](
+                plannable_type="planner_note", plannable_id=5)
+        assert result.startswith("✅")
+
+
+class TestCalendarEventCoursePolicy:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("event", "extra_routes"),
+        [
+            ({"id": 9, "context_code": "course_section_55", "effective_context_code": "course_100"},
+             {}),
+            ({"id": 9, "context_code": f"user_{ME}", "effective_context_code": "course_100",
+              "appointment_group_id": 3}, {}),
+            ({"id": 9, "context_code": "group_5"},
+             {("get", "/groups/5"): {"id": 5, "context_type": "Course", "course_id": 100}}),
+            ({"id": 9, "context_code": "course_section_55",
+              "effective_context_code": "course_200,course_100"}, {}),
+        ],
+    )
+    async def test_governing_course_is_checked(self, event: dict, extra_routes: dict) -> None:
+        tools = write_tools()
+        fake = FakeCanvas(routes={("get", "/calendar_events/9"): event, **extra_routes},
+                          paginated={"/planner/overrides": []})
+        policy = AsyncMock(return_value=(False, "Not here."))
+        with canvas(fake), patch(f"{MOD}.check_student_write_allowed", new=policy):
+            result = await tools["mark_planner_item_complete"](
+                plannable_type="calendar_event", plannable_id=9)
+        assert result.startswith("❌ Update blocked.")
+        assert ("100", "mark_planner_item_complete") in [c.args for c in policy.await_args_list]
+        assert fake.writes() == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("event", "extra_routes"),
+        [
+            ({"id": 9, "context_code": "course_section_55"}, {}),
+            ({"id": 9, "context_code": "group_5"}, {("get", "/groups/5"): _http_error(403)}),
+            ({"id": 9, "context_code": "appointment_group_3"}, {}),
+        ],
+    )
+    async def test_unresolvable_course_fails_closed(self, event: dict, extra_routes: dict) -> None:
+        tools = write_tools()
+        fake = FakeCanvas(routes={("get", "/calendar_events/9"): event, **extra_routes},
+                          paginated={"/planner/overrides": []})
+        with canvas(fake):
+            result = await tools["mark_planner_item_complete"](
+                plannable_type="calendar_event", plannable_id=9)
+        assert result.startswith("❌")
+        assert fake.writes() == []
+
+    @pytest.mark.asyncio
+    async def test_account_group_event_needs_no_course_policy(self) -> None:
+        tools = write_tools()
+        fake = FakeCanvas(routes={
+            ("get", "/calendar_events/9"): {"id": 9, "title": "Club", "context_code": "group_5"},
+            ("get", "/groups/5"): {"id": 5, "context_type": "Account", "account_id": 1},
+            ("post", "/planner/overrides"): {"id": 1, "marked_complete": True},
+        }, paginated={"/planner/overrides": []})
+        policy = AsyncMock(return_value=(False, "Not here."))
+        with canvas(fake), patch(f"{MOD}.check_student_write_allowed", new=policy):
+            result = await tools["mark_planner_item_complete"](
+                plannable_type="calendar_event", plannable_id=9)
+        assert result.startswith("✅")
+        policy.assert_not_awaited()

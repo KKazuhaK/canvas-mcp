@@ -62,7 +62,8 @@ tools that *replace* data are marked destructive even though they delete nothing
   CSV), `execute_typescript`, and every `delete_*`.
 - **Additive**: `create_announcement`, `create_assignment`, `create_discussion_topic`,
   `create_module`, `create_rubric_from_csv`, `post_*`/`reply_*`, `send_*`,
-  `add_module_item`, `assign_peer_review`, `mark_conversations_read`.
+  `add_module_item`, `assign_peer_review`, `mark_conversations_read`,
+  `mark_module_item_done` (only ever completes a requirement; it has no undo).
 
 **The `create_` prefix is not a safe guide.** Three creators displace existing state
 through an option and are therefore destructive: `create_page` with `front_page=True`
@@ -78,6 +79,15 @@ lost, the prior state is restorable through the same API, and marking an inbox r
 is the archetypal benign toggle. Over-flagging costs real signal: a client that
 prompts for everything trains users to click through the prompts that matter. Revisit
 if a client ever surfaces these hints differently.
+
+`mark_planner_item_complete` looks like the same toggle but is **not** covered by
+that exception, and is marked destructive. Canvas's planner-override create and
+update both call `sync_module_requirement_done`, so ticking course content also
+completes its "Mark as done" module requirement, and `complete=False` un-completes
+it and re-evaluates progression, which can re-lock later modules. That is course
+progress, not personal display state. For the same reason the tool requires
+`mark_module_item_done` to be permitted (operator ceiling and course policy) for
+course content, so a course that excludes that tool cannot have it bypassed.
 
 Idempotency is a separate axis, and it is judged on the tool's **whole effect, not
 just its primary resource**. A tool is non-idempotent if *any* supported input makes

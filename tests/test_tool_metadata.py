@@ -95,6 +95,10 @@ DESTRUCTIVE = {
     "update_planner_note",
     "delete_planner_note",
     "delete_personal_calendar_event",
+    # Not the mark_conversations_read benign-toggle exception: Canvas syncs a
+    # planner override to the item's "Mark as done" module requirement, so
+    # complete=False un-completes module progress and can re-lock modules.
+    "mark_planner_item_complete",
 }
 
 # Additive: each call adds something and removes nothing.
@@ -119,9 +123,8 @@ ADDITIVE = {
     # Student calendar/planner: a new note or personal event, nothing replaced.
     "create_planner_note",
     "create_personal_calendar_event",
-    # A personal planner check-mark: the same benign-toggle exception as
-    # mark_conversations_read (restorable through the same call).
-    "mark_planner_item_complete",
+    # Only ever completes a module requirement; it has no undo.
+    "mark_module_item_done",
 }
 
 # Repeating the call with the same arguments produces a duplicate.

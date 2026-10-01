@@ -125,7 +125,10 @@ Your Canvas calendar in date order: course events, events on your personal
 calendar, group events, and assignment due dates.
 
 **Parameters:**
-- `start_date` / `end_date` (optional): `YYYY-MM-DD` or ISO 8601 (default: now to now + `days`)
+- `start_date` / `end_date` (optional): `YYYY-MM-DD`, or ISO 8601 with an offset or `Z`
+  (default: today through `days` days ahead; whole days, so today's all-day events
+  and notes are included). A date-time without an offset is read in the configured
+  `TIMEZONE`, and refused when none is set. The window may span at most 366 days.
 - `days` (optional): Look-ahead when `end_date` is omitted (default 14, max 366)
 - `course_identifier` (optional): Only one course's calendar
 - `event_type` (optional): `event`, `assignment`, or `all` (default)
@@ -140,6 +143,9 @@ calendar, group events, and assignment due dates.
 **Returns:** Each entry's time, calendar, location and event or assignment ID.
 Covers every active course, your personal calendar and your groups; Canvas
 accepts at most 10 calendars per request, so larger sets are fetched in batches.
+Groups from courses that are no longer active are skipped (Canvas refuses them),
+and groups are fetched in their own batches so one refused group cannot hide the
+rest of the calendar.
 For submission status use `get_my_upcoming_assignments`.
 
 ---
@@ -238,7 +244,10 @@ student's own planner and personal calendar: the personal-calendar tools always
 use the caller's own `user_<id>` calendar (read from `/users/self`, never from an
 argument), and update/delete read the note or event first and refuse anything
 that is not the caller's. A note filed under a course, and a planner item that is
-course content, are subject to that course's agent policy.
+course content, are subject to that course's agent policy. For a calendar event
+the course is taken from `effective_context_code` too (section events and
+appointment reservations), or from the owning group; an event that cannot be tied
+to a course is refused.
 
 | Tool | What it does | Confirmation |
 |---|---|---|
@@ -249,9 +258,13 @@ course content, are subject to that course's agent policy.
 | `create_personal_calendar_event` | Add an event to your personal calendar | none |
 | `delete_personal_calendar_event` | Delete an event from your personal calendar (one occurrence of a series) | preview, then token |
 
-`mark_planner_item_complete` changes the planner display only: it reuses an
-existing planner override when there is one, and does not submit anything or
-satisfy a module requirement. `delete_personal_calendar_event` refuses course
+`mark_planner_item_complete` reuses an existing planner override when there is
+one (including one Canvas stored under the quiz, discussion or page behind an
+assignment) and does not submit anything. For course content Canvas also syncs
+module progress: ticking satisfies the item's "Mark as done" module requirement and
+unticking reverses it, which can re-lock later modules. So course content also
+needs `mark_module_item_done` enabled in `STUDENT_WRITE_TOOLS` and allowed by the
+course policy. `delete_personal_calendar_event` refuses course
 and group events and appointment reservations (deleting a reservation would
 cancel a booking with an instructor).
 

@@ -65,7 +65,7 @@ instructor can still block them in their own course.
 | `create_planner_note` | Add a note to your own planner |
 | `update_planner_note` | Change one of your planner notes (preview, then token) |
 | `delete_planner_note` | Delete one of your planner notes (preview, then token) |
-| `mark_planner_item_complete` | Tick or untick an item in your own planner (display only) |
+| `mark_planner_item_complete` | Tick or untick an item in your own planner; for course content this also syncs its "Mark as done" module requirement, so `mark_module_item_done` must be permitted too |
 | `create_personal_calendar_event` | Add an event to your personal calendar |
 | `delete_personal_calendar_event` | Delete an event from your personal calendar (preview, then token) |
 
