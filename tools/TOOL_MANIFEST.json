@@ -160,13 +160,13 @@
           "name": "start_date",
           "type": "string",
           "required": false,
-          "description": "Earliest post date, YYYY-MM-DD or ISO 8601 (default: 14 days ago)"
+          "description": "Earliest post date, YYYY-MM-DD, MM/DD/YYYY or ISO 8601 (default: 14 days before end_date); a date-only value starts at midnight in your Canvas time zone"
         },
         {
           "name": "end_date",
           "type": "string",
           "required": false,
-          "description": "Latest post date, YYYY-MM-DD or ISO 8601 (default: now); a date-only value includes the whole UTC day"
+          "description": "Latest post date, same formats (default: now); a date-only value includes that whole day in your Canvas time zone"
         },
         {
           "name": "limit",
@@ -183,7 +183,7 @@
           "description": "Characters of body text to preview per announcement (0-2000; 0 = titles only)"
         }
       ],
-      "returns": "Announcements newest first with course code, post date, unread flag, author, fenced title and body preview, and a warning for any course whose announcements could not be read",
+      "returns": "Announcements newest first with course code, post date, unread flag, author, fenced title and body preview, and a warning when Canvas returned an error for some courses (results may be incomplete)",
       "examples": [
         "What did my professors announce this week?",
         "Any new announcements in my classes?",
@@ -193,7 +193,7 @@
     {
       "name": "get_my_activity_stream",
       "category": "student",
-      "description": "Your recent Canvas activity across all active courses (the dashboard Recent Activity feed), grouped by kind: announcements, discussions, inbox conversations, grades and submission comments, notifications. Read-only; does not mark anything read.",
+      "description": "Your recent Canvas activity across all active courses (the dashboard Recent Activity feed), grouped by kind: announcements, discussions, inbox conversations, grades and submission comments, notifications. Group activity and inbox messages not tied to a course are not included. Read-only; does not mark anything read.",
       "parameters": [
         {
           "name": "item_type",

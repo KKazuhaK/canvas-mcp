@@ -25,7 +25,8 @@ that embeds other people's discussion posts, messages and comments.
 """
 
 import re
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal
 
 from fastmcp import FastMCP
@@ -33,7 +34,7 @@ from mcp.types import ToolAnnotations
 
 from ..core.cache import get_course_code, get_course_id
 from ..core.client import fetch_all_paginated_results
-from ..core.dates import format_date, parse_date
+from ..core.dates import _output_tz, format_date, parse_date
 from ..core.untrusted_content import fence_untrusted, fence_untrusted_inline
 from ..core.validation import coerce_canvas_id, validate_params
 from .courses import strip_html_tags
@@ -50,11 +51,24 @@ CONTEXT_CODE_CHUNK_SIZE = 10
 MAX_LIMIT = 200
 MAX_PREVIEW_CHARS = 2000
 
-_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _CONTEXT_CODE = re.compile(r"^course_(\d+)$")
-# A grade Canvas computed from a grading scheme is a short token ("A-", "92.5",
-# "complete", "85%"). Anything else is rendered through the inline fence.
-_PLAIN_GRADE = re.compile(r"^[A-Za-z0-9.+\-% ]{1,16}$")
+# Grade-shaped tokens shown as-is: letter grades ("A-"), numbers and
+# percentages ("92.5", "85%"), and Canvas's fixed pass/fail and excused words.
+# Letter-grade text comes from instructor-named grading-scheme entries, so
+# anything else is rendered through the inline fence.
+_PLAIN_GRADE = re.compile(
+    r"^(?:[A-F][+-]?|\d{1,4}(?:\.\d{1,2})?%?|complete|incomplete|pass|fail|EX)$",
+    re.IGNORECASE,
+)
+_HTTP_STATUS = re.compile(r"^HTTP error: (\d{3})\b")
+
+#: Statuses for which a failed multi-course /announcements request is retried
+#: one course at a time. Canvas is not known to produce these per course: the
+#: endpoint has no per-course authorization and silently omits courses the
+#: caller cannot read (``api_find_all`` filters rather than raising), so this
+#: fallback is defensive. Server errors, 429 after the client's own retries,
+#: and transport failures concern the whole request and are never fanned out.
+_PER_COURSE_RETRY_STATUSES = frozenset({400, 401, 403, 404})
 _PLAIN_CATEGORY = re.compile(r"^[A-Za-z &/\-]{1,40}$")
 
 #: Activity-stream item ``type`` -> display category, in display order.
@@ -92,40 +106,75 @@ def _to_canvas_timestamp(dt: datetime) -> str:
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+@dataclass(frozen=True)
+class _Bound:
+    """One end of the announcement window.
+
+    ``param`` is what Canvas receives, ``display`` what the caller is shown,
+    and ``instant`` is used only for the local start <= end check.
+    """
+
+    param: str
+    display: str
+    instant: datetime
+    day: date | None = None
+
+
+def _day_bound(day: date, *, end: bool) -> _Bound:
+    # Sent as YYYY-MM-DD so Canvas applies beginning_of_day / end_of_day in the
+    # user's Canvas profile time zone (announcements_api_controller#get_dates),
+    # the same day boundaries the Canvas UI uses. The local ordering check uses
+    # the configured TIMEZONE as the closest available stand-in.
+    edge = datetime.combine(day, time.max if end else time.min, tzinfo=_output_tz())
+    text = day.isoformat()
+    return _Bound(text, text, edge, day)
+
+
+def _instant_bound(moment: datetime) -> _Bound:
+    stamp = _to_canvas_timestamp(moment)
+    return _Bound(stamp, format_date(stamp), moment)
+
+
+def _parse_bound(raw: str, name: str, *, end: bool) -> _Bound | str:
+    parsed = parse_date(raw)
+    if parsed is None:
+        return (
+            f"Error: could not parse {name} '{raw}'. Use YYYY-MM-DD, "
+            "MM/DD/YYYY or ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)."
+        )
+    text = raw.strip()
+    # Every format parse_date accepts with a time of day contains ':'.
+    if "T" not in text.upper() and ":" not in text:
+        return _day_bound(parsed.date(), end=end)
+    return _instant_bound(parsed)
+
+
 def _resolve_window(
     start_date: str | None, end_date: str | None
-) -> tuple[datetime, datetime] | str:
-    """Turn the optional window bounds into UTC datetimes, or an error string.
+) -> tuple[_Bound, _Bound] | str:
+    """Resolve the optional window bounds, or return an error string.
 
-    A date-only ``end_date`` covers that whole UTC day; otherwise an
-    announcement posted at noon on the end date would fall outside a window
-    the caller meant to include it in.
+    Date-only values (YYYY-MM-DD or MM/DD/YYYY) are sent to Canvas as dates so
+    Canvas covers the whole day in the user's own time zone; timestamps are
+    sent as UTC. Without a start_date the window starts 14 days before its end.
     """
-    now = datetime.now(UTC)
+    if end_date:
+        end = _parse_bound(end_date, "end_date", end=True)
+        if isinstance(end, str):
+            return end
+    else:
+        end = _instant_bound(datetime.now(UTC))
 
     if start_date:
-        start = parse_date(start_date)
-        if start is None:
-            return (
-                f"Error: could not parse start_date '{start_date}'. "
-                "Use YYYY-MM-DD or ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)."
-            )
+        start = _parse_bound(start_date, "start_date", end=False)
+        if isinstance(start, str):
+            return start
+    elif end.day is not None:
+        start = _day_bound(end.day - timedelta(days=DEFAULT_ANNOUNCEMENT_DAYS), end=False)
     else:
-        start = now - timedelta(days=DEFAULT_ANNOUNCEMENT_DAYS)
+        start = _instant_bound(end.instant - timedelta(days=DEFAULT_ANNOUNCEMENT_DAYS))
 
-    if end_date:
-        end = parse_date(end_date)
-        if end is None:
-            return (
-                f"Error: could not parse end_date '{end_date}'. "
-                "Use YYYY-MM-DD or ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)."
-            )
-        if _DATE_ONLY.match(end_date.strip()):
-            end = end + timedelta(days=1) - timedelta(seconds=1)
-    else:
-        end = now
-
-    if start > end:
+    if start.instant > end.instant:
         return "Error: start_date must be on or before end_date."
     return start, end
 
@@ -154,6 +203,26 @@ def _grade_label(value: Any) -> str:
     return fence_untrusted_inline(text, "grade text")
 
 
+def _number_label(value: Any) -> str:
+    """Canvas sends scores as floats (18.0); show them as 18, 18.5, 17.25."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return _grade_label(value)
+    text = f"{float(value):.2f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _same_number(a: Any, b: Any) -> bool:
+    try:
+        return float(a) == float(b)
+    except (TypeError, ValueError):
+        return False
+
+
+def _http_status(error: str) -> int | None:
+    match = _HTTP_STATUS.match(error)
+    return int(match.group(1)) if match else None
+
+
 async def _fetch_active_courses() -> list[dict] | str:
     """The caller's active-enrollment courses, or an error string."""
     courses = await fetch_all_paginated_results(
@@ -166,15 +235,28 @@ async def _fetch_active_courses() -> list[dict] | str:
     return [c for c in courses if isinstance(c, dict)]
 
 
-async def _course_label(course_id: Any, codes: dict[str, str]) -> str:
-    """Course code for display, never an unvalidated value in a request path."""
+async def _course_label(
+    course_id: Any, codes: dict[str, str], *, lookup: bool = True
+) -> str:
+    """Course code for display, never an unvalidated value in a request path.
+
+    Every result, including the ``course <id>`` fallback after a failed
+    lookup, is written back into ``codes`` so each course is looked up at
+    most once per call. With ``lookup=False`` no request is made at all.
+    """
     numeric = coerce_canvas_id(course_id) if course_id is not None else None
     if numeric is None:
         return "Unknown course"
     if numeric in codes:
         return codes[numeric]
-    code = await get_course_code(numeric)
-    return str(code) if code else f"course {numeric}"
+    label = f"course {numeric}"
+    if lookup:
+        code = await get_course_code(numeric)
+        # get_course_code returns the bare ID when it cannot find a code.
+        if code and str(code) != numeric:
+            label = str(code)
+    codes[numeric] = label
+    return label
 
 
 def _chunks(items: list[str], size: int) -> list[list[str]]:
@@ -183,16 +265,23 @@ def _chunks(items: list[str], size: int) -> list[list[str]]:
 
 async def _fetch_announcements(
     context_codes: list[str], window_params: dict[str, Any]
-) -> tuple[list[dict], list[tuple[str, str]]]:
+) -> tuple[list[dict], list[tuple[str, str]], list[tuple[list[str], str]]]:
     """Fetch announcements for ``context_codes`` in bounded chunks.
 
-    Returns the announcements plus ``(context_code, error)`` for each course
-    whose announcements could not be read. When a multi-course chunk fails
-    (one unreadable course can fail the whole request), its courses are
-    retried one at a time so one bad course does not hide the others.
+    Returns ``(announcements, course_failures, request_failures)``:
+    ``course_failures`` holds ``(context_code, error)`` for a course that
+    failed on its own, and ``request_failures`` holds ``(chunk, error)`` for a
+    request that failed as a whole, which is not blamed on any one course.
+
+    Only a chunk that fails with a status in ``_PER_COURSE_RETRY_STATUSES`` is
+    retried course by course (defensive; see that constant). If every
+    single-course retry repeats the chunk's status, the failure is treated as
+    request-wide and later chunks are not fanned out.
     """
     found: list[dict] = []
-    failures: list[tuple[str, str]] = []
+    course_failures: list[tuple[str, str]] = []
+    request_failures: list[tuple[list[str], str]] = []
+    request_wide = False
 
     async def fetch(codes: list[str]) -> list[dict] | str:
         result = await fetch_all_paginated_results(
@@ -210,16 +299,24 @@ async def _fetch_announcements(
         if not isinstance(result, str):
             found.extend(result)
             continue
-        if len(chunk) == 1:
-            failures.append((chunk[0], result))
+        status = _http_status(result)
+        if status not in _PER_COURSE_RETRY_STATUSES or request_wide:
+            request_failures.append((chunk, result))
             continue
-        for code in chunk:
-            single = await fetch([code])
+        if len(chunk) == 1:
+            course_failures.append((chunk[0], result))
+            continue
+        singles = [(code, await fetch([code])) for code in chunk]
+        if all(isinstance(r, str) and _http_status(r) == status for _, r in singles):
+            request_wide = True
+            request_failures.append((chunk, result))
+            continue
+        for code, single in singles:
             if isinstance(single, str):
-                failures.append((code, single))
+                course_failures.append((code, single))
             else:
                 found.extend(single)
-    return found, failures
+    return found, course_failures, request_failures
 
 
 def _format_announcement(
@@ -251,6 +348,25 @@ def _format_announcement(
     return "\n".join(lines) + "\n"
 
 
+def _latest_conversation_message(item: dict) -> Any:
+    """Text of the newest message in a Conversation stream item.
+
+    Canvas sends ``message: null`` for conversations (a Conversation has no
+    body) and puts the text in ``latest_messages[].message``, already limited
+    to messages the viewer takes part in.
+    """
+    raw = item.get("latest_messages")
+    messages = [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+    if not messages:
+        return None
+    ordered = sorted(
+        messages,
+        key=lambda m: parse_date(str(m.get("created_at") or ""))
+        or datetime.min.replace(tzinfo=UTC),
+    )
+    return ordered[-1].get("message")
+
+
 def _stream_item_sort_key(item: dict) -> datetime:
     return (
         parse_date(item.get("updated_at") or item.get("created_at"))
@@ -263,8 +379,12 @@ async def _format_stream_item(
 ) -> str:
     item_type = item.get("type") or "Unknown"
     if item.get("course_id") is not None:
-        where = await _course_label(item.get("course_id"), codes)
+        # Labelled from the caller's course list only: a per-item lookup would
+        # cost a request (or two) per item for any course not in that list.
+        where = await _course_label(item.get("course_id"), codes, lookup=False)
     elif item.get("group_id") is not None:
+        # Defensive: with only_active_courses=true Canvas returns only items
+        # whose context is an active course, so group items should not occur.
         group = coerce_canvas_id(item["group_id"])
         where = f"group {group}" if group else "a group"
     else:
@@ -282,8 +402,12 @@ async def _format_stream_item(
         if score is not None or grade is not None:
             parts = []
             if score is not None:
-                parts.append(f"{score}/{points}" if points is not None else f"{score}")
-            if grade is not None and str(grade) != str(score):
+                parts.append(
+                    f"{_number_label(score)}/{_number_label(points)}"
+                    if points is not None
+                    else _number_label(score)
+                )
+            if grade is not None and not _same_number(grade, score):
                 parts.append(f"grade {_grade_label(grade)}")
             lines.append(f"  Grade: {', '.join(parts)}")
         comments = [
@@ -322,9 +446,14 @@ async def _format_stream_item(
             if item.get("require_initial_post") and item.get("user_has_posted") is False:
                 lines.append("  You must post before you can see replies.")
         if preview_chars > 0:
-            text = _preview(item.get("message"), preview_chars)
+            source, label = item.get("message"), "activity item preview"
+            if item_type == "Conversation":
+                latest = _latest_conversation_message(item)
+                if latest is not None:
+                    source, label = latest, "latest conversation message preview"
+            text = _preview(source, preview_chars)
             if text:
-                lines.append(fence_untrusted(text, "activity item preview"))
+                lines.append(fence_untrusted(text, label))
 
     if item.get("html_url"):
         lines.append(f"  Link: {item['html_url']}")
@@ -352,10 +481,12 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
         Args:
             course_identifier: Optional course code or Canvas ID to show only
                 that course.
-            start_date: Earliest post date, YYYY-MM-DD or ISO 8601 (default:
-                14 days ago). Date-only values are UTC days.
-            end_date: Latest post date, YYYY-MM-DD or ISO 8601 (default: now).
-                A date-only end_date includes that whole UTC day.
+            start_date: Earliest post date, YYYY-MM-DD, MM/DD/YYYY or ISO
+                8601 (default: 14 days before end_date). A date-only value
+                starts at midnight in your Canvas account's time zone.
+            end_date: Latest post date, same formats (default: now). A
+                date-only value includes that whole day in your Canvas
+                account's time zone; ISO timestamps are exact.
             limit: Maximum announcements to show (1-200, default 50).
             preview_chars: Characters of body text to preview per
                 announcement (0-2000, default 400; 0 shows titles only).
@@ -406,16 +537,20 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
             return "You have no active courses, so there are no announcements to show."
 
         window_params = {
-            "start_date": _to_canvas_timestamp(start),
-            "end_date": _to_canvas_timestamp(end),
+            "start_date": start.param,
+            "end_date": end.param,
             "active_only": True,
         }
-        announcements, failures = await _fetch_announcements(
+        announcements, course_failures, request_failures = await _fetch_announcements(
             [f"course_{cid}" for cid in course_ids], window_params
         )
 
-        if failures and len(failures) == len(course_ids):
-            detail = "; ".join(f"{code}: {err}" for code, err in failures[:5])
+        failed_count = len(course_failures) + sum(len(chunk) for chunk, _ in request_failures)
+        if failed_count and failed_count >= len(course_ids) and not announcements:
+            details = [err for _, err in request_failures] + [
+                f"{code}: {err}" for code, err in course_failures
+            ]
+            detail = "; ".join(list(dict.fromkeys(details))[:5])
             return f"Error fetching announcements: {detail}"
 
         # A course listed in two chunks or retried must not show twice.
@@ -430,7 +565,7 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
             reverse=True,
         )
 
-        window_text = f"{format_date(_to_canvas_timestamp(start))} to {format_date(_to_canvas_timestamp(end))}"
+        window_text = f"{start.display} to {end.display}"
         scope = (
             await _course_label(course_ids[0], codes)
             if filtered
@@ -438,13 +573,20 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
         )
 
         failure_note = ""
-        if failures:
+        if request_failures:
+            missed = sum(len(chunk) for chunk, _ in request_failures)
+            errors = "; ".join(list(dict.fromkeys(err for _, err in request_failures))[:3])
+            failure_note += (
+                f"\n⚠️  Canvas returned an error for the announcements of {missed} of "
+                f"{len(course_ids)} courses ({errors}); results may be incomplete.\n"
+            )
+        if course_failures:
             failed = []
-            for code, err in failures:
+            for code, err in course_failures:
                 match = _CONTEXT_CODE.match(code)
                 label = await _course_label(match.group(1), codes) if match else code
                 failed.append(f"  • {label}: {err}\n")
-            failure_note = (
+            failure_note += (
                 "\n⚠️  Could not read announcements for:\n" + "".join(failed)
                 + "Those courses may have announcements not shown here.\n"
             )
@@ -484,6 +626,8 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
         The dashboard "Recent Activity" feed: announcements, discussions,
         inbox conversations, grades and submission comments, and
         notifications, newest first. Reading it does not mark anything read.
+        Group activity and inbox messages not tied to a course are not
+        included (Canvas limits this feed to your active courses).
 
         Args:
             item_type: Show only one kind: "announcements", "discussions",

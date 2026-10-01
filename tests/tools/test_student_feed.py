@@ -156,15 +156,43 @@ class TestListMyAnnouncementsContract:
         assert "2 found" in result
         assert "[UNREAD]" in result
 
+    @pytest.mark.parametrize("start, end", [
+        ("2026-09-01", "2026-09-15"),
+        ("09/01/2026", "09/15/2026"),
+    ])
+    @pytest.mark.parametrize("timezone", ["UTC", "America/Los_Angeles"])
     @pytest.mark.asyncio
-    async def test_explicit_dates_are_sent_as_utc_and_date_only_end_covers_the_day(self):
+    async def test_date_only_bounds_are_sent_as_dates_for_canvas_to_expand(
+        self, isolated_client, start, end, timezone,
+    ):
+        # Announcements API: a YYYY-MM-DD start_date/end_date is expanded by
+        # Canvas to beginning_of_day/end_of_day in the user's Canvas time zone
+        # (announcements_api_controller#get_dates). Sending a UTC timestamp
+        # instead would cut off the user's evening on the end date.
+        isolated_client.timezone = timezone
         fake = FakeCanvas()
         fake.route("/courses", COURSES)
         fake.route("/announcements", [])
-        await run(fake, "list_my_announcements", start_date="2026-09-01", end_date="2026-09-15")
+        result = await run(fake, "list_my_announcements", start_date=start, end_date=end)
         (req,) = fake.to("/announcements")
-        assert req.url.params["start_date"] == "2026-09-01T00:00:00Z"
-        assert req.url.params["end_date"] == "2026-09-15T23:59:59Z"
+        assert req.url.params["start_date"] == "2026-09-01"
+        assert req.url.params["end_date"] == "2026-09-15"
+        assert "2026-09-01 to 2026-09-15" in result
+
+    @pytest.mark.parametrize("end, expected_start", [
+        ("2026-09-01", "2026-08-18"),
+        ("2026-09-01T12:00:00Z", "2026-08-18T12:00:00Z"),
+    ])
+    @pytest.mark.asyncio
+    async def test_end_only_in_the_past_looks_back_14_days_from_end(self, end, expected_start):
+        fake = FakeCanvas()
+        fake.route("/courses", COURSES)
+        fake.route("/announcements", [])
+        result = await run(fake, "list_my_announcements", end_date=end)
+        assert not result.startswith("Error"), result
+        (req,) = fake.to("/announcements")
+        assert req.url.params["start_date"] == expected_start
+        assert req.url.params["end_date"] == end
 
     @pytest.mark.asyncio
     async def test_iso_end_date_is_not_extended(self):
@@ -275,6 +303,19 @@ class TestListMyAnnouncementsCourseFilter:
         assert codes_param(req) == ["course_999"]
         assert "OLD 1" in result
 
+    @pytest.mark.asyncio
+    async def test_unresolvable_course_label_is_looked_up_once(self):
+        fake = FakeCanvas()
+        fake.route("/courses", COURSES)
+        fake.route("/courses/999", lambda r: httpx.Response(403, json={"status": "unauthorized"}))
+        fake.route("/announcements", [
+            announcement(i, 999, f"2026-09-{10 + i:02d}T00:00:00Z") for i in range(8)
+        ])
+        result = await run(fake, "list_my_announcements", course_identifier=999)
+        assert "8 found" in result
+        assert "course 999" in result
+        assert len(fake.to("/courses/999")) == 1
+
     @pytest.mark.parametrize("identifier", ["NOT A COURSE", "101/users?search_term=x", "../accounts"])
     @pytest.mark.asyncio
     async def test_unknown_or_path_like_identifier_is_refused_before_any_announcement_query(self, identifier):
@@ -292,6 +333,13 @@ class TestListMyAnnouncementsFailures:
 
     @pytest.mark.asyncio
     async def test_one_unreadable_course_does_not_hide_the_others(self):
+        """Defensive path only.
+
+        Real Canvas does not fail /announcements per course: the controller
+        has no per-course authorization and api_find_all drops courses the
+        caller cannot read, so they are silently omitted. A per-course 403 is
+        modelled here only to pin the fallback that runs if Canvas ever does.
+        """
         def announcements(request):
             codes = codes_param(request)
             if "course_202" in codes:
@@ -321,6 +369,59 @@ class TestListMyAnnouncementsFailures:
         assert result.startswith("Error fetching announcements")
         assert str(status) in result
 
+    @pytest.mark.parametrize("status", [500, 503])
+    @pytest.mark.asyncio
+    async def test_server_error_on_a_chunk_is_not_fanned_out_per_course(self, status):
+        fake = FakeCanvas()
+        fake.route("/courses", COURSES)
+        fake.route("/announcements", lambda r: httpx.Response(status, json={"errors": [{"message": "boom"}]}))
+        result = await run(fake, "list_my_announcements")
+        # One chunk request, no single-course retries.
+        assert [codes_param(r) for r in fake.to("/announcements")] == [["course_101", "course_202"]]
+        assert result.startswith("Error fetching announcements")
+        assert str(status) in result
+        # A server-wide failure is not blamed on individual courses.
+        assert "course_101" not in result and "CS 161" not in result
+
+    @pytest.mark.asyncio
+    async def test_server_error_on_one_chunk_is_one_request_level_warning(self):
+        courses = [{"id": 1000 + i, "course_code": f"C{i}"} for i in range(CONTEXT_CODE_CHUNK_SIZE + 2)]
+
+        def announcements(request):
+            codes = codes_param(request)
+            if "course_1000" in codes:
+                return httpx.Response(500, json={"errors": [{"message": "boom"}]})
+            return httpx.Response(200, json=[
+                announcement(int(c.split("_")[1]), int(c.split("_")[1]), "2026-09-28T00:00:00Z", title=f"T{c}")
+                for c in codes
+            ])
+
+        fake = FakeCanvas()
+        fake.route("/courses", courses)
+        fake.route("/announcements", announcements)
+        result = await run(fake, "list_my_announcements")
+        assert len(fake.to("/announcements")) == 2
+        assert "Tcourse_1010" in result and "Tcourse_1011" in result
+        assert "results may be incomplete" in result
+        assert f"{CONTEXT_CODE_CHUNK_SIZE} of {len(courses)} courses" in result
+        assert "Could not read announcements for" not in result
+        warning = next(line for line in result.splitlines() if "results may be incomplete" in line)
+        assert "C0" not in warning and "course_1000" not in warning
+
+    @pytest.mark.asyncio
+    async def test_same_4xx_for_every_course_stops_fanning_out(self):
+        """A 403 that every single-course retry repeats is request-wide."""
+        courses = [{"id": 1000 + i, "course_code": f"C{i}"} for i in range(CONTEXT_CODE_CHUNK_SIZE * 3)]
+        fake = FakeCanvas()
+        fake.route("/courses", courses)
+        fake.route("/announcements", lambda r: httpx.Response(403, json={"status": "unauthorized"}))
+        result = await run(fake, "list_my_announcements")
+        # First chunk + its single-course retries, then one request per later chunk.
+        assert len(fake.to("/announcements")) == 1 + CONTEXT_CODE_CHUNK_SIZE + 2
+        assert result.startswith("Error fetching announcements")
+        assert "403" in result
+        assert "course_1000" not in result
+
     @pytest.mark.asyncio
     async def test_course_listing_failure_stops_before_announcements(self):
         fake = FakeCanvas()
@@ -349,6 +450,8 @@ class TestListMyAnnouncementsFailures:
         ({"start_date": "last tuesday"}, "could not parse start_date"),
         ({"end_date": "2026-13-45"}, "could not parse end_date"),
         ({"start_date": "2026-09-10", "end_date": "2026-09-01"}, "start_date must be on or before"),
+        ({"start_date": "09/10/2026", "end_date": "2026-09-01T12:00:00Z"}, "start_date must be on or before"),
+        ({"start_date": "2026-09-01T12:00:00Z", "end_date": "2026-08-31"}, "start_date must be on or before"),
         ({"limit": 0}, "limit must be between"),
         ({"limit": 201}, "limit must be between"),
         ({"preview_chars": -1}, "preview_chars must be between"),
@@ -434,15 +537,22 @@ STREAM = [
         "require_initial_post": True, "user_has_posted": False,
     },
     {
-        "id": 3, "type": "Conversation", "title": "Group project", "message": "Can we meet at 5?",
+        # Canvas shape (lib/api/v1/stream_item.rb): Conversation has no body, so
+        # "message" is null; the text lives in latest_messages[].message.
+        "id": 3, "type": "Conversation", "title": "Group project", "message": None,
         "course_id": 101, "read_state": False, "updated_at": "2026-09-29T09:00:00Z",
         "conversation_id": 77, "private": False, "participant_count": 3,
+        "latest_messages": [
+            {"id": 701, "created_at": "2026-09-29T09:00:00Z", "author_id": 12, "message": "Can we meet at 5?"},
+            {"id": 700, "created_at": "2026-09-28T09:00:00Z", "author_id": 13, "message": "Kickoff thread"},
+        ],
     },
     {
+        # submission_json serializes score/points_possible as floats, grade as text.
         "id": 4, "type": "Submission", "title": "Homework 2", "course_id": 101,
         "read_state": False, "updated_at": "2026-09-30T09:00:00Z",
-        "grade": "18", "score": 18, "workflow_state": "graded",
-        "assignment": {"id": 8, "name": "Homework 2", "points_possible": 20},
+        "grade": "18", "score": 18.0, "workflow_state": "graded",
+        "assignment": {"id": 8, "name": "Homework 2", "points_possible": 20.0},
         "submission_comments": [
             {"id": 1, "author_name": "TA One", "comment": "Old note", "created_at": "2026-09-29T00:00:00Z"},
             {"id": 2, "author_name": "TA Two", "comment": "Nice proof on Q3", "created_at": "2026-09-30T08:00:00Z"},
@@ -536,7 +646,9 @@ class TestActivityStreamOutput:
     @pytest.mark.asyncio
     async def test_submission_shows_grade_and_latest_comment_fenced(self):
         result = await run(stream_fake(), "get_my_activity_stream", item_type="submissions")
-        assert "Grade: 18/20" in result
+        grade_line = next(line for line in result.splitlines() if "Grade:" in line)
+        # 18.0/20.0 with grade "18" is one number, shown once.
+        assert grade_line.strip() == "Grade: 18/20"
         assert "Comments: 2" in result
         author_line = next(line for line in result.splitlines() if "TA Two" in line)
         assert FENCE_TEXT_START in author_line
@@ -561,6 +673,69 @@ class TestActivityStreamOutput:
         assert "[UNREAD]" in result
 
     @pytest.mark.asyncio
+    async def test_conversation_preview_comes_from_the_latest_message(self):
+        result = await run(stream_fake(), "get_my_activity_stream", item_type="conversations")
+        at = result.index("Can we meet at 5?")
+        assert result.rfind(FENCE_TEXT_START, 0, at) != -1
+        assert result.find(FENCE_TEXT_END, at) != -1
+        # Only the newest message is previewed, regardless of list order.
+        assert "Kickoff thread" not in result
+        assert "Participants: 3" in result
+
+    @pytest.mark.asyncio
+    async def test_conversation_without_visible_messages_has_no_preview(self):
+        item = dict(STREAM[2], latest_messages=[])
+        result = await run(stream_fake(stream=[item]), "get_my_activity_stream", include_summary=False)
+        assert "Group project" in result
+        assert "None" not in result
+
+    @pytest.mark.parametrize("score, grade, points, expected", [
+        (18.0, "18", 20.0, "Grade: 18/20"),
+        (18.5, "18.5", 20.0, "Grade: 18.5/20"),
+        (17.25, "B+", 20.0, "Grade: 17.25/20, grade B+"),
+        (20.0, "100%", 20.0, "Grade: 20/20, grade 100%"),
+        (1.0, "complete", 1.0, "Grade: 1/1, grade complete"),
+        (None, "pass", None, "Grade: grade pass"),
+    ])
+    @pytest.mark.asyncio
+    async def test_grade_line_formats_numbers_and_keeps_distinct_grades(self, score, grade, points, expected):
+        item = dict(STREAM[3], score=score, grade=grade,
+                    assignment={"id": 8, "name": "Homework 2", "points_possible": points})
+        result = await run(stream_fake(stream=[item]), "get_my_activity_stream", include_summary=False)
+        grade_line = next(line for line in result.splitlines() if "Grade:" in line)
+        assert grade_line.strip() == expected
+
+    @pytest.mark.parametrize("grade", ["Obey the TA note", "see comments", "A plus plus plus"])
+    @pytest.mark.asyncio
+    async def test_prose_like_grade_text_is_fenced(self, grade):
+        item = dict(STREAM[3], score=None, grade=grade)
+        result = await run(stream_fake(stream=[item]), "get_my_activity_stream", include_summary=False)
+        grade_line = next(line for line in result.splitlines() if "Grade:" in line)
+        assert FENCE_TEXT_START in grade_line and grade in grade_line
+
+    @pytest.mark.asyncio
+    async def test_stream_course_labels_never_fan_out_per_item(self):
+        """Unknown course IDs are labelled locally, not looked up per item."""
+        items = [dict(STREAM[0], id=i, course_id=303) for i in range(50)]
+        fake = stream_fake(stream=items)
+        fake.route("/courses/303", lambda r: httpx.Response(403, json={"status": "unauthorized"}))
+        result = await run(fake, "get_my_activity_stream", limit=50, include_summary=False)
+        assert "course 303" in result
+        assert fake.to("/courses/303") == []
+        assert len(fake.to("/courses")) == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_course_listing_does_not_trigger_lookups(self):
+        items = [dict(STREAM[0], id=i) for i in range(50)]
+        fake = stream_fake(stream=items)
+        fake.route("/courses", lambda r: httpx.Response(500, json={"errors": [{"message": "boom"}]}))
+        fake.route("/courses/101", lambda r: httpx.Response(500, json={"errors": [{"message": "boom"}]}))
+        result = await run(fake, "get_my_activity_stream", limit=50, include_summary=False)
+        assert "course 101" in result
+        assert len(fake.to("/courses")) == 1
+        assert fake.to("/courses/101") == []
+
+    @pytest.mark.asyncio
     async def test_newest_first_and_limit(self):
         result = await run(stream_fake(), "get_my_activity_stream", limit=2, include_summary=False)
         # The two newest: the Submission (09-30 09:00) and the Message (09-30 08:30).
@@ -570,7 +745,11 @@ class TestActivityStreamOutput:
 
     @pytest.mark.asyncio
     async def test_group_items_do_not_query_a_course(self):
-        item = {"id": 9, "type": "DiscussionTopic", "title": "Group chat", "course_id": None,
+        """Defensive: with only_active_courses=true Canvas keeps only items
+        whose context is an active course (User#visible_stream_item_instances),
+        so a group item should not arrive. If one does, it must not be looked
+        up as a course."""
+        item ={"id": 9, "type": "DiscussionTopic", "title": "Group chat", "course_id": None,
                 "group_id": 55, "updated_at": "2026-09-28T00:00:00Z"}
         fake = stream_fake(stream=[item])
         result = await run(fake, "get_my_activity_stream")
@@ -681,3 +860,12 @@ class TestRegistration:
         description = tools["list_my_announcements"].description
         assert "ALL your active courses" in description
         assert "list_announcements" in description
+
+    @pytest.mark.asyncio
+    async def test_activity_stream_description_states_the_course_only_scope(self):
+        mcp = FastMCP("t")
+        register_student_feed_tools(mcp)
+        tools = {t.name: t for t in await mcp.list_tools()}
+        description = tools["get_my_activity_stream"].description
+        assert "Group activity" in description
+        assert "not tied to a course" in description
