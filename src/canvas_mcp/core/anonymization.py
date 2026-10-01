@@ -143,6 +143,10 @@ NON_USER_MARKER_FIELDS = frozenset({
 #: user-only null fields apply without needing their own corroborating signal.
 #: ``communication_channels`` / ``pseudonyms`` are the ``/users/self/profile``
 #: sub-objects that hold the caller's addresses and login handles.
+#: ``participants`` is the discussion ``/view`` user-summary list: an entry
+#: without an avatar key carries no other user signal, so without this its
+#: ``display_name`` passed through. (On ``/conversations`` the free_text tier
+#: keeps display names regardless.)
 USER_CONTAINER_KEYS = frozenset({
     'user',
     'author',
@@ -151,6 +155,7 @@ USER_CONTAINER_KEYS = frozenset({
     'editor',
     'submitter',
     'participant',
+    'participants',
     'student',
     'observed_user',
     'communication_channels',

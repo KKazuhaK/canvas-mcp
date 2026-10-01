@@ -356,6 +356,26 @@ class TestNonUserObjectsPreserved:
         assert result["attachments"][0]["display_name"] == "essay.pdf"
 
 
+class TestDiscussionViewParticipants:
+    """`participants` is a list of people by definition (#166 container keys)."""
+
+    @pytest.mark.parametrize("endpoint", [
+        "/courses/55/discussion_topics/9/view",
+        "/groups/7/discussion_topics/9/view",
+    ])
+    def test_participants_without_avatar_are_scrubbed(self, endpoint):
+        """/view participants are user summaries. When one arrives without an
+        avatar key (the only user signal it would carry) it must still be
+        treated as a person, because the list key itself says so."""
+        view = {
+            "participants": [{"id": 501, "display_name": "Jane Classmate"}],
+            "view": [{"id": 900, "user_id": 501, "message": "hi"}],
+        }
+        result, _ = _anonymize_for_endpoint(view, endpoint)
+        assert "Jane Classmate" not in json.dumps(result)
+        assert result["participants"][0]["id"] == 501
+
+
 class TestDataTypeRouting:
 
     def test_explicit_data_type_suppresses_duck_typing(self):
