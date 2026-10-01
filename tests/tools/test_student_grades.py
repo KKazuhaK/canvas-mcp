@@ -461,6 +461,23 @@ class TestLetterScheme:
         course = course_json(grading_standard_id=77, grading_scheme=None)
         result = await run("calculate_grade_scenarios", FakeCanvas(course=course), course_identifier="123")
         assert "FALLBACK" in result and "77" in result
+        # 84% is a B in the default scheme and in Canvas's own letter: no letter note.
+        assert "Canvas shows the letter" not in result
+
+    @pytest.mark.asyncio
+    async def test_letter_mismatch_with_canvas_is_pointed_out(self):
+        # Institution scheme unreadable; Canvas itself says 84% is a B+.
+        course = course_json(grading_standard_id=77, grading_scheme=None)
+        course["enrollments"][0]["computed_current_grade"] = "B+"
+        result = await run("calculate_grade_scenarios", FakeCanvas(course=course), course_identifier="123")
+        assert "Canvas shows the letter B+ but the scheme used here gives B" in result
+
+    @pytest.mark.asyncio
+    async def test_missing_standard_id_key_uses_returned_scheme(self):
+        course = course_json(grading_scheme=[["P", 0.7], ["NP", 0]])
+        del course["grading_standard_id"]
+        result = await run("calculate_grade_scenarios", FakeCanvas(course=course), course_identifier="123")
+        assert "Canvas did not say whether the course has letter grades enabled" in result
 
     @pytest.mark.asyncio
     async def test_non_numeric_standard_id_is_not_put_in_a_path(self):

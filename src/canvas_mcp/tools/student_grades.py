@@ -150,6 +150,11 @@ async def _resolve_letter_scheme(
         course.get("grading_scheme"), _number(course.get("scaling_factor"))
     )
 
+    if "grading_standard_id" not in course and from_include:
+        return from_include, (
+            "the scheme Canvas returned for this course (Canvas did not say whether the "
+            "course has letter grades enabled)."
+        )
     if standard_id in (None, ""):
         return gc.CANVAS_DEFAULT_SCHEME, (
             "Canvas default scheme. This course has no grading scheme enabled, so "
@@ -367,6 +372,13 @@ def _render_grade_scenarios(
             disagreements.append("current")
         else:
             lines.append("  Agreement: the computed grade matches Canvas.")
+            ours = gc.letter_for_percent(current.percent, scheme)
+            if canvas_letter and ours is not None and str(canvas_letter) != ours:
+                lines.append(
+                    f"  Note: Canvas shows the letter {_letter_label(str(canvas_letter))} but the "
+                    f"scheme used here gives {_letter_label(ours)}. Canvas's letter reflects the "
+                    "course's real scheme; treat the letters below as approximate."
+                )
     else:
         lines.append("  Canvas reports: not available (see caveats)")
 
