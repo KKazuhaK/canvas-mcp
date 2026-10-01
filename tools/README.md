@@ -278,6 +278,57 @@ View your current grades across all enrolled courses.
 
 ---
 
+### Quizzes (read-only)
+
+These tools never open a quiz, start an attempt, or read questions or answers.
+Canvas has two quiz engines: Classic Quizzes have their own API, while New
+Quizzes appear to Canvas only as assignments (marked `is_quiz_lti_assignment`),
+so their settings and attempt history are not available to students through the
+REST API. Both tools say so rather than guess.
+
+#### `list_quizzes`
+List the quizzes in one of your courses.
+
+**Parameters:**
+- `course_identifier`: Course code or Canvas ID
+
+**Example:**
+```
+"What quizzes do I have in CS 161?"
+"When is my next quiz due?"
+```
+
+**Returns:** Classic quizzes by quiz ID (type, due/open/close dates, time limit,
+allowed attempts, points, published, lock state) and New Quizzes by assignment ID
+(dates, points), each with your submission state. If the instructor has hidden
+the Quizzes page (Canvas answers 404), graded Classic quizzes are still listed
+from the assignment list.
+
+#### `get_quiz_details`
+One quiz's settings and your own attempts.
+
+**Parameters:**
+- `course_identifier`: Course code or Canvas ID
+- `quiz_id` (optional): Classic quiz ID
+- `assignment_id` (optional): Assignment ID of a New Quiz, or of a graded Classic quiz
+
+Pass exactly one of `quiz_id` or `assignment_id`.
+
+**Example:**
+```
+"How many attempts do I have left on Quiz 3?"
+"What was my kept score on the practice quiz?"
+```
+
+**Returns:** For a Classic quiz: settings (time limit, allowed attempts, points,
+question count, scoring policy, access-code and LockDown Browser requirements),
+then your attempts used and remaining, kept score, any attempt in progress, and
+each finished attempt's score. For a New Quiz: the Canvas assignment record and
+your gradebook submission, with a note that the rest lives in the New Quizzes
+service.
+
+---
+
 ### Peer Review Management
 
 #### `get_my_peer_reviews_todo`
