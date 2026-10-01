@@ -11,7 +11,13 @@ not after this implementation:
 - QuizSubmission list: ``{"quiz_submissions": [...]}``; a student caller gets
   only their own records (QuizSubmissionsApiController#index), each carrying
   ``attempt``, ``score``, ``kept_score``, ``attempts_left``, ``extra_attempts``,
-  ``validation_token`` and ``workflow_state``.
+  ``validation_token`` and ``workflow_state``. For a student, ``index`` returns
+  ONLY the in-progress record while an attempt is ``untaken``, otherwise
+  ``submitted_attempts`` (built from versions, so never a ``settings_only``
+  record). The singular ``GET .../quizzes/:id/submission`` ("Get the quiz
+  submission") returns the caller's live record in any state.
+- Course permissions: ``GET /courses/:id/permissions`` with ``permissions[]``
+  answers ``{name: bool}`` for the caller (CoursesController#permissions).
 """
 
 from types import SimpleNamespace
@@ -424,7 +430,9 @@ class TestListQuizzesFailures:
         assert not result.startswith("Error")
         assert "404" in result and "hidden the Quizzes page" in result
         assert "Quiz ID: 77 | Assignment ID: 501" in result
-        assert "practice quizzes and surveys cannot be listed" in result
+        # Graded surveys keep an assignment shell, so only practice quizzes
+        # and ungraded surveys are missing from this fallback.
+        assert "practice quizzes and ungraded surveys cannot be listed" in result
         assert "New Quizzes (1):" in result
 
     @pytest.mark.asyncio
@@ -488,12 +496,47 @@ class TestListQuizzesFencing:
 # --------------------------------------------------------------------------
 
 
-def classic_responses(submissions: Any, quiz: Any = None, me: Any = None) -> dict[str, Any]:
+NO_GRADING_RIGHTS = {"manage_grades": False, "view_all_grades": False}
+
+
+def _live_record_for(submissions: Any) -> Any:
+    """What the singular route returns given what the plural route returned.
+
+    The live record is the caller's single QuizSubmission row, i.e. the
+    highest attempt; an error on one route is the same error on the other
+    (both require the quiz's :submit right).
+    """
+    if not isinstance(submissions, dict) or "error" in submissions:
+        return submissions
+    records = submissions.get("quiz_submissions") or []
+    own = [r for r in records if r.get("user_id") == MY_ID]
+    if not own:
+        return {"quiz_submissions": []}
+    return {"quiz_submissions": [max(own, key=lambda r: r.get("attempt") or 0)]}
+
+
+def classic_responses(
+    submissions: Any,
+    quiz: Any = None,
+    me: Any = None,
+    current: Any = None,
+    permissions: Any = None,
+) -> dict[str, Any]:
     return {
         f"/courses/{COURSE}/quizzes/77": classic_quiz() if quiz is None else quiz,
+        f"/courses/{COURSE}/permissions": NO_GRADING_RIGHTS if permissions is None else permissions,
         "/users/self": {"id": MY_ID, "name": "Me"} if me is None else me,
+        f"/courses/{COURSE}/quizzes/77/submission": (
+            _live_record_for(submissions) if current is None else current
+        ),
         f"/courses/{COURSE}/quizzes/77/submissions": submissions,
     }
+
+
+ATTEMPT_ENDPOINTS = (
+    f"/courses/{COURSE}/quizzes/77/submission",
+    f"/courses/{COURSE}/quizzes/77/submissions",
+)
 
 
 class TestGetQuizDetailsValidation:
@@ -521,7 +564,7 @@ class TestGetQuizDetailsValidation:
 
 class TestGetQuizDetailsClassic:
     @pytest.mark.asyncio
-    async def test_request_contract_is_three_reads(self, course_code):
+    async def test_request_contract_is_five_reads(self, course_code):
         request = request_router(
             classic_responses({"quiz_submissions": [quiz_submission()]})
         )
@@ -530,9 +573,17 @@ class TestGetQuizDetailsClassic:
 
         assert [(c.args[0], c.args[1]) for c in request.call_args_list] == [
             ("get", f"/courses/{COURSE}/quizzes/77"),
+            # Courses API "Permissions": checked before any attempt route.
+            ("get", f"/courses/{COURSE}/permissions"),
             ("get", "/users/self"),
+            # Quiz Submissions API "Get the quiz submission" (singular).
+            ("get", f"/courses/{COURSE}/quizzes/77/submission"),
+            # Quiz Submissions API "Get all quiz submissions".
             ("get", f"/courses/{COURSE}/quizzes/77/submissions"),
         ]
+        assert request.call_args_list[1].kwargs["params"] == {
+            "permissions[]": ["manage_grades", "view_all_grades"]
+        }
         _assert_no_quiz_taking(request)
 
     @pytest.mark.asyncio
@@ -614,18 +665,46 @@ class TestGetQuizDetailsClassic:
         assert "Attempts used: 1 (remaining attempts not reported by Canvas)" in result
 
     @pytest.mark.asyncio
-    async def test_settings_only_record_is_not_an_attempt(self, course_code):
+    async def test_extra_attempts_granted_before_first_attempt(self, course_code):
+        """A settings_only record is returned ONLY by the singular route.
+
+        QuizExtension stores extra attempts on a settings_only QuizSubmission.
+        The plural index serves a student ``submitted_attempts`` (versions
+        only), so it answers [] here; the grant is visible only on the live
+        record from GET .../quizzes/:id/submission.
+        """
         quiz = classic_quiz(allowed_attempts=1)
         placeholder = quiz_submission(
             attempt=None, workflow_state="settings_only", extra_attempts=2,
             attempts_left=3, score=None, kept_score=None, started_at=None,
-            finished_at=None, time_spent=None,
+            finished_at=None, end_at=None, time_spent=None,
         )
-        request = request_router(classic_responses({"quiz_submissions": [placeholder]}, quiz=quiz))
+        request = request_router(classic_responses(
+            {"quiz_submissions": []}, quiz=quiz,
+            current={"quiz_submissions": [placeholder]},
+        ))
         with patch(f"{MODULE}.make_canvas_request", new=request):
             result = await get_tool_function("get_quiz_details")(course_identifier=COURSE, quiz_id=77)
-        assert "Attempts used: 0 of 1, remaining: 3" in result
+        assert (
+            "Attempts used: 0 of 1, remaining: 3 (includes 2 extra granted by your instructor)"
+        ) in result
         assert "You have not started this quiz." in result
+        assert "In progress" not in result and "Kept score" not in result
+
+    @pytest.mark.asyncio
+    async def test_live_record_from_another_user_is_ignored(self, course_code):
+        quiz = classic_quiz(allowed_attempts=1)
+        foreign = quiz_submission(
+            user_id=50, attempt=None, workflow_state="settings_only",
+            extra_attempts=5, attempts_left=6,
+        )
+        request = request_router(classic_responses(
+            {"quiz_submissions": []}, quiz=quiz, current={"quiz_submissions": [foreign]},
+        ))
+        with patch(f"{MODULE}.make_canvas_request", new=request):
+            result = await get_tool_function("get_quiz_details")(course_identifier=COURSE, quiz_id=77)
+        assert "Attempts used: 0 of 1, remaining: 1" in result
+        assert "extra granted" not in result
 
     @pytest.mark.asyncio
     async def test_in_progress_attempt(self, course_code):
@@ -643,6 +722,45 @@ class TestGetQuizDetailsClassic:
         ) in result
         assert "Attempts used: 1 of 2, remaining: 1" in result
         assert "You have not started" not in result
+        # No attempt has been submitted, so nothing can be "hidden" yet.
+        assert "Kept score: none yet (no submitted attempt yet)" in result
+        assert "results may be hidden" not in result
+        assert "not listed by Canvas" not in result
+
+    @pytest.mark.asyncio
+    async def test_in_progress_later_attempt_says_history_is_withheld(self, course_code):
+        """While attempt 2 runs, Canvas returns only that untaken record."""
+        quiz = classic_quiz(allowed_attempts=3)
+        current = quiz_submission(
+            attempt=2, workflow_state="untaken", finished_at=None, score=None,
+            kept_score=6.0, time_spent=None, attempts_left=1,
+            started_at="2026-10-04T10:00:00Z", end_at="2026-10-04T10:30:00Z",
+        )
+        request = request_router(classic_responses({"quiz_submissions": [current]}, quiz=quiz))
+        with patch(f"{MODULE}.make_canvas_request", new=request):
+            result = await get_tool_function("get_quiz_details")(course_identifier=COURSE, quiz_id=77)
+        assert "In progress: attempt 2, started 2026-10-04T10:00:00Z" in result
+        assert (
+            "Your earlier attempt 1 is not listed by Canvas while an attempt is "
+            "in progress; check again after submitting."
+        ) in result
+        assert "Kept score: 6/10" in result
+        assert "History:" not in result
+        assert "You have not started" not in result
+
+    @pytest.mark.asyncio
+    async def test_in_progress_third_attempt_names_the_range(self, course_code):
+        quiz = classic_quiz(allowed_attempts=-1)
+        current = quiz_submission(
+            attempt=3, workflow_state="untaken", finished_at=None, score=None,
+            kept_score=None, time_spent=None, attempts_left=-1,
+        )
+        request = request_router(classic_responses({"quiz_submissions": [current]}, quiz=quiz))
+        with patch(f"{MODULE}.make_canvas_request", new=request):
+            result = await get_tool_function("get_quiz_details")(course_identifier=COURSE, quiz_id=77)
+        assert "Your earlier attempts 1 to 2 are not listed by Canvas" in result
+        # Earlier attempts were submitted, so a missing score really is hidden.
+        assert "Kept score: not available (results may be hidden or not yet graded)" in result
 
     @pytest.mark.asyncio
     async def test_hidden_score_is_reported_as_unavailable(self, course_code):
@@ -663,9 +781,53 @@ class TestGetQuizDetailsClassic:
         request = request_router(classic_responses({"quiz_submissions": others}))
         with patch(f"{MODULE}.make_canvas_request", new=request):
             result = await get_tool_function("get_quiz_details")(course_identifier=COURSE, quiz_id=77)
-        assert "returned 2 quiz submission(s) belonging to other users" in result
+        assert "Canvas also returned quiz submission records belonging to other users" in result
+        # Only the first page would have been counted, so no count is claimed.
+        assert "returned 2" not in result
         assert "9.5" not in result and "score 3" not in result
         assert "You have not started this quiz." in result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("permissions", [
+        {"manage_grades": True, "view_all_grades": False},
+        {"manage_grades": False, "view_all_grades": True},
+        {"manage_grades": "true", "view_all_grades": "false"},  # docs' example shape
+    ])
+    async def test_grading_rights_never_request_attempt_routes(self, permissions, course_code):
+        """With grading rights the plural index grades OTHER students' overdue attempts.
+
+        QuizSubmissionsApiController#index (grader branch) queues
+        OutstandingQuizSubmissionManager#grade_by_ids on every visible
+        student's record, so a read-only tool must not call it.
+        """
+        request = request_router(classic_responses(
+            {"quiz_submissions": [quiz_submission(user_id=50)]}, permissions=permissions
+        ))
+        with patch(f"{MODULE}.make_canvas_request", new=request):
+            result = await get_tool_function("get_quiz_details")(course_identifier=COURSE, quiz_id=77)
+        endpoints = [c.args[1] for c in request.call_args_list]
+        assert not any(e in ATTEMPT_ENDPOINTS for e in endpoints)
+        assert "/users/self" not in endpoints
+        assert "You have grading rights in this course" in result
+        assert "You have not started this quiz." not in result
+        assert "Attempts allowed: 2" in result  # quiz settings still shown
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("permissions", [
+        {"error": UNAUTHORIZED_401},
+        {"manage_grades": False},  # incomplete answer
+        ["not", "a", "dict"],
+    ])
+    async def test_unconfirmed_role_fails_closed(self, permissions, course_code):
+        request = request_router(classic_responses(
+            {"quiz_submissions": [quiz_submission()]}, permissions=permissions
+        ))
+        with patch(f"{MODULE}.make_canvas_request", new=request):
+            result = await get_tool_function("get_quiz_details")(course_identifier=COURSE, quiz_id=77)
+        endpoints = [c.args[1] for c in request.call_args_list]
+        assert not any(e in ATTEMPT_ENDPOINTS for e in endpoints)
+        assert "Could not confirm your role in this course" in result
+        assert "Attempts used" not in result
 
     @pytest.mark.asyncio
     async def test_flags_and_description_are_fenced(self, course_code):
@@ -696,6 +858,9 @@ class TestGetQuizDetailsFailures:
         assert result.startswith("Error")
         assert "(404)" in result
         assert "pass its assignment_id instead" in result
+        # QuizzesApiController#show has no tab check, so a hidden Quizzes
+        # page cannot be the reason for this 404.
+        assert "hidden the Quizzes page" not in result
         assert request.call_count == 1
 
     @pytest.mark.asyncio
@@ -717,6 +882,26 @@ class TestGetQuizDetailsFailures:
         assert "Canvas refused to show your quiz attempts (403 Forbidden)" in result
 
     @pytest.mark.asyncio
+    async def test_attempts_401_explains_the_submit_right_not_the_token(self, course_code):
+        """Both attempt routes need the quiz :submit right (concluded course, excused)."""
+        request = request_router(classic_responses({"error": UNAUTHORIZED_401}))
+        with patch(f"{MODULE}.make_canvas_request", new=request):
+            result = await get_tool_function("get_quiz_details")(course_identifier=COURSE, quiz_id=77)
+        assert not result.startswith("Error")
+        assert "Canvas refused to show your quiz attempts (401 Unauthorized)" in result
+        assert "course has concluded for you or you are excused from this quiz" in result
+        # The quiz was just read with the same token.
+        assert "token is invalid" not in result
+
+    @pytest.mark.asyncio
+    async def test_attempts_404_has_no_quizzes_page_hint(self, course_code):
+        request = request_router(classic_responses({"error": "HTTP error: 404, Details: {}"}))
+        with patch(f"{MODULE}.make_canvas_request", new=request):
+            result = await get_tool_function("get_quiz_details")(course_identifier=COURSE, quiz_id=77)
+        assert "Canvas could not find your quiz attempts (404)" in result
+        assert "hidden the Quizzes page" not in result
+
+    @pytest.mark.asyncio
     async def test_self_lookup_failure_skips_attempts_rather_than_guessing(self, course_code):
         request = request_router(classic_responses(
             {"quiz_submissions": [quiz_submission()]}, me={"error": UNAUTHORIZED_401}
@@ -726,7 +911,7 @@ class TestGetQuizDetailsFailures:
         assert "Could not identify you to read your attempts" in result
         assert "Attempts used" not in result
         endpoints = [c.args[1] for c in request.call_args_list]
-        assert f"/courses/{COURSE}/quizzes/77/submissions" not in endpoints
+        assert not any(e in ATTEMPT_ENDPOINTS for e in endpoints)
 
 
 class TestGetQuizDetailsByAssignment:
@@ -763,7 +948,9 @@ class TestGetQuizDetailsByAssignment:
         assert [c.args[1] for c in request.call_args_list] == [
             f"/courses/{COURSE}/assignments/501",
             f"/courses/{COURSE}/quizzes/77",
+            f"/courses/{COURSE}/permissions",
             "/users/self",
+            f"/courses/{COURSE}/quizzes/77/submission",
             f"/courses/{COURSE}/quizzes/77/submissions",
         ]
         assert "Your gradebook submission: submitted 2026-10-02T18:00:00Z, score 8/10" in result
@@ -784,6 +971,8 @@ class TestGetQuizDetailsByAssignment:
             result = await get_tool_function("get_quiz_details")(course_identifier=COURSE, assignment_id=999)
         assert result.startswith("Error")
         assert "(404)" in result
+        # AssignmentsApiController#show does not check the Quizzes tab.
+        assert "hidden the Quizzes page" not in result
 
 
 # --------------------------------------------------------------------------
@@ -876,8 +1065,12 @@ class TestRealClient:
             path = request.url.path
             if path == "/api/v1/courses/12345/quizzes/77":
                 return httpx.Response(200, json=classic_quiz())
+            if path == "/api/v1/courses/12345/permissions":
+                return httpx.Response(200, json=NO_GRADING_RIGHTS)
             if path == "/api/v1/users/self":
                 return httpx.Response(200, json={"id": MY_ID, "name": "Real Name"})
+            if path == "/api/v1/courses/12345/quizzes/77/submission":
+                return httpx.Response(200, json={"quiz_submissions": [quiz_submission()]})
             if path == "/api/v1/courses/12345/quizzes/77/submissions":
                 return httpx.Response(200, json={"quiz_submissions": [quiz_submission()]})
             return httpx.Response(500, json={"error": f"unexpected {path}"})
@@ -888,5 +1081,9 @@ class TestRealClient:
         )
         assert "Attempts used: 2 of 2, remaining: 0" in result
         assert "Kept score: 8/10" in result
-        assert [r.method for r in seen] == ["GET", "GET", "GET"]
+        assert [r.method for r in seen] == ["GET"] * 5
         assert not any("questions" in r.url.path for r in seen)
+        permissions_request = next(r for r in seen if r.url.path.endswith("/permissions"))
+        assert permissions_request.url.params.get_list("permissions[]") == [
+            "manage_grades", "view_all_grades",
+        ]

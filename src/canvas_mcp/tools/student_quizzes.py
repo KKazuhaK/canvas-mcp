@@ -9,10 +9,15 @@ deliberately does not make, so no endpoint under ``.../questions``,
 Canvas has two quiz engines, and they surface differently to a student token:
 
 - **Classic Quizzes** have their own API. ``GET /courses/:id/quizzes`` lists them
-  (404 when the instructor has hidden the Quizzes page), ``GET
-  /courses/:id/quizzes/:id`` describes one, and ``GET
-  /courses/:id/quizzes/:id/submissions`` returns the caller's own attempts when
-  the caller can only submit.
+  (404 when the instructor has hidden the Quizzes page; only this list checks
+  the tab), ``GET /courses/:id/quizzes/:id`` describes one, ``GET
+  /courses/:id/quizzes/:id/submission`` returns the caller's live quiz record
+  (including the ``settings_only`` record that holds extra attempts granted
+  before a first attempt), and ``GET /courses/:id/quizzes/:id/submissions``
+  returns the caller's attempt history when the caller can only submit.
+  The plural route is never called with grading rights: for a grader it pages
+  through every student's records and queues Canvas's job that grades their
+  overdue in-progress attempts (QuizSubmissionsApiController#index).
 - **New Quizzes** live in a separate LTI service. To Canvas they are assignments
   whose external tool is the Quizzes LTI tool, which the assignment serializer
   marks with ``is_quiz_lti_assignment: true`` (canvas-lms
@@ -77,17 +82,26 @@ def _http_status(error: object) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _explain_error(error: object, what: str) -> str:
+def _explain_error(
+    error: object,
+    what: str,
+    *,
+    tab_hint: bool = False,
+    unauthorized: str | None = None,
+) -> str:
     """One sentence that tells a student what a Canvas refusal most likely means.
 
     Canvas answers an action the caller's role may not perform with 401 (not
-    403), so a 401 is not necessarily a bad token. A hidden Quizzes page answers
-    404 with "That page has been disabled for this course" (``tab_enabled?`` in
-    canvas-lms ``application_controller.rb``).
+    403), so a 401 is not necessarily a bad token; ``unauthorized`` replaces the
+    generic 401 text where the cause is known. A hidden Quizzes page answers
+    404 with "That page has been disabled for this course", but only the quiz
+    LIST checks the tab (``QuizzesApiController#index`` calls ``tab_enabled?``;
+    ``show`` and the quiz-submissions routes do not), so ``tab_hint`` is passed
+    only for that request.
     """
     status = _http_status(error)
     if status == 401:
-        hint = (
+        hint = unauthorized or (
             f"Canvas refused to show {what} (401 Unauthorized). Either the token "
             "is invalid or expired, or your role in this course may not view it "
             "(for example it is unpublished or not assigned to you)."
@@ -97,12 +111,49 @@ def _explain_error(error: object, what: str) -> str:
     elif status == 404:
         hint = (
             f"Canvas could not find {what} (404). The course or item may not "
-            "exist or be visible to you, or the instructor has hidden the "
-            "Quizzes page in this course."
+            "exist or be visible to you"
+        )
+        hint += (
+            ", or the instructor has hidden the Quizzes page in this course."
+            if tab_hint else "."
         )
     else:
         hint = f"Could not fetch {what}."
     return f"{hint} Details: {error}"
+
+
+# Both quiz-submission routes require the quiz's :submit right, which Canvas
+# withholds when the course has concluded for the student (no
+# participate_as_student) or the student is excused from the quiz
+# (Quizzes::Quiz set_policy). The quiz itself was just read with the same
+# token, so a token problem is not the explanation.
+_ATTEMPTS_UNAUTHORIZED = (
+    "Canvas refused to show your quiz attempts (401 Unauthorized). Canvas only "
+    "shows quiz attempts while you can still take the quiz; this happens when "
+    "the course has concluded for you or you are excused from this quiz."
+)
+
+# Canvas permission names that put the quiz-submissions index on its grader
+# branch (QuizSubmissionsApiController#index).
+_GRADING_PERMISSIONS = ("manage_grades", "view_all_grades")
+
+
+def _grading_rights(response: object) -> bool | None:
+    """Whether a /courses/:id/permissions answer grants grading rights.
+
+    True if any grading permission is granted, False if all are explicitly
+    denied, None when the answer is an error or incomplete (callers fail
+    closed). Canvas renders booleans; its docs show "true"/"false" strings, so
+    both are accepted.
+    """
+    if not isinstance(response, dict) or _is_error(response):
+        return None
+    values = [response.get(name) for name in _GRADING_PERMISSIONS]
+    if any(v is True or v == "true" for v in values):
+        return True
+    if all(v is False or v == "false" for v in values):
+        return False
+    return None
 
 
 def _is_error(response: object) -> bool:
@@ -266,27 +317,53 @@ def _new_quiz_block(assignment: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _attempt_number(record: dict[str, Any]) -> int:
+    return record.get("attempt") or 0
+
+
 def _attempt_summary(
-    own: list[dict[str, Any]], quiz: dict[str, Any]
+    history: list[dict[str, Any]],
+    quiz: dict[str, Any],
+    live: dict[str, Any] | None = None,
 ) -> list[str]:
     """Attempts used/remaining, kept score, in-progress state and history.
 
+    ``history`` is what the plural submissions route returns to a student:
+    every submitted attempt, or ONLY the in-progress record while an attempt is
+    running (``QuizSubmissionsApiController#index``). ``live`` is the caller's
+    current record from the singular route, the only one that returns a
+    ``settings_only`` record (extra attempts granted before a first attempt).
+
     ``attempts_left`` is Canvas's own figure (``allowed_attempts - attempt +
-    extra_attempts``, or -1 for unlimited) and is preferred over recomputing it.
+    extra_attempts``, or -1 for unlimited) and is preferred over recomputing it,
+    taken from the live record when there is one.
     """
-    attempts = [s for s in own if s.get("workflow_state") not in _NON_ATTEMPT_STATES]
-    latest_any = max(own, key=lambda s: s.get("attempt") or 0) if own else {}
-    latest = max(attempts, key=lambda s: s.get("attempt") or 0) if attempts else {}
-    used = (latest.get("attempt") or 0) if latest else 0
+    # The live record first, so it wins ties with its own history version.
+    records = ([live] if live else []) + list(history)
+    attempts = [s for s in records if s.get("workflow_state") not in _NON_ATTEMPT_STATES]
+    latest = max(attempts, key=_attempt_number) if attempts else {}
+    source = live if live else (max(records, key=_attempt_number) if records else {})
+    used = _attempt_number(latest) if latest else 0
     allowed = quiz.get("allowed_attempts")
 
-    left = latest_any.get("attempts_left") if latest_any else None
+    in_progress: dict[int, dict[str, Any]] = {}
+    for record in attempts:
+        if record.get("workflow_state") == "untaken":
+            in_progress.setdefault(_attempt_number(record), record)
+    finished = sorted(
+        (s for s in history if s.get("workflow_state") in _FINISHED_STATES),
+        key=_attempt_number,
+    )
+    # Any attempt numbered above 1 means an earlier one was submitted, even
+    # when Canvas does not list it.
+    submitted_any = bool(finished) or any(
+        s.get("workflow_state") in _FINISHED_STATES for s in attempts
+    ) or any(n > 1 for n in in_progress)
+
+    left = source.get("attempts_left") if source else None
+    extra = source.get("extra_attempts") if source else None
     if left is None and isinstance(allowed, int):
-        if allowed < 0:
-            left = -1
-        else:
-            granted = (latest_any.get("extra_attempts") or 0) if latest_any else 0
-            left = max(0, allowed - used + granted)
+        left = -1 if allowed < 0 else max(0, allowed - used + (extra or 0))
 
     if isinstance(left, int) and left < 0:
         usage = f"Attempts used: {used} (unlimited attempts allowed)"
@@ -294,11 +371,12 @@ def _attempt_summary(
         usage = f"Attempts used: {used}, remaining: {left}"
         if isinstance(allowed, int) and allowed >= 0:
             usage = f"Attempts used: {used} of {allowed}, remaining: {left}"
-        extra = latest_any.get("extra_attempts") if latest_any else None
         if extra:
             usage += f" (includes {extra} extra granted by your instructor)"
     else:
         usage = f"Attempts used: {used} (remaining attempts not reported by Canvas)"
+    if in_progress:
+        usage += "; the attempt in progress counts as used"
     lines = [usage]
 
     points = quiz.get("points_possible")
@@ -308,11 +386,13 @@ def _attempt_summary(
         policy = _SCORING_POLICY_LABELS.get(quiz.get("scoring_policy"), "")
         suffix = f" ({policy})" if policy else ""
         lines.append(f"Kept score: {_fmt_points(kept)}{total}{suffix}")
-    elif used:
+    elif submitted_any:
         lines.append("Kept score: not available (results may be hidden or not yet graded)")
+    elif in_progress:
+        lines.append("Kept score: none yet (no submitted attempt yet)")
 
-    in_progress = [s for s in attempts if s.get("workflow_state") == "untaken"]
-    for current in in_progress:
+    for number in sorted(in_progress):
+        current = in_progress[number]
         line = f"In progress: attempt {current.get('attempt')}"
         if current.get("started_at"):
             line += f", started {format_date(current['started_at'])}"
@@ -321,11 +401,14 @@ def _attempt_summary(
         if current.get("overdue_and_needs_submission"):
             line += " (past its end time; Canvas will submit it automatically)"
         lines.append(line)
+    running = max(in_progress, default=0)
+    if running > 1 and not any(_attempt_number(s) < running for s in finished):
+        earlier = "attempt 1 is" if running == 2 else f"attempts 1 to {running - 1} are"
+        lines.append(
+            f"Your earlier {earlier} not listed by Canvas while an attempt is in "
+            "progress; check again after submitting."
+        )
 
-    finished = sorted(
-        (s for s in attempts if s.get("workflow_state") in _FINISHED_STATES),
-        key=lambda s: s.get("attempt") or 0,
-    )
     if finished:
         lines.append("History:")
         for record in finished:
@@ -345,7 +428,7 @@ def _attempt_summary(
                     if spent >= 60 else f", time spent {int(spent)} s"
                 )
             lines.append(entry)
-    elif not in_progress:
+    elif not in_progress and not used:
         lines.append("You have not started this quiz.")
     return lines
 
@@ -391,7 +474,7 @@ def register_student_quiz_tools(mcp: FastMCP) -> None:
             )
             return (
                 "Error: could not list quizzes for this course.\n"
-                f"- Classic quizzes: {_explain_error(classic_err, 'the quiz list')}\n"
+                f"- Classic quizzes: {_explain_error(classic_err, 'the quiz list', tab_hint=True)}\n"
                 f"- New Quizzes (assignments): {_explain_error(assignment_err, 'the assignment list')}"
             )
 
@@ -417,14 +500,17 @@ def register_student_quiz_tools(mcp: FastMCP) -> None:
                 lines.extend(_classic_quiz_block(quiz, by_quiz_id.get(str(quiz.get("id")))))
         else:
             classic_err = classic.get("error") if isinstance(classic, dict) else classic
-            lines.append(f"Classic Quizzes: {_explain_error(classic_err, 'the quiz list')}")
+            lines.append(
+                "Classic Quizzes: "
+                + _explain_error(classic_err, "the quiz list", tab_hint=True)
+            )
             # A hidden Quizzes page does not hide graded quizzes from the
             # assignment list, so the student still sees their deadlines.
             shells = sorted(by_quiz_id.values(), key=_due_sort_key)
             if shells:
                 lines.append(
                     f"Graded Classic quizzes found in the assignment list ({len(shells)}); "
-                    "practice quizzes and surveys cannot be listed this way:"
+                    "practice quizzes and ungraded surveys cannot be listed this way:"
                 )
                 for shell in shells:
                     name = fence_untrusted_inline(shell.get("name") or "Untitled quiz", "quiz title")
@@ -479,7 +565,8 @@ def register_student_quiz_tools(mcp: FastMCP) -> None:
         answers. Pass exactly one of quiz_id (a Classic quiz, as listed by
         list_quizzes) or assignment_id (a New Quiz, or the assignment of a
         graded Classic quiz). For New Quizzes Canvas does not expose settings
-        or attempt history to students, and the result says so.
+        or attempt history to students, and the result says so. With grading
+        rights in the course, attempts are not requested at all.
 
         Args:
             course_identifier: Course code or Canvas ID
@@ -614,35 +701,84 @@ def register_student_quiz_tools(mcp: FastMCP) -> None:
 
         lines.append("")
         lines.append("Your attempts:")
+
+        # Grading rights put the plural submissions route on its grader branch:
+        # it pages through every visible student's records and queues
+        # Quizzes::OutstandingQuizSubmissionManager#grade_by_ids on them, which
+        # finalizes other students' overdue in-progress attempts. A read-only
+        # tool must not trigger that, so the caller's rights are checked first
+        # and anything but a clear "no" stops here.
+        permissions = await make_canvas_request(
+            "get",
+            f"/courses/{course_id}/permissions",
+            params={"permissions[]": list(_GRADING_PERMISSIONS)},
+        )
+        grader = _grading_rights(permissions)
+        if grader is None:
+            detail = permissions.get("error") if isinstance(permissions, dict) else permissions
+            lines.append(
+                "Could not confirm your role in this course, so your attempts "
+                f"were not requested. Details: {detail}"
+            )
+            return "\n".join(lines)
+        if grader:
+            lines.append(
+                "You have grading rights in this course; this tool only shows "
+                "a student's own attempts, so none were requested."
+            )
+            return "\n".join(lines)
+
         me = await make_canvas_request("get", "/users/self")
         if not isinstance(me, dict) or _is_error(me) or me.get("id") is None:
             detail = me.get("error") if isinstance(me, dict) else me
             lines.append(f"Could not identify you to read your attempts: {detail}")
             return "\n".join(lines)
+        my_id = str(me["id"])
+
+        # The caller's live record in any state ("Get the quiz submission").
+        # It is the only route that returns a settings_only record, which is
+        # where extra attempts granted before a first attempt are stored.
+        current = await make_canvas_request(
+            "get", f"/courses/{course_id}/quizzes/{checked_id}/submission"
+        )
+        if _is_error(current) or not isinstance(current, dict):
+            detail = current.get("error") if isinstance(current, dict) else current
+            lines.append(
+                _explain_error(
+                    detail, "your quiz attempts", unauthorized=_ATTEMPTS_UNAUTHORIZED
+                )
+            )
+            return "\n".join(lines)
+        live = next(
+            (
+                r for r in current.get("quiz_submissions") or []
+                if isinstance(r, dict) and str(r.get("user_id")) == my_id
+            ),
+            None,
+        )
 
         # For a caller who can only submit, Canvas returns that caller's own
-        # attempts as one unpaginated list (the in-progress attempt, or every
-        # submitted attempt); see QuizSubmissionsApiController#index. A token
-        # with grading rights instead gets a paginated list of OTHER students'
-        # records, never its own, which is why records are filtered to the
-        # caller's id and the rest are counted but never shown.
+        # attempts as one unpaginated list: the in-progress attempt alone, or
+        # every submitted attempt (QuizSubmissionsApiController#index).
+        # Records are still filtered to the caller's id as a safety net.
         response = await make_canvas_request(
             "get", f"/courses/{course_id}/quizzes/{checked_id}/submissions"
         )
         if _is_error(response) or not isinstance(response, dict):
             detail = response.get("error") if isinstance(response, dict) else response
-            lines.append(_explain_error(detail, "your quiz attempts"))
+            lines.append(
+                _explain_error(
+                    detail, "your quiz attempts", unauthorized=_ATTEMPTS_UNAUTHORIZED
+                )
+            )
             return "\n".join(lines)
 
         records = [r for r in response.get("quiz_submissions") or [] if isinstance(r, dict)]
-        my_id = str(me["id"])
         own = [r for r in records if str(r.get("user_id")) == my_id]
-        others = len(records) - len(own)
-        lines.extend(_attempt_summary(own, quiz))
-        if others:
+        lines.extend(_attempt_summary(own, quiz, live))
+        if len(own) < len(records):
             lines.append(
-                f"Canvas also returned {others} quiz submission(s) belonging to "
-                "other users (your token can view grades in this course); they "
-                "are not shown."
+                "Canvas also returned quiz submission records belonging to "
+                "other users; they are not shown."
             )
         return "\n".join(lines)

@@ -323,9 +323,13 @@ Pass exactly one of `quiz_id` or `assignment_id`.
 **Returns:** For a Classic quiz: settings (time limit, allowed attempts, points,
 question count, scoring policy, access-code and LockDown Browser requirements),
 then your attempts used and remaining, kept score, any attempt in progress, and
-each finished attempt's score. For a New Quiz: the Canvas assignment record and
-your gradebook submission, with a note that the rest lives in the New Quizzes
-service.
+each finished attempt's score (Canvas lists earlier attempts only when no
+attempt is in progress, and the result says so). Extra attempts your instructor
+granted are included. For a New Quiz: the Canvas assignment record and your
+gradebook submission, with a note that the rest lives in the New Quizzes
+service. If the token has grading rights in the course, attempts are not
+requested: Canvas's attempt list would then cover every student and grade their
+overdue attempts.
 
 ---
 
