@@ -48,7 +48,7 @@ Personal academic tracking uses Canvas "self" endpoints. Shared course-content t
 | `get_my_course_grades` | Current grades across courses |
 | `get_my_peer_reviews_todo` | Pending peer reviews to complete |
 | `get_my_submission` | Your submission for one assignment, with attempts used |
-| `find_message_recipients` | Find instructors, TAs or classmates you can message in a course, with their user IDs |
+| `find_message_recipients` | Find instructors, TAs or classmates you can message in a course, with their user IDs (non-staff names pseudonymised while anonymization is on) |
 
 ### Student Write Tools (off by default)
 Let an agent act on Canvas for the student rather than only read. **None of these

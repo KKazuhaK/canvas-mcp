@@ -233,8 +233,12 @@ def _endpoint_anonymization_mode(endpoint: str) -> str:
       the participants are their own correspondents, not third parties whose
       records they are browsing — pseudonymising `participants[].name` would
       make "who emailed me?" unanswerable while protecting nobody.
-    - /search/recipients -> ANONYMIZE_FREE_TEXT, for the same reason: it is
-      the caller's Inbox address book, used to find who to message.
+    - /search/recipients -> ANONYMIZE_FREE_TEXT: the caller's Inbox address
+      book, used to find who to message, so names must survive for staff.
+      Unlike the inbox it lists everyone in a course, so the one tool that
+      reads it (tools/student_messaging.py) pseudonymises every non-staff
+      entry itself while anonymization is on; otherwise it would map the
+      user IDs the FULL tier keeps back to real names.
     - /pages, /courses/{id}/pages/{slug}, /courses/{id}/front_page ->
       ANONYMIZE_IDENTITY. Previously ungated: `last_edited_by` leaked a display
       name and avatar URL. front_page returns the same block but carries no
@@ -282,10 +286,12 @@ def _endpoint_anonymization_mode(endpoint: str) -> str:
         return ANONYMIZE_FULL
 
     # /search/recipients is the Inbox address book: the people the caller may
-    # message, with their names and shared courses. Same reasoning as the
-    # caller's own inbox, so the same tier: pseudonymising names would make
-    # "what is my instructor's user ID?" unanswerable, while avatars and
-    # direct identifiers are still nulled. Exact path, not a 'search' prefix.
+    # message, with their names and shared courses. Pseudonymising every name
+    # here would make "what is my instructor's user ID?" unanswerable, so the
+    # tier keeps names and nulls avatars and direct identifiers; the caller
+    # (student_messaging._display_name) pseudonymises non-staff entries, per
+    # course, because the address book is a full roster. Exact path, not a
+    # 'search' prefix.
     if _has_route_segment(segments, {'conversations'}) or segments == ['search', 'recipients']:
         return ANONYMIZE_FREE_TEXT
 

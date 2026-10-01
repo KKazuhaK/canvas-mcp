@@ -138,7 +138,12 @@ group addresses.
 ```
 
 **Returns:** Each match's user ID, display name (fenced as untrusted text, since
-people edit their own names), and roles in that course.
+people edit their own names), and roles in that course. While
+`ENABLE_DATA_ANONYMIZATION` is on (the default), only course staff are named;
+everyone else appears under the same `Student_<hash>` pseudonym the server uses
+for them elsewhere, so the address book cannot undo anonymization. It reads at
+most a few pages of the course address book per call and says when more people
+may match; narrow `search` in a large course.
 
 ---
 
@@ -221,7 +226,7 @@ second (with the token from the preview) sends.
 - `course_identifier` (required): Course code or Canvas ID the message is about
 - `recipient_ids` (required): 1-5 numeric Canvas user IDs, from `find_message_recipients`
 - `subject` (required): Message subject, at most 255 characters
-- `body` (required): Message text
+- `body` (required): Message text, at most 10,000 characters
 - `confirmation_token` (optional): Token from the preview call; omit to preview
 
 **Example:**
@@ -232,7 +237,8 @@ second (with the token from the preview) sends.
 
 **Returns:** On the first call, a preview naming every recipient with their role
 in the course (and a warning when someone is not course staff), the subject and
-the full body. On the second, the new conversation ID.
+the full body. On the second, the ID of the new conversation, which all
+recipients share (one thread, so they see each other's replies).
 
 **Limits, on purpose:** at most 5 recipients, each a person Canvas lets you
 message in that course. Course-, section- and group-wide addresses
@@ -248,7 +254,7 @@ the people already in it; nobody can be added. **Two calls**, like `send_message
 
 **Parameters:**
 - `conversation_id` (required): Canvas conversation ID, from `list_conversations`
-- `body` (required): Reply text
+- `body` (required): Reply text, at most 10,000 characters
 - `confirmation_token` (optional): Token from the preview call; omit to preview
 
 **Example:**

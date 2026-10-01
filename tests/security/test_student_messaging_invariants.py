@@ -157,4 +157,31 @@ async def test_reply_wire_body_carries_no_identity_override():
             "5", "Thanks", confirmation_token=preview["confirmation_token"]
         )
     guard.assert_called_once_with(sent[0])
-    assert set(sent[0]) == {"body", "recipients[]"}
+    # Only the body: no recipients[] (delivery is the previewed participants,
+    # Canvas's default), no included_messages, no attachments.
+    assert set(sent[0]) == {"body"}
+
+
+@pytest.mark.asyncio
+async def test_send_is_one_group_conversation_never_the_batch_path():
+    """force_new or bulk_message would make Canvas split the send into one
+    conversation per recipient (ConversationsController#create)."""
+    async def lookup(method, endpoint, **kwargs):
+        assert method == "get", f"unexpected {method} {endpoint}"
+        user_id = kwargs["params"]["user_id"]
+        return [{"id": int(user_id), "name": "X", "common_courses": {"123": ["TeacherEnrollment"]}}]
+
+    post = AsyncMock(return_value={"success": True, "conversation": [{"id": 1}]})
+    tools = await _tools()
+    with patch.object(student_messaging, "make_canvas_request", lookup), patch.object(
+        student_messaging, "_post_conversation", post
+    ), patch.object(student_messaging, "get_course_code", AsyncMock(return_value="C")):
+        args = ("123", ["501", "502"], "Hi", "Body")
+        preview = await tools["send_message"].fn(*args)
+        result = await tools["send_message"].fn(*args, confirmation_token=preview["confirmation_token"])
+    assert result["success"] is True
+    kwargs = post.await_args.kwargs
+    assert kwargs["force_new"] is False
+    assert kwargs["bulk_message"] is False
+    assert kwargs["group_conversation"] is True
+    assert kwargs["attachment_ids"] is None

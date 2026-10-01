@@ -7,14 +7,22 @@ request contracts asserted here come from the Canvas REST docs, not from this
 implementation:
 
 - ``GET /api/v1/search/recipients`` (Search API "Find recipients"): ``search``,
-  ``context`` such as ``course_3``, ``type`` of ``user``/``context``, and
-  ``user_id``, which looks up one user; paginated. Users carry
+  ``context`` such as ``course_3``, ``type`` of ``user``/``context``,
+  ``per_page``, and ``user_id``, which looks up one user (Canvas's
+  ``SearchController#recipients`` still passes ``context`` to
+  ``address_book.known_user`` on that path); paginated. Users carry
   ``common_courses`` mapping course id to enrollment types.
 - ``POST /api/v1/conversations`` (Conversations API "Create a conversation"):
   ``recipients[]``, ``subject``, ``body``, ``force_new``,
-  ``group_conversation``, ``mode``, ``context_code``; form-encoded.
+  ``group_conversation``, ``mode``, ``context_code``; form-encoded. In
+  ``ConversationsController#create``, ``force_new`` (or ``bulk_message`` on a
+  group conversation) takes the ConversationBatch path: one conversation per
+  recipient. FakeCanvas copies that rule.
 - ``POST /api/v1/conversations/:id/add_message``: ``body`` and optional
-  ``recipients[]`` (user ids; defaults to the current recipients).
+  ``recipients[]`` (user ids; defaults to the current recipients). When
+  ``recipients[]`` is present and the caller is a student, Canvas refuses any
+  listed person without an active enrollment in the course with 401
+  (``ConversationsHelper#get_invalid_recipients``). FakeCanvas copies that too.
 - ``GET /api/v1/conversations/:id`` marks the conversation read unless
   ``auto_mark_as_read`` is false.
 """
@@ -32,11 +40,13 @@ import pytest
 from fastmcp import FastMCP
 
 from canvas_mcp.core import client as client_module
+from canvas_mcp.core.anonymization import generate_anonymous_id
 from canvas_mcp.core.config import reset_config
 from canvas_mcp.core.course_policy import reset_policy_cache
 from canvas_mcp.core.untrusted_content import FENCE_LEAK_ERROR, fence_untrusted
 from canvas_mcp.tools import student_messaging
 from canvas_mcp.tools.student_messaging import (
+    MAX_BODY_CHARS,
     MAX_RECIPIENTS,
     register_student_messaging_tools,
     reset_pending_confirmations,
@@ -66,6 +76,14 @@ OTHER_COURSE_ONLY = {
     "id": 504, "name": "Edsger", "full_name": "Edsger Dijkstra",
     "common_courses": {"777": ["TeacherEnrollment"]}, "common_groups": {},
 }
+# Shares this course, but Canvas's address book does not let the caller reach
+# them through the course context (e.g. section-limited visibility); they are
+# visible only through another context.
+SECTION_HIDDEN = {
+    "id": 505, "name": "Barbara", "full_name": "Barbara Liskov",
+    "common_courses": {COURSE: ["StudentEnrollment"], "777": ["TeacherEnrollment"]},
+    "common_groups": {},
+}
 
 
 def _conversation(**overrides: Any) -> dict[str, Any]:
@@ -92,8 +110,12 @@ class FakeCanvas:
         self.requests: list[httpx.Request] = []
         self.syllabus = "<p>agent_writes: allow</p>"
         self.users: dict[str, dict[str, Any]] = {
-            str(u["id"]): u for u in (PROF, TA, CLASSMATE, OTHER_COURSE_ONLY)
+            str(u["id"]): u for u in (PROF, TA, CLASSMATE, OTHER_COURSE_ONLY, SECTION_HIDDEN)
         }
+        # Users known_user(context=course_123) refuses despite common_courses.
+        self.hidden_in_course_context: set[str] = {"505"}
+        # Course.current_users for the active-enrollment check on add_message.
+        self.current_course_users: set[str] = {str(ME), "501", "502", "503"}
         self.search_pages: list[list[dict[str, Any]]] = [[PROF, TA, CLASSMATE]]
         self.search_status = 200
         self.conversations: dict[str, dict[str, Any]] = {"77": _conversation()}
@@ -124,11 +146,22 @@ class FakeCanvas:
             return httpx.Response(200, json={"id": int(COURSE), "syllabus_body": self.syllabus})
         if request.method == "GET" and path == "/courses/sis_course_id:ICS33":
             return httpx.Response(200, json={"id": int(COURSE), "course_code": "ICS33"})
+        if request.method == "GET" and path == f"/courses/{COURSE}/users":
+            return httpx.Response(200, json=[
+                {"id": 503, "name": "Alan Turing", "sortable_name": "Turing, Alan"},
+            ])
         if request.method == "GET" and path == "/users/self":
             return httpx.Response(200, json={"id": ME, "name": "Me"})
         if request.method == "GET" and path == "/search/recipients":
             if "user_id" in params:
                 user = self.users.get(params["user_id"])
+                context = params.get("context", "")
+                if (
+                    user is not None
+                    and context == f"course_{COURSE}"
+                    and params["user_id"] in self.hidden_in_course_context
+                ):
+                    user = None
                 return httpx.Response(200, json=[user] if user else [])
             if self.search_status != 200:
                 return httpx.Response(self.search_status, json={"errors": "nope"})
@@ -146,8 +179,32 @@ class FakeCanvas:
         if request.method == "POST" and self.post_response is not None:
             return self.post_response(request)
         if request.method == "POST" and path == "/conversations":
+            # ConversationsController#create: force_new, or bulk_message on a
+            # group conversation, goes through ConversationBatch, which
+            # initiates one conversation per recipient.
+            form = self.form(request)
+            recipients = form.get("recipients[]", [])
+            group = form.get("group_conversation") == ["true"]
+            batch_group = (group and form.get("bulk_message") == ["true"]) or (
+                form.get("force_new") == ["true"]
+            )
+            batch_private = not group and len(recipients) > 1
+            if batch_group or batch_private:
+                return httpx.Response(
+                    201, json=[{"id": 5000 + i} for i, _ in enumerate(recipients)]
+                )
             return httpx.Response(201, json=[{"id": 4001, "subject": "x"}])
         if request.method == "POST" and path.endswith("/add_message"):
+            # ConversationsHelper#get_invalid_recipients runs only when
+            # recipients[] is sent and the caller is a student.
+            listed = self.form(request).get("recipients[]")
+            if listed is not None:
+                invalid = [uid for uid in listed if uid not in self.current_course_users]
+                if invalid:
+                    return httpx.Response(401, json={"errors": [{
+                        "message": "The following recipients have no active "
+                        "enrollment in the course, unable to send messages",
+                    }]})
             return httpx.Response(201, json={"id": 77, "messages": [{"id": 9001}]})
         return httpx.Response(404, json={"errors": [{"message": f"unrouted {path}"}]})
 
@@ -222,6 +279,7 @@ class TestFindMessageRecipients:
         assert request.url.params["context"] == f"course_{COURSE}"
         assert request.url.params["type"] == "user"
         assert request.url.params["search"] == "ada"
+        assert request.url.params["per_page"] == "100"
         assert not canvas.posts()
 
         assert result["success"] is True
@@ -234,6 +292,10 @@ class TestFindMessageRecipients:
         assert result["recipients"][0]["name"].startswith("<<<UNTRUSTED CANVAS CONTENT")
         assert "untrusted_content_notice" in result
         assert "avatar" not in json.dumps(result)
+        # Anonymization is on by default: the classmate is pseudonymised.
+        assert result["recipients"][2]["name"] == generate_anonymous_id("503")
+        assert "Alan Turing" not in json.dumps(result)
+        assert "anonymization_note" in result
 
     @pytest.mark.asyncio
     async def test_blank_search_is_not_sent(self, canvas):
@@ -283,6 +345,41 @@ class TestFindMessageRecipients:
         assert result["count"] == 2
         assert result["total_matches"] == 3
         assert result["truncated"] is True
+        assert result["total_is_lower_bound"] is False
+
+    @pytest.mark.asyncio
+    async def test_stops_paging_once_more_than_limit_matches_are_known(self, canvas):
+        canvas.search_pages = [[PROF, TA, CLASSMATE], [dict(PROF, id=601)], [dict(PROF, id=602)]]
+        tools = await _tools()
+        result = await tools["find_message_recipients"](COURSE, limit=2)
+
+        assert len(canvas.calls("GET", "/search/recipients")) == 1
+        assert [r["user_id"] for r in result["recipients"]] == ["501", "502"]
+        assert result["truncated"] is True
+        assert result["total_is_lower_bound"] is True
+        assert "Narrow the search" in result["note"]
+
+    @pytest.mark.asyncio
+    async def test_page_reads_are_capped_for_a_large_course(self, canvas):
+        # Every page holds only non-matches, so nothing short of the cap stops it.
+        canvas.search_pages = [[OTHER_COURSE_ONLY]] * 50
+        tools = await _tools()
+        result = await tools["find_message_recipients"](COURSE, role="staff")
+
+        assert (
+            len(canvas.calls("GET", "/search/recipients"))
+            == student_messaging._MAX_RECIPIENT_PAGES
+        )
+        assert result["recipients"] == []
+        assert result["truncated"] is True
+        assert result["total_is_lower_bound"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_repeated_page_does_not_list_anyone_twice(self, canvas):
+        canvas.search_pages = [[PROF], [PROF, TA]]
+        tools = await _tools()
+        result = await tools["find_message_recipients"](COURSE)
+        assert [r["user_id"] for r in result["recipients"]] == ["501", "502"]
 
     @pytest.mark.asyncio
     async def test_empty_result(self, canvas):
@@ -320,6 +417,25 @@ class TestFindMessageRecipients:
         [request] = canvas.calls("GET", "/search/recipients")
         assert request.url.params["context"] == f"course_{COURSE}"
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("identifier", [
+        "1/users/503", "abc/def", "sis_course_id:1/users/503",
+        "sis_course_id:x%2Fusers%2F503", "sis_course_id:a\\b", "sis_course_id:",
+    ])
+    async def test_path_shaped_course_identifier_makes_no_request(self, canvas, identifier):
+        """get_course_id passes unknown strings through; they must not reach a path."""
+        tools = await _tools()
+        result = await tools["find_message_recipients"](identifier)
+        assert "Could not find course" in result["error"]
+        assert canvas.requests == []
+
+    @pytest.mark.asyncio
+    async def test_path_shaped_course_identifier_cannot_send(self, canvas):
+        tools = await _tools()
+        result = await tools["send_message"]("1/users/503", ["501"], "Hi", "Body")
+        assert result["nothing_sent"] is True
+        assert canvas.requests == []
+
 
 # ---------------------------------------------------------------------------
 # send_message
@@ -350,12 +466,24 @@ class TestSendMessage:
         # Each recipient was checked with Canvas's own messageability lookup.
         lookups = canvas.calls("GET", "/search/recipients")
         assert [r.url.params["user_id"] for r in lookups] == ["501", "502"]
+        # Scoped to the course, so Canvas runs the same address-book check
+        # the POST with context_code=course_123 will run.
+        assert [r.url.params["context"] for r in lookups] == [f"course_{COURSE}"] * 2
 
     @pytest.mark.asyncio
     async def test_preview_warns_when_a_recipient_is_not_staff(self, canvas):
         tools = await _tools()
         preview = await _preview_send(tools, ("501", "503"))
         assert "not course staff" in preview["warning"]
+
+    @pytest.mark.asyncio
+    async def test_recipient_hidden_from_the_course_context_is_refused_in_preview(self, canvas):
+        """505 shares the course but is reachable only via another context."""
+        tools = await _tools()
+        result = await _preview_send(tools, ("501", "505"))
+        assert "User 505 is not someone you can message" in result["error"]
+        assert "confirmation_token" not in result
+        assert not canvas.posts()
 
     @pytest.mark.asyncio
     async def test_confirm_posts_exactly_the_documented_form_fields(self, canvas):
@@ -367,7 +495,10 @@ class TestSendMessage:
         )
 
         assert result["success"] is True
+        # One shared conversation for both recipients, not Canvas's
+        # per-recipient batch path (FakeCanvas copies the controller rule).
         assert result["conversation_ids"] == [4001]
+        assert "note" not in result
         [post] = canvas.posts()
         assert post.method == "POST"
         assert post.url.path == f"{API}/conversations"
@@ -377,10 +508,22 @@ class TestSendMessage:
             "body": ["Hello Professor"],
             "group_conversation": ["true"],
             "bulk_message": ["false"],
-            "force_new": ["true"],
+            "force_new": ["false"],
             "mode": ["sync"],
             "context_code": [f"course_{COURSE}"],
         }
+
+    @pytest.mark.asyncio
+    async def test_canvas_splitting_a_send_is_reported(self, canvas):
+        canvas.post_response = lambda request: httpx.Response(201, json=[{"id": 1}, {"id": 2}])
+        tools = await _tools()
+        preview = await _preview_send(tools, ("501", "502"))
+        result = await tools["send_message"](
+            COURSE, ["501", "502"], "Regrade", "Hello Professor",
+            confirmation_token=preview["confirmation_token"],
+        )
+        assert result["conversation_ids"] == [1, 2]
+        assert "2 separate conversations" in result["note"]
 
     @pytest.mark.asyncio
     async def test_token_is_single_use(self, canvas):
@@ -470,12 +613,22 @@ class TestSendMessage:
         assert canvas.requests == []
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("subject,body", [("", "Body"), ("x" * 256, "Body"), ("Hi", "")])
+    @pytest.mark.parametrize("subject,body", [
+        ("", "Body"), ("x" * 256, "Body"), ("Hi", ""), ("Hi", "   "), ("Hi", " \n\t "),
+        pytest.param("Hi", "x" * (MAX_BODY_CHARS + 1), id="over-length-body"),
+    ])
     async def test_subject_and_body_validation(self, canvas, subject, body):
         tools = await _tools()
         result = await tools["send_message"](COURSE, ["501"], subject, body)
         assert result["nothing_sent"] is True
+        assert "confirmation_token" not in result
         assert canvas.requests == []
+
+    @pytest.mark.asyncio
+    async def test_body_at_the_length_ceiling_is_accepted(self, canvas):
+        tools = await _tools()
+        preview = await _preview_send(tools, body="x" * MAX_BODY_CHARS)
+        assert preview["confirmation_token"]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("user_id", ["504", "999"])
@@ -607,9 +760,52 @@ class TestReplyToConversation:
 
         assert result["success"] is True
         assert result["message_id"] == 9001
+        assert result["recipient_ids"] == ["501", "502"]
         [post] = canvas.posts()
         assert post.url.path == f"{API}/conversations/77/add_message"
-        assert canvas.form(post) == {"body": ["Thanks"], "recipients[]": ["501", "502"]}
+        # No recipients[]: Canvas delivers to the current participants, which
+        # are exactly the previewed audience bound into the token.
+        assert canvas.form(post) == {"body": ["Thanks"]}
+
+    @pytest.mark.asyncio
+    async def test_reply_reaches_a_thread_with_someone_no_longer_enrolled(self, canvas):
+        """Last term's TA (601) is still a participant but not a current user of
+        the course. Canvas refuses a student's add_message with 401 only when
+        recipients[] lists them; the default audience is delivered."""
+        canvas.conversations["77"] = _conversation(
+            audience=[501, 601],
+            participants=[{"id": ME}, {"id": 501, "name": "Ada"}, {"id": 601, "name": "Old TA"}],
+        )
+        tools = await _tools()
+        preview = await tools["reply_to_conversation"]("77", "Thanks")
+        assert [r["user_id"] for r in preview["recipients"]] == ["501", "601"]
+        result = await tools["reply_to_conversation"](
+            "77", "Thanks", confirmation_token=preview["confirmation_token"]
+        )
+        assert result["success"] is True
+        assert len(canvas.posts()) == 1
+
+    @pytest.mark.asyncio
+    async def test_participants_missing_from_audience_are_still_previewed_and_counted(self, canvas):
+        """Delivery goes to every participant, so the preview and the cap use the
+        union of audience and participants, never audience alone."""
+        extra = list(range(601, 601 + MAX_RECIPIENTS))
+        canvas.conversations["77"] = _conversation(
+            audience=[501],
+            participants=[{"id": ME}, {"id": 501, "name": "Ada"}]
+            + [{"id": uid, "name": f"S{uid}"} for uid in extra],
+        )
+        tools = await _tools()
+        result = await tools["reply_to_conversation"]("77", "Thanks")
+        assert f"more than the {MAX_RECIPIENTS}" in result["error"]
+        assert "confirmation_token" not in result
+
+        canvas.conversations["77"] = _conversation(
+            audience=[501],
+            participants=[{"id": ME}, {"id": 501, "name": "Ada"}, {"id": 502, "name": "Grace"}],
+        )
+        preview = await tools["reply_to_conversation"]("77", "Thanks")
+        assert [r["user_id"] for r in preview["recipients"]] == ["501", "502"]
 
     @pytest.mark.asyncio
     async def test_token_is_single_use(self, canvas):
@@ -709,7 +905,10 @@ class TestReplyToConversation:
         assert canvas.requests == []
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("body", ["", "   ", fence_untrusted("roster", "page body")])
+    @pytest.mark.parametrize("body", [
+        "", "   ", fence_untrusted("roster", "page body"),
+        pytest.param("x" * (MAX_BODY_CHARS + 1), id="over-length-body"),
+    ])
     async def test_empty_or_fenced_body_is_refused(self, canvas, body):
         tools = await _tools()
         result = await tools["reply_to_conversation"]("77", body)
@@ -774,3 +973,74 @@ class TestReplyToConversation:
             "77", "Thanks", confirmation_token=preview["confirmation_token"]
         )
         assert result["delivery_uncertain"] is True
+
+
+# ---------------------------------------------------------------------------
+# Anonymization (the address book must not de-anonymize the roster)
+# ---------------------------------------------------------------------------
+
+
+class TestAnonymization:
+    """With ENABLE_DATA_ANONYMIZATION on (the default), /courses/:id/users and
+    discussion entries pseudonymise students but keep their numeric user IDs.
+    The address book must not map those IDs back to real names."""
+
+    @pytest.mark.asyncio
+    async def test_pseudonym_matches_the_full_tier(self, canvas):
+        """The same user ID gets the same name here as through /courses/:id/users."""
+        [user] = await client_module.make_canvas_request("get", f"/courses/{COURSE}/users")
+        assert user["id"] == 503
+        assert user["name"] == generate_anonymous_id("503")
+        tools = await _tools()
+        result = await tools["find_message_recipients"](COURSE, role="student")
+        assert result["recipients"][0]["name"] == user["name"]
+
+    @pytest.mark.asyncio
+    async def test_find_recipients_pseudonymises_everyone_but_staff(self, canvas):
+        observer = {"id": 506, "full_name": "Observer Parent",
+                    "common_courses": {COURSE: ["ObserverEnrollment"]}}
+        canvas.search_pages = [[PROF, TA, CLASSMATE, observer]]
+        tools = await _tools()
+        result = await tools["find_message_recipients"](COURSE)
+        names = {r["user_id"]: r["name"] for r in result["recipients"]}
+
+        assert "Ada Lovelace" in names["501"] and "Grace Hopper" in names["502"]
+        assert names["503"] == generate_anonymous_id("503")
+        assert names["506"] == generate_anonymous_id("506")
+        dumped = json.dumps(result)
+        assert "Alan Turing" not in dumped and "Observer Parent" not in dumped
+
+    @pytest.mark.asyncio
+    async def test_role_student_filter_is_not_a_real_name_roster(self, canvas):
+        tools = await _tools()
+        result = await tools["find_message_recipients"](COURSE, role="student")
+        assert [r["name"] for r in result["recipients"]] == [generate_anonymous_id("503")]
+
+    @pytest.mark.asyncio
+    async def test_staff_elsewhere_is_still_pseudonymised_in_this_course(self, canvas):
+        """505 is a teacher in course 777 but a student here."""
+        canvas.search_pages = [[SECTION_HIDDEN]]
+        tools = await _tools()
+        result = await tools["find_message_recipients"](COURSE)
+        assert result["recipients"][0]["name"] == generate_anonymous_id("505")
+
+    @pytest.mark.asyncio
+    async def test_send_preview_is_not_a_name_oracle(self, canvas):
+        tools = await _tools()
+        preview = await _preview_send(tools, ("501", "503"))
+        names = {r["user_id"]: r["name"] for r in preview["recipients"]}
+        assert "Ada Lovelace" in names["501"]
+        assert names["503"] == generate_anonymous_id("503")
+        assert "Alan Turing" not in json.dumps(preview)
+        assert "anonymization_note" in preview
+        assert not canvas.posts()
+
+    @pytest.mark.asyncio
+    async def test_real_names_are_shown_fenced_when_anonymization_is_off(self, canvas, monkeypatch):
+        monkeypatch.setenv("ENABLE_DATA_ANONYMIZATION", "false")
+        tools = await _tools()
+        result = await tools["find_message_recipients"](COURSE, role="student")
+        [classmate] = result["recipients"]
+        assert "Alan Turing" in classmate["name"]
+        assert classmate["name"].startswith("<<<UNTRUSTED CANVAS CONTENT")
+        assert "anonymization_note" not in result

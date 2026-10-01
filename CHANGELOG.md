@@ -22,8 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attachments or bulk sends, and text carrying UNTRUSTED CANVAS CONTENT
   markers is refused.
 - `/search/recipients` responses now use the same `free_text` anonymization
-  tier as `/conversations`: display names are kept, avatars and direct
-  identifiers are removed.
+  tier as `/conversations`: avatars and direct identifiers are removed. The
+  address book lists a whole course, so while `ENABLE_DATA_ANONYMIZATION` is
+  on, `find_message_recipients` and the `send_message` preview name only
+  course staff and show everyone else under the same `Student_<hash>`
+  pseudonym the `/courses/:id/users` tier uses; they cannot be used to map
+  pseudonymised user IDs back to real names.
 
 ## [1.13.0] — 2026-09-27
 

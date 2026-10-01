@@ -19,10 +19,12 @@ exfiltration needs, and the outer gates are the ones a prompt cannot cross:
 3. **Narrow reach.** Recipients are explicit numeric user IDs, at most
    ``MAX_RECIPIENTS``. ``course_*``, ``group_*``, ``section_*`` and other
    expandable aliases are refused, and every recipient must be someone Canvas
-   says the student can message in that course. Replies go only to the people
-   already in a conversation the student is in, under the same size cap, so a
-   reply cannot fan out to a whole class. No attachments, no forwarded
-   messages, no bulk mode.
+   says the student can message in that course. A send creates one shared
+   conversation among exactly those people (never Canvas's per-recipient
+   batch path). Replies go only to the people already in a conversation the
+   student is in, under the same size cap, so a reply cannot fan out to a
+   whole class. No attachments, no forwarded messages, no bulk mode, and
+   bodies are capped at ``MAX_BODY_CHARS``.
 4. **Preview bound to content.** Both tools preview first and issue a
    single-use token bound to the caller, recipients, subject and body. The
    preview names each recipient and their role in the course, so a person
@@ -32,6 +34,12 @@ exfiltration needs, and the outer gates are the ones a prompt cannot cross:
 5. **No fence leakage.** Text carrying this server's UNTRUSTED CANVAS CONTENT
    markers is refused, so a fenced read result pasted into a message is never
    sent.
+
+The recipient lookup is also kept from becoming a de-anonymization oracle: the
+Inbox address book lists everyone enrolled in a course, so while
+``ENABLE_DATA_ANONYMIZATION`` is on, only course staff keep their real names
+and everyone else gets the same ``generate_anonymous_id`` pseudonym the
+``/courses/:id/users`` tier shows.
 """
 
 from __future__ import annotations
@@ -44,8 +52,9 @@ from typing import Any
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from ..core.anonymization import generate_anonymous_id
 from ..core.cache import get_course_code, get_course_id
-from ..core.client import fetch_all_paginated_results, make_canvas_request
+from ..core.client import make_canvas_request
 from ..core.config import get_config
 from ..core.course_policy import (
     assert_no_identity_override,
@@ -67,9 +76,20 @@ from .messaging import _post_conversation, _validate_outbound_message
 #: become a broadcast.
 MAX_RECIPIENTS = 5
 
+#: Longest message or reply body accepted, in characters. Generous for a note
+#: to an instructor, and a ceiling on how much text one confirmed call carries.
+MAX_BODY_CHARS = 10_000
+
 #: Default and ceiling for how many matches find_message_recipients returns.
 _DEFAULT_RECIPIENT_LIMIT = 25
 _MAX_RECIPIENT_LIMIT = 50
+
+#: find_message_recipients stops reading the address book after this many
+#: pages even if it has not found ``limit`` matches, so one call against a large
+#: lecture course stays a small, bounded number of requests. The result then
+#: says more may exist and to narrow ``search``.
+_RECIPIENT_PAGE_SIZE = 100
+_MAX_RECIPIENT_PAGES = 5
 
 # Canvas enrollment types, as they appear in common_courses / audience_contexts.
 _ROLE_LABELS = {
@@ -116,6 +136,21 @@ def _matches_role_filter(roles: list[str], role_filter: str) -> bool:
     return role_filter in roles
 
 
+def _body_error(body: str) -> str | None:
+    """Shared body checks for both student write tools, run before any request."""
+    if not body or not body.strip():
+        return "body is required"
+    if len(body) > MAX_BODY_CHARS:
+        return (
+            f"body is {len(body)} characters; a student message may be at most "
+            f"{MAX_BODY_CHARS}."
+        )
+    # Backstop for issue 239: never send our provenance fence markers.
+    if contains_fence_markers(body):
+        return FENCE_LEAK_ERROR
+    return None
+
+
 async def _resolve_course(
     course_identifier: str | int,
 ) -> tuple[str, str] | str:
@@ -123,13 +158,23 @@ async def _resolve_course(
 
     ``context_code`` must be ``course_<numeric id>``, but ``get_course_id`` can
     hand back a ``sis_course_id:`` form, so that case is read back from Canvas
-    rather than interpolated into a context code.
+    rather than interpolated into a context code. ``get_course_id`` also passes
+    any other unrecognised string through unchanged; that is refused rather
+    than read back, because a path-shaped value such as ``1/users/503`` would
+    fetch some other object and adopt its id as the course.
     """
     course_id = await get_course_id(course_identifier)
     if not course_id:
         return f"Could not find course {course_identifier}"
     numeric = coerce_canvas_id(course_id)
     if numeric is None:
+        sis_id = str(course_id).removeprefix("sis_course_id:")
+        if (
+            sis_id == str(course_id)
+            or not sis_id.strip()
+            or any(ch in sis_id for ch in "/\\?#%")
+        ):
+            return f"Could not find course {course_identifier}"
         course = await make_canvas_request("get", f"/courses/{course_id}")
         if not isinstance(course, dict) or "error" in course:
             return f"Could not find course {course_identifier}"
@@ -170,12 +215,19 @@ async def _resolve_recipient(user_id: str, course_id: str) -> dict[str, Any] | s
 
     ``GET /search/recipients?user_id=`` returns the user only if they are
     messageable by the caller, with ``common_courses`` mapping each shared
-    course to the user's enrollment types there. A user who shares no
-    enrollment in this course is refused even if Canvas would accept a
-    message through some other shared context.
+    course to the user's enrollment types there. ``context=course_<id>`` makes
+    Canvas run the same course-scoped address-book check that
+    ``POST /conversations`` with ``context_code=course_<id>`` runs
+    (``SearchController#recipients`` passes it to ``known_user``), so a user the
+    caller can see only through some other context (another course, or a
+    section they are not visible from) is refused in the preview rather than by
+    Canvas at send time. ``common_courses`` must still list this course, for
+    the roles shown in the preview.
     """
     response = await make_canvas_request(
-        "get", "/search/recipients", params={"user_id": user_id}
+        "get",
+        "/search/recipients",
+        params={"user_id": user_id, "context": f"course_{course_id}"},
     )
     if isinstance(response, dict) and "error" in response:
         return f"Could not look up recipient {user_id}: {response['error']}"
@@ -198,14 +250,62 @@ async def _resolve_recipient(user_id: str, course_id: str) -> dict[str, Any] | s
     )
 
 
+def _display_name(user_id: str, raw_name: str, roles: list[str]) -> str:
+    """The name to show for an address-book entry in one course.
+
+    ``/search/recipients`` is on the ``free_text`` anonymization tier, which
+    keeps display names, but unlike the caller's own inbox it lists everyone
+    enrolled in the course. Next to real user IDs, that would map every
+    pseudonym the ``full`` tier hands out (``/courses/:id/users``, discussion
+    entries, group members) back to a real name. So while anonymization is on,
+    only course staff keep their names (a student must be able to recognise
+    their instructor) and everyone else gets the pseudonym the ``full`` tier
+    shows for that user ID. Real names are fenced: their owners can edit them,
+    and they sit next to a redeemable confirmation token.
+    """
+    if get_config().enable_data_anonymization and not _STAFF_ROLES.intersection(roles):
+        return generate_anonymous_id(user_id)
+    return fence_untrusted_inline(raw_name or "", "user name")
+
+
+def _anonymization_note() -> str | None:
+    if not get_config().enable_data_anonymization:
+        return None
+    return (
+        "Data anonymization is on: only course staff are shown by name; everyone "
+        "else appears under the same Student_<hash> pseudonym this server uses "
+        "for them elsewhere."
+    )
+
+
+def _recipient_match(entry: Any, course_id: str, role_filter: str) -> dict[str, Any] | None:
+    """One address-book entry as a find_message_recipients match, or None."""
+    if not isinstance(entry, dict):
+        return None
+    # type=user should exclude contexts; skip any that slip through (their
+    # ids are "course_1"-style addresses, not user IDs).
+    user_id = coerce_canvas_id(entry.get("id", ""))
+    if user_id is None:
+        return None
+    common = entry.get("common_courses")
+    roles = _role_labels(common.get(course_id) if isinstance(common, dict) else None)
+    if not roles or not _matches_role_filter(roles, role_filter):
+        return None
+    raw_name = entry.get("full_name") or entry.get("name") or ""
+    return {
+        "user_id": user_id,
+        "name": _display_name(user_id, raw_name, roles),
+        "roles": roles,
+    }
+
+
 def _display_recipient(recipient: dict[str, Any]) -> dict[str, Any]:
-    """Preview/result copy of a resolved recipient, with the name fenced."""
+    """Preview/result copy of a resolved recipient."""
+    roles = recipient.get("roles", [])
     return {
         "user_id": recipient["user_id"],
-        # Display names are editable by their owners: fence them, especially
-        # next to a redeemable confirmation token.
-        "name": fence_untrusted_inline(recipient.get("name") or "", "user name"),
-        "roles": recipient.get("roles", []),
+        "name": _display_name(recipient["user_id"], recipient.get("name") or "", roles),
+        "roles": roles,
     }
 
 
@@ -315,11 +415,16 @@ async def _load_reply_target(
     if conversation.get("cannot_reply") is True:
         return "Canvas does not allow replies to this conversation."
 
+    # The reply is sent without recipients[], so Canvas delivers it to every
+    # current participant. The previewed (and fingerprinted, and capped)
+    # audience is therefore the union of ``audience`` and ``participants``,
+    # never less than what Canvas will actually reach.
     audience: list[str] = []
-    for raw in conversation.get("audience") or []:
-        user_id = coerce_canvas_id(raw)
+    raw_ids = list(conversation.get("audience") or []) + [p.get("id") for p in participants]
+    for raw in raw_ids:
+        user_id = coerce_canvas_id(raw if raw is not None else "")
         if user_id is None:
-            return f"Conversation {conversation_id} has an unexpected audience entry."
+            return f"Conversation {conversation_id} has an unexpected participant entry."
         if user_id != my_id and user_id not in audience:
             audience.append(user_id)
     if not audience:
@@ -361,7 +466,9 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
         """Find people you can message in a course, with their Canvas user IDs.
 
         Use it to look up your instructor's or TA's user ID before
-        send_message. Only individual people are returned.
+        send_message. Only individual people are returned. While data
+        anonymization is on, people who are not course staff are listed
+        under a Student_<hash> pseudonym.
 
         Args:
             course_identifier: Course code or Canvas ID
@@ -379,47 +486,63 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
             return {"error": resolved}
         course_id, course_code = resolved
 
-        params: dict[str, Any] = {"context": f"course_{course_id}", "type": "user"}
+        params: dict[str, Any] = {
+            "context": f"course_{course_id}",
+            "type": "user",
+            "per_page": _RECIPIENT_PAGE_SIZE,
+        }
         term = (search or "").strip()
         if term:
             params["search"] = term
 
-        results = await fetch_all_paginated_results("/search/recipients", params)
-        if isinstance(results, dict) and "error" in results:
-            return {"error": f"Could not search recipients: {results['error']}"}
-        if not isinstance(results, list):
-            return {"error": "Unexpected response from Canvas recipient search"}
-
+        # Read only as many pages as it takes to know whether there are more
+        # than ``limit`` matches, and never more than _MAX_RECIPIENT_PAGES: an
+        # empty search in a large course must not walk the whole roster.
         matches: list[dict[str, Any]] = []
-        for entry in results:
-            if not isinstance(entry, dict):
-                continue
-            # type=user should exclude contexts; skip any that slip through
-            # (their ids are "course_1"-style addresses, not user IDs).
-            user_id = coerce_canvas_id(entry.get("id", ""))
-            if user_id is None:
-                continue
-            common = entry.get("common_courses")
-            roles = _role_labels(common.get(course_id) if isinstance(common, dict) else None)
-            if not roles or not _matches_role_filter(roles, role):
-                continue
-            matches.append({
-                "user_id": user_id,
-                "name": fence_untrusted_inline(
-                    entry.get("full_name") or entry.get("name") or "", "user name"
-                ),
-                "roles": roles,
-            })
+        seen_ids: set[str] = set()
+        pagination: dict[str, str | None] = {}
+        more_pages = False
+        for _ in range(_MAX_RECIPIENT_PAGES):
+            page = await make_canvas_request(
+                "get", "/search/recipients", params=params, _pagination=pagination
+            )
+            if isinstance(page, dict) and "error" in page:
+                return {"error": f"Could not search recipients: {page['error']}"}
+            if not isinstance(page, list):
+                return {"error": "Unexpected response from Canvas recipient search"}
+            for entry in page:
+                match = _recipient_match(entry, course_id, role)
+                # De-duplicated, so a repeated or cycling page cannot list
+                # someone twice.
+                if match is not None and match["user_id"] not in seen_ids:
+                    seen_ids.add(match["user_id"])
+                    matches.append(match)
+            next_url = pagination.get("next")
+            more_pages = bool(next_url)
+            if not more_pages or len(matches) > limit:
+                break
+            pagination["url"] = next_url
 
-        return {
+        result: dict[str, Any] = {
             "success": True,
             "course": course_code,
             "untrusted_content_notice": UNTRUSTED_NOTICE,
             "recipients": matches[:limit],
             "count": min(len(matches), limit),
             "total_matches": len(matches),
-            "truncated": len(matches) > limit,
+            # Stopping early means total_matches is only what was read so far.
+            "total_is_lower_bound": more_pages,
+            "truncated": len(matches) > limit or more_pages,
         }
+        if more_pages:
+            result["note"] = (
+                "Stopped reading the course address book early; more people may "
+                "match. Narrow the search with part of a name."
+            )
+        note = _anonymization_note()
+        if note:
+            result["anonymization_note"] = note
+        return result
 
     if "send_message" in enabled:
 
@@ -447,15 +570,19 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
                 course_identifier: Course code or Canvas ID the message is about
                 recipient_ids: Canvas user IDs (1-5) from find_message_recipients
                 subject: Message subject (max 255 chars)
-                body: Message text
+                body: Message text (max 10,000 chars)
                 confirmation_token: Token from the preview call; omit to preview
             """
             parsed = _parse_recipient_ids(recipient_ids)
             if isinstance(parsed, str):
                 return {"error": parsed, "nothing_sent": True}
             # The same outbound validation the educator send path enforces
-            # (subject length, empty body, fence markers).
-            validation_error = _validate_outbound_message(parsed, subject, body, "sync")
+            # (subject length, empty body, fence markers), plus the student
+            # body rules shared with reply_to_conversation (whitespace-only and
+            # over-long bodies).
+            validation_error = _body_error(body) or _validate_outbound_message(
+                parsed, subject, body, "sync"
+            )
             if validation_error:
                 return {"error": validation_error, "nothing_sent": True}
 
@@ -501,6 +628,9 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
                 warning = _classmate_warning(recipients)
                 if warning:
                     preview["warning"] = warning
+                    note = _anonymization_note()
+                    if note:
+                        preview["anonymization_note"] = note
                 return preview
 
             # Claim synchronously, before any further await, so two overlapping
@@ -521,9 +651,14 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
                 outcome = WriteOutcome.MAY_HAVE_WRITTEN
                 # The shared /conversations choke point: it re-runs the outbound
                 # validation and form-encodes the request. Flags are fixed here,
-                # never caller-controlled: a group conversation among exactly the
-                # previewed people, always a new conversation (so the previewed
-                # subject is used), never bulk, no attachments.
+                # never caller-controlled: one group conversation among exactly
+                # the previewed people, never bulk, no attachments. force_new
+                # must stay false: in ConversationsController#create it routes
+                # the send down the ConversationBatch path, which starts a
+                # separate conversation per recipient. group_conversation=true
+                # with force_new=false calls initiate_conversation with
+                # private=false, which always creates one new conversation (it
+                # never reuses one) under the previewed subject.
                 result = await _post_conversation(
                     course_id,
                     parsed,
@@ -533,7 +668,7 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
                     bulk_message=False,
                     context_code=f"course_{course_id}",
                     mode="sync",
-                    force_new=True,
+                    force_new=False,
                     attachment_ids=None,
                 )
                 if isinstance(result, RequestFailure):
@@ -543,15 +678,26 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
 
                 sent = result.get("conversation")
                 conversations = sent if isinstance(sent, list) else [sent]
-                return {
+                conversation_ids = [
+                    c.get("id") for c in conversations if isinstance(c, dict)
+                ]
+                success: dict[str, Any] = {
                     "success": True,
                     "message": f"Message sent to {len(parsed)} recipient(s).",
                     "course": course_code,
                     "recipient_ids": parsed,
-                    "conversation_ids": [
-                        c.get("id") for c in conversations if isinstance(c, dict)
-                    ],
+                    "conversation_ids": conversation_ids,
                 }
+                if len(conversation_ids) > 1:
+                    # Canvas can still split a send itself (for example the
+                    # restrict_student_access account setting); say so rather
+                    # than imply one shared thread.
+                    success["note"] = (
+                        f"Canvas delivered this as {len(conversation_ids)} separate "
+                        "conversations, so recipients do not see each other's "
+                        "replies."
+                    )
+                return success
             except Exception as e:
                 print(f"Error sending student message: {e}", file=sys.stderr)
                 if outcome is WriteOutcome.NOT_DISPATCHED:
@@ -589,7 +735,7 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
 
             Args:
                 conversation_id: Canvas conversation ID (from list_conversations)
-                body: Reply text
+                body: Reply text (max 10,000 chars)
                 confirmation_token: Token from the preview call; omit to preview
             """
             validated_id = coerce_canvas_id(conversation_id)
@@ -598,11 +744,9 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
                     "error": "conversation_id must be a numeric Canvas conversation ID",
                     "nothing_sent": True,
                 }
-            if not body or not body.strip():
-                return {"error": "body is required", "nothing_sent": True}
-            # Backstop for issue 239: never send our provenance fence markers.
-            if contains_fence_markers(body):
-                return {"error": FENCE_LEAK_ERROR, "nothing_sent": True}
+            body_error = _body_error(body)
+            if body_error:
+                return {"error": body_error, "nothing_sent": True}
 
             target = await _load_reply_target(validated_id)
             if isinstance(target, str):
@@ -660,11 +804,17 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
                 if not allowed:
                     return {"error": f"❌ Reply blocked. {reason}", "nothing_sent": True}
 
-                # recipients[] pins delivery to exactly the previewed audience
-                # (Canvas would otherwise default to whoever is in the
-                # conversation at send time). No included_messages, no
+                # No recipients[]: Canvas then delivers to the conversation's
+                # current participants, which is exactly the audience just
+                # re-read, previewed and bound into the token. Sending
+                # recipients[] would add nothing a prompt could exploit (only
+                # a participant can add people, and they already get the
+                # reply) but makes Canvas run its student active-enrollment
+                # check on every listed person (get_invalid_recipients), so a
+                # reply to any thread with a dropped classmate or last term's
+                # TA would be refused with 401. No included_messages, no
                 # attachments.
-                data: dict[str, Any] = {"body": body, "recipients[]": audience}
+                data: dict[str, Any] = {"body": body}
                 assert_no_identity_override(data)
 
                 outcome = WriteOutcome.MAY_HAVE_WRITTEN
