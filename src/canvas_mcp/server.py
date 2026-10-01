@@ -62,6 +62,7 @@ from .tools import (
     register_shared_file_tools,
     register_shared_messaging_tools,
     register_shared_module_tools,
+    register_student_group_tools,
     register_student_tools,
     register_student_write_tools,
 )
@@ -449,6 +450,8 @@ def register_all_tools(mcp: FastMCP, role: str = "all") -> None:
     # Student-specific tools
     if role in ("student", "all"):
         register_student_tools(mcp)
+        # Read-only, scoped to groups the caller belongs to (tools/student_groups.py).
+        register_student_group_tools(mcp)
         # Tier 1 writes register only for tools the operator named in
         # STUDENT_WRITE_TOOLS (default: none). See tools/student_write.py.
         register_student_write_tools(mcp)
