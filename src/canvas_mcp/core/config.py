@@ -25,6 +25,8 @@ STUDENT_WRITE_TOOL_NAMES = frozenset({
     "submit_assignment",
     "comment_on_my_submission",
     "mark_module_item_done",
+    "send_message",
+    "reply_to_conversation",
 })
 
 
