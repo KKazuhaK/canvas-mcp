@@ -19,6 +19,7 @@ from .discussions import (
     register_shared_discussion_tools,
 )
 from .enrollment import register_enrollment_tools
+from .file_text import register_file_text_tools
 from .files import register_educator_file_tools, register_shared_file_tools
 from .messaging import (
     register_educator_messaging_tools,
@@ -48,6 +49,7 @@ __all__ = [
     'register_educator_messaging_tools',
     'register_educator_module_tools',
     'register_educator_page_crud_tools',
+    'register_file_text_tools',
     'register_page_tools',
     'register_peer_review_comment_tools',
     'register_peer_review_tools',

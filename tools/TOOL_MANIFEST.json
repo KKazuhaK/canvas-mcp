@@ -3387,7 +3387,7 @@
           "description": "\"asc\" or \"desc\" (default: desc)"
         }
       ],
-      "returns": "List of course files with IDs, names, sizes, and folders",
+      "returns": "List of course files with IDs, names, sizes, and folders. When Canvas refuses the course file list (Files tab hidden), lists files linked from modules instead and says so",
       "examples": [
         "List the PDF files in this course"
       ]
@@ -3571,6 +3571,52 @@
         "Read the rubric spreadsheet from course files"
       ],
       "notes": "Unlike download_course_file which saves to the server's local filesystem, this tool returns the file content directly in the response. This is useful when the MCP server runs on a different machine than the client. Use list_course_files or list_module_items to find file IDs."
+    },
+    {
+      "name": "read_course_file_text",
+      "category": "student",
+      "description": "Read a course file (PDF, slides, Word doc, text) as plain text.",
+      "parameters": [
+        {
+          "name": "course_identifier",
+          "type": "string | integer",
+          "required": true,
+          "description": "Course code or Canvas ID"
+        },
+        {
+          "name": "file_id",
+          "type": "string | integer",
+          "required": true,
+          "description": "Canvas file ID"
+        },
+        {
+          "name": "max_chars",
+          "type": "integer",
+          "required": false,
+          "default": 40000,
+          "description": "Maximum characters of text to return (default 40000, max 200000)"
+        },
+        {
+          "name": "start_page",
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "First page (PDF) or slide (PPTX) to read, 1-based"
+        },
+        {
+          "name": "end_page",
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "Last page or slide to read, inclusive"
+        }
+      ],
+      "returns": "Extracted text with page/slide markers inside an untrusted-content fence, plus file name, type, size, page/slide range, and a continuation hint when truncated",
+      "examples": [
+        "Summarize the week 3 lecture slides",
+        "What does page 12 of the lab manual say about grading?"
+      ],
+      "notes": "Supports PDF (page text, no OCR), PPTX (slide titles, text, tables, speaker notes), DOCX (paragraphs and tables), and plain text/Markdown/CSV/JSON/HTML. Checks the reported size against a 50 MB cap (clamped to READ_FILE_MAX_SIZE_MB) before downloading. The Canvas token is sent only to the Canvas host; storage redirects are fetched without credentials. Works for files linked from modules when the course Files tab is hidden. PDF/PPTX/DOCX need the optional 'documents' extra: pip install 'canvas-mcp[documents]'."
     },
     {
       "name": "reply_to_discussion_entry",

@@ -107,7 +107,9 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -e .
+        # The documents extra (pypdf, python-pptx, python-docx) lets the
+        # read_course_file_text extraction tests run instead of skipping.
+        pip install -e ".[documents]"
         # pyyaml is needed by the workflow-permission policy tests. They use
         # importorskip, so omitting it makes them skip silently in the one job
         # branch protection actually requires — passing green while the check

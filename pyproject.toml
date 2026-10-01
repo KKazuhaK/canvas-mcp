@@ -51,6 +51,13 @@ hosted = [
     "azure-communication-email>=1.0.0",
     "azure-identity>=1.17.0",
 ]
+# Text extraction for read_course_file_text (PDF, PPTX, DOCX). Optional: the
+# tool answers with an install hint when these are missing.
+documents = [
+    "pypdf>=6.0,<7",
+    "python-pptx>=1.0.2,<2",
+    "python-docx>=1.2.0,<2",
+]
 
 [tool.hatch.version]
 path = "src/canvas_mcp/__init__.py"
@@ -139,4 +146,9 @@ dev = [
     # use importorskip, so relying on a transitive PyYAML would let the gate
     # skip silently — the exact failure mode it exists to prevent.
     "pyyaml>=6.0",
+    # Same reasoning for the document-extraction tests: install the optional
+    # parsers so they run instead of skipping.
+    "pypdf>=6.0,<7",
+    "python-pptx>=1.0.2,<2",
+    "python-docx>=1.2.0,<2",
 ]

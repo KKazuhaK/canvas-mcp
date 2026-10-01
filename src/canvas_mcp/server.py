@@ -51,6 +51,7 @@ from .tools import (
     register_educator_module_tools,
     register_educator_page_crud_tools,
     register_enrollment_tools,
+    register_file_text_tools,
     register_page_tools,
     register_peer_review_comment_tools,
     register_peer_review_tools,
@@ -449,6 +450,7 @@ def register_all_tools(mcp: FastMCP, role: str = "all") -> None:
     # Student-specific tools
     if role in ("student", "all"):
         register_student_tools(mcp)
+        register_file_text_tools(mcp)
         # Tier 1 writes register only for tools the operator named in
         # STUDENT_WRITE_TOOLS (default: none). See tools/student_write.py.
         register_student_write_tools(mcp)
@@ -583,7 +585,7 @@ def main() -> None:
         "--role",
         choices=["student", "educator", "all"],
         default=None,
-        help="Tool profile: student (~37 tools), educator (~88 tools), all (default: all)"
+        help="Tool profile: student (~38 tools), educator (~88 tools), all (default: all)"
     )
     parser.add_argument(
         "--list-grants",

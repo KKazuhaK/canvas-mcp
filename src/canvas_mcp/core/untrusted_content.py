@@ -137,6 +137,7 @@ READ_TOOL_CONTENT_POLICIES: dict[str, ReadToolContentPolicy] = {
     "list_users": _fenced("fence_untrusted_inline"),
     "parse_ufixit_violations": _fenced("fence_untrusted_fields"),
     "read_course_file": _fenced("fence_untrusted_inline"),
+    "read_course_file_text": _fenced("fence_untrusted", "fence_untrusted_inline"),
     "scan_course_content_accessibility": _fenced("fence_untrusted_fields"),
     "search_canvas_tools": _safe(
         "Returns registered tool and bundled source metadata, not Canvas content."

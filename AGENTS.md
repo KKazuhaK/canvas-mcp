@@ -28,9 +28,9 @@ Reduce tool overhead by setting a role-based profile. Only tools relevant to the
 
 ```
 # In .env:
-CANVAS_ROLE=student    # ~37 tools (student + shared)
+CANVAS_ROLE=student    # ~38 tools (student + shared)
 CANVAS_ROLE=educator   # 92 tools (educator + shared)
-CANVAS_ROLE=all        # Default profile; 98 tools by default, 103 with all feature-gated tools enabled
+CANVAS_ROLE=all        # Default profile; 99 tools by default, 104 with all feature-gated tools enabled
 ```
 
 Or via CLI flag: `canvas-mcp-server --role student` (CLI flag takes precedence over env var).
@@ -48,6 +48,10 @@ Personal academic tracking uses Canvas "self" endpoints. Shared course-content t
 | `get_my_course_grades` | Current grades across courses |
 | `get_my_peer_reviews_todo` | Pending peer reviews to complete |
 | `get_my_submission` | Your submission for one assignment, with attempts used |
+| `read_course_file_text` | Read lecture slides, PDFs, Word docs, or text files as plain text with page/slide markers (PDF/PPTX/DOCX need the `documents` extra) |
+
+If a course hides its Files tab, `list_course_files` lists the files linked from
+modules instead, and the file read tools reach those files through their module.
 
 ### Student Write Tools (off by default)
 Let an agent act on Canvas for the student rather than only read. **None of these
