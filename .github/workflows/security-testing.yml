@@ -123,7 +123,12 @@ jobs:
       - name: Export locked dependencies
         run: |
           # Audit the exact pinned dependency set that actually ships (uv.lock),
-          # including the optional "hosted" extra, rather than a fresh resolve.
+          # including the optional "hosted" and "documents" extras, rather than a
+          # fresh resolve.
+          # --frozen trusts the lock as is, so first fail when it is stale: a
+          # dependency added to pyproject.toml without `uv lock` would
+          # otherwise never reach the audit.
+          uv lock --check
           uv export --frozen --format requirements-txt \
             --no-emit-project --no-hashes --all-extras > requirements-audit.txt
       

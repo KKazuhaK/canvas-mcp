@@ -54,7 +54,10 @@ hosted = [
 # Text extraction for read_course_file_text (PDF, PPTX, DOCX). Optional: the
 # tool answers with an install hint when these are missing.
 documents = [
-    "pypdf>=6.0,<7",
+    # 6.19.0 is the newest release with fixes for the pypdf text-extraction
+    # DoS advisories (e.g. GHSA-fp3h-c4fm-7vvf, GHSA-php9-fj8v-98fj); keep the
+    # floor at the newest patched release.
+    "pypdf>=6.19.0,<7",
     "python-pptx>=1.0.2,<2",
     "python-docx>=1.2.0,<2",
 ]
@@ -126,6 +129,13 @@ disallow_untyped_defs = false
 module = "azure.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# The document parsers come from the optional "documents" extra. CI's mypy job
+# installs only the base package, and the imports are guarded at runtime
+# (MissingDependencyError -> install hint).
+module = ["pypdf", "pypdf.*", "pptx", "pptx.*", "docx", "docx.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
@@ -148,7 +158,7 @@ dev = [
     "pyyaml>=6.0",
     # Same reasoning for the document-extraction tests: install the optional
     # parsers so they run instead of skipping.
-    "pypdf>=6.0,<7",
+    "pypdf>=6.19.0,<7",
     "python-pptx>=1.0.2,<2",
     "python-docx>=1.2.0,<2",
 ]
