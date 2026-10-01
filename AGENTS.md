@@ -28,7 +28,7 @@ Reduce tool overhead by setting a role-based profile. Only tools relevant to the
 
 ```
 # In .env:
-CANVAS_ROLE=student    # ~37 tools (student + shared)
+CANVAS_ROLE=student    # ~39 tools (student + shared)
 CANVAS_ROLE=educator   # 92 tools (educator + shared)
 CANVAS_ROLE=all        # Default profile; 98 tools by default, 103 with all feature-gated tools enabled
 ```
@@ -48,6 +48,8 @@ Personal academic tracking uses Canvas "self" endpoints. Shared course-content t
 | `get_my_course_grades` | Current grades across courses |
 | `get_my_peer_reviews_todo` | Pending peer reviews to complete |
 | `get_my_submission` | Your submission for one assignment, with attempts used |
+| `list_my_announcements` | Announcements across ALL active courses (default last 14 days); `list_announcements` is per-course |
+| `get_my_activity_stream` | Recent activity feed grouped by kind: announcements, discussions, conversations, grades/comments |
 
 ### Student Write Tools (off by default)
 Let an agent act on Canvas for the student rather than only read. **None of these
@@ -219,6 +221,9 @@ Is it a simple query?
 
 ### Student: Weekly Planning
 ```
+0. "What's new in my classes?"
+   → list_my_announcements() / get_my_activity_stream()
+
 1. "What assignments do I have due this week?"
    → get_my_upcoming_assignments(days=7)
 

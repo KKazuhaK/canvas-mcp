@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Student "what's new" feed (read-only, student profile): `list_my_announcements`
+  lists announcements across all active courses in one call (default last 14
+  days, optional course filter), and `get_my_activity_stream` summarises the
+  Canvas activity stream by kind (announcements, discussions, conversations,
+  grades and submission comments, notifications). Canvas-authored text is fenced.
+
 ## [1.13.0] — 2026-09-27
 
 ### Security
