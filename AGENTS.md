@@ -30,7 +30,7 @@ Reduce tool overhead by setting a role-based profile. Only tools relevant to the
 # In .env:
 CANVAS_ROLE=student    # ~39 tools (student + shared)
 CANVAS_ROLE=educator   # 92 tools (educator + shared)
-CANVAS_ROLE=all        # Default profile; 98 tools by default, 103 with all feature-gated tools enabled
+CANVAS_ROLE=all        # Default profile; 100 tools by default, 105 with all feature-gated tools enabled
 ```
 
 Or via CLI flag: `canvas-mcp-server --role student` (CLI flag takes precedence over env var).
@@ -49,7 +49,7 @@ Personal academic tracking uses Canvas "self" endpoints. Shared course-content t
 | `get_my_peer_reviews_todo` | Pending peer reviews to complete |
 | `get_my_submission` | Your submission for one assignment, with attempts used |
 | `list_my_announcements` | Announcements across ALL active courses (default last 14 days); `list_announcements` is per-course |
-| `get_my_activity_stream` | Recent activity feed grouped by kind: announcements, discussions, conversations, grades/comments |
+| `get_my_activity_stream` | Recent activity feed grouped by kind: announcements, discussions, conversations, grades/comments (course activity only; no group or non-course inbox items) |
 
 ### Student Write Tools (off by default)
 Let an agent act on Canvas for the student rather than only read. **None of these
