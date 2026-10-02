@@ -20,6 +20,11 @@ PROD_WORKFLOWS = [
     ROOT / "deploy" / "azure" / "deploy-prod.yml.sample",
 ]
 BRANCH_GUARD = "github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')"
+# The upstream workflow also skips in forks, which have no deploy secrets. That
+# guard may only narrow the branch guard (an outer AND), never replace it. The
+# sample stays unguarded: a deployment copied from it is a different repo.
+REPO_GUARD = "github.repository == 'vishalsachdev/canvas-mcp'"
+ALLOWED_JOB_GUARDS = {BRANCH_GUARD, f"{REPO_GUARD} && ({BRANCH_GUARD})"}
 
 
 def _triggers(workflow: dict) -> dict:
@@ -35,7 +40,7 @@ def _policy_violations(workflow: dict) -> list[str]:
     if "workflow_dispatch" not in triggers:
         problems.append("manual runs (workflow_dispatch) must stay available")
     for name, job in workflow.get("jobs", {}).items():
-        if job.get("if") != BRANCH_GUARD:
+        if job.get("if") not in ALLOWED_JOB_GUARDS:
             problems.append(f"job {name!r} must guard manual runs with {BRANCH_GUARD!r}")
     return problems
 
@@ -61,3 +66,22 @@ jobs:
     problems = _policy_violations(old)
     assert any("push trigger" in p for p in problems)
     assert any("guard manual runs" in p for p in problems)
+
+
+@pytest.mark.parametrize(
+    "job_if",
+    [
+        # The fork guard alone would let a manual run from any branch deploy.
+        REPO_GUARD,
+        # Without parentheses && binds first, so a tag push from a fork deploys.
+        f"{REPO_GUARD} && {BRANCH_GUARD}",
+        # OR-ing the fork guard in widens the branch guard instead of narrowing it.
+        f"{REPO_GUARD} || ({BRANCH_GUARD})",
+    ],
+)
+def test_the_fork_guard_cannot_replace_the_branch_guard(job_if):
+    workflow = {
+        "on": {"push": {"tags": ["v*"]}, "workflow_dispatch": {}},
+        "jobs": {"build-and-deploy": {"if": job_if}},
+    }
+    assert any("guard manual runs" in p for p in _policy_violations(workflow))

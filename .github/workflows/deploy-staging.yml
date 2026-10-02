@@ -28,6 +28,9 @@ env:
 
 jobs:
   build-and-deploy:
+    # Upstream only: a fork has neither the ACR nor the Azure publish profile,
+    # so the job is skipped there rather than failing on missing secrets.
+    if: github.repository == 'vishalsachdev/canvas-mcp'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
