@@ -36,6 +36,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   course staff and show everyone else under the same `Student_<hash>`
   pseudonym the `/courses/:id/users` tier uses; they cannot be used to map
   pseudonymised user IDs back to real names.
+- `read_course_file_text` (student profile): read a course file as plain text
+  with page/slide markers. PDF pages, PowerPoint slide titles/text/tables/speaker
+  notes, Word paragraphs and tables, and plain text, Markdown, CSV, JSON and
+  HTML. The reported size is checked before downloading (50 MB, lowered by
+  `READ_FILE_MAX_SIZE_MB`), output is fenced as untrusted Canvas content, and
+  long files are cut at `max_chars` with a note naming the page (`start_page`)
+  or character offset (`start_char`) to continue from. PDF/PPTX/DOCX parsing needs the new optional `documents` extra
+  (`pip install 'canvas-mcp[documents]'`); without it the tool returns an
+  install hint.
+- Hidden Files tab fallback: when Canvas refuses `GET /courses/:id/files` with
+  401/403 (students in a course whose Files tab is hidden),
+  `list_course_files` lists the files linked from the course modules instead
+  and says so. `read_course_file`, `download_course_file` and
+  `read_course_file_text` read such a file through `GET /files/:id`, but only
+  when the course links it from a module.
+
+### Security
+
+- `read_course_file_text` follows download redirects one hop at a time and
+  sends the Canvas token only to the configured Canvas origin; storage hops go
+  out without credentials and must be HTTPS.
+- The file tools now reject a non-numeric `file_id` before it reaches a
+  request path.
+- `read_course_file_text` refuses Office files whose XML would inflate past
+  20 MB, or with any part that inflates more than 100x, before a parser runs,
+  parses at most two files at once, and prints only a validated MIME token for
+  the uploader-supplied content type.
+- `uv.lock` now pins the `documents` extra, and the security workflow fails on
+  a stale lock (`uv lock --check`) so new dependencies always reach pip-audit.
 
 ## [1.13.0] — 2026-09-27
 

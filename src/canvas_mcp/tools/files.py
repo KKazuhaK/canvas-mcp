@@ -15,6 +15,7 @@ This module handles all three steps transparently.
 import base64
 import os
 import tempfile
+from typing import Any
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -27,6 +28,12 @@ from ..core.client import (
     upload_file_to_storage,
 )
 from ..core.config import get_config
+from ..core.course_files import (
+    canvas_error_status,
+    fetch_module_linked_file,
+    is_access_denied,
+    list_files_via_modules,
+)
 from ..core.credentials import is_http_request_active
 from ..core.file_validation import (
     FileValidationResult,
@@ -35,7 +42,24 @@ from ..core.file_validation import (
     validate_file_for_upload,
 )
 from ..core.untrusted_content import fence_untrusted_inline
-from ..core.validation import validate_params
+from ..core.validation import coerce_canvas_id, validate_params
+
+
+async def _get_file_info(course_id: str, file_id: str) -> tuple[Any, str | None]:
+    """File metadata via the course route, falling back to module links.
+
+    Returns ``(file_info_or_error, note)``. ``note`` is set only when the
+    course Files route was refused (401/403, typically a hidden Files tab) and
+    the file was found through a module instead.
+    """
+    file_info = await make_canvas_request("get", f"/courses/{course_id}/files/{file_id}")
+    if is_access_denied(file_info):
+        return await fetch_module_linked_file(course_id, file_id, file_info)
+    return file_info, None
+
+
+def _invalid_file_id(file_id: str | int) -> str:
+    return f"Error: file_id must be a numeric Canvas file ID (got {file_id!r})."
 
 
 def register_shared_file_tools(mcp: FastMCP) -> None:
@@ -78,13 +102,14 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
                 "read_course_file instead, which returns the content in the response."
             )
 
+        file_key = coerce_canvas_id(file_id)
+        if file_key is None:
+            return _invalid_file_id(file_id)
+
         course_id = await get_course_id(course_identifier)
 
-        # Get file metadata from Canvas API
-        file_info = await make_canvas_request(
-            "get",
-            f"/courses/{course_id}/files/{file_id}"
-        )
+        # Get file metadata, falling back to module links if Files is hidden
+        file_info, route_note = await _get_file_info(course_id, file_key)
 
         if isinstance(file_info, dict) and "error" in file_info:
             return f"Error getting file info: {file_info['error']}"
@@ -162,6 +187,8 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
         result += f"  Size: {size_str}\n"
         result += f"  Type: {content_type}\n"
         result += f"  Course: {course_display}\n"
+        if route_note:
+            result += f"  Note: {route_note}\n"
         return result
 
     @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
@@ -196,13 +223,14 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
         effective_max_mb = min(float(max_size_mb), server_max_mb)
         max_size_bytes = int(effective_max_mb * 1024 * 1024)
 
+        file_key = coerce_canvas_id(file_id)
+        if file_key is None:
+            return _invalid_file_id(file_id)
+
         course_id = await get_course_id(course_identifier)
 
-        # Get file metadata from Canvas API
-        file_info = await make_canvas_request(
-            "get",
-            f"/courses/{course_id}/files/{file_id}"
-        )
+        # Get file metadata, falling back to module links if Files is hidden
+        file_info, route_note = await _get_file_info(course_id, file_key)
 
         if isinstance(file_info, dict) and "error" in file_info:
             return f"Error getting file info: {file_info['error']}"
@@ -248,6 +276,8 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
             result += f"  Size: {size_str}\n"
             result += f"  Type: {content_type}\n"
             result += f"  Course: {course_display}\n"
+            if route_note:
+                result += f"  Note: {route_note}\n"
             result += "  Encoding: base64\n"
             result += f"  Content:\n{base64_content}\n"
             return result
@@ -264,6 +294,10 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
         order: str = "desc",
     ) -> str:
         """List files in a Canvas course with optional search.
+
+        If Canvas refuses the course file list (401/403, usually because the
+        Files tab is hidden for students), lists the files linked from the
+        course modules instead and says so in the output.
 
         Args:
             course_identifier: Course code or Canvas ID
@@ -294,6 +328,13 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
             params
         )
 
+        if is_access_denied(files):
+            # Students get 401/403 here when the course Files tab is hidden,
+            # yet files linked from modules stay readable. List those instead.
+            return await _list_module_linked_files(
+                course_id, course_identifier, files, search_term, sort, order
+            )
+
         if isinstance(files, dict) and "error" in files:
             return f"Error listing files: {files['error']}"
 
@@ -315,6 +356,61 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
 
         result += f"\nTotal: {len(files)} file(s)"
         return result
+
+
+async def _list_module_linked_files(
+    course_id: str,
+    course_identifier: str | int,
+    denied: dict[str, Any],
+    search_term: str | None,
+    sort: str,
+    order: str,
+) -> str:
+    """``list_course_files`` output built from module File items."""
+    module_files = await list_files_via_modules(course_id)
+    if isinstance(module_files, dict):
+        return (
+            f"Error listing files: {denied.get('error')}; listing files through "
+            f"modules also failed: {module_files.get('error')}"
+        )
+
+    if search_term:
+        needle = search_term.lower()
+        module_files = [f for f in module_files if needle in str(f["title"]).lower()]
+
+    notice = (
+        f"Note: Canvas refused the course file list (HTTP {canvas_error_status(denied)}); "
+        "the Files tab is probably hidden for students. Showing files linked from "
+        "modules instead. Files not placed in any module are not listed, names are "
+        "module item titles, and size/type are not shown here (read_course_file_text "
+        "and read_course_file report them).\n"
+    )
+    if sort == "name":
+        module_files = sorted(
+            module_files, key=lambda f: str(f["title"]).lower(), reverse=order == "desc"
+        )
+    else:
+        notice += (
+            f"Sort '{sort}' is not available for module-linked files; "
+            "shown in module order.\n"
+        )
+
+    if not module_files:
+        msg = "No files found in modules"
+        if search_term:
+            msg += f" matching '{search_term}'"
+        return f"{notice}\n{msg}"
+
+    course_display = await get_course_code(course_id) or course_identifier
+    result = f"{notice}\nFiles linked from modules in {course_display}:\n\n"
+    for f in module_files:
+        modules = ", ".join(
+            fence_untrusted_inline(name, "module name") for name in f["modules"]
+        )
+        title = fence_untrusted_inline(f["title"], "module item title")
+        result += f"  ID: {f['id']} | {title} (module: {modules})\n"
+    result += f"\nTotal: {len(module_files)} file(s)"
+    return result
 
 
 def register_educator_file_tools(mcp: FastMCP) -> None:

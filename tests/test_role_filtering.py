@@ -27,6 +27,8 @@ STUDENT_ONLY_TOOLS = {
     "list_calendar_events",
     "get_calendar_event",
     "list_planner_notes",
+    # Lecture-file text extraction is registered with the student profile.
+    "read_course_file_text",
 }
 
 # Calendar/planner writes: student profile only, and only when the operator

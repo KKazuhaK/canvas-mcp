@@ -60,9 +60,13 @@ Personal academic tracking uses Canvas "self" endpoints. Shared course-content t
 | `get_group_discussion` | One group topic or announcement with all posts |
 | `list_group_announcements` | Announcements in one of your groups |
 | `list_group_files` | Files stored in one of your groups |
+| `read_course_file_text` | Read lecture slides, PDFs, Word docs, or text files as plain text with page/slide markers (PDF/PPTX/DOCX need the `documents` extra) |
 
 The group tools only read groups you are a member of; they check your membership
 before every call and refuse other groups even when Canvas would allow the read.
+
+If a course hides its Files tab, `list_course_files` lists the files linked from
+modules instead, and the file read tools reach those files through their module.
 
 ### Student Write Tools (off by default)
 Let an agent act on Canvas for the student rather than only read. **None of these

@@ -51,6 +51,7 @@ from .tools import (
     register_educator_module_tools,
     register_educator_page_crud_tools,
     register_enrollment_tools,
+    register_file_text_tools,
     register_page_tools,
     register_peer_review_comment_tools,
     register_peer_review_tools,
@@ -457,6 +458,7 @@ def register_all_tools(mcp: FastMCP, role: str = "all") -> None:
         register_student_quiz_tools(mcp)
         # Read-only, scoped to groups the caller belongs to (tools/student_groups.py).
         register_student_group_tools(mcp)
+        register_file_text_tools(mcp)
         # Tier 1 writes register only for tools the operator named in
         # STUDENT_WRITE_TOOLS (default: none). See tools/student_write.py.
         register_student_write_tools(mcp)

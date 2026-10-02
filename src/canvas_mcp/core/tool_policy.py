@@ -123,6 +123,7 @@ TOOL_EFFECTS: dict[str, Effect] = {
     "list_users": Effect.READ,
     "parse_ufixit_violations": Effect.READ,
     "read_course_file": Effect.READ,
+    "read_course_file_text": Effect.READ,
     "scan_course_content_accessibility": Effect.READ,
     "search_canvas_tools": Effect.READ,
     # --- CANVAS_WRITE (48) ---

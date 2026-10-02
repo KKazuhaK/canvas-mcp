@@ -2182,7 +2182,7 @@ List files in a course with optional search.
 "List the PDF files in this course"
 ```
 
-**Returns:** Course files with IDs, names, sizes, and folders.
+**Returns:** Course files with IDs, names, sizes, and folders. If the Files tab is hidden, files linked from modules (see below).
 
 ---
 
@@ -2224,6 +2224,56 @@ Read a course file and return its content directly in the response as base64. Un
 ```
 
 **Returns:** File content as base64 with name, size, and content type.
+
+> **Hidden Files tab.** When a course hides its Files tab, Canvas refuses
+> `list_course_files` for students (401/403). The tool then lists the files
+> linked from the course modules instead and says so; `read_course_file`,
+> `download_course_file` and `read_course_file_text` read those files through
+> the module that links them. Files not placed in any module stay unreachable.
+
+---
+
+#### `read_course_file_text`
+*(student profile)* Read a course file as plain text: lecture slides, PDFs, Word
+documents, and text files. Output carries `--- Page N ---` / `--- Slide N ---`
+markers and is fenced as untrusted Canvas content.
+
+| Format | What is extracted |
+|--------|-------------------|
+| PDF | Page text (no OCR: scanned pages come back empty, with a note) |
+| PPTX | Slide title, text boxes, tables, and speaker notes |
+| DOCX | Paragraphs (headings marked `#`) and tables |
+| TXT, Markdown, CSV, JSON, HTML | Decoded text; HTML is converted to text |
+
+PDF, PPTX and DOCX need the optional `documents` extra on the machine running
+the server: `pip install 'canvas-mcp[documents]'`. Without it the tool answers
+with that install hint. Legacy `.ppt`/`.doc` files are not supported.
+
+The reported file size is checked before anything is downloaded (50 MB cap,
+lowered by `READ_FILE_MAX_SIZE_MB`). Office files whose XML would inflate past
+20 MB, or with any part that inflates more than 100x, are refused before
+parsing, and at most two files are parsed at once. The Canvas token is only
+sent to the Canvas host; the redirect to file storage is fetched without
+credentials.
+
+**Parameters:**
+- `course_identifier`: Course code or ID
+- `file_id`: Canvas file ID (find it with `list_course_files` or `list_module_items`)
+- `max_chars` (optional): Maximum characters of text to return (default 40000, max 200000)
+- `start_page` / `end_page` (optional): 1-based inclusive page (PDF) or slide (PPTX) range
+- `start_char` (optional): for files without pages (DOCX, text, HTML), the 0-based character offset to start from
+
+**Example:**
+```
+"Summarize the week 3 lecture slides"
+"What does page 12 of the lab manual say about late work?"
+```
+
+**Returns:** File name, type, size, the page/slide (or character) range shown, and
+the text. When the text is cut at `max_chars`, a note gives the `start_page` (PDF,
+PPTX) or `start_char` (everything else) to continue from. A single page or slide
+longer than `max_chars` is shown in part, and the note points past it rather
+than back at it.
 
 ---
 

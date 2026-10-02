@@ -51,6 +51,16 @@ hosted = [
     "azure-communication-email>=1.0.0",
     "azure-identity>=1.17.0",
 ]
+# Text extraction for read_course_file_text (PDF, PPTX, DOCX). Optional: the
+# tool answers with an install hint when these are missing.
+documents = [
+    # 6.19.0 is the newest release with fixes for the pypdf text-extraction
+    # DoS advisories (e.g. GHSA-fp3h-c4fm-7vvf, GHSA-php9-fj8v-98fj); keep the
+    # floor at the newest patched release.
+    "pypdf>=6.19.0,<7",
+    "python-pptx>=1.0.2,<2",
+    "python-docx>=1.2.0,<2",
+]
 
 [tool.hatch.version]
 path = "src/canvas_mcp/__init__.py"
@@ -119,6 +129,13 @@ disallow_untyped_defs = false
 module = "azure.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# The document parsers come from the optional "documents" extra. CI's mypy job
+# installs only the base package, and the imports are guarded at runtime
+# (MissingDependencyError -> install hint).
+module = ["pypdf", "pypdf.*", "pptx", "pptx.*", "docx", "docx.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
@@ -139,4 +156,9 @@ dev = [
     # use importorskip, so relying on a transitive PyYAML would let the gate
     # skip silently — the exact failure mode it exists to prevent.
     "pyyaml>=6.0",
+    # Same reasoning for the document-extraction tests: install the optional
+    # parsers so they run instead of skipping.
+    "pypdf>=6.19.0,<7",
+    "python-pptx>=1.0.2,<2",
+    "python-docx>=1.2.0,<2",
 ]
