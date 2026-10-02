@@ -314,6 +314,37 @@ class TestListMyAnnouncementsCourseFilter:
         assert fake.to("/announcements") == []
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("sis", ["2026F-MATH2B", "2026F MATH 2B"])
+    async def test_sis_form_of_an_active_course_matches_locally(self, sis):
+        """The active courses carry their SIS IDs, so no lookup is made, and
+        a token Canvas could not take as a path segment still matches."""
+        fake = FakeCanvas()
+        fake.route("/courses", [COURSES[0], {**COURSES[1], "sis_course_id": sis}])
+        fake.route("/announcements", [])
+        result = await run(fake, "list_my_announcements", course_identifier=f"sis_course_id:{sis}")
+        assert not result.startswith("Error"), result
+        (req,) = fake.to("/announcements")
+        assert codes_param(req) == ["course_202"]
+        assert [r.url.path for r in fake.requests] == ["/api/v1/courses", "/api/v1/announcements"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("identifier", ["OLD 1", "Past Course"])
+    async def test_code_or_name_outside_the_active_courses_gets_the_feed_message(
+        self, identifier
+    ):
+        """Not the generic 'use a code from list_courses' advice: list_courses
+        can show this very code, for a course that is not active."""
+        fake = FakeCanvas()
+        fake.route("/courses", COURSES)
+        fake.route("/announcements", [])
+        result = await run(fake, "list_my_announcements", course_identifier=identifier)
+        assert result == (
+            f"Error: '{identifier}' is not one of your active courses. "
+            "Pass its numeric Canvas course ID instead."
+        )
+        assert [r.url.path for r in fake.requests] == ["/api/v1/courses"]
+
+    @pytest.mark.asyncio
     async def test_ambiguous_code_is_refused(self):
         courses = [{"id": 1, "course_code": "CS 161", "name": "A"},
                    {"id": 2, "course_code": "cs 161", "name": "B"}]

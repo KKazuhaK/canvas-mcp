@@ -88,7 +88,8 @@ def denied(status: int) -> RequestFailure:
 def api():
     """Patch the tool's Canvas boundary; tests set return values."""
     config = SimpleNamespace(read_file_max_size_mb=100.0)
-    with patch("canvas_mcp.tools.file_text.get_course_id", AsyncMock(return_value="60366")), \
+    with patch("canvas_mcp.tools.file_text.resolve_numeric_course_id",
+               AsyncMock(return_value=("60366", None))), \
          patch("canvas_mcp.tools.file_text.get_course_code", AsyncMock(return_value="CS_161_F26")), \
          patch("canvas_mcp.tools.file_text.get_config", return_value=config), \
          patch("canvas_mcp.tools.file_text.make_canvas_request", new_callable=AsyncMock) as request, \

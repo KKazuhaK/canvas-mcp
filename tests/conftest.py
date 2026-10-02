@@ -40,6 +40,10 @@ def isolated_course_cache(monkeypatch):
     monkeypatch.setattr(cache, "course_code_to_id_cache", {})
     monkeypatch.setattr(cache, "id_to_course_code_cache", {})
     monkeypatch.setattr(cache, "course_records_cache", [])
+    # The refresh-on-miss rate limit and its shared in-flight refresh, so one
+    # test's refresh never suppresses the next test's.
+    monkeypatch.setattr(cache, "_last_refresh_at", None)
+    monkeypatch.setattr(cache, "_refresh_task", None)
     return cache
 
 

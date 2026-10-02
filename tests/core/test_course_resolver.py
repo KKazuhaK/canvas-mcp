@@ -9,6 +9,7 @@ contain spaces (``COMPSCI 161``, ``I&C SCI 33``), so they must resolve too.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -140,12 +141,28 @@ class TestCourseCodes:
         assert not any(path.startswith("/courses/") for path in canvas.paths())
 
     @pytest.mark.asyncio
-    async def test_code_beats_name_when_both_match_different_courses(self, canvas):
-        canvas.courses = [
-            {"id": 1, "course_code": "STATS 7", "name": "Intro"},
-            {"id": 2, "course_code": "STATS 8", "name": "stats 7"},
-        ]
-        assert await resolve_numeric_course_id("Stats 7") == ("1", None)
+    @pytest.mark.parametrize(("other", "identifier"), [
+        ({"id": 2, "course_code": "COMPSCI 161", "name": "Algorithms"}, "Algorithms"),
+        ({"id": 2, "course_code": "STATS 8", "name": "stats 7"}, "Stats 7"),
+        ({"id": 2, "course_code": "STATS 8", "sis_course_id": "STATS 7"}, "stats 7"),
+    ])
+    async def test_value_naming_different_courses_under_different_aliases_is_refused(
+        self, canvas, other, identifier
+    ):
+        """One course's code that is another's name or SIS ID is ambiguous; a
+        write tool must not silently pick the code's course."""
+        first_code = "Algorithms" if identifier == "Algorithms" else "STATS 7"
+        canvas.courses = [{"id": 1, "course_code": first_code, "name": "Intro"}, other]
+        course_id, error = await resolve_numeric_course_id(identifier)
+        assert course_id is None
+        assert error is not None and error.startswith(f"Could not find course {identifier}")
+        assert "IDs 1, 2" in error and "numeric" in error
+
+    @pytest.mark.asyncio
+    async def test_one_course_matching_under_several_aliases_is_not_ambiguous(self, canvas):
+        canvas.courses = [{"id": 4242, "course_code": "COMPSCI 161", "name": "COMPSCI 161",
+                           "sis_course_id": "compsci 161"}]
+        assert await resolve_numeric_course_id("COMPSCI 161") == ("4242", None)
 
     @pytest.mark.asyncio
     async def test_ambiguous_code_is_refused_with_the_candidates(self, canvas):
@@ -248,3 +265,152 @@ class TestCandidateCourses:
     @pytest.mark.asyncio
     async def test_numeric_ids_are_not_restricted(self, canvas):
         assert await resolve_numeric_course_id("4242", courses=[]) == ("4242", None)
+
+
+class TestForeignCourseInTheCodeCache:
+    """get_course_code caches courses outside the caller's list (a past course
+    looked up by numeric ID). UCI reuses codes every quarter, so such a course
+    must not make the caller's own course ambiguous or take it over."""
+
+    @pytest.mark.asyncio
+    async def test_foreign_course_with_the_same_code_does_not_make_it_ambiguous(self, canvas):
+        canvas.courses = [{"id": 4242, "course_code": "COMPSCI 161"}]
+        canvas.sis["/courses/999"] = {"id": 999, "course_code": "COMPSCI 161"}
+        assert await resolve_numeric_course_id("COMPSCI 161") == ("4242", None)
+        assert await cache.get_course_code("999") == "COMPSCI 161"
+        canvas.requests.clear()
+
+        assert await resolve_numeric_course_id("COMPSCI 161") == ("4242", None)
+        assert await resolve_numeric_course_id("compsci 161") == ("4242", None)
+        assert await cache.get_course_id("COMPSCI 161") == "4242"
+        assert await cache.get_course_id("compsci 161") == "4242"
+        assert canvas.requests == []
+
+    @pytest.mark.asyncio
+    async def test_foreign_course_looked_up_first_does_not_take_over_the_code(self, canvas):
+        """get_course_code as the very first lookup reads the course list and
+        then fetches the foreign course; the code still names the caller's."""
+        canvas.courses = [{"id": 4242, "course_code": "COMPSCI 161"}]
+        canvas.sis["/courses/999"] = {"id": 999, "course_code": "COMPSCI 161"}
+        assert await cache.get_course_code("999") == "COMPSCI 161"
+        assert await resolve_numeric_course_id("COMPSCI 161") == ("4242", None)
+        assert await cache.get_course_id("COMPSCI 161") == "4242"
+
+
+class TestRefreshRateLimit:
+    """A miss re-reads /courses at most once per window, shared by
+    concurrent callers, so garbage or a retried typo cannot page through the
+    course list on every call."""
+
+    @pytest.mark.asyncio
+    async def test_back_to_back_misses_read_the_course_list_once(self, canvas):
+        for identifier in ("MATH 2B", "Algorithms", "１２３", "1/users/503", "COMPSCI 161"):
+            await resolve_numeric_course_id(identifier)
+        assert canvas.list_reads == 1
+
+    @pytest.mark.asyncio
+    async def test_a_miss_after_the_window_reads_it_again(self, canvas, monkeypatch):
+        await resolve_numeric_course_id("MATH 2B")
+        monkeypatch.setattr(
+            cache, "_last_refresh_at",
+            cache._last_refresh_at - cache.REFRESH_ON_MISS_INTERVAL_SECONDS - 1,
+        )
+        canvas.courses = COURSES + [{"id": 8080, "course_code": "MATH 2B"}]
+        assert await resolve_numeric_course_id("MATH 2B") == ("8080", None)
+        assert canvas.list_reads == 2
+
+    @pytest.mark.asyncio
+    async def test_concurrent_misses_share_one_read(self, canvas, monkeypatch):
+        gate = asyncio.Event()
+        inner = canvas.paginate
+
+        async def slow_paginate(endpoint: str, params: dict[str, Any] | None = None, **kw: Any):
+            await gate.wait()
+            return await inner(endpoint, params, **kw)
+
+        monkeypatch.setattr(cache, "fetch_all_paginated_results", slow_paginate)
+        lookups = asyncio.gather(
+            resolve_numeric_course_id("COMPSCI 161"),
+            resolve_numeric_course_id("I&C SCI 33"),
+            cache.get_course_id("NOPE 1"),
+        )
+        await asyncio.sleep(0)
+        gate.set()
+        assert await lookups == [("4242", None), ("5151", None), "NOPE 1"]
+        assert canvas.list_reads == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_read_is_retried_on_the_next_miss(self, canvas):
+        canvas.courses = {"error": "HTTP error: 500"}
+        _, error = await resolve_numeric_course_id("COMPSCI 161")
+        assert error is not None and "could not be loaded" in error
+        canvas.courses = COURSES
+        assert await resolve_numeric_course_id("COMPSCI 161") == ("4242", None)
+        assert canvas.list_reads == 2
+
+
+class TestSisFormOfAListedCourse:
+    @pytest.mark.asyncio
+    async def test_cached_sis_id_resolves_without_a_request(self, canvas):
+        warm(COURSES)
+        assert await resolve_numeric_course_id("sis_course_id:2026F-ICS33") == ("5151", None)
+        assert canvas.requests == []
+
+    @pytest.mark.asyncio
+    async def test_cached_sis_id_with_a_space_resolves_without_a_request(self, canvas):
+        """The token is never sent, so the path-segment rule does not apply."""
+        warm([{"id": 6, "course_code": "PHYS 7C", "sis_course_id": "2026F PHYS 7C"}])
+        assert await resolve_numeric_course_id("sis_course_id:2026F PHYS 7C") == ("6", None)
+        assert canvas.requests == []
+
+    @pytest.mark.asyncio
+    async def test_given_courses_are_matched_by_sis_form(self, canvas):
+        given = [{"id": 9, "course_code": "MATH 2B", "sis_course_id": "M 2B"}]
+        assert await resolve_numeric_course_id("sis_course_id:M 2B", courses=given) == ("9", None)
+        assert canvas.requests == []
+
+
+class TestGetCourseIdLooksUpOnMiss:
+    """Upstream tools resolve through get_course_id; a code with spaces must
+    work there too, and its fallback for unknown identifiers is unchanged."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("identifier", ["COMPSCI 161", " compsci 161 ",
+                                            "Design and Analysis of Algorithms", "2026F-ICS33"])
+    async def test_code_name_or_sis_id_on_a_cold_cache(self, canvas, identifier):
+        expected = "5151" if identifier == "2026F-ICS33" else "4242"
+        assert await cache.get_course_id(identifier) == expected
+        assert canvas.requests == [("paginate", "/courses")]
+
+    @pytest.mark.asyncio
+    async def test_code_missing_from_a_warm_cache_is_found_after_a_refresh(self, canvas):
+        warm([{"id": 1, "course_code": "OLD 1"}])
+        assert await cache.get_course_id("I&C SCI 33") == "5151"
+        assert canvas.list_reads == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("identifier", "fallback"), [
+        ("MATH 2B", "MATH 2B"),
+        ("no_such_course", "sis_course_id:no_such_course"),
+    ])
+    async def test_unknown_identifier_keeps_the_upstream_fallback(self, canvas, identifier, fallback):
+        assert await cache.get_course_id(identifier) == fallback
+        assert canvas.requests == [("paginate", "/courses")]
+
+    @pytest.mark.asyncio
+    async def test_unknown_identifier_on_a_failed_course_list_keeps_the_fallback(self, canvas):
+        canvas.courses = {"error": "HTTP error: 500"}
+        assert await cache.get_course_id("no_such_course") == "sis_course_id:no_such_course"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("identifier", ["4242", 4242, "sis_course_id:anything"])
+    async def test_numeric_and_sis_forms_are_unchanged_without_a_request(self, canvas, identifier):
+        assert await cache.get_course_id(identifier) == str(identifier)
+        assert canvas.requests == []
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_code_falls_back_without_a_second_read(self, canvas):
+        canvas.courses = [{"id": 11, "course_code": "COMPSCI 161", "name": "Fall"},
+                          {"id": 22, "course_code": "compsci 161", "name": "Winter"}]
+        assert await cache.get_course_id("Compsci 161") == "Compsci 161"
+        assert canvas.list_reads == 1

@@ -34,7 +34,7 @@ from mcp.types import (
     ToolAnnotations,
 )
 
-from ..core.cache import get_course_code, get_course_id
+from ..core.cache import get_course_code, get_course_id, resolve_numeric_course_id
 from ..core.client import (
     canvas_authenticated_client,
     fetch_all_paginated_results,
@@ -388,7 +388,9 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
         if file_key is None:
             return _invalid_file_id(file_id)
 
-        course_id = await get_course_id(course_identifier)
+        course_id, course_error = await resolve_numeric_course_id(course_identifier)
+        if course_id is None:
+            return f"Error: {course_error}"
 
         # Get file metadata, falling back to module links if Files is hidden
         file_info, route_note = await _get_file_info(course_id, file_key)
@@ -536,7 +538,9 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
         # Decided before downloading: the text path has its own size budget.
         as_text = client_mishandles_file_blobs()
 
-        course_id = await get_course_id(course_identifier)
+        course_id, course_error = await resolve_numeric_course_id(course_identifier)
+        if course_id is None:
+            return f"Error: {course_error}"
 
         # Get file metadata, falling back to module links if Files is hidden
         file_info, route_note = await _get_file_info(course_id, file_key)
@@ -682,7 +686,9 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
         if order not in ("asc", "desc"):
             return f"Invalid order: '{order}'. Must be 'asc' or 'desc'."
 
-        course_id = await get_course_id(course_identifier)
+        course_id, course_error = await resolve_numeric_course_id(course_identifier)
+        if course_id is None:
+            return f"Error: {course_error}"
 
         params = {
             "per_page": 100,

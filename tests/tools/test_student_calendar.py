@@ -1366,7 +1366,8 @@ class TestCourseIdentifierPaths:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("bad", ["sis_course_id:X/../../users/self",
                                      "sis_course_id:X?as_user_id=1", "sis_course_id:a b",
-                                     "sis_course_id:x%2Fusers", "sis_course_id:a\b",
+                                     "sis_course_id:x%2Fusers", "sis_course_id:a\\b",
+                                     "sis_course_id:a\x00b", "sis_course_id:a\x08b",
                                      "sis_course_id:"])
     async def test_crafted_sis_identifiers_make_no_canvas_call(self, bad: str) -> None:
         tools = get_tools()
