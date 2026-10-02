@@ -54,9 +54,8 @@ from typing import Any
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from ..core import cache as course_cache
 from ..core.anonymization import scrub_free_text
-from ..core.cache import get_course_code, get_course_id, refresh_course_cache
+from ..core.cache import get_course_code, resolve_numeric_course_id
 from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.config import get_config
 from ..core.dates import format_date
@@ -84,7 +83,6 @@ _TAG = re.compile(r"<[^>]+>")
 # Canvas's upload preflight takes a client-supplied content_type, so anything
 # that is not a plain MIME token is not printed.
 _MIME_TYPE = re.compile(r"^[\w.+-]+/[\w.+-]+$")
-_SIS_COURSE_PREFIX = "sis_course_id:"
 
 
 def _scrub(text: str) -> str:
@@ -97,40 +95,6 @@ def _scrub(text: str) -> str:
     if get_config().enable_data_anonymization:
         return str(scrub_free_text(text))
     return text
-
-
-async def _resolve_course_numeric_id(course_identifier: str | int) -> str | None:
-    """Resolve any accepted course identifier to a numeric Canvas course ID.
-
-    ``get_course_id`` passes some forms through unresolved (``sis_course_id:``
-    values, codes missing from a cold or stale cache, which it may also turn
-    into ``sis_course_id:<code>``). Other tools put that value in a URL and
-    let Canvas resolve it; list_my_groups compares IDs locally, so it must
-    have the number. Returns None when the course cannot be found.
-    """
-    raw = str(course_identifier).strip()
-    resolved = str(await get_course_id(raw)).strip()
-    numeric = coerce_canvas_id(resolved)
-    if numeric is not None:
-        return numeric
-
-    # A course code (with or without underscores): look it up in a fresh cache.
-    if not raw.startswith(_SIS_COURSE_PREFIX) and await refresh_course_cache():
-        cached = coerce_canvas_id(course_cache.course_code_to_id_cache.get(raw, ""))
-        if cached is not None:
-            return cached
-
-    # Canvas resolves SIS IDs on GET /courses/:id. Only a single path segment
-    # is ever sent.
-    if (
-        resolved.startswith(_SIS_COURSE_PREFIX)
-        and len(resolved) > len(_SIS_COURSE_PREFIX)
-        and "/" not in resolved
-    ):
-        course = await make_canvas_request("get", f"/courses/{resolved}")
-        if isinstance(course, dict) and "error" not in course:
-            return coerce_canvas_id(course.get("id", ""))
-    return None
 
 
 def _http_status(error: object) -> int | None:
@@ -330,13 +294,9 @@ def register_student_group_tools(mcp: FastMCP) -> None:
         if course_identifier is not None and str(course_identifier).strip():
             # The filter below compares numeric IDs, so an unresolved code or
             # SIS ID would silently match nothing; fail loudly instead.
-            course_id = await _resolve_course_numeric_id(course_identifier)
+            course_id, course_error = await resolve_numeric_course_id(course_identifier)
             if course_id is None:
-                return (
-                    f"Error: could not find course '{course_identifier}' among "
-                    "your Canvas courses. Use a course code from list_courses "
-                    "or a numeric Canvas course ID."
-                )
+                return f"Error: {course_error}"
             # Documented filter on /users/self/groups. Canvas has no course
             # filter on this endpoint, so the course match is done below.
             params["context_type"] = "Course"

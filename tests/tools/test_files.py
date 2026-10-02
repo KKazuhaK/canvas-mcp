@@ -8,7 +8,7 @@ Tests for the Canvas file upload tools:
 These tests use mocking to avoid requiring real Canvas API access.
 """
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -44,6 +44,8 @@ MOCK_UPLOAD_SUCCESS_RESPONSE = {
 def mock_canvas_api():
     """Fixture to mock Canvas API calls."""
     with patch('canvas_mcp.tools.files.get_course_id') as mock_get_id, \
+         patch('canvas_mcp.tools.files.resolve_numeric_course_id',
+               AsyncMock(return_value=("60366", None))), \
          patch('canvas_mcp.tools.files.get_course_code') as mock_get_code, \
          patch('canvas_mcp.tools.files.make_canvas_request') as mock_request, \
          patch('canvas_mcp.tools.files.upload_file_to_storage') as mock_upload:
@@ -697,6 +699,8 @@ class TestDownloadCourseFile:
         from unittest.mock import AsyncMock
 
         with patch('canvas_mcp.tools.files.get_course_id') as mock_get_id, \
+             patch('canvas_mcp.tools.files.resolve_numeric_course_id',
+                   AsyncMock(return_value=("60366", None))), \
              patch('canvas_mcp.tools.files.get_course_code') as mock_get_code, \
              patch('canvas_mcp.tools.files.make_canvas_request') as mock_request, \
              patch('canvas_mcp.tools.files.stream_file_download',
@@ -865,6 +869,8 @@ class TestListCourseFiles:
     def mock_list_api(self):
         """Fixture to mock APIs needed for list_course_files."""
         with patch('canvas_mcp.tools.files.get_course_id') as mock_get_id, \
+             patch('canvas_mcp.tools.files.resolve_numeric_course_id',
+                   AsyncMock(return_value=("60366", None))), \
              patch('canvas_mcp.tools.files.get_course_code') as mock_get_code, \
              patch('canvas_mcp.tools.files.fetch_all_paginated_results') as mock_fetch:
 
@@ -1030,7 +1036,8 @@ class TestListCourseFilesHiddenTabFallback:
     def fallback_api(self):
         from unittest.mock import AsyncMock
 
-        with patch('canvas_mcp.tools.files.get_course_id', AsyncMock(return_value="60366")), \
+        with patch('canvas_mcp.tools.files.resolve_numeric_course_id',
+                   AsyncMock(return_value=("60366", None))), \
              patch('canvas_mcp.tools.files.get_course_code', AsyncMock(return_value="CS_161_F26")), \
              patch('canvas_mcp.tools.files.fetch_all_paginated_results', new_callable=AsyncMock) as files_fetch, \
              patch('canvas_mcp.core.course_files.fetch_all_paginated_results', new_callable=AsyncMock) as module_fetch:
@@ -1149,7 +1156,8 @@ class TestFileReadsHiddenTabFallback:
     def read_api(self):
         from unittest.mock import AsyncMock
 
-        with patch('canvas_mcp.tools.files.get_course_id', AsyncMock(return_value="60366")), \
+        with patch('canvas_mcp.tools.files.resolve_numeric_course_id',
+                   AsyncMock(return_value=("60366", None))), \
              patch('canvas_mcp.tools.files.get_course_code', AsyncMock(return_value="CS_161_F26")), \
              patch('canvas_mcp.tools.files.make_canvas_request', new_callable=AsyncMock) as course_get, \
              patch('canvas_mcp.core.course_files.fetch_all_paginated_results', new_callable=AsyncMock) as module_fetch, \

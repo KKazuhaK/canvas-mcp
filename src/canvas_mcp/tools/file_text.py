@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from ..core.cache import get_course_code, get_course_id
+from ..core.cache import get_course_code, resolve_numeric_course_id
 from ..core.client import make_canvas_request
 from ..core.config import get_config
 from ..core.course_files import (
@@ -279,7 +279,9 @@ def register_file_text_tools(mcp: FastMCP) -> None:
                 f"end_page ({end_page})."
             )
 
-        course_id = await get_course_id(course_identifier)
+        course_id, course_error = await resolve_numeric_course_id(course_identifier)
+        if course_id is None:
+            return f"Error: {course_error}"
 
         file_info = await make_canvas_request("get", f"/courses/{course_id}/files/{file_key}")
         route_note = None

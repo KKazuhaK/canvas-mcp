@@ -29,7 +29,7 @@ from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from ..core import grade_calc as gc
-from ..core.cache import get_course_id
+from ..core.cache import resolve_numeric_course_id
 from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.dates import format_date
 from ..core.untrusted_content import fence_untrusted_inline
@@ -120,9 +120,9 @@ async def _load_course(
     course_identifier: str | int, course_includes: list[str] | None
 ) -> _CourseData | str:
     """Fetch the course and its assignment groups, or return an error string."""
-    course_id = str(await get_course_id(course_identifier))
-    if not course_id or "/" in course_id:
-        return f"Error: invalid course identifier {course_identifier!r}."
+    course_id, course_error = await resolve_numeric_course_id(course_identifier)
+    if course_id is None:
+        return f"Error: {course_error}"
 
     params = {"include[]": course_includes} if course_includes else None
     course = await make_canvas_request("get", f"/courses/{course_id}", params=params)

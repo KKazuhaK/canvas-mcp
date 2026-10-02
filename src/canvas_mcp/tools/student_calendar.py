@@ -55,7 +55,7 @@ from typing import Any
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from ..core.cache import get_course_code, get_course_id
+from ..core.cache import get_course_code, resolve_numeric_course_id
 from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.config import get_config
 from ..core.course_policy import (
@@ -114,7 +114,6 @@ _DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # Calendar date, then a time with at least hours and minutes; the rest
 # (seconds, fraction, offset or Z) is left to datetime.fromisoformat.
 _ISO_DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
-_SIS_COURSE = re.compile(r"^sis_course_id:[A-Za-z0-9_.:-]+$")
 _COURSE_CONTEXT = re.compile(r"^course_(\d+)$")
 _SECTION_CONTEXT = re.compile(r"^course_section_\d+$")
 _GROUP_CONTEXT = re.compile(r"^group_(\d+)$")
@@ -296,35 +295,18 @@ async def _my_user_id() -> tuple[str | None, str | None]:
 async def _resolve_numeric_course_id(
     course_identifier: str | int,
 ) -> tuple[str | None, str | None]:
-    """Resolve a course code/SIS id/Canvas id to a numeric id.
+    """Resolve a course code/name/SIS id/Canvas id to a numeric id.
 
     Planner notes take ``course_id`` as an integer, and course policy and
-    context codes are keyed by it, so a SIS-form identifier is looked up rather
-    than passed on.
-
-    ``get_course_id`` returns an unrecognised string unchanged, so only the
-    ``sis_course_id:<token>`` form, with a token free of path and query
-    characters, is ever interpolated into a lookup path. Anything else (for
-    example ``101/assignments/4242``) could otherwise reach an arbitrary
-    sub-resource and have its ``id`` mistaken for a course id.
+    context codes are keyed by it. ``resolve_numeric_course_id`` never puts an
+    unvalidated identifier in a request path, so a crafted value such as
+    ``101/assignments/4242`` cannot reach a sub-resource and have its ``id``
+    mistaken for a course id.
     """
-    course_id = await get_course_id(course_identifier)
-    if not course_id:
-        return None, f"Error: Could not find course {course_identifier}"
-    numeric = coerce_canvas_id(course_id)
-    if numeric is not None:
-        return numeric, None
-    if not _SIS_COURSE.match(course_id) or ".." in course_id:
-        return None, f"Error: Could not find course {course_identifier}"
-    course = await make_canvas_request("get", f"/courses/{course_id}")
-    if not isinstance(course, dict) or _is_error(course):
-        return None, (
-            f"Error: Could not find course {course_identifier}: {_error_detail(course)}"
-        )
-    numeric = coerce_canvas_id(course.get("id", ""))
-    if numeric is None:
-        return None, f"Error: Could not find course {course_identifier}"
-    return numeric, None
+    course_id, error = await resolve_numeric_course_id(course_identifier)
+    if course_id is None:
+        return None, f"Error: {error or f'Could not find course {course_identifier}'}"
+    return course_id, None
 
 
 async def _course_policy_error(course_ids: set[str], tool_name: str, verb: str) -> str | None:

@@ -499,6 +499,26 @@ Canvas MCP accepts multiple identifier formats:
 
 The server automatically resolves identifiers to Canvas IDs.
 
+Every tool matches a course code against your own courses, ignoring case and
+surrounding spaces, so codes with spaces work (`COMPSCI 161`, `I&C SCI 33`);
+course names and bare SIS IDs match the same way. On a miss the course list is
+re-read once, at most every 30 seconds.
+
+The student tools (calendar and planner, groups, student messaging,
+`list_my_announcements`, grades and quizzes) and the student file tools
+(`read_course_file`, `read_course_file_text`, `download_course_file`,
+`list_course_files`) accept only a course they can resolve: a value that names
+several of your courses (by code, name or SIS ID), or none, is an error naming
+the course, returned before any request in that course; pass the numeric ID. A
+`sis_course_id:` value is looked up only when its token is one plain path
+segment. `list_my_announcements` matches a code, name or SIS ID only among your
+active courses.
+
+The other tools keep the original fallback: an identifier that matches none of
+your courses is passed on to Canvas (an underscore code as
+`sis_course_id:<code>`, anything else as given), and Canvas decides. They do
+not refuse a code that names several of your courses.
+
 ## Privacy and Anonymization
 
 ### For Educators

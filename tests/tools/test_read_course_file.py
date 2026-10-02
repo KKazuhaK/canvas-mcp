@@ -110,7 +110,8 @@ def _server() -> FastMCP:
 def api():
     """Patch the tool's Canvas boundary; tests set return values."""
     config = SimpleNamespace(read_file_max_size_mb=100.0)
-    with patch("canvas_mcp.tools.files.get_course_id", AsyncMock(return_value="60366")), \
+    with patch("canvas_mcp.tools.files.resolve_numeric_course_id",
+               AsyncMock(return_value=("60366", None))), \
          patch("canvas_mcp.tools.files.get_course_code", AsyncMock(return_value="CS_161_F26")), \
          patch("canvas_mcp.tools.files.get_config", return_value=config), \
          patch("canvas_mcp.tools.files.make_canvas_request", new_callable=AsyncMock) as request, \
@@ -507,7 +508,8 @@ class TestEndToEnd:
             "canvas_mcp.tools.files.get_course_code", AsyncMock(return_value="CS_161")
         )
         monkeypatch.setattr(
-            "canvas_mcp.tools.files.get_course_id", AsyncMock(return_value="60366")
+            "canvas_mcp.tools.files.resolve_numeric_course_id",
+            AsyncMock(return_value=("60366", None)),
         )
         monkeypatch.setattr("canvas_mcp.core.audit.log_data_access", lambda *a, **k: None)
 

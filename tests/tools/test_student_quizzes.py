@@ -31,6 +31,7 @@ from canvas_mcp.core import client as client_module
 from canvas_mcp.core.untrusted_content import FENCE_TEXT_START
 
 MODULE = "canvas_mcp.tools.student_quizzes"
+CACHE = "canvas_mcp.core.cache"
 COURSE = "12345"
 MY_ID = 42
 
@@ -293,13 +294,77 @@ class TestListQuizzesRequests:
         request.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_course_code_is_resolved_before_the_path_is_built(self, course_code):
-        fetch = fetch_router()
-        with patch(f"{MODULE}.get_course_id", new=AsyncMock(return_value=COURSE)) as resolve, \
+    @pytest.mark.parametrize(("identifier", "expected"), [
+        ("cs_161_fall", "999"), ("COMPSCI 161", COURSE), (" compsci 161 ", COURSE),
+    ])
+    async def test_course_code_is_resolved_before_the_path_is_built(
+        self, course_code, identifier, expected
+    ):
+        """Real resolver on a cold cache: the code is looked up in the caller's
+        course list and only the numeric ID reaches a request path."""
+        fetch = AsyncMock(return_value=[])
+        course_list = AsyncMock(return_value=[
+            {"id": int(COURSE), "course_code": "COMPSCI 161"},
+            {"id": 999, "course_code": "cs_161_fall"},
+        ])
+        with patch(f"{CACHE}.fetch_all_paginated_results", new=course_list), \
              patch(f"{MODULE}.fetch_all_paginated_results", new=fetch):
-            await get_tool_function("list_quizzes")(course_identifier="cs_161_fall")
-        resolve.assert_awaited_once_with("cs_161_fall")
-        assert fetch.call_args_list[0].args[0] == f"/courses/{COURSE}/quizzes"
+            result = await get_tool_function("list_quizzes")(course_identifier=identifier)
+        assert not result.startswith("Error"), result
+        assert course_list.call_args_list[0].args[0] == "/courses"
+        assert [c.args[0] for c in fetch.call_args_list] == [
+            f"/courses/{expected}/quizzes", f"/courses/{expected}/assignments",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_unknown_course_is_reported_plainly_before_any_quiz_request(self, course_code):
+        """A course that does not resolve is not a hidden Quizzes page."""
+        fetch = AsyncMock(side_effect=AssertionError("no quiz request expected"))
+        request = AsyncMock(side_effect=AssertionError("no request expected"))
+        course_list = AsyncMock(return_value=[{"id": int(COURSE), "course_code": "COMPSCI 161"}])
+        with patch(f"{CACHE}.fetch_all_paginated_results", new=course_list), \
+             patch(f"{CACHE}.make_canvas_request", new=request), \
+             patch(f"{MODULE}.fetch_all_paginated_results", new=fetch), \
+             patch(f"{MODULE}.make_canvas_request", new=request):
+            result = await get_tool_function("list_quizzes")(course_identifier="I&C SCI 33")
+        assert result.startswith("Error: Could not find course I&C SCI 33")
+        assert "hidden" not in result and "Quizzes page" not in result
+        fetch.assert_not_called()
+        request.assert_not_called()
+        assert [c.args[0] for c in course_list.call_args_list] == ["/courses"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("identifier", [
+        "1/quizzes/5", "sis_course_id:x/../../users/self", "sis_course_id:x?as_user_id=1",
+    ])
+    async def test_path_shaped_course_never_reaches_a_request_path(self, course_code, identifier):
+        fetch = AsyncMock(side_effect=AssertionError("no quiz request expected"))
+        request = AsyncMock(side_effect=AssertionError("no request expected"))
+        course_list = AsyncMock(return_value=[{"id": int(COURSE), "course_code": "COMPSCI 161"}])
+        with patch(f"{CACHE}.fetch_all_paginated_results", new=course_list), \
+             patch(f"{CACHE}.make_canvas_request", new=request), \
+             patch(f"{MODULE}.fetch_all_paginated_results", new=fetch), \
+             patch(f"{MODULE}.make_canvas_request", new=request):
+            for tool, kwargs in (("list_quizzes", {}), ("get_quiz_details", {"quiz_id": 5})):
+                result = await get_tool_function(tool)(course_identifier=identifier, **kwargs)
+                assert result.startswith("Error: Could not find course"), result
+        fetch.assert_not_called()
+        request.assert_not_called()
+        assert all(c.args[0] == "/courses" for c in course_list.call_args_list)
+
+    @pytest.mark.asyncio
+    async def test_get_quiz_details_resolves_a_course_code(self, course_code):
+        course_list = AsyncMock(return_value=[{"id": int(COURSE), "course_code": "COMPSCI 161"}])
+        seen: list[str] = []
+
+        async def request(method: str, endpoint: str, **_: Any) -> Any:
+            seen.append(endpoint)
+            return {"error": "HTTP error: 404, Details: {}"}
+
+        with patch(f"{CACHE}.fetch_all_paginated_results", new=course_list), \
+             patch(f"{MODULE}.make_canvas_request", new=request):
+            await get_tool_function("get_quiz_details")(course_identifier="COMPSCI 161", quiz_id=5)
+        assert seen and all(e.startswith(f"/courses/{COURSE}/") for e in seen)
 
 
 class TestListQuizzesClassification:

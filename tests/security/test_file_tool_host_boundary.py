@@ -167,7 +167,8 @@ def stdio_tool():
     with patch(
         "canvas_mcp.tools.files.is_http_request_active", return_value=False
     ), patch(
-        "canvas_mcp.tools.files.get_course_id", new=AsyncMock(return_value="60366")
+        "canvas_mcp.tools.files.resolve_numeric_course_id",
+        new=AsyncMock(return_value=("60366", None)),
     ), patch(
         "canvas_mcp.tools.files.get_course_code", new=AsyncMock(return_value="badm_350")
     ), patch(
@@ -186,7 +187,8 @@ class TestDownloadRefusedOverHttp:
         ), patch(
             "canvas_mcp.tools.files.make_canvas_request", new_callable=AsyncMock
         ) as request, patch(
-            "canvas_mcp.tools.files.get_course_id", new=AsyncMock(return_value="60366")
+            "canvas_mcp.tools.files.resolve_numeric_course_id",
+            new=AsyncMock(return_value=("60366", None)),
         ), patch(
             "canvas_mcp.tools.files.stream_file_download", new_callable=AsyncMock
         ) as stream:
@@ -312,7 +314,8 @@ class TestUploadRefusedOverHttp:
         ) as storage, patch(
             "canvas_mcp.tools.files.validate_file_for_upload"
         ) as validate, patch(
-            "canvas_mcp.tools.files.get_course_id", new=AsyncMock(return_value="60366")
+            "canvas_mcp.tools.files.resolve_numeric_course_id",
+            new=AsyncMock(return_value=("60366", None)),
         ):
             upload = get_tool_function("upload_course_file")
             result = await upload("badm_350", str(secret))
@@ -330,7 +333,8 @@ class TestUploadRefusedOverHttp:
         with patch(
             "canvas_mcp.tools.files.is_http_request_active", return_value=True
         ), patch(
-            "canvas_mcp.tools.files.get_course_id", new=AsyncMock(return_value="60366")
+            "canvas_mcp.tools.files.resolve_numeric_course_id",
+            new=AsyncMock(return_value=("60366", None)),
         ):
             upload = get_tool_function("upload_course_file")
             missing = await upload("badm_350", str(tmp_path / "does-not-exist"))
@@ -456,7 +460,8 @@ def download_route(request):
     with patch(
         "canvas_mcp.tools.files.is_http_request_active", return_value=False
     ), patch(
-        "canvas_mcp.tools.files.get_course_id", new=AsyncMock(return_value="60366")
+        "canvas_mcp.tools.files.resolve_numeric_course_id",
+        new=AsyncMock(return_value=("60366", None)),
     ), patch(
         "canvas_mcp.tools.files.get_course_code", new=AsyncMock(return_value="badm_350")
     ), patch(
