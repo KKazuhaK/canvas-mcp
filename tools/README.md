@@ -243,7 +243,7 @@ group addresses.
 
 **Parameters:**
 - `course_identifier` (required): Course code or Canvas ID
-- `search` (optional): Part of a name to match; omit to list everyone you can message
+- `search` (optional): Part of a name to match; omit to list everyone you can message. While anonymization is on, a search matches course staff only
 - `role` (optional): `any` (default), `staff` (teachers, TAs, designers), `teacher`, `ta`, or `student`
 - `limit` (optional): Maximum matches to return, 1-50 (default 25)
 
@@ -257,9 +257,19 @@ group addresses.
 people edit their own names), and roles in that course. While
 `ENABLE_DATA_ANONYMIZATION` is on (the default), only course staff are named;
 everyone else appears under the same `Student_<hash>` pseudonym the server uses
-for them elsewhere, so the address book cannot undo anonymization. It reads at
-most a few pages of the course address book per call and says when more people
-may match; narrow `search` in a large course.
+for them elsewhere, so the address book cannot undo anonymization. Because
+Canvas matches `search` against real names, a search in that mode returns
+course staff only (it never says whether a classmate matched) and asks Canvas
+for staff alone, so students are never read or counted; to find a classmate,
+list without `search` and pick them out by pseudonym. It reads at most a few
+pages of the course address book per call and says when more people may match;
+narrow `search` in a large course.
+
+Known limitation: a pseudonym depends only on the user ID, so it is the same in
+every course. A person who is staff in one course you share with them (named
+here with their user ID) and a student in another is not anonymous in the
+second. Your own inbox (`list_conversations`, `get_conversation_details`) also
+shows correspondents' real names beside their user IDs.
 
 ---
 

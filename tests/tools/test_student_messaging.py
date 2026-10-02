@@ -275,27 +275,34 @@ class TestFindMessageRecipients:
         tools = await _tools()
         result = await tools["find_message_recipients"](COURSE, search="  ada ")
 
-        [request] = canvas.calls("GET", "/search/recipients")
-        assert request.url.params["context"] == f"course_{COURSE}"
-        assert request.url.params["type"] == "user"
-        assert request.url.params["search"] == "ada"
-        assert request.url.params["per_page"] == "100"
+        # Anonymization is on by default, so a search asks Canvas for staff
+        # only: one request per staff sub-context of the course.
+        requests = canvas.calls("GET", "/search/recipients")
+        assert [r.url.params["context"] for r in requests] == [
+            f"course_{COURSE}_teachers", f"course_{COURSE}_tas", f"course_{COURSE}_designers",
+        ]
+        for request in requests:
+            assert request.url.params["type"] == "user"
+            assert request.url.params["search"] == "ada"
+            assert request.url.params["per_page"] == "100"
         assert not canvas.posts()
 
         assert result["success"] is True
         assert result["course"] == "ICS33"
-        assert [r["user_id"] for r in result["recipients"]] == ["501", "502", "503"]
-        assert [r["roles"] for r in result["recipients"]] == [["teacher"], ["ta"], ["student"]]
+        # Anonymization is on by default, and Canvas matched ``search`` against
+        # real names, so the classmate it returned is dropped entirely rather
+        # than pseudonymised (tests/security/test_recipient_search_privacy.py).
+        assert [r["user_id"] for r in result["recipients"]] == ["501", "502"]
+        assert [r["roles"] for r in result["recipients"]] == [["teacher"], ["ta"]]
         # Names survive the free_text anonymization tier (so a student can
         # recognise their professor) but arrive fenced as untrusted labels.
         assert "Ada Lovelace" in result["recipients"][0]["name"]
         assert result["recipients"][0]["name"].startswith("<<<UNTRUSTED CANVAS CONTENT")
         assert "untrusted_content_notice" in result
         assert "avatar" not in json.dumps(result)
-        # Anonymization is on by default: the classmate is pseudonymised.
-        assert result["recipients"][2]["name"] == generate_anonymous_id("503")
+        assert generate_anonymous_id("503") not in json.dumps(result)
         assert "Alan Turing" not in json.dumps(result)
-        assert "anonymization_note" in result
+        assert "staff" in result["anonymization_note"]
 
     @pytest.mark.asyncio
     async def test_blank_search_is_not_sent(self, canvas):
@@ -303,6 +310,7 @@ class TestFindMessageRecipients:
         await tools["find_message_recipients"](COURSE, search="   ")
         [request] = canvas.calls("GET", "/search/recipients")
         assert "search" not in request.url.params
+        assert request.url.params["context"] == f"course_{COURSE}"
 
     @pytest.mark.asyncio
     async def test_hostile_display_name_cannot_escape_its_fence(self, canvas):

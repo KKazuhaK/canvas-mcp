@@ -35,11 +35,30 @@ exfiltration needs, and the outer gates are the ones a prompt cannot cross:
    markers is refused, so a fenced read result pasted into a message is never
    sent.
 
-The recipient lookup is also kept from becoming a de-anonymization oracle: the
+The recipient lookup is also kept from becoming a de-anonymization oracle. The
 Inbox address book lists everyone enrolled in a course, so while
 ``ENABLE_DATA_ANONYMIZATION`` is on, only course staff keep their real names
 and everyone else gets the same ``generate_anonymous_id`` pseudonym the
-``/courses/:id/users`` tier shows.
+``/courses/:id/users`` tier shows. A pseudonym alone is not enough when the
+caller supplied a ``search`` term: Canvas matches it against real names
+server-side, so returning a classmate for "Alan Turing" would reveal which
+pseudonym and user ID are Alan Turing's. While anonymization is on, a search
+therefore returns course staff only, and says so; listing without a search
+still returns everyone under their pseudonyms. The search itself goes to the
+course's staff sub-contexts (``course_<id>_teachers``, ``_tas``,
+``_designers``), so Canvas matches the term against staff alone and students
+are neither read nor counted. ``send_message`` cannot be used the same way: it
+accepts numeric user IDs only and looks each one up by ``user_id``, never by
+name.
+
+Known limitation: a pseudonym depends only on the user ID
+(``generate_anonymous_id``), and staff are named here next to their user ID.
+So someone who is staff in one course the caller shares with them and a
+student in another is named in the first, which reveals their pseudonym in
+the second. The role check is per course and cannot prevent that. The caller's
+own inbox (``list_conversations``, ``get_conversation_details`` and the
+``reply_to_conversation`` preview) likewise shows correspondents' real names
+beside their user IDs, by design (see ``core/client.py``).
 """
 
 from __future__ import annotations
@@ -101,6 +120,12 @@ _ROLE_LABELS = {
 }
 _STAFF_ROLES = frozenset({"teacher", "ta", "designer"})
 _ROLE_FILTERS = ("any", "staff", "teacher", "ta", "student")
+
+#: Canvas address-book sub-contexts (``course_<id>_<suffix>``) that list only
+#: people with one enrollment type in the course. A staff-only search goes to
+#: these, so Canvas matches the term against staff alone; the role filter must
+#: name a staff role to narrow them further.
+_STAFF_SUBCONTEXTS = {"teacher": "teachers", "ta": "tas", "designer": "designers"}
 
 _COURSE_CONTEXT = re.compile(r"^course_([0-9]+)$")
 
@@ -262,15 +287,30 @@ def _display_name(user_id: str, raw_name: str, roles: list[str]) -> str:
     their instructor) and everyone else gets the pseudonym the ``full`` tier
     shows for that user ID. Real names are fenced: their owners can edit them,
     and they sit next to a redeemable confirmation token.
+
+    A pseudonym only protects an entry that was not selected by name. For a
+    ``search`` request Canvas has already matched the term against real
+    names, so find_message_recipients drops non-staff entries altogether
+    (``_recipient_match(staff_only=True)``) instead of pseudonymising them.
     """
     if get_config().enable_data_anonymization and not _STAFF_ROLES.intersection(roles):
         return generate_anonymous_id(user_id)
     return fence_untrusted_inline(raw_name or "", "user name")
 
 
-def _anonymization_note() -> str | None:
+def _anonymization_note(searched: bool = False) -> str | None:
     if not get_config().enable_data_anonymization:
         return None
+    if searched:
+        # Deliberately silent on whether anyone else matched: saying so would
+        # itself confirm that a classmate by that name is in the course.
+        return (
+            "Data anonymization is on: a name search returns course staff "
+            "(teachers, TAs, designers) only. Canvas matches the search against "
+            "real names, so other people are never returned for a search, "
+            "whether or not anyone matched. Omit search to list everyone under "
+            "their Student_<hash> pseudonyms."
+        )
     return (
         "Data anonymization is on: only course staff are shown by name; everyone "
         "else appears under the same Student_<hash> pseudonym this server uses "
@@ -278,8 +318,14 @@ def _anonymization_note() -> str | None:
     )
 
 
-def _recipient_match(entry: Any, course_id: str, role_filter: str) -> dict[str, Any] | None:
-    """One address-book entry as a find_message_recipients match, or None."""
+def _recipient_match(
+    entry: Any, course_id: str, role_filter: str, *, staff_only: bool = False
+) -> dict[str, Any] | None:
+    """One address-book entry as a find_message_recipients match, or None.
+
+    ``staff_only`` drops everyone without a staff role in this course; it is
+    set for a name search while anonymization is on (see ``_display_name``).
+    """
     if not isinstance(entry, dict):
         return None
     # type=user should exclude contexts; skip any that slip through (their
@@ -290,6 +336,8 @@ def _recipient_match(entry: Any, course_id: str, role_filter: str) -> dict[str, 
     common = entry.get("common_courses")
     roles = _role_labels(common.get(course_id) if isinstance(common, dict) else None)
     if not roles or not _matches_role_filter(roles, role_filter):
+        return None
+    if staff_only and not _STAFF_ROLES.intersection(roles):
         return None
     raw_name = entry.get("full_name") or entry.get("name") or ""
     return {
@@ -468,11 +516,13 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
         Use it to look up your instructor's or TA's user ID before
         send_message. Only individual people are returned. While data
         anonymization is on, people who are not course staff are listed
-        under a Student_<hash> pseudonym.
+        under a Student_<hash> pseudonym, and a name search returns course
+        staff only.
 
         Args:
             course_identifier: Course code or Canvas ID
-            search: Part of a name to match, e.g. "smith" (omit to list all)
+            search: Part of a name to match, e.g. "smith" (omit to list all).
+                While anonymization is on, matches only course staff.
             role: "any", "staff" (teachers, TAs, designers), "teacher", "ta", or "student"
             limit: Maximum matches to return (1-50, default 25)
         """
@@ -487,41 +537,70 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
         course_id, course_code = resolved
 
         params: dict[str, Any] = {
-            "context": f"course_{course_id}",
             "type": "user",
             "per_page": _RECIPIENT_PAGE_SIZE,
         }
         term = (search or "").strip()
         if term:
             params["search"] = term
+        # Canvas filters a search by real name, so while anonymization is on
+        # any non-staff entry it returns would tie that name to the entry's
+        # pseudonym and user ID. Return staff only for a search, and ask
+        # Canvas for staff only: searching the staff sub-contexts keeps
+        # students out of the pages read, so they neither cost requests nor
+        # make the result look truncated. _recipient_match still drops any
+        # non-staff entry, in case Canvas ever returns one there.
+        staff_only = bool(term) and get_config().enable_data_anonymization
+        if staff_only:
+            wanted = [role] if role in _STAFF_SUBCONTEXTS else list(_STAFF_SUBCONTEXTS)
+            contexts = [
+                f"course_{course_id}_{_STAFF_SUBCONTEXTS[r]}" for r in wanted
+            ]
+        else:
+            contexts = [f"course_{course_id}"]
 
         # Read only as many pages as it takes to know whether there are more
-        # than ``limit`` matches, and never more than _MAX_RECIPIENT_PAGES: an
-        # empty search in a large course must not walk the whole roster.
+        # than ``limit`` matches, and never more than _MAX_RECIPIENT_PAGES in
+        # all: an empty search in a large course must not walk the whole roster.
         matches: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
-        pagination: dict[str, str | None] = {}
+        pages_read = 0
         more_pages = False
-        for _ in range(_MAX_RECIPIENT_PAGES):
-            page = await make_canvas_request(
-                "get", "/search/recipients", params=params, _pagination=pagination
-            )
-            if isinstance(page, dict) and "error" in page:
-                return {"error": f"Could not search recipients: {page['error']}"}
-            if not isinstance(page, list):
-                return {"error": "Unexpected response from Canvas recipient search"}
-            for entry in page:
-                match = _recipient_match(entry, course_id, role)
-                # De-duplicated, so a repeated or cycling page cannot list
-                # someone twice.
-                if match is not None and match["user_id"] not in seen_ids:
-                    seen_ids.add(match["user_id"])
-                    matches.append(match)
-            next_url = pagination.get("next")
-            more_pages = bool(next_url)
-            if not more_pages or len(matches) > limit:
+        for index, context in enumerate(contexts):
+            pagination: dict[str, str | None] = {}
+            while True:
+                if pages_read >= _MAX_RECIPIENT_PAGES:
+                    # Out of budget with this context still unread.
+                    more_pages = True
+                    break
+                page = await make_canvas_request(
+                    "get",
+                    "/search/recipients",
+                    params={**params, "context": context},
+                    _pagination=pagination,
+                )
+                pages_read += 1
+                if isinstance(page, dict) and "error" in page:
+                    return {"error": f"Could not search recipients: {page['error']}"}
+                if not isinstance(page, list):
+                    return {"error": "Unexpected response from Canvas recipient search"}
+                for entry in page:
+                    match = _recipient_match(entry, course_id, role, staff_only=staff_only)
+                    # De-duplicated, so a repeated or cycling page (or someone
+                    # who is both teacher and TA) cannot be listed twice.
+                    if match is not None and match["user_id"] not in seen_ids:
+                        seen_ids.add(match["user_id"])
+                        matches.append(match)
+                next_url = pagination.get("next")
+                more_pages = bool(next_url)
+                if not more_pages or len(matches) > limit:
+                    break
+                pagination["url"] = next_url
+            if more_pages or len(matches) > limit:
+                # Stopped early: anything in the contexts not yet read counts
+                # as more that may match.
+                more_pages = more_pages or index + 1 < len(contexts)
                 break
-            pagination["url"] = next_url
 
         result: dict[str, Any] = {
             "success": True,
@@ -539,7 +618,7 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
                 "Stopped reading the course address book early; more people may "
                 "match. Narrow the search with part of a name."
             )
-        note = _anonymization_note()
+        note = _anonymization_note(searched=bool(term))
         if note:
             result["anonymization_note"] = note
         return result
