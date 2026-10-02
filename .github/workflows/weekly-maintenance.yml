@@ -11,6 +11,9 @@ permissions:
 
 jobs:
   maintenance:
+    # Upstream only: needs the upstream CLAUDE_CODE_OAUTH_TOKEN secret, so a
+    # fork skips instead of failing.
+    if: github.repository == 'vishalsachdev/canvas-mcp'
     runs-on: ubuntu-latest
     # Least privilege. This job reads untrusted input — public issue text and
     # web search results — into a model that also holds a GitHub token, so the

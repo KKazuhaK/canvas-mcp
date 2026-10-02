@@ -28,6 +28,9 @@ jobs:
   # releases or mint an attestation. It only produces an artifact.
   build-mcpb:
     name: Build Desktop Extension
+    # Upstream only: releases and their provenance are published from the
+    # upstream repo, so a fork skips instead of minting its own.
+    if: github.repository == 'vishalsachdev/canvas-mcp'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -81,6 +84,7 @@ jobs:
   create-release:
     name: Create Release
     needs: build-mcpb
+    if: github.repository == 'vishalsachdev/canvas-mcp'
     runs-on: ubuntu-latest
     permissions:
       # Create the release and attach assets.

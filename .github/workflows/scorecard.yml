@@ -17,6 +17,9 @@ permissions: read-all
 jobs:
   analysis:
     name: Scorecard analysis
+    # Upstream only: the result is published to the public OpenSSF API for the
+    # upstream repo, so a fork skips instead of scoring itself.
+    if: github.repository == 'vishalsachdev/canvas-mcp'
     runs-on: ubuntu-latest
     permissions:
       # Upload the SARIF result to the Security tab.

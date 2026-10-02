@@ -10,6 +10,9 @@ permissions:
 
 jobs:
   claude-review:
+    # Upstream only: needs the upstream CLAUDE_CODE_OAUTH_TOKEN secret, so a
+    # fork skips instead of failing.
+    if: github.repository == 'vishalsachdev/canvas-mcp'
     runs-on: ubuntu-latest
     permissions:
       contents: read
