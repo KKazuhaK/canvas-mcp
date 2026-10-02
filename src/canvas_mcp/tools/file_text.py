@@ -1,10 +1,17 @@
-"""Read a course file (lecture slides, PDFs, handouts) as text.
+"""Read a course file (lecture slides, PDFs, handouts) as text, complete.
 
-``read_course_file`` returns raw bytes as base64, which a model cannot read
-for a PDF or a slide deck. This tool downloads the file, extracts its text
-(PDF pages, PPTX slide titles/text/speaker notes, DOCX paragraphs and tables,
-plain text/Markdown/CSV/JSON, HTML), and returns it with page or slide markers
-inside an untrusted-content fence.
+This tool downloads the file, extracts its text (PDF pages, PPTX slide
+titles/text/speaker notes, DOCX paragraphs and tables, plain
+text/Markdown/CSV/JSON, HTML), and returns ALL of it with page or slide markers
+inside an untrusted-content fence. Nothing is cut: a caller who wants less asks
+for a page range. Claude Code is told (``FULL_CONTENT_TOOL_META``) that the
+result may be large, so it delivers it whole or saves it to a file the model
+reads, rather than shortening it.
+
+To see a file the way a person does (layout, figures, scanned pages), use
+``read_course_file``, which returns the file itself. ``read_course_file`` also
+uses the helpers here to fall back to text for clients that cannot receive a
+file from a tool.
 
 It shares the module fallback of the other file tools: when the course Files
 tab is hidden, a file linked from a module is still readable.
@@ -13,7 +20,6 @@ tab is hidden, a file linked from a module is still readable.
 import asyncio
 import re
 import threading
-from dataclasses import dataclass
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -27,16 +33,17 @@ from ..core.course_files import (
     is_access_denied,
 )
 from ..core.document_text import (
+    KIND_DOCX,
     KIND_LABELS,
     PAGED_KINDS,
     SUPPORTED_FORMATS,
     DocumentTextError,
     ExtractedDocument,
-    TextSection,
     detect_kind,
     extract_text,
 )
 from ..core.file_validation import format_file_size
+from ..core.tool_results import FULL_CONTENT_TOOL_META
 from ..core.untrusted_content import fence_untrusted, fence_untrusted_inline
 from ..core.validation import coerce_canvas_id, validate_params
 
@@ -44,22 +51,24 @@ from ..core.validation import coerce_canvas_id, validate_params
 #: clamp. Lecture decks are usually well under this; video is not a target.
 TEXT_READ_MAX_SIZE_MB = 50.0
 
-DEFAULT_MAX_CHARS = 40000
-#: Upper bound on ``max_chars`` so one call cannot flood the model context.
-MAX_CHARS_LIMIT = 200000
-
-
 #: Parses running at once. Office parsing holds a whole document's XML tree in
 #: memory and cannot be cancelled once started, so concurrent calls queue here
 #: (in the worker thread, not on the event loop) instead of stacking up.
 MAX_CONCURRENT_EXTRACTIONS = 2
-_EXTRACTION_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_EXTRACTIONS)
+EXTRACTION_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_EXTRACTIONS)
+
+#: How ``read_course_file_text`` tells the model to see pages that have no
+#: text (scans, figures, handwriting).
+SEE_PAGES_WITH_READ_COURSE_FILE = (
+    "Call read_course_file on this file to see the pages as images, the way a "
+    "person would."
+)
 
 #: A MIME type as Canvas should report it (type/subtype, no parameters).
 _MIME_TOKEN = re.compile(r"[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}")
 
 
-def _shown_content_type(content_type: str | None) -> str:
+def shown_content_type(content_type: str | None) -> str:
     """The Canvas content-type as safe to print, or ``"unrecognized"``.
 
     Canvas takes ``content_type`` from the uploader on API uploads, so the
@@ -78,127 +87,136 @@ def _extract_bounded(
     filename: str,
     start: int | None,
     end: int | None,
-    budget: int,
 ) -> ExtractedDocument:
-    """``extract_text`` holding one of the extraction slots (worker thread)."""
-    with _EXTRACTION_SLOTS:
-        return extract_text(
-            data, kind, filename=filename, start=start, end=end, budget=budget
-        )
+    """``extract_text`` of the whole range, holding an extraction slot."""
+    with EXTRACTION_SLOTS:
+        return extract_text(data, kind, filename=filename, start=start, end=end)
 
 
-@dataclass
-class _Rendered:
-    text: str
-    truncated: bool = False
-    #: Page/slide to pass as ``start_page`` to continue, if any remain.
-    resume_at: int | None = None
-    #: First and last page/slide that appear in ``text`` (fully or partly).
-    first_shown: int | None = None
-    last_shown: int | None = None
-    #: The page/slide shown only in part, if the cut fell inside one.
-    partial: int | None = None
-    #: True when ``partial`` is the first page/slide shown: it alone is over
-    #: ``max_chars``, so the caller must raise ``max_chars`` or skip past it.
-    oversized: bool = False
+async def extract_document(
+    data: bytes,
+    kind: str,
+    filename: str,
+    start_page: int | None = None,
+    end_page: int | None = None,
+) -> ExtractedDocument:
+    """All text of ``data`` (or of the page range), parsed in a worker thread.
 
-
-def _render_sections(doc: ExtractedDocument, max_chars: int) -> _Rendered:
-    """Join sections with markers and cut at ``max_chars``.
-
-    The continuation point always moves forward: when the very first
-    page/slide does not fit, ``resume_at`` is the one after it (and
-    ``oversized`` is set) rather than the same page again.
+    Raises ``DocumentTextError`` (including ``MissingDependencyError``, whose
+    message carries the documents-extra install hint).
     """
+    return await asyncio.to_thread(
+        _extract_bounded, data, kind, filename, start_page, end_page
+    )
+
+
+def _join_sections(doc: ExtractedDocument) -> str:
     label = (doc.unit or "").capitalize()
-    out = _Rendered("")
     pieces: list[str] = []
-    length = 0
-    for index, section in enumerate(doc.sections):
-        header = ""
-        if section.number is not None:
-            body = section.text or f"[no text on this {doc.unit}]"
-            header = f"--- {label} {section.number} ---\n"
-            piece = header + body
+    for section in doc.sections:
+        if section.number is None:
+            pieces.append(section.text)
         else:
-            piece = section.text
-        separator = "\n\n" if pieces else ""
-        if length + len(separator) + len(piece) > max_chars:
-            out.truncated = True
-            room = max_chars - length - len(separator)
-            first = not pieces
-            # A later section is only shown if at least one character of its
-            # body fits; a bare (or cut) marker would claim a page that is
-            # not there.
-            if room > 0 and (first or room > len(header)):
-                pieces.append(separator + piece[:room])
-                if section.number is not None:
-                    out.partial = section.number
-                    out.last_shown = section.number
-                    if out.first_shown is None:
-                        out.first_shown = section.number
-            if section.number is None:
-                break
-            if first:
-                out.oversized = True
-                more = index < len(doc.sections) - 1 or doc.stopped_early
-                out.resume_at = section.number + 1 if more else None
-            else:
-                out.resume_at = section.number
-            break
-        pieces.append(separator + piece)
-        length += len(separator) + len(piece)
-        if section.number is not None:
-            out.last_shown = section.number
-            if out.first_shown is None:
-                out.first_shown = section.number
-        if doc.stopped_early and index == len(doc.sections) - 1:
-            # Extraction stopped on budget: everything shown is complete, more
-            # exists after it.
-            out.truncated = True
-            out.resume_at = section.number + 1 if section.number is not None else None
-    out.text = "".join(pieces)
-    return out
+            body = section.text or f"[no text on this {doc.unit}]"
+            pieces.append(f"--- {label} {section.number} ---\n{body}")
+    return "\n\n".join(pieces)
+
+
+def format_document_text(
+    *,
+    shown_name: str,
+    course_display: str | int,
+    kind: str,
+    shown_type: str,
+    size_bytes: int,
+    doc: ExtractedDocument,
+    route_note: str | None,
+    see_pages_hint: str,
+    lead_notes: tuple[str, ...] = (),
+) -> str:
+    """The complete text result: header lines, then every section, fenced.
+
+    ``shown_name`` must already be fenced. ``see_pages_hint`` tells the
+    caller how to see pages or slides that carry no text (scans, figures).
+    """
+    result = f"File: {shown_name}\n"
+    result += f"  Course: {course_display}\n"
+    result += f"  Type: {KIND_LABELS[kind]} ({shown_type})\n"
+    result += f"  Size: {format_file_size(size_bytes)}\n"
+
+    unit = (doc.unit or "").capitalize()
+    numbered = [s for s in doc.sections if s.number is not None]
+    if doc.unit and doc.total_units is not None:
+        if numbered:
+            result += (
+                f"  {unit}s: {numbered[0].number}-{numbered[-1].number} "
+                f"of {doc.total_units}\n"
+            )
+        else:
+            result += f"  {unit}s: 0\n"
+
+    text = _join_sections(doc)
+    if doc.unit is None and text:
+        result += f"  Characters: {len(text)} (complete)\n"
+
+    for note in lead_notes:
+        result += f"  Note: {note}\n"
+    if route_note:
+        result += f"  Note: {route_note}\n"
+    for note in doc.notes:
+        result += f"  Note: {note}\n"
+
+    blank = [s.number for s in numbered if not s.text.strip()]
+    if blank and len(blank) < len(numbered):
+        listed = ", ".join(str(n) for n in blank)
+        result += f"  Note: {unit}s with no extractable text: {listed}. {see_pages_hint}\n"
+
+    if not text.strip() or (numbered and len(blank) == len(numbered)):
+        result += "\n(No text could be extracted from this file.)"
+        if kind in PAGED_KINDS or kind == KIND_DOCX:
+            result += f" {see_pages_hint}"
+        return result + "\n"
+
+    return result + "\n" + fence_untrusted(text, "course file text") + "\n"
 
 
 def register_file_text_tools(mcp: FastMCP) -> None:
     """Register the course-file text extraction tool."""
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(
+        annotations=ToolAnnotations(read_only_hint=True),
+        meta=FULL_CONTENT_TOOL_META,
+    )
     @validate_params
     async def read_course_file_text(
         course_identifier: str | int,
         file_id: str | int,
-        max_chars: int = DEFAULT_MAX_CHARS,
         start_page: int | None = None,
         end_page: int | None = None,
-        start_char: int = 0,
     ) -> str:
-        """Read a course file (PDF, slides, Word doc, text) as plain text.
+        """Read ALL the text of a course file (PDF, slides, Word doc, text).
 
-        Extracts PDF page text, PowerPoint slide titles/text/speaker notes,
-        Word paragraphs and tables, and plain text/Markdown/CSV/JSON/HTML.
-        Output carries page or slide markers. Works for files linked from
-        modules even when the course Files tab is hidden. Scanned PDFs have
-        no extractable text (no OCR). For raw bytes use read_course_file.
+        Returns the complete extracted text, never cut: PDF page text,
+        PowerPoint slide titles/text/speaker notes, Word paragraphs and
+        tables, and plain text/Markdown/CSV/JSON/HTML, with page or slide
+        markers. Works for files linked from modules even when the course
+        Files tab is hidden.
+
+        Text extraction misses layout, figures, equations drawn as images,
+        and scanned pages (no OCR). To see the file the way a person does,
+        call read_course_file, which returns the original file.
 
         Use list_course_files or list_module_items to find file IDs.
 
         Args:
             course_identifier: Course code or Canvas ID
             file_id: Canvas file ID
-            max_chars: Maximum characters of text to return (default 40000, max 200000)
-            start_page: First page (PDF) or slide (PPTX) to read, 1-based
-            end_page: Last page or slide to read, inclusive
-            start_char: For files without pages (DOCX, text, HTML), the 0-based character offset to start from
+            start_page: Optional first page (PDF) or slide (PPTX) to read, 1-based
+            end_page: Optional last page or slide to read, inclusive
         """
         file_key = coerce_canvas_id(file_id)
         if file_key is None:
             return f"Error: file_id must be a numeric Canvas file ID (got {file_id!r})."
-        if max_chars < 1:
-            return f"Error: max_chars must be positive (got {max_chars})."
-        requested_max_chars = max_chars
-        max_chars = min(max_chars, MAX_CHARS_LIMIT)
         if start_page is not None and start_page < 1:
             return f"Error: start_page must be 1 or greater (got {start_page})."
         if end_page is not None and end_page < 1:
@@ -208,8 +226,6 @@ def register_file_text_tools(mcp: FastMCP) -> None:
                 f"Error: start_page ({start_page}) must not be greater than "
                 f"end_page ({end_page})."
             )
-        if start_char < 0:
-            return f"Error: start_char must be 0 or greater (got {start_char})."
 
         course_id = await get_course_id(course_identifier)
 
@@ -227,7 +243,7 @@ def register_file_text_tools(mcp: FastMCP) -> None:
         filename = file_info.get("display_name") or file_info.get("filename") or f"file_{file_key}"
         shown_name = fence_untrusted_inline(filename, "file name")
         content_type = file_info.get("content-type") or ""
-        shown_type = _shown_content_type(content_type)
+        shown_type = shown_content_type(content_type)
         reported_size = file_info.get("size") or 0
 
         if file_info.get("locked_for_user"):
@@ -241,12 +257,8 @@ def register_file_text_tools(mcp: FastMCP) -> None:
         if kind is None:
             return (
                 f"Error: cannot extract text from {shown_name} ({shown_type}). "
-                f"Supported formats: {SUPPORTED_FORMATS}. Use read_course_file for raw bytes."
-            )
-        if start_char and kind in PAGED_KINDS:
-            return (
-                f"Error: start_char applies only to files without pages (Word, text, "
-                f"HTML). {shown_name} is a {KIND_LABELS[kind]} file: use start_page instead."
+                f"Supported formats: {SUPPORTED_FORMATS}. Use read_course_file to "
+                "open the file itself."
             )
 
         effective_max_mb = min(TEXT_READ_MAX_SIZE_MB, get_config().read_file_max_size_mb)
@@ -266,86 +278,18 @@ def register_file_text_tools(mcp: FastMCP) -> None:
             return f"Error downloading {shown_name}: {data['error']}"
 
         try:
-            doc = await asyncio.to_thread(
-                _extract_bounded,
-                data,
-                kind,
-                filename,
-                start_page,
-                end_page,
-                # Unpaged extraction (DOCX) must also gather the skipped prefix.
-                start_char + max_chars + 1,
-            )
+            doc = await extract_document(data, kind, filename, start_page, end_page)
         except DocumentTextError as exc:
             return f"Error reading {shown_name}: {exc}"
 
-        full_chars: int | None = None
-        if doc.unit is None and doc.sections:
-            full_text = doc.sections[0].text
-            if start_char and start_char >= len(full_text):
-                return (
-                    f"Error: start_char {start_char} is past the end of {shown_name} "
-                    f"({len(full_text)} characters of text)."
-                )
-            if not doc.stopped_early:
-                full_chars = len(full_text)
-            doc.sections[0] = TextSection(None, full_text[start_char:])
-
-        rendered = _render_sections(doc, max_chars)
-        text = rendered.text
         course_display = await get_course_code(course_id) or course_identifier
-
-        result = f"File: {shown_name}\n"
-        result += f"  Course: {course_display}\n"
-        result += f"  Type: {KIND_LABELS[kind]} ({shown_type})\n"
-        result += f"  Size: {format_file_size(len(data))}\n"
-        unit = (doc.unit or "").capitalize()
-        if doc.unit and doc.total_units is not None:
-            if rendered.first_shown is not None:
-                # The range shown, not the range extracted: a page gathered
-                # but cut away entirely is not claimed here.
-                result += (
-                    f"  {unit}s: {rendered.first_shown}-{rendered.last_shown} "
-                    f"of {doc.total_units}"
-                )
-                if rendered.partial is not None:
-                    result += f" ({doc.unit} {rendered.partial} cut short)"
-                result += "\n"
-            else:
-                result += f"  {unit}s: 0\n"
-        elif text and (start_char or rendered.truncated):
-            end_char = start_char + len(text)
-            of = f" of {full_chars}" if full_chars is not None else ""
-            result += f"  Characters: {start_char}-{end_char}{of}\n"
-        if route_note:
-            result += f"  Note: {route_note}\n"
-        for note in doc.notes:
-            result += f"  Note: {note}\n"
-
-        if not text.strip() and not rendered.truncated:
-            # A whitespace-only slice mid-file still gets its continuation hint.
-            result += "\n(No text could be extracted from this file.)\n"
-            return result
-
-        result += "\n" + fence_untrusted(text, "course file text") + "\n"
-        if rendered.truncated:
-            result += f"\n[Truncated at {max_chars} characters"
-            if requested_max_chars > max_chars:
-                result += f" (max_chars is capped at {MAX_CHARS_LIMIT})"
-            result += "."
-            if doc.unit and rendered.oversized:
-                result += (
-                    f" {unit} {rendered.partial} alone is longer than that, so only "
-                    "its first part is shown"
-                )
-                if max_chars < MAX_CHARS_LIMIT:
-                    result += "; raise max_chars to read all of it"
-                if rendered.resume_at is not None:
-                    result += f"; continue with start_page={rendered.resume_at}"
-                result += "."
-            elif doc.unit and rendered.resume_at is not None:
-                result += f" Continue with start_page={rendered.resume_at}."
-            elif doc.unit is None:
-                result += f" Continue with start_char={start_char + len(text)}."
-            result += "]\n"
-        return result
+        return format_document_text(
+            shown_name=shown_name,
+            course_display=course_display,
+            kind=kind,
+            shown_type=shown_type,
+            size_bytes=len(data),
+            doc=doc,
+            route_note=route_note,
+            see_pages_hint=SEE_PAGES_WITH_READ_COURSE_FILE,
+        )

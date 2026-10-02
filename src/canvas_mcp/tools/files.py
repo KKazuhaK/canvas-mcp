@@ -12,13 +12,25 @@ The Canvas file upload process uses a 3-step protocol:
 This module handles all three steps transparently.
 """
 
+import asyncio
 import base64
+import io
+import mimetypes
 import os
+import re
 import tempfile
 from typing import Any
 
 from fastmcp import FastMCP
-from mcp.types import ToolAnnotations
+from fastmcp.tools import ToolResult
+from mcp.types import (
+    BlobResourceContents,
+    ContentBlock,
+    EmbeddedResource,
+    ImageContent,
+    TextContent,
+    ToolAnnotations,
+)
 
 from ..core.cache import get_course_code, get_course_id
 from ..core.client import (
@@ -30,19 +42,164 @@ from ..core.client import (
 from ..core.config import get_config
 from ..core.course_files import (
     canvas_error_status,
+    download_file_bytes,
     fetch_module_linked_file,
     is_access_denied,
     list_files_via_modules,
 )
 from ..core.credentials import is_http_request_active
+from ..core.document_text import SUPPORTED_FORMATS, DocumentTextError, detect_kind
 from ..core.file_validation import (
     FileValidationResult,
     format_file_size,
     sanitize_filename,
     validate_file_for_upload,
 )
+from ..core.mcp_client import client_mishandles_file_blobs
+from ..core.tool_results import FULL_CONTENT_TOOL_META
 from ..core.untrusted_content import fence_untrusted_inline
 from ..core.validation import coerce_canvas_id, validate_params
+from .file_text import (
+    EXTRACTION_SLOTS,
+    extract_document,
+    format_document_text,
+    shown_content_type,
+)
+
+#: Image types a model is shown inline (MCP ImageContent). Claude accepts
+#: exactly these; any other image type travels as a file like everything else.
+INLINE_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+
+#: Leading bytes that identify a file regardless of what the uploader claimed.
+_MAGIC_TYPES: tuple[tuple[bytes, str], ...] = (
+    (b"%PDF-", "application/pdf"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+#: Content types that say nothing about the bytes; the file extension decides.
+_GENERIC_TYPES = frozenset(
+    {"unrecognized", "application/octet-stream", "binary/octet-stream", "application/unknown"}
+)
+
+_SAFE_EXTENSION = re.compile(r"\.[a-z0-9]{1,8}")
+
+_EXTENSION_FOR_TYPE = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/zip": ".zip",
+    "application/json": ".json",
+    "text/plain": ".txt",
+    "text/csv": ".csv",
+    "text/html": ".html",
+    "text/markdown": ".md",
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+
+#: Shown with the extracted-text fallback for clients that cannot take a file.
+_FALLBACK_LEAD_NOTE = (
+    "This app cannot receive files from tools, so this is the file's complete "
+    "extracted text. Figures, layout and scanned pages are not included; to see "
+    "them, download the file from Canvas and attach it to the chat."
+)
+_FALLBACK_SEE_PAGES = (
+    "To see those pages, download the file from Canvas and attach it to the chat."
+)
+
+
+def _file_mime_type(data: bytes, content_type: Any, filename: str) -> str:
+    """The MIME type to declare for the returned file.
+
+    The Canvas ``content-type`` comes from the uploader on API uploads, so the
+    bytes themselves decide when they carry a known signature; then a clean
+    Canvas type; then the file extension; then ``application/octet-stream``.
+    """
+    for magic, mime in _MAGIC_TYPES:
+        if data.startswith(magic):
+            return mime
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    declared = shown_content_type(content_type if isinstance(content_type, str) else None)
+    if declared not in _GENERIC_TYPES and declared not in INLINE_IMAGE_TYPES:
+        # A declared inline image type without the matching signature is not
+        # sent as ImageContent: the client would fail to decode it.
+        return declared
+    guessed, _ = mimetypes.guess_type(filename)
+    if guessed and guessed not in INLINE_IMAGE_TYPES:
+        return guessed
+    return "application/octet-stream"
+
+
+def _file_resource_uri(file_id: str, mime: str) -> str:
+    """Resource URI for the returned file, built only from values we control.
+
+    Claude Code shows the URI to the model, so the uploader-chosen file name
+    is never part of it.
+    """
+    # A fixed table first: mimetypes' answer varies by platform (and the
+    # Windows registry), and the extension decides how a client opens the file.
+    extension = _EXTENSION_FOR_TYPE.get(mime) or mimetypes.guess_extension(mime) or ""
+    if not _SAFE_EXTENSION.fullmatch(extension):
+        extension = ""
+    return f"canvas://files/{file_id}{extension}"
+
+
+def _count_pdf_pages(data: bytes) -> int | None:
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return None
+    with EXTRACTION_SLOTS:
+        try:
+            return len(PdfReader(io.BytesIO(data)).pages)
+        except Exception:
+            return None
+
+
+async def _pdf_page_count(data: bytes) -> int | None:
+    """Page count when pypdf is installed and can read the file, else None."""
+    return await asyncio.to_thread(_count_pdf_pages, data)
+
+
+async def _file_as_text_fallback(
+    data: bytes,
+    mime: str,
+    filename: str,
+    shown_name: str,
+    course_display: str | int,
+    route_note: str | None,
+) -> str:
+    """Complete extracted text, for a client that cannot receive the file."""
+    kind = detect_kind(mime, filename)
+    if kind is None:
+        return (
+            f"Error: {shown_name} ({mime}) cannot be shown here. This app cannot "
+            f"receive files from tools, and text can only be extracted from "
+            f"{SUPPORTED_FORMATS}. Download the file from Canvas and attach it to "
+            "the chat to view it."
+        )
+    try:
+        doc = await extract_document(data, kind, filename)
+    except DocumentTextError as exc:
+        return f"Error reading {shown_name}: {exc}"
+    return format_document_text(
+        shown_name=shown_name,
+        course_display=course_display,
+        kind=kind,
+        shown_type=mime,
+        size_bytes=len(data),
+        doc=doc,
+        route_note=route_note,
+        see_pages_hint=_FALLBACK_SEE_PAGES,
+        lead_notes=(_FALLBACK_LEAD_NOTE,),
+    )
 
 
 async def _get_file_info(course_id: str, file_id: str) -> tuple[Any, str | None]:
@@ -195,27 +352,41 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
             result += f"  Note: {route_note}\n"
         return result
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(
+        annotations=ToolAnnotations(read_only_hint=True),
+        # The result mixes text with the file itself; it has no JSON shape.
+        output_schema=None,
+        meta=FULL_CONTENT_TOOL_META,
+    )
     @validate_params
     async def read_course_file(
         course_identifier: str | int,
         file_id: str | int,
         max_size_mb: float = 25.0,
-    ) -> str:
-        """Read a file from a Canvas course and return its content as base64.
+    ) -> str | ToolResult:
+        """Open a course file exactly as a person sees it: returns the original file.
 
-        Unlike download_course_file which saves to the server's local filesystem,
-        this tool returns the file content directly in the response. This is useful
-        when the MCP server runs on a different machine than the client.
+        Use this to look at lecture slides, PDFs, handouts, worksheets, or
+        images the way a student would, with layout, figures, diagrams,
+        equations, handwriting, and scanned pages intact. It returns the file
+        itself, like a file attached to the chat, not a text conversion:
 
-        Use list_course_files or list_module_items to find file IDs.
+        - Claude Code saves the file and gives its path: open that path with
+          the Read tool to view it (a PDF arrives as page images plus text).
+        - Images (PNG, JPEG, GIF, WebP) are shown directly.
+        - Claude Desktop chat cannot receive files from tools, so there it
+          returns the file's complete extracted text instead.
+
+        For the words only (quicker, smaller), use read_course_file_text. Use
+        list_course_files or list_module_items to find file IDs. Works for
+        files linked from modules even when the course Files tab is hidden.
 
         Args:
             course_identifier: Course code or Canvas ID
             file_id: Canvas file ID
             max_size_mb: Maximum file size in MB to read (default: 25). Clamped server-side to
-                READ_FILE_MAX_SIZE_MB (default 100). Files larger than the effective limit are
-                rejected to avoid excessive memory usage.
+                READ_FILE_MAX_SIZE_MB (default 100). Larger files are refused before
+                anything is downloaded.
         """
         if max_size_mb <= 0:
             return (
@@ -238,56 +409,97 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
 
         if isinstance(file_info, dict) and "error" in file_info:
             return f"Error getting file info: {file_info['error']}"
+        if not isinstance(file_info, dict):
+            return "Error getting file info: unexpected response from Canvas."
 
-        raw_filename = file_info.get("display_name") or file_info.get("filename", f"file_{file_id}")
-        filename = sanitize_filename(raw_filename)
+        # Uploader-controlled (issue 239): only ever shown inside a fence, and
+        # never written anywhere (the resource URI uses the file ID).
+        filename = str(
+            file_info.get("display_name") or file_info.get("filename") or f"file_{file_key}"
+        )
+        shown_name = fence_untrusted_inline(filename, "file name")
+        reported_size = file_info.get("size") or 0
+
+        if file_info.get("locked_for_user"):
+            explanation = file_info.get("lock_explanation") or "Canvas reports it as locked."
+            return (
+                f"Error: {shown_name} is locked for you: "
+                f"{fence_untrusted_inline(explanation, 'lock explanation')}"
+            )
+
         download_url = file_info.get("url")
-        content_type = file_info.get("content-type", "unknown")
-        reported_size = file_info.get("size", 0)
-
         if not download_url:
             return "Error: No download URL available for this file. Check permissions."
 
-        # Check reported file size before downloading
-        if reported_size and reported_size > max_size_bytes:
+        # Refuse an oversized file before a single byte is downloaded.
+        if isinstance(reported_size, int) and reported_size > max_size_bytes:
             return (
-                f"Error: File '{filename}' is {format_file_size(reported_size)}, "
-                f"which exceeds the {effective_max_mb} MB limit. "
-                f"Use download_course_file instead for large files."
+                f"Error: File {shown_name} is {format_file_size(reported_size)}, "
+                f"which exceeds the {effective_max_mb:g} MB limit. Nothing was downloaded. "
+                f"Use download_course_file on a local server for large files."
             )
 
-        # Download the file content into memory
-        try:
-            buffer = bytearray()
-            async with canvas_authenticated_client() as client:
-                async with client.stream("GET", download_url, follow_redirects=True) as response:
-                    response.raise_for_status()
+        # The token goes to the Canvas origin only; storage hops get none.
+        data = await download_file_bytes(download_url, max_size_bytes)
+        if isinstance(data, dict):
+            error = data["error"]
+            if "size limit" in error:
+                return (
+                    f"Error: File {shown_name} exceeds the {effective_max_mb:g} MB limit "
+                    f"during download. Use download_course_file on a local server for "
+                    f"large files."
+                )
+            return f"Error downloading {shown_name}: {error}"
 
-                    async for chunk in response.aiter_bytes(chunk_size=8192):
-                        if len(buffer) + len(chunk) > max_size_bytes:
-                            return (
-                                f"Error: File '{filename}' exceeds the {effective_max_mb} MB limit "
-                                f"during download. Use download_course_file instead for large files."
-                            )
-                        buffer.extend(chunk)
+        mime = _file_mime_type(data, file_info.get("content-type"), filename)
+        course_display = await get_course_code(course_id) or course_identifier
 
-            base64_content = base64.b64encode(buffer).decode("ascii")
+        if mime not in INLINE_IMAGE_TYPES and client_mishandles_file_blobs():
+            return await _file_as_text_fallback(
+                data, mime, filename, shown_name, course_display, route_note
+            )
 
-            size_str = format_file_size(len(buffer))
-            course_display = await get_course_code(course_id) or course_identifier
+        lines = [
+            f"File: {shown_name}",
+            f"  Course: {course_display}",
+            f"  Type: {mime}",
+            f"  Size: {format_file_size(len(data))}",
+        ]
+        if mime == "application/pdf":
+            pages = await _pdf_page_count(data)
+            if pages is not None:
+                lines.append(f"  Pages: {pages}")
+        if route_note:
+            lines.append(f"  Note: {route_note}")
 
-            result = f"Read: {fence_untrusted_inline(filename, 'file name')}\n"
-            result += f"  Size: {size_str}\n"
-            result += f"  Type: {content_type}\n"
-            result += f"  Course: {course_display}\n"
-            if route_note:
-                result += f"  Note: {route_note}\n"
-            result += "  Encoding: base64\n"
-            result += f"  Content:\n{base64_content}\n"
-            return result
-
-        except Exception as e:
-            return f"Error reading file: {str(e)}"
+        encoded = base64.b64encode(data).decode("ascii")
+        content: list[ContentBlock]
+        if mime in INLINE_IMAGE_TYPES:
+            lines.append("The image follows.")
+            content = [
+                TextContent(type="text", text="\n".join(lines)),
+                ImageContent(type="image", data=encoded, mime_type=mime),
+            ]
+        else:
+            hint = (
+                "Claude Code saves this file; open the saved path with Read to view "
+                "it like an attached file."
+            )
+            if mime != "application/pdf" and not mime.startswith("text/"):
+                hint += " If Read cannot open this type, read_course_file_text returns its text."
+            lines.append(hint)
+            content = [
+                TextContent(type="text", text="\n".join(lines)),
+                EmbeddedResource(
+                    type="resource",
+                    resource=BlobResourceContents(
+                        uri=_file_resource_uri(file_key, mime),
+                        mime_type=mime,
+                        blob=encoded,
+                    ),
+                ),
+            ]
+        return ToolResult(content=content)
 
     @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
     @validate_params

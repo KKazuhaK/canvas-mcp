@@ -8,7 +8,7 @@ with an install hint instead of a traceback.
 
 The bytes are third-party content. Office files are ZIP containers, so their
 declared uncompressed size is checked before a parser inflates them, and
-extraction stops once it has gathered enough text for the caller's budget.
+extraction can stop early once it has gathered a caller-chosen budget of text.
 """
 
 import html
@@ -195,7 +195,7 @@ def _check_zip_container(data: bytes, kind: str) -> None:
 
 
 def _extract_pdf(
-    data: bytes, start: int | None, end: int | None, budget: int
+    data: bytes, start: int | None, end: int | None, budget: int | None
 ) -> ExtractedDocument:
     try:
         from pypdf import PdfReader
@@ -225,7 +225,7 @@ def _extract_pdf(
             empty += 1
         doc.sections.append(TextSection(number, text))
         used += len(text)
-        if used >= budget and number < last:
+        if budget is not None and used >= budget and number < last:
             doc.stopped_early = True
             break
     if doc.sections and empty == len(doc.sections):
@@ -260,7 +260,7 @@ def _shape_text(shape: object) -> list[str]:
 
 
 def _extract_pptx(
-    data: bytes, start: int | None, end: int | None, budget: int
+    data: bytes, start: int | None, end: int | None, budget: int | None
 ) -> ExtractedDocument:
     try:
         from pptx import Presentation
@@ -302,13 +302,13 @@ def _extract_pptx(
         text = "\n".join(parts)
         doc.sections.append(TextSection(number, text))
         used += len(text)
-        if used >= budget and number < last:
+        if budget is not None and used >= budget and number < last:
             doc.stopped_early = True
             break
     return doc
 
 
-def _extract_docx(data: bytes, budget: int) -> ExtractedDocument:
+def _extract_docx(data: bytes, budget: int | None) -> ExtractedDocument:
     try:
         from docx import Document
         from docx.table import Table
@@ -339,7 +339,7 @@ def _extract_docx(data: bytes, budget: int) -> ExtractedDocument:
             added.append(f"# {text}" if style.lower().startswith(("heading", "title")) else text)
         lines.extend(added)
         used += sum(len(line) + 1 for line in added)
-        if used >= budget:
+        if budget is not None and used >= budget:
             stopped = True
             break
     return ExtractedDocument(
@@ -419,14 +419,14 @@ def extract_text(
     filename: str | None = None,
     start: int | None = None,
     end: int | None = None,
-    budget: int = 40000,
+    budget: int | None = None,
 ) -> ExtractedDocument:
     """Extract text from ``data`` of the given ``kind`` (see ``detect_kind``).
 
     ``start``/``end`` are 1-based inclusive page (PDF) or slide (PPTX) numbers
-    and are ignored, with a note, for unpaged formats. ``budget`` is a
-    character count after which paged extraction stops early; the caller
-    still truncates the final output to its own limit.
+    and are ignored, with a note, for unpaged formats. ``budget`` is an
+    optional character count after which extraction stops early (setting
+    ``stopped_early``); the default, None, extracts the whole document.
     """
     if kind == KIND_PDF:
         return _extract_pdf(data, start, end, budget)
