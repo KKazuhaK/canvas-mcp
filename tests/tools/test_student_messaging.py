@@ -120,6 +120,10 @@ class FakeCanvas:
         self.search_status = 200
         self.conversations: dict[str, dict[str, Any]] = {"77": _conversation()}
         self.post_response: Callable[[httpx.Request], httpx.Response] | None = None
+        # GET /courses: the list the shared course resolver matches codes against.
+        self.courses: list[dict[str, Any]] = [
+            {"id": int(COURSE), "course_code": "COMPSCI 161", "name": "Design of Algorithms"},
+        ]
 
     # -- helpers -----------------------------------------------------------
     def calls(self, method: str, path: str) -> list[httpx.Request]:
@@ -142,6 +146,8 @@ class FakeCanvas:
         path = request.url.path.removeprefix(API)
         params = request.url.params
 
+        if request.method == "GET" and path == "/courses":
+            return httpx.Response(200, json=self.courses)
         if request.method == "GET" and path == f"/courses/{COURSE}":
             return httpx.Response(200, json={"id": int(COURSE), "syllabus_body": self.syllabus})
         if request.method == "GET" and path == "/courses/sis_course_id:ICS33":
@@ -417,32 +423,58 @@ class TestFindMessageRecipients:
     @pytest.mark.asyncio
     async def test_sis_course_form_is_resolved_to_a_numeric_context(self, canvas):
         tools = await _tools()
-        with patch.object(
-            student_messaging, "get_course_id",
-            AsyncMock(return_value="sis_course_id:ICS33"),
-        ):
-            await tools["find_message_recipients"]("ICS33")
+        await tools["find_message_recipients"]("sis_course_id:ICS33")
+        assert len(canvas.calls("GET", "/courses/sis_course_id:ICS33")) == 1
         [request] = canvas.calls("GET", "/search/recipients")
         assert request.url.params["context"] == f"course_{COURSE}"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("identifier", ["COMPSCI 161", " compsci 161  ", "Design of Algorithms"])
+    async def test_course_code_with_spaces_is_resolved_on_a_cold_cache(self, canvas, identifier):
+        tools = await _tools()
+        result = await tools["find_message_recipients"](identifier)
+        assert "error" not in result, result
+        assert len(canvas.calls("GET", "/courses")) == 1
+        [request] = canvas.calls("GET", "/search/recipients")
+        assert request.url.params["context"] == f"course_{COURSE}"
+        assert not any("compsci" in r.url.path.lower() for r in canvas.requests)
+
+    @pytest.mark.asyncio
+    async def test_unknown_course_code_is_refused_after_one_list_lookup(self, canvas):
+        tools = await _tools()
+        result = await tools["find_message_recipients"]("I&C SCI 33")
+        assert result["error"].startswith("Could not find course I&C SCI 33")
+        assert [r.url.path for r in canvas.requests] == [f"{API}/courses"]
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("identifier", [
-        "1/users/503", "abc/def", "sis_course_id:1/users/503",
-        "sis_course_id:x%2Fusers%2F503", "sis_course_id:a\\b", "sis_course_id:",
+        "sis_course_id:1/users/503", "sis_course_id:x%2Fusers%2F503",
+        "sis_course_id:a\\b", "sis_course_id:", "sis_course_id:x?as_user_id=1",
+        "sis_course_id:x#y", "sis_course_id:..",
     ])
-    async def test_path_shaped_course_identifier_makes_no_request(self, canvas, identifier):
-        """get_course_id passes unknown strings through; they must not reach a path."""
+    async def test_path_shaped_sis_identifier_makes_no_request(self, canvas, identifier):
+        """Only a single plain SIS segment is ever put in a request path."""
         tools = await _tools()
         result = await tools["find_message_recipients"](identifier)
         assert "Could not find course" in result["error"]
         assert canvas.requests == []
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("identifier", ["1/users/503", "abc/def"])
+    async def test_path_shaped_course_identifier_reaches_no_path(self, canvas, identifier):
+        """A non-SIS identifier is only matched against the caller's course
+        list (one GET /courses); it is never put in a request path."""
+        tools = await _tools()
+        result = await tools["find_message_recipients"](identifier)
+        assert "Could not find course" in result["error"]
+        assert [(r.method, r.url.path) for r in canvas.requests] == [("GET", f"{API}/courses")]
+
+    @pytest.mark.asyncio
     async def test_path_shaped_course_identifier_cannot_send(self, canvas):
         tools = await _tools()
         result = await tools["send_message"]("1/users/503", ["501"], "Hi", "Body")
         assert result["nothing_sent"] is True
-        assert canvas.requests == []
+        assert [(r.method, r.url.path) for r in canvas.requests] == [("GET", f"{API}/courses")]
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +487,21 @@ async def _preview_send(tools, recipients=("501",), subject="Regrade", body="Hel
 
 
 class TestSendMessage:
+    @pytest.mark.asyncio
+    async def test_course_code_with_spaces_previews_and_sends_in_that_course(self, canvas):
+        tools = await _tools()
+        preview = await tools["send_message"]("COMPSCI 161", ["501"], "Regrade", "Hello")
+        assert preview["preview"] is True, preview
+        result = await tools["send_message"](
+            "COMPSCI 161", ["501"], "Regrade", "Hello",
+            confirmation_token=preview["confirmation_token"],
+        )
+        assert result["success"] is True, result
+        [post] = canvas.posts()
+        assert post.url.path == f"{API}/conversations"
+        assert canvas.form(post)["context_code"] == [f"course_{COURSE}"]
+        assert not any("compsci" in r.url.path.lower() for r in canvas.requests)
+
     @pytest.mark.asyncio
     async def test_preview_sends_nothing_and_names_recipients(self, canvas):
         tools = await _tools()

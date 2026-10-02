@@ -32,7 +32,7 @@ from typing import Any, Literal
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from ..core.cache import get_course_code, get_course_id
+from ..core.cache import SIS_COURSE_PREFIX, get_course_code, resolve_numeric_course_id
 from ..core.client import fetch_all_paginated_results
 from ..core.dates import _output_tz, format_date, parse_date
 from ..core.untrusted_content import fence_untrusted, fence_untrusted_inline
@@ -535,7 +535,6 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
             return courses
 
         codes: dict[str, str] = {}
-        aliases: dict[str, str] = {}
         course_ids: list[str] = []
         for course in courses:
             raw_id = course.get("id")
@@ -544,20 +543,22 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
                 continue
             codes[cid] = course.get("course_code") or course.get("name") or f"course {cid}"
             course_ids.append(cid)
-            if course.get("course_code"):
-                aliases.setdefault(str(course["course_code"]), cid)
-            if course.get("sis_course_id"):
-                aliases.setdefault(f"sis_course_id:{course['sis_course_id']}", cid)
 
         filtered = course_identifier is not None and bool(str(course_identifier).strip())
         if filtered:
             wanted = str(course_identifier).strip()
-            resolved = await get_course_id(wanted)
-            # Only a plain numeric ID may become a context code; a course code
-            # or SIS ID that did not resolve must match one of the caller's
-            # own active courses.
-            target = coerce_canvas_id(resolved) or aliases.get(wanted) or aliases.get(resolved)
+            numeric_given = coerce_canvas_id(wanted) is not None
+            sis_given = wanted.startswith(SIS_COURSE_PREFIX)
+            # A numeric ID is used as given, even for a course that is no
+            # longer active. A course code or name is matched only against the
+            # caller's own active courses, and a SIS ID must resolve to one of
+            # them, so nothing else becomes a context code.
+            target, error = await resolve_numeric_course_id(
+                wanted, courses=None if numeric_given or sis_given else courses
+            )
             if target is None:
+                return f"Error: {error}"
+            if not numeric_given and target not in codes:
                 return (
                     f"Error: '{wanted}' is not one of your active courses. "
                     "Pass its numeric Canvas course ID instead."

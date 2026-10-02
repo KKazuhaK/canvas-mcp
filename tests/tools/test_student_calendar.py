@@ -41,6 +41,7 @@ from canvas_mcp.tools.student_calendar import (
 )
 
 MOD = "canvas_mcp.tools.student_calendar"
+CACHE = "canvas_mcp.core.cache"
 ME = 7
 WRITE_TOOLS = (
     "create_planner_note",
@@ -132,17 +133,20 @@ class FakeCanvas:
 
 @contextmanager
 def canvas(fake: FakeCanvas) -> Any:
-    async def course_id(identifier: Any) -> str:
-        return str(identifier)
+    """Route the tools AND the shared course resolver through ``fake``.
+
+    The resolver is the real one, so every request it makes (a course-list
+    refresh, a SIS lookup) is recorded alongside the tools' own.
+    """
 
     async def course_code(course: Any) -> str:
         return f"COURSE-{course}"
 
     with patch(f"{MOD}.make_canvas_request", new=fake.request), patch(
         f"{MOD}.fetch_all_paginated_results", new=fake.paginate
-    ), patch(f"{MOD}.get_course_id", new=course_id), patch(
-        f"{MOD}.get_course_code", new=course_code
-    ):
+    ), patch(f"{CACHE}.make_canvas_request", new=fake.request), patch(
+        f"{CACHE}.fetch_all_paginated_results", new=fake.paginate
+    ), patch(f"{MOD}.get_course_code", new=course_code):
         yield fake
 
 
@@ -1355,17 +1359,127 @@ class TestDateInputs:
         assert fake.writes()[0][2]["data"]["calendar_event[start_at]"] == "2026-10-05T14:00:00Z"
 
 
+UCI_COURSES = [{"id": 4242, "course_code": "COMPSCI 161", "name": "Design and Analysis of Algorithms"}]
+
+
 class TestCourseIdentifierPaths:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("bad", ["101/assignments/4242", "sis_course_id:X/../../users/self",
-                                     "sis_course_id:X?as_user_id=1", "sis_course_id:a b"])
-    async def test_crafted_identifiers_make_no_canvas_call(self, bad: str) -> None:
+    @pytest.mark.parametrize("bad", ["sis_course_id:X/../../users/self",
+                                     "sis_course_id:X?as_user_id=1", "sis_course_id:a b",
+                                     "sis_course_id:x%2Fusers", "sis_course_id:a\b",
+                                     "sis_course_id:"])
+    async def test_crafted_sis_identifiers_make_no_canvas_call(self, bad: str) -> None:
         tools = get_tools()
         fake = FakeCanvas()
         with canvas(fake):
             result = await tools["list_planner_notes"](course_identifier=bad)
         assert result.startswith("Error: Could not find course")
         assert fake.calls == [] and fake.paged == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad", ["101/assignments/4242", "../users/self", "1?as_user_id=2"])
+    async def test_path_shaped_identifier_is_only_matched_against_the_course_list(
+        self, bad: str
+    ) -> None:
+        """A non-SIS identifier is looked up in the caller's course list; it
+        never reaches a request path, and nothing else is requested."""
+        tools = get_tools()
+        fake = FakeCanvas(paginated={"/courses": UCI_COURSES})
+        with canvas(fake):
+            result = await tools["list_planner_notes"](course_identifier=bad)
+        assert result.startswith("Error: Could not find course")
+        assert fake.calls == []
+        assert fake.paged == [("/courses", {"per_page": 100})]
+
+
+class TestCourseCodeResolution:
+    """UCI course codes contain spaces (``COMPSCI 161``); every calendar tool
+    that takes a course must resolve them to the numeric ID, on a cold cache,
+    without ever putting the code in a request path."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("identifier", ["COMPSCI 161", "  compsci 161 ",
+                                            "Design and Analysis of Algorithms"])
+    async def test_list_planner_notes(self, identifier: str) -> None:
+        tools = get_tools()
+        fake = FakeCanvas(paginated={"/courses": UCI_COURSES, "/planner_notes": []})
+        with canvas(fake):
+            await tools["list_planner_notes"](course_identifier=identifier)
+        assert fake.paged[0] == ("/courses", {"per_page": 100})
+        assert fake.paged[1][0] == "/planner_notes"
+        assert fake.paged[1][1]["context_codes[]"] == ["course_4242"]
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_list_calendar_events(self) -> None:
+        tools = get_tools()
+        fake = _calendar_fake(n_courses=0)
+        fake.paginated["/courses"] = UCI_COURSES
+        with canvas(fake):
+            result = await tools["list_calendar_events"](course_identifier="COMPSCI 161")
+        assert not result.startswith("Error"), result
+        calendar_calls = [p for e, p in fake.paged if e == "/calendar_events"]
+        assert calendar_calls
+        assert all(p["context_codes[]"] == ["course_4242"] for p in calendar_calls)
+        assert {e for e, _ in fake.paged} == {"/courses", "/calendar_events"}
+
+    @pytest.mark.asyncio
+    async def test_create_planner_note(self) -> None:
+        tools = write_tools()
+        fake = FakeCanvas(
+            routes={("post", "/planner_notes"): {"id": 9, "title": "x"}},
+            paginated={"/courses": UCI_COURSES},
+        )
+        policy = AsyncMock(return_value=(True, ""))
+        with canvas(fake), patch(f"{MOD}.check_student_write_allowed", new=policy):
+            await tools["create_planner_note"](
+                title="x", todo_date="2026-10-03", course_identifier="COMPSCI 161")
+        policy.assert_awaited_once_with("4242", "create_planner_note")
+        [(method, endpoint, kwargs)] = fake.writes()
+        assert (method, endpoint) == ("post", "/planner_notes")
+        assert kwargs["data"]["course_id"] == "4242"
+
+    @pytest.mark.asyncio
+    async def test_update_planner_note_moves_to_course_code(self) -> None:
+        tools = write_tools()
+        fake = FakeCanvas(
+            routes={("get", "/planner_notes/5"): _note(course_id=100)},
+            paginated={"/courses": UCI_COURSES},
+        )
+        policy = AsyncMock(return_value=(True, ""))
+        with canvas(fake), patch(f"{MOD}.check_student_write_allowed", new=policy):
+            await tools["update_planner_note"](note_id=5, course_identifier="COMPSCI 161")
+        assert {call.args[0] for call in policy.await_args_list} == {"100", "4242"}
+        assert all("COMPSCI" not in endpoint for _, endpoint, _ in fake.calls)
+
+    @pytest.mark.asyncio
+    async def test_mark_planner_item_complete(self) -> None:
+        tools = write_tools()
+        fake = FakeCanvas(
+            routes={
+                ("get", "/courses/4242/assignments/42"): {"id": 42, "name": "Lab 2"},
+                ("post", "/planner/overrides"): {"id": 1, "plannable_type": "assignment",
+                                                 "plannable_id": 42, "marked_complete": True},
+            },
+            paginated={"/courses": UCI_COURSES, "/planner/overrides": []},
+        )
+        with canvas(fake), patch(
+            f"{MOD}.check_student_write_allowed", new=AsyncMock(return_value=(True, ""))
+        ):
+            result = await tools["mark_planner_item_complete"](
+                plannable_type="assignment", plannable_id=42, course_identifier="COMPSCI 161")
+        assert result.startswith("✅"), result
+        assert ("get", "/courses/4242/assignments/42") in [(m, e) for m, e, _ in fake.calls]
+
+    @pytest.mark.asyncio
+    async def test_unknown_code_is_refused_after_one_refresh(self) -> None:
+        tools = write_tools()
+        fake = FakeCanvas(paginated={"/courses": UCI_COURSES})
+        with canvas(fake):
+            result = await tools["create_planner_note"](
+                title="x", todo_date="2026-10-03", course_identifier="I&C SCI 33")
+        assert result.startswith("Error: Could not find course I&C SCI 33")
+        assert fake.calls == [] and fake.paged == [("/courses", {"per_page": 100})]
 
 
 class TestOverrideMatching:

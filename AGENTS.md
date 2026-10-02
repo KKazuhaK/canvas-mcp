@@ -496,6 +496,14 @@ Canvas MCP accepts multiple identifier formats:
 
 The server automatically resolves identifiers to Canvas IDs.
 
+The student tools (calendar and planner, groups, student messaging,
+`list_my_announcements`, grades and quizzes) resolve every identifier the same
+way: course codes may contain spaces (`COMPSCI 161`, `I&C SCI 33`) and are
+matched against your own courses ignoring case and surrounding spaces, as are
+course names. A code that matches several of your courses, or none, is an error
+naming the course; pass the numeric ID then. `list_my_announcements` matches a
+code or name only among your active courses.
+
 ## Privacy and Anonymization
 
 ### For Educators

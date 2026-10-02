@@ -39,7 +39,7 @@ from urllib.parse import urlsplit
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from ..core.cache import get_course_code, get_course_id
+from ..core.cache import get_course_code, resolve_numeric_course_id
 from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.dates import format_date, parse_date
 from ..core.tool_results import FULL_CONTENT_TOOL_META
@@ -462,9 +462,12 @@ def register_student_quiz_tools(mcp: FastMCP) -> None:
         Args:
             course_identifier: Course code or Canvas ID
         """
-        course_id = await get_course_id(course_identifier)
-        if not course_id:
-            return f"Error: Could not find course {course_identifier}"
+        # Resolved before any request: a course that does not resolve is
+        # reported as such, so the hidden-Quizzes-page hint below only ever
+        # explains a real 404 from the quiz list.
+        course_id, course_error = await resolve_numeric_course_id(course_identifier)
+        if course_id is None:
+            return f"Error: {course_error}"
 
         classic = await fetch_all_paginated_results(
             f"/courses/{course_id}/quizzes", {"per_page": 100}
@@ -600,9 +603,9 @@ def register_student_quiz_tools(mcp: FastMCP) -> None:
         if checked_id is None:
             return f"Error: {which} must be a numeric Canvas ID. Use list_quizzes to find it."
 
-        course_id = await get_course_id(course_identifier)
-        if not course_id:
-            return f"Error: Could not find course {course_identifier}"
+        course_id, course_error = await resolve_numeric_course_id(course_identifier)
+        if course_id is None:
+            return f"Error: {course_error}"
         course_display = await get_course_code(course_id) or course_identifier
 
         assignment: dict[str, Any] | None = None

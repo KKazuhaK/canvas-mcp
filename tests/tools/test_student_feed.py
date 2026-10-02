@@ -283,6 +283,58 @@ class TestListMyAnnouncementsCourseFilter:
         assert "MATH 2B" in result
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("identifier", ["COMPSCI 161", "  compsci 161 ", "Design and Analysis of Algorithms"])
+    async def test_code_with_spaces_case_and_name_match_an_active_course(self, identifier):
+        courses = [{"id": 4242, "course_code": "COMPSCI 161",
+                    "name": "Design and Analysis of Algorithms"}]
+        fake = FakeCanvas()
+        fake.route("/courses", courses)
+        fake.route("/announcements", [])
+        result = await run(fake, "list_my_announcements", course_identifier=identifier)
+        assert not result.startswith("Error"), result
+        (req,) = fake.to("/announcements")
+        assert codes_param(req) == ["course_4242"]
+        # Matched against the active-course list already fetched; no other read.
+        assert [r.url.path for r in fake.requests] == ["/api/v1/courses", "/api/v1/announcements"]
+
+    @pytest.mark.asyncio
+    async def test_sis_form_must_resolve_to_an_active_course(self):
+        fake = FakeCanvas()
+        fake.route("/courses", COURSES)
+        fake.route("/courses/sis_course_id:2026F-MATH2B", {"id": 202, "course_code": "MATH 2B"})
+        fake.route("/courses/sis_course_id:2024F-OLD", {"id": 999, "course_code": "OLD 1"})
+        fake.route("/announcements", [])
+        await run(fake, "list_my_announcements", course_identifier="sis_course_id:2026F-MATH2B")
+        (req,) = fake.to("/announcements")
+        assert codes_param(req) == ["course_202"]
+
+        fake.requests.clear()
+        result = await run(fake, "list_my_announcements", course_identifier="sis_course_id:2024F-OLD")
+        assert result.startswith("Error:") and "not one of your active courses" in result
+        assert fake.to("/announcements") == []
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_code_is_refused(self):
+        courses = [{"id": 1, "course_code": "CS 161", "name": "A"},
+                   {"id": 2, "course_code": "cs 161", "name": "B"}]
+        fake = FakeCanvas()
+        fake.route("/courses", courses)
+        fake.route("/announcements", [])
+        result = await run(fake, "list_my_announcements", course_identifier="CS 161")
+        assert result.startswith("Error: Could not find course CS 161")
+        assert "more than one" in result
+        assert fake.to("/announcements") == []
+
+    @pytest.mark.parametrize("identifier", ["sis_course_id:x/../users", "sis_course_id:a?b=1"])
+    @pytest.mark.asyncio
+    async def test_unsafe_sis_form_is_refused_without_a_lookup(self, identifier):
+        fake = FakeCanvas()
+        fake.route("/courses", COURSES)
+        result = await run(fake, "list_my_announcements", course_identifier=identifier)
+        assert result.startswith("Error: Could not find course")
+        assert [r.url.path for r in fake.requests] == ["/api/v1/courses"]
+
+    @pytest.mark.asyncio
     async def test_filter_by_underscore_course_code_resolves_through_cache(self):
         courses = [{"id": 303, "course_code": "ics_33_fall"}] + COURSES
         fake = FakeCanvas()

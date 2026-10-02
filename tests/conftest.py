@@ -27,6 +27,22 @@ def reset_config_between_tests(monkeypatch):
     reset_config()
 
 
+@pytest.fixture(autouse=True)
+def isolated_course_cache(monkeypatch):
+    """Start every test with an empty course cache and restore it afterwards.
+
+    ``refresh_course_cache`` rebinds the module globals, so a test that
+    refreshes it would otherwise leak its synthetic courses into later tests
+    and change how ``resolve_numeric_course_id`` answers there.
+    """
+    from canvas_mcp.core import cache
+
+    monkeypatch.setattr(cache, "course_code_to_id_cache", {})
+    monkeypatch.setattr(cache, "id_to_course_code_cache", {})
+    monkeypatch.setattr(cache, "course_records_cache", [])
+    return cache
+
+
 @pytest.fixture
 def mock_canvas_request():
     """Mock Canvas API request function."""

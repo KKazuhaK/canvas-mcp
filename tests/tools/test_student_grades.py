@@ -727,3 +727,58 @@ async def test_real_client_http_error_is_reported(real_client):
             result = await tools["get_my_assignment_scores"](course_identifier="123")
     assert result.startswith("Error fetching course 123")
     assert "401" in result
+
+
+# --------------------------------------------------------------------------
+# Course identifier resolution (shared resolver, real client)
+# --------------------------------------------------------------------------
+
+UCI_COURSE_LIST = [{"id": 4242, "course_code": "COMPSCI 161", "name": "Design and Analysis of Algorithms"}]
+
+
+def _grades_transport(seen: list[httpx.Request]):
+    async def transport(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path = request.url.path
+        if path == "/api/v1/courses":
+            return httpx.Response(200, json=UCI_COURSE_LIST)
+        if path == "/api/v1/courses/4242":
+            return httpx.Response(200, json=course_json(id=4242, course_code="COMPSCI 161"))
+        if path == "/api/v1/courses/4242/assignment_groups":
+            return httpx.Response(200, json=weighted_groups())
+        return httpx.Response(404, json={"errors": [{"message": "not found"}]})
+
+    return transport
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["get_my_assignment_scores", "calculate_grade_scenarios"])
+@pytest.mark.parametrize("identifier", ["COMPSCI 161", "  compsci 161 "])
+async def test_course_code_with_spaces_resolves_on_a_cold_cache(real_client, tool, identifier):
+    seen: list[httpx.Request] = []
+    tools, _ = get_tools()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_grades_transport(seen))) as client:
+        with patch.object(cm, "_get_http_client", return_value=client):
+            result = await tools[tool](course_identifier=identifier)
+    assert not result.startswith("Error"), result
+    paths = [r.url.path for r in seen]
+    assert paths[0] == "/api/v1/courses"
+    assert "/api/v1/courses/4242" in paths
+    assert "/api/v1/courses/4242/assignment_groups" in paths
+    assert not any("compsci" in p.lower() for p in paths)
+    assert all(r.method == "GET" for r in seen)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identifier", [
+    "I&C SCI 33", "123/assignments", "sis_course_id:x/../users/self", "sis_course_id:x?y=1",
+])
+async def test_unresolved_course_never_reaches_a_request_path(real_client, identifier):
+    seen: list[httpx.Request] = []
+    tools, _ = get_tools()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_grades_transport(seen))) as client:
+        with patch.object(cm, "_get_http_client", return_value=client):
+            result = await tools["get_my_assignment_scores"](course_identifier=identifier)
+    assert result.startswith("Error: Could not find course"), result
+    # At most the caller's course list was read; the identifier went nowhere.
+    assert all(r.url.path == "/api/v1/courses" for r in seen)

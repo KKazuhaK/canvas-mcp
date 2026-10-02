@@ -116,7 +116,7 @@ async def run_tool(tool_name: str, routes: dict[str, Any], *, anonymize: bool = 
         patch(f"{MODULE}.fetch_all_paginated_results", side_effect=fake.fetch),
         patch(f"{MODULE}.make_canvas_request", side_effect=fake.request),
         patch(f"{MODULE}.get_course_code", new=AsyncMock(return_value="ICS 33")),
-        patch(f"{MODULE}.get_course_id", new=AsyncMock(return_value=101)),
+        patch(f"{MODULE}.resolve_numeric_course_id", new=AsyncMock(return_value=("101", None))),
         patch(f"{MODULE}.get_config",
               return_value=SimpleNamespace(enable_data_anonymization=anonymize)),
     ):
@@ -838,6 +838,25 @@ class TestListMyGroupsCourseResolution:
         assert "/api/v1/courses" in seen
 
     @pytest.mark.asyncio
+    async def test_course_code_with_spaces_missing_from_a_warm_cache(
+        self, real_client, cold_course_cache
+    ):
+        """A warm but stale cache is refreshed once on a miss, and the match
+        ignores case and surrounding whitespace."""
+        cold_course_cache.course_code_to_id_cache["OLD 1"] = "999"
+        seen: list[str] = []
+        handler = _course_filter_handler(
+            seen, courses=[{"id": 101, "course_code": "COMPSCI 161"}]
+        )
+        result = await _run_with_transport(
+            real_client, handler, "list_my_groups", course_identifier=" compsci 161 "
+        )
+        assert "Team Rocket" in result
+        assert "Study Buddies" not in result
+        assert seen.count("/api/v1/courses") == 1
+        assert not any("compsci" in path.lower() for path in seen)
+
+    @pytest.mark.asyncio
     async def test_sis_course_id_is_resolved_by_canvas(self, real_client, cold_course_cache):
         seen: list[str] = []
         handler = _course_filter_handler(seen, sis={
@@ -879,7 +898,7 @@ class TestListMyGroupsCourseResolution:
         result = await _run_with_transport(
             real_client, handler, "list_my_groups", course_identifier=identifier
         )
-        assert result.startswith("Error: could not find course")
+        assert result.startswith("Error: Could not find course")
         assert identifier in result
         assert "not in any groups" not in result
         # Nothing about groups is read for a course that does not resolve.
@@ -895,7 +914,7 @@ class TestListMyGroupsCourseResolution:
             real_client, handler, "list_my_groups",
             course_identifier="sis_course_id:x/users",
         )
-        assert result.startswith("Error: could not find course")
+        assert result.startswith("Error: Could not find course")
         assert not any(path.startswith("/api/v1/courses/sis_course_id") for path in seen)
 
 

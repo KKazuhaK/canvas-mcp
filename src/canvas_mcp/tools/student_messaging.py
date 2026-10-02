@@ -72,7 +72,7 @@ from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from ..core.anonymization import generate_anonymous_id
-from ..core.cache import get_course_code, get_course_id
+from ..core.cache import get_course_code, resolve_numeric_course_id
 from ..core.client import make_canvas_request
 from ..core.config import get_config
 from ..core.course_policy import (
@@ -181,31 +181,14 @@ async def _resolve_course(
 ) -> tuple[str, str] | str:
     """Resolve any course identifier to ``(numeric_id, display_code)``.
 
-    ``context_code`` must be ``course_<numeric id>``, but ``get_course_id`` can
-    hand back a ``sis_course_id:`` form, so that case is read back from Canvas
-    rather than interpolated into a context code. ``get_course_id`` also passes
-    any other unrecognised string through unchanged; that is refused rather
-    than read back, because a path-shaped value such as ``1/users/503`` would
-    fetch some other object and adopt its id as the course.
+    ``context_code`` must be ``course_<numeric id>``, so the shared resolver
+    is used: it never hands back an unresolved string, and never puts an
+    unvalidated identifier in a request path (a path-shaped value such as
+    ``1/users/503`` would otherwise fetch some other object and adopt its id).
     """
-    course_id = await get_course_id(course_identifier)
-    if not course_id:
-        return f"Could not find course {course_identifier}"
-    numeric = coerce_canvas_id(course_id)
+    numeric, error = await resolve_numeric_course_id(course_identifier)
     if numeric is None:
-        sis_id = str(course_id).removeprefix("sis_course_id:")
-        if (
-            sis_id == str(course_id)
-            or not sis_id.strip()
-            or any(ch in sis_id for ch in "/\\?#%")
-        ):
-            return f"Could not find course {course_identifier}"
-        course = await make_canvas_request("get", f"/courses/{course_id}")
-        if not isinstance(course, dict) or "error" in course:
-            return f"Could not find course {course_identifier}"
-        numeric = coerce_canvas_id(course.get("id", ""))
-        if numeric is None:
-            return f"Could not find course {course_identifier}"
+        return error or f"Could not find course {course_identifier}"
     code = await get_course_code(numeric)
     return numeric, code or numeric
 
