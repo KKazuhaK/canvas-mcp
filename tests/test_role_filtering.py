@@ -29,6 +29,9 @@ STUDENT_ONLY_TOOLS = {
     "list_planner_notes",
     # Lecture-file text extraction is registered with the student profile.
     "read_course_file_text",
+    # cross-course "what's new" feed (tools/student_feed.py)
+    "list_my_announcements",
+    "get_my_activity_stream",
 }
 
 # Calendar/planner writes: student profile only, and only when the operator

@@ -61,6 +61,8 @@ Personal academic tracking uses Canvas "self" endpoints. Shared course-content t
 | `list_group_announcements` | Announcements in one of your groups |
 | `list_group_files` | Files stored in one of your groups |
 | `read_course_file_text` | Read lecture slides, PDFs, Word docs, or text files as plain text with page/slide markers (PDF/PPTX/DOCX need the `documents` extra) |
+| `list_my_announcements` | Announcements across ALL active courses (default last 14 days); `list_announcements` is per-course |
+| `get_my_activity_stream` | Recent activity feed grouped by kind: announcements, discussions, conversations, grades/comments (course activity only; no group or non-course inbox items) |
 
 The group tools only read groups you are a member of; they check your membership
 before every call and refuse other groups even when Canvas would allow the read.
@@ -258,6 +260,9 @@ Is it a simple query?
 
 ### Student: Weekly Planning
 ```
+0. "What's new in my classes?"
+   → list_my_announcements() / get_my_activity_stream()
+
 1. "What assignments do I have due this week?"
    → get_my_upcoming_assignments(days=7)
 
