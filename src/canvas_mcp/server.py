@@ -65,6 +65,7 @@ from .tools import (
     register_student_calendar_tools,
     register_student_quiz_tools,
     register_student_group_tools,
+    register_student_messaging_tools,
     register_student_tools,
     register_student_write_tools,
 )
@@ -462,6 +463,9 @@ def register_all_tools(mcp: FastMCP, role: str = "all") -> None:
         # Calendar and planner reads; its writes follow the same
         # STUDENT_WRITE_TOOLS gate. See tools/student_calendar.py.
         register_student_calendar_tools(mcp)
+        # Inbox: recipient lookup is always on; send_message and
+        # reply_to_conversation are STUDENT_WRITE_TOOLS-gated like the rest.
+        register_student_messaging_tools(mcp)
 
     # Educator-specific tools
     if role in ("educator", "all"):

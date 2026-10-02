@@ -17,6 +17,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by the assignment API's `is_quiz_lti_assignment` flag (not
   `is_quiz_assignment`, which marks Classic quizzes); their settings and attempt
   history are not exposed to students by the REST API, and the tools say so.
+- **Student Inbox messaging.** `find_message_recipients` (read-only, always
+  on) looks up the people a student can message in a course and their user
+  IDs. `send_message` and `reply_to_conversation` are new student write tools,
+  off unless named in `STUDENT_WRITE_TOOLS` and subject to the per-course
+  syllabus policy and `ALLOWED_WRITE_TOOLS`. Both preview first and need a
+  single-use confirmation token bound to the recipients, subject and body.
+  To keep GHSA-hmr8 closed for students, recipients must be 1-5 individual
+  user IDs that Canvas lets the student message in that course (course,
+  section and group addresses are refused), replies reach only a
+  conversation's existing audience of at most 5 people, there are no
+  attachments or bulk sends, and text carrying UNTRUSTED CANVAS CONTENT
+  markers is refused.
+- `/search/recipients` responses now use the same `free_text` anonymization
+  tier as `/conversations`: avatars and direct identifiers are removed. The
+  address book lists a whole course, so while `ENABLE_DATA_ANONYMIZATION` is
+  on, `find_message_recipients` and the `send_message` preview name only
+  course staff and show everyone else under the same `Student_<hash>`
+  pseudonym the `/courses/:id/users` tier uses; they cannot be used to map
+  pseudonymised user IDs back to real names.
 
 ## [1.13.0] — 2026-09-27
 
