@@ -2322,10 +2322,13 @@ Download a course file to the local filesystem of the machine running the MCP se
 
 The download streams to disk through the same downloader as the read tools:
 each redirect hop is followed by hand, the Canvas token goes only to the
-Canvas origin, a storage hop gets no credentials and must be HTTPS, and at
-most 5 redirects are followed. Files are capped at 1 GB: a larger reported
-size is refused before anything is written, a body that grows past the cap is
-cut off, and a failed download leaves no partial file.
+Canvas origin, a storage hop gets no credentials and must be HTTPS, once a
+hop has left Canvas no later hop carries the token (not even one that points
+back at Canvas), and at most 5 redirects are followed. Files are capped at
+1 GB by default, set by `DOWNLOAD_FILE_MAX_SIZE_MB` in the server's
+environment: a larger reported size is refused before anything is written
+(the refusal names the setting), a body that grows past the cap is cut off,
+and a failed download leaves no partial file.
 
 **Parameters:**
 - `course_identifier`: Course code or ID
@@ -2339,7 +2342,7 @@ cut off, and a failed download leaves no partial file.
 
 **Returns:** Local path of the downloaded file with size and content type. Errors
 if the destination already exists rather than overwriting it, or if the file is
-over 1 GB.
+over the download cap (1 GB unless `DOWNLOAD_FILE_MAX_SIZE_MB` says otherwise).
 
 ---
 

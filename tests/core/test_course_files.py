@@ -142,6 +142,36 @@ class TestDownloadTokenBoundary:
         assert [str(r.url) for r in recorder.requests] == [DOWNLOAD_URL]
 
     @pytest.mark.asyncio
+    async def test_storage_cannot_bounce_back_to_an_authenticated_canvas_get(
+        self, transport_env
+    ):
+        """Once a hop leaves Canvas, a hop back to Canvas carries no token.
+
+        Otherwise a hostile storage host picks which authenticated Canvas GET
+        the server makes (here the student's profile) and the response is
+        handed over as the file.
+        """
+        profile = f"{CANVAS}/api/v1/users/self/profile"
+        recorder = transport_env({
+            DOWNLOAD_URL: redirect(STORAGE_URL),
+            STORAGE_URL: redirect(profile),
+            profile: lambda request: (
+                httpx.Response(200, content=b'{"name": "Student"}')
+                if request.headers.get("Authorization")
+                else httpx.Response(401, text="unauthenticated")
+            ),
+        })
+
+        result = await cf.download_file_bytes(DOWNLOAD_URL, 1024)
+
+        assert recorder.auth_by_host() == [
+            ("canvas.example.edu", f"Bearer {TOKEN}"),
+            ("files.storage.example.net", None),
+            ("canvas.example.edu", None),
+        ]
+        assert result == {"error": "HTTP 401 while downloading the file"}
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("url", ["file:///etc/passwd", "ftp://canvas.example.edu/x"])
     async def test_non_http_schemes_are_refused(self, transport_env, url):
         recorder = transport_env({})

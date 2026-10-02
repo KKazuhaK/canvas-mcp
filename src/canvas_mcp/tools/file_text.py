@@ -33,6 +33,7 @@ from ..core.course_files import (
     fetch_module_linked_file,
     is_access_denied,
 )
+from ..core.credentials import is_http_request_active
 from ..core.document_text import (
     KIND_DOCX,
     KIND_LABELS,
@@ -222,10 +223,10 @@ def oversized_text_error(
             f"start_page={first}, end_page={last} ({doc.total_units} {doc.unit}s in all)."
         )
     else:
-        error += (
-            " This format has no pages to select. On a local server, "
-            "download_course_file saves the file to disk."
-        )
+        error += " This format has no pages to select."
+        # download_course_file refuses over HTTP, so name it only where it works.
+        if not is_http_request_active():
+            error += " download_course_file saves the file to disk on this local server."
     return error
 
 

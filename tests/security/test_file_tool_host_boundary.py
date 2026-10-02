@@ -130,6 +130,14 @@ def wire(monkeypatch):
     return recorder
 
 
+def configure_download_limit(monkeypatch, value: str) -> None:
+    """Set DOWNLOAD_FILE_MAX_SIZE_MB and rebuild the config that reads it."""
+    from canvas_mcp.core.config import reset_config
+
+    monkeypatch.setenv("DOWNLOAD_FILE_MAX_SIZE_MB", value)
+    reset_config()
+
+
 def redirect(to: str, status: int = 302):
     return lambda request: httpx.Response(status, headers={"Location": to})
 
@@ -467,11 +475,21 @@ class TestDownloadTokenBoundary:
 
     @pytest.mark.asyncio
     async def test_storage_redirect_never_carries_authorization(
-        self, tmp_path, wire, download_route
+        self, tmp_path, wire, download_route, monkeypatch
     ):
         _, check_route = download_route
         wire.route(DOWNLOAD_URL, redirect(STORAGE_URL))
         wire.route(STORAGE_URL, body(b"%PDF-1.4 slides"))
+        # The recorder sees a request whoever follows the redirect, so record
+        # how each hop was asked for: the library must never follow on its own.
+        follow_flags: list[object] = []
+        real_stream = httpx.AsyncClient.stream
+
+        def recording_stream(self, method, url, **kwargs):
+            follow_flags.append(kwargs.get("follow_redirects", "unset"))
+            return real_stream(self, method, url, **kwargs)
+
+        monkeypatch.setattr(httpx.AsyncClient, "stream", recording_stream)
 
         result = await get_tool_function("download_course_file")(
             "badm_350", 12345, save_directory=str(tmp_path)
@@ -485,8 +503,10 @@ class TestDownloadTokenBoundary:
             ("files.storage.example.net", None),
         ]
         assert wire.token_seen_by() == {"canvas.example.edu"}
-        # Every hop is fetched by hand; none relies on the library following.
+        # Exactly one request to Canvas and one to storage, each fetched by
+        # hand with library redirect following turned off.
         assert len(wire.requests) == 2
+        assert follow_flags == [False, False]
 
     @pytest.mark.asyncio
     async def test_chained_redirects_off_canvas_never_carry_authorization(
@@ -510,6 +530,41 @@ class TestDownloadTokenBoundary:
             "canvas.example.edu.attacker.example",
         ]
         assert wire.token_seen_by() == {"canvas.example.edu"}
+
+    @pytest.mark.asyncio
+    async def test_storage_cannot_bounce_back_to_an_authenticated_canvas_get(
+        self, tmp_path, wire, download_route
+    ):
+        """After leaving Canvas, a hop back to a Canvas API path gets no token.
+
+        Otherwise the storage host would choose which authenticated Canvas GET
+        the server makes for the student, and the response would be saved as
+        the file.
+        """
+        _, check_route = download_route
+        profile = f"{CANVAS}/api/v1/users/self/profile"
+        wire.route(DOWNLOAD_URL, redirect(STORAGE_URL))
+        wire.route(STORAGE_URL, redirect(profile))
+        wire.route(profile, lambda request: (
+            httpx.Response(200, content=b'{"name": "Student"}')
+            if request.headers.get("Authorization")
+            else httpx.Response(401, text="unauthenticated")
+        ))
+
+        result = await get_tool_function("download_course_file")(
+            "badm_350", 12345, save_directory=str(tmp_path)
+        )
+
+        check_route(result, noted=False)
+        assert wire.auth_by_host() == [
+            ("canvas.example.edu", f"Bearer {TOKEN}"),
+            ("files.storage.example.net", None),
+            ("canvas.example.edu", None),
+        ]
+        third = wire.requests[2]
+        assert not any(TOKEN in value for value in third.headers.values())
+        assert result.startswith("Error downloading file") and "HTTP 401" in result
+        assert list(tmp_path.iterdir()) == []
 
     @pytest.mark.asyncio
     async def test_non_canvas_download_url_never_sees_the_token(
@@ -573,11 +628,10 @@ class TestDownloadTokenBoundary:
         The reported size passes the up-front check, so only the streaming
         cap stops it; the partial file is removed.
         """
-        import canvas_mcp.tools.files as files_module
-
         set_info, check_route = download_route
         set_info(file_info(size=50))
-        monkeypatch.setattr(files_module, "DOWNLOAD_MAX_SIZE_BYTES", 100)
+        # 0.0001 MB is 104 bytes: the 500-byte body overruns it mid-stream.
+        configure_download_limit(monkeypatch, "0.0001")
         wire.route(DOWNLOAD_URL, redirect(STORAGE_URL))
         wire.route(STORAGE_URL, lambda request: httpx.Response(
             200, stream=httpx.ByteStream(b"x" * 500)
@@ -589,18 +643,21 @@ class TestDownloadTokenBoundary:
 
         check_route(result, noted=False)
         assert result.startswith("Error downloading file")
-        assert "download limit" in result
+        assert "download limit" in result and "DOWNLOAD_FILE_MAX_SIZE_MB" in result
         assert len(wire.requests) == 2
         assert list(tmp_path.iterdir()) == []
 
     @pytest.mark.asyncio
     async def test_reported_size_over_cap_is_refused_before_anything(
-        self, tmp_path, wire, download_route
+        self, tmp_path, wire, download_route, monkeypatch
     ):
-        from canvas_mcp.tools.files import DOWNLOAD_MAX_SIZE_BYTES
+        from canvas_mcp.core.config import reset_config
 
         set_info, check_route = download_route
-        set_info(file_info(size=DOWNLOAD_MAX_SIZE_BYTES + 1))
+        # The default cap is 1 GB.
+        monkeypatch.delenv("DOWNLOAD_FILE_MAX_SIZE_MB", raising=False)
+        reset_config()
+        set_info(file_info(size=1024 * 1024 * 1024 + 1))
 
         result = await get_tool_function("download_course_file")(
             "badm_350", 12345, save_directory=str(tmp_path)
@@ -609,9 +666,59 @@ class TestDownloadTokenBoundary:
         # Refused before the route note is written, so only the route is checked.
         check_route(result, noted=False)
         assert result.startswith("Error:")
-        assert "download limit" in result and "Nothing was downloaded" in result
+        assert "1 GB download limit" in result and "Nothing was downloaded" in result
+        # The refusal names the setting a local user raises to allow more.
+        assert "DOWNLOAD_FILE_MAX_SIZE_MB=1024" in result
         assert wire.requests == []
         assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.asyncio
+    async def test_configured_limit_lowers_the_cap(
+        self, tmp_path, wire, download_route, monkeypatch
+    ):
+        set_info, check_route = download_route
+        set_info(file_info(size=2 * 1024 * 1024))
+        configure_download_limit(monkeypatch, "1")
+
+        result = await get_tool_function("download_course_file")(
+            "badm_350", 12345, save_directory=str(tmp_path)
+        )
+
+        check_route(result, noted=False)
+        assert result.startswith("Error:")
+        assert "1 MB download limit" in result and "DOWNLOAD_FILE_MAX_SIZE_MB=1 " in result
+        assert wire.requests == []
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.asyncio
+    async def test_configured_limit_raises_the_cap(
+        self, tmp_path, wire, download_route, monkeypatch
+    ):
+        """A local user can allow a file over the 1 GB default."""
+        import canvas_mcp.tools.files as files_module
+
+        set_info, check_route = download_route
+        set_info(file_info(size=1536 * 1024 * 1024))
+        configure_download_limit(monkeypatch, "2048")
+        wire.route(DOWNLOAD_URL, redirect(STORAGE_URL))
+        wire.route(STORAGE_URL, body(b"%PDF-1.4 lecture capture"))
+        caps: list[int] = []
+        real_stream = files_module.stream_file_download
+
+        async def recording_stream(url, max_bytes, write):
+            caps.append(max_bytes)
+            return await real_stream(url, max_bytes, write)
+
+        monkeypatch.setattr(files_module, "stream_file_download", recording_stream)
+
+        result = await get_tool_function("download_course_file")(
+            "badm_350", 12345, save_directory=str(tmp_path)
+        )
+
+        check_route(result)
+        assert "Downloaded:" in result
+        assert caps == [2048 * 1024 * 1024]
+        assert (tmp_path / "syllabus.pdf").read_bytes() == b"%PDF-1.4 lecture capture"
 
 
 UPLOAD_URL = "https://inst-fs.storage.example.net/upload?token=s1gn3d"

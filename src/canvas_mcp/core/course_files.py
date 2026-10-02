@@ -41,8 +41,10 @@ from .validation import coerce_canvas_id
 #: Canvas statuses that mean "you may not list/see this through this route".
 ACCESS_DENIED_STATUSES = frozenset({401, 403})
 
-#: Redirect hops followed by ``download_file_bytes`` before giving up. A Canvas
-#: download normally takes one (Canvas -> storage).
+#: Redirect hops followed by ``stream_file_download`` before giving up, so it
+#: caps every course-file download: read_course_file, read_course_file_text
+#: and download_course_file. A Canvas download normally takes one
+#: (Canvas -> storage).
 MAX_DOWNLOAD_REDIRECTS = 5
 
 _HTTP_STATUS = re.compile(r"^HTTP error: (\d{3})\b")
@@ -200,8 +202,12 @@ async def stream_file_download(
     The one download path for course files, so the token rule lives in one
     place. Each hop is fetched with ``follow_redirects=False``. A hop on the
     Canvas origin uses the fail-closed authenticated client; any other hop
-    uses a client with no credentials and must be HTTPS. At most
-    ``MAX_DOWNLOAD_REDIRECTS`` redirects are followed.
+    uses a client with no credentials and must be HTTPS. Once a hop has left
+    the Canvas origin, every later hop goes out without credentials even if
+    it points back at Canvas: otherwise a storage host could pick which
+    authenticated Canvas GET the server makes and have the response handed
+    over as the file. At most ``MAX_DOWNLOAD_REDIRECTS`` redirects are
+    followed.
 
     The body is capped at ``max_bytes``: a larger declared Content-Length is
     refused before any byte is written, and the count is checked again before
@@ -220,10 +226,16 @@ async def stream_file_download(
         return {"error": "Canvas returned an invalid download URL"}
 
     canvas_origin = _canvas_origin()
+    left_canvas = False
     for _ in range(MAX_DOWNLOAD_REDIRECTS + 1):
         if current.scheme not in _DEFAULT_PORTS:
             return {"error": f"Refusing to download over the '{current.scheme}' scheme"}
-        on_canvas = canvas_origin is not None and _origin(current) == canvas_origin
+        on_canvas = (
+            not left_canvas
+            and canvas_origin is not None
+            and _origin(current) == canvas_origin
+        )
+        left_canvas = not on_canvas
         if not on_canvas and current.scheme != "https":
             return {"error": "Refusing a non-HTTPS download from a non-Canvas host"}
 

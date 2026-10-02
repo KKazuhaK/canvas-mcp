@@ -88,11 +88,11 @@ INLINE_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/w
 FILE_RESULT_MAX_MB = 11.5
 FILE_RESULT_MAX_BYTES = int(FILE_RESULT_MAX_MB * 1024 * 1024)
 
-#: Largest file download_course_file writes to disk. It bounds what a hostile
-#: or broken storage host can stream onto the student's disk; course videos
-#: and datasets fit well under it.
-DOWNLOAD_MAX_SIZE_MB = 1024.0
-DOWNLOAD_MAX_SIZE_BYTES = int(DOWNLOAD_MAX_SIZE_MB * 1024 * 1024)
+#: Environment setting for the largest file download_course_file writes to
+#: disk (default 1024 MB). It bounds what a hostile or broken storage host can
+#: stream onto the student's disk; course videos and datasets fit well under
+#: the default, and a local user who needs more raises it.
+DOWNLOAD_LIMIT_SETTING = "DOWNLOAD_FILE_MAX_SIZE_MB"
 
 #: What download_course_file says to use instead when it cannot write a file
 #: (hosted server). Both tools are registered beside it in every profile.
@@ -344,17 +344,64 @@ async def _file_as_text_fallback(
     return too_big or result
 
 
+def _format_mb(mb: float) -> str:
+    """A size limit in the unit the docs use: whole gigabytes as GB."""
+    if mb >= 1024 and mb % 1024 == 0:
+        return f"{mb / 1024:g} GB"
+    return f"{mb:g} MB"
+
+
+def _download_limit_note(limit_mb: float) -> str:
+    """The download cap, the setting that sets it, and how to raise it."""
+    return (
+        f"the {_format_mb(limit_mb)} download limit ({DOWNLOAD_LIMIT_SETTING}="
+        f"{limit_mb:g} on this server; set {DOWNLOAD_LIMIT_SETTING} higher in "
+        "the server's environment to allow larger files)"
+    )
+
+
 def _file_result_limit_reason(text_readable: bool) -> str:
     """Why a bigger file is not returned as a file, and what to use instead."""
-    instead = (
-        "read_course_file_text returns its text (all of it, or a page range)"
-        if text_readable
-        else "download_course_file saves it to disk on a local server"
-    )
+    if text_readable:
+        instead = "read_course_file_text returns its text (all of it, or a page range)"
+    elif is_http_request_active():
+        # download_course_file refuses over HTTP: there is no disk to name.
+        instead = "this hosted server cannot return a file that large"
+    else:
+        instead = "download_course_file saves it to disk on this local server"
     return (
         f"At most {FILE_RESULT_MAX_MB:g} MB can be returned as a file, because MCP "
         f"clients disconnect on a result over 16 MB; {instead}."
     )
+
+
+def _own_limit_reason(
+    requested_mb: float, server_max_mb: float, as_text: bool, text_readable: bool
+) -> str:
+    """Why read_course_file refused when ``requested_mb`` itself is the limit.
+
+    Either the caller's own ``max_size_mb`` is the limit, and a larger value
+    up to the path's ceiling would read the file, or the server's
+    READ_FILE_MAX_SIZE_MB is. download_course_file is named only on a local
+    server, the one place it works.
+    """
+    path_max_mb = TEXT_READ_MAX_SIZE_MB if as_text else FILE_RESULT_MAX_MB
+    ceiling_mb = min(server_max_mb, path_max_mb)
+    if requested_mb < ceiling_mb:
+        parts = [
+            f"That is the max_size_mb you passed; pass max_size_mb={ceiling_mb:g} "
+            f"to read files up to {ceiling_mb:g} MB."
+        ]
+    else:
+        parts = ["That is this server's READ_FILE_MAX_SIZE_MB limit."]
+    text_max_mb = min(server_max_mb, TEXT_READ_MAX_SIZE_MB)
+    if text_readable and requested_mb < text_max_mb:
+        parts.append(
+            f"read_course_file_text returns its text for files up to {text_max_mb:g} MB."
+        )
+    if not is_http_request_active():
+        parts.append("download_course_file saves larger files to disk on this local server.")
+    return " ".join(parts)
 
 
 async def _get_file_info(course_id: str, file_id: str) -> tuple[Any, str | None]:
@@ -400,7 +447,8 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
         """Download a file from a Canvas course to the local filesystem.
 
         Only available on a local (stdio) server: the file is written to the
-        server's disk (up to 1 GB) and the result gives its path. To look at
+        server's disk (up to 1 GB by default, set by DOWNLOAD_FILE_MAX_SIZE_MB)
+        and the result gives its path. To look at
         a file instead, call read_course_file, which returns the file as it
         is (PDF pages, images, text); for its plain text, call
         read_course_file_text. Works for files linked from modules even when
@@ -450,11 +498,13 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
             return "Error: No download URL available for this file. Check permissions."
 
         # Refuse an oversized file before creating anything on disk.
-        if isinstance(reported_size, int) and reported_size > DOWNLOAD_MAX_SIZE_BYTES:
+        download_max_mb = get_config().download_file_max_size_mb
+        download_max_bytes = int(download_max_mb * 1024 * 1024)
+        if isinstance(reported_size, int) and reported_size > download_max_bytes:
             return (
                 f"Error: {fence_untrusted_inline(filename, 'file name')} is "
-                f"{format_file_size(reported_size)}, over the {DOWNLOAD_MAX_SIZE_MB:g} MB "
-                "download limit. Nothing was downloaded."
+                f"{format_file_size(reported_size)}, over "
+                f"{_download_limit_note(download_max_mb)}. Nothing was downloaded."
             )
 
         # Determine save path with symlink resolution
@@ -501,7 +551,7 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
         try:
             with os.fdopen(fd, 'wb') as f:
                 outcome = await stream_file_download(
-                    download_url, DOWNLOAD_MAX_SIZE_BYTES, f.write
+                    download_url, download_max_bytes, f.write
                 )
         except Exception as e:
             outcome = {"error": str(e)}
@@ -515,7 +565,7 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
             _discard_partial_download(save_path)
             error = outcome["error"]
             if "size limit" in error:
-                error = f"the file exceeds the {DOWNLOAD_MAX_SIZE_MB:g} MB download limit"
+                error = f"the file exceeds {_download_limit_note(download_max_mb)}"
             return f"Error downloading file: {error}. Nothing was saved."
         total_bytes = outcome
 
@@ -635,7 +685,7 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
             reason = _file_result_limit_reason(text_readable)
         else:
             limit_mb = requested_mb
-            reason = "Use download_course_file on a local server for large files."
+            reason = _own_limit_reason(requested_mb, server_max_mb, as_text, text_readable)
         max_size_bytes = int(limit_mb * 1024 * 1024)
 
         # Refuse an oversized file before a single byte is downloaded.

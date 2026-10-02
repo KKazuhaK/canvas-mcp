@@ -117,9 +117,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   route and on the hidden-Files-tab module route), streaming to disk. It used
   to send the token to whatever URL Canvas reported for the file, follow up to
   20 redirects with the authenticated client, accept `http://` storage hops
-  and write without a size limit. It now caps a download at 1 GB (refused
-  before anything is written when Canvas reports a larger size, and cut off
-  while streaming otherwise), and removes the partial file on any failure.
+  and write without a size limit. It now caps a download at 1 GB by default
+  (refused before anything is written when Canvas reports a larger size, and
+  cut off while streaming otherwise), and removes the partial file on any
+  failure. **Migration:** a local user who downloads files over 1 GB sets
+  `DOWNLOAD_FILE_MAX_SIZE_MB` (in MB, e.g. `4096`) in the server's
+  environment; the refusal names the setting.
+- Once a download hop has left the Canvas origin, every later hop goes out
+  without the token, even one that redirects back to Canvas. A storage host
+  can no longer make the server perform an authenticated Canvas GET and hand
+  the response over as the file.
 - `upload_file_to_storage` (used by `upload_course_file` and the student
   `submit_assignment` file upload) sends the token to the storage host's
   confirmation redirect only when it points at the caller's Canvas origin,
