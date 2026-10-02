@@ -120,6 +120,53 @@ grade if any, and submission comments.
 
 ---
 
+#### `list_calendar_events`
+Your Canvas calendar in date order: course events, events on your personal
+calendar, group events, and assignment due dates.
+
+**Parameters:**
+- `start_date` / `end_date` (optional): `YYYY-MM-DD`, or ISO 8601 with an offset or `Z`
+  (default: today through `days` days ahead; whole days, so today's all-day events
+  and notes are included). A date-time without an offset is read in the configured
+  `TIMEZONE`, and refused when none is set. The window may span at most 366 days.
+- `days` (optional): Look-ahead when `end_date` is omitted (default 14, max 366)
+- `course_identifier` (optional): Only one course's calendar
+- `event_type` (optional): `event`, `assignment`, or `all` (default)
+- `include_descriptions` (optional): Include event descriptions
+
+**Example:**
+```
+"What's on my calendar this week?"
+"When is the CS 161 midterm?"
+```
+
+**Returns:** Each entry's time, calendar, location and event or assignment ID.
+Covers every active course, your personal calendar and your groups; Canvas
+accepts at most 10 calendars per request, so larger sets are fetched in batches.
+Groups from courses that are no longer active are skipped (Canvas refuses them),
+and groups are fetched in their own batches so one refused group cannot hide the
+rest of the calendar.
+For submission status use `get_my_upcoming_assignments`.
+
+---
+
+#### `get_calendar_event`
+One calendar event in full, including description and address.
+
+**Parameters:**
+- `event_id` (required): Numeric calendar event ID
+
+---
+
+#### `list_planner_notes`
+Your own planner notes (the personal to-do items in the Canvas planner).
+
+**Parameters:**
+- `start_date` / `end_date` / `days` (optional): Date window, as above
+- `course_identifier` (optional): Only notes filed under this course
+
+---
+
 ### Student Write Tools
 
 > **Off by default.** These tools only exist if the server operator enabled them
@@ -187,6 +234,39 @@ requirements.
 - `course_identifier` (required): Course code or Canvas ID
 - `module_id` (required): Canvas module ID
 - `item_id` (required): Canvas module item ID
+
+---
+
+#### Calendar and planner writes
+
+Each is enabled separately through `STUDENT_WRITE_TOOLS`. They change only the
+student's own planner and personal calendar: the personal-calendar tools always
+use the caller's own `user_<id>` calendar (read from `/users/self`, never from an
+argument), and update/delete read the note or event first and refuse anything
+that is not the caller's. A note filed under a course, and a planner item that is
+course content, are subject to that course's agent policy. For a calendar event
+the course is taken from `effective_context_code` too (section events and
+appointment reservations), or from the owning group; an event that cannot be tied
+to a course is refused.
+
+| Tool | What it does | Confirmation |
+|---|---|---|
+| `create_planner_note` | Add a planner note (`title`, `todo_date`, optional `details`, `course_identifier`, linked course item) | none |
+| `update_planner_note` | Change a note's title, details, date or course | preview, then token |
+| `delete_planner_note` | Delete a note | preview, then token |
+| `mark_planner_item_complete` | Tick or untick a planner item (`plannable_type`, `plannable_id`, `course_identifier` for course content, `complete`) | none |
+| `create_personal_calendar_event` | Add an event to your personal calendar | none |
+| `delete_personal_calendar_event` | Delete an event from your personal calendar (one occurrence of a series) | preview, then token |
+
+`mark_planner_item_complete` reuses an existing planner override when there is
+one (including one Canvas stored under the quiz, discussion or page behind an
+assignment) and does not submit anything. For course content Canvas also syncs
+module progress: ticking satisfies the item's "Mark as done" module requirement and
+unticking reverses it, which can re-lock later modules. So course content also
+needs `mark_module_item_done` enabled in `STUDENT_WRITE_TOOLS` and allowed by the
+course policy. `delete_personal_calendar_event` refuses course
+and group events and appointment reservations (deleting a reservation would
+cancel a booking with an instructor).
 
 ---
 
