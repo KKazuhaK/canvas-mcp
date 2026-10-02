@@ -50,7 +50,7 @@ Personal academic tracking uses Canvas "self" endpoints. Shared course-content t
 | `calculate_grade_scenarios` | Recompute your grade the way Canvas does (compared with Canvas's own score), try what-if scores, and get the percentage needed on remaining work for a target % or letter |
 | `get_my_peer_reviews_todo` | Pending peer reviews to complete |
 | `get_my_submission` | Your submission for one assignment, with attempts used |
-| `find_message_recipients` | Find instructors, TAs or classmates you can message in a course, with their user IDs (non-staff names pseudonymised while anonymization is on) |
+| `find_message_recipients` | Find instructors, TAs or classmates you can message in a course, with their user IDs (non-staff names pseudonymised while anonymization is on, and a name search then returns staff only) |
 | `list_calendar_events` | Calendar across courses, personal and group calendars: events and due dates |
 | `get_calendar_event` | One calendar event in full |
 | `list_planner_notes` | Your own planner notes (personal to-dos) in a date window |

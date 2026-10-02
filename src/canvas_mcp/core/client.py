@@ -237,8 +237,9 @@ def _endpoint_anonymization_mode(endpoint: str) -> str:
       book, used to find who to message, so names must survive for staff.
       Unlike the inbox it lists everyone in a course, so the one tool that
       reads it (tools/student_messaging.py) pseudonymises every non-staff
-      entry itself while anonymization is on; otherwise it would map the
-      user IDs the FULL tier keeps back to real names.
+      entry itself while anonymization is on, and drops them from a name
+      search (Canvas matches ``search`` against real names); otherwise it
+      would map the user IDs the FULL tier keeps back to real names.
     - /pages, /courses/{id}/pages/{slug}, /courses/{id}/front_page ->
       ANONYMIZE_IDENTITY. Previously ungated: `last_edited_by` leaked a display
       name and avatar URL. front_page returns the same block but carries no

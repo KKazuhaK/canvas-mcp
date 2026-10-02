@@ -78,6 +78,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the uploader-supplied content type.
 - `uv.lock` now pins the `documents` extra, and the security workflow fails on
   a stale lock (`uv lock --check`) so new dependencies always reach pip-audit.
+- `find_message_recipients` no longer maps a real name to a pseudonym. Canvas
+  matches `search` against real names, so returning a classmate's
+  `Student_<hash>` and user ID for a name search revealed whose pseudonym it
+  was. While `ENABLE_DATA_ANONYMIZATION` is on, a search now returns course
+  staff (teachers, TAs, designers) only and says so, without saying whether
+  anyone else matched; listing without `search` still shows everyone under
+  their pseudonyms. `send_message` already accepted numeric user IDs only and
+  looks them up by ID, never by name.
 
 ## [1.13.0] — 2026-09-27
 
