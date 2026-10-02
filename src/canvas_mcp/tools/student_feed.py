@@ -394,7 +394,8 @@ async def _format_stream_item(
     lines = [f"• {where} | {item_type} | {when}{unread}"]
 
     if item_type == "Submission":
-        assignment = item.get("assignment") if isinstance(item.get("assignment"), dict) else {}
+        raw_assignment = item.get("assignment")
+        assignment: dict[str, Any] = raw_assignment if isinstance(raw_assignment, dict) else {}
         name = assignment.get("name") or item.get("title") or "Unnamed assignment"
         lines.append(f"  Assignment: {fence_untrusted_inline(name, 'assignment name')}")
         score, grade = item.get("score"), item.get("grade")
@@ -509,7 +510,8 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
         aliases: dict[str, str] = {}
         course_ids: list[str] = []
         for course in courses:
-            cid = coerce_canvas_id(course.get("id")) if course.get("id") is not None else None
+            raw_id = course.get("id")
+            cid = coerce_canvas_id(raw_id) if raw_id is not None else None
             if cid is None or cid in codes:
                 continue
             codes[cid] = course.get("course_code") or course.get("name") or f"course {cid}"
@@ -697,7 +699,8 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
         codes: dict[str, str] = {}
         if isinstance(courses, list):
             for course in courses:
-                cid = coerce_canvas_id(course.get("id")) if course.get("id") is not None else None
+                raw_id = course.get("id")
+                cid = coerce_canvas_id(raw_id) if raw_id is not None else None
                 if cid is not None:
                     codes[cid] = course.get("course_code") or course.get("name") or f"course {cid}"
 
