@@ -18,8 +18,9 @@ tab is hidden, a file linked from a module is still readable.
 """
 
 import asyncio
+import functools
 import re
-import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -32,6 +33,7 @@ from ..core.course_files import (
     fetch_module_linked_file,
     is_access_denied,
 )
+from ..core.credentials import is_http_request_active
 from ..core.document_text import (
     KIND_DOCX,
     KIND_LABELS,
@@ -60,10 +62,15 @@ TEXT_READ_MAX_SIZE_MB = 50.0
 TEXT_RESULT_MAX_BYTES = MAX_WIRE_MESSAGE_BYTES - 1024 * 1024
 
 #: Parses running at once. Office parsing holds a whole document's XML tree in
-#: memory and cannot be cancelled once started, so concurrent calls queue here
-#: (in the worker thread, not on the event loop) instead of stacking up.
+#: memory and cannot be cancelled once started, so concurrent calls queue
+#: instead of stacking up. They queue as work items in this pool of their own,
+#: not as threads: a waiting parse holds no thread, so the event loop's default
+#: executor (DNS lookups, ``asyncio.to_thread``) stays free however many reads
+#: arrive at once. A parse whose caller is cancelled before it starts is dropped.
 MAX_CONCURRENT_EXTRACTIONS = 2
-EXTRACTION_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_EXTRACTIONS)
+EXTRACTION_EXECUTOR = ThreadPoolExecutor(
+    max_workers=MAX_CONCURRENT_EXTRACTIONS, thread_name_prefix="canvas-mcp-extract"
+)
 
 #: How ``read_course_file_text`` tells the model to see pages that have no
 #: text (scans, figures, handwriting).
@@ -89,18 +96,6 @@ def shown_content_type(content_type: str | None) -> str:
     return "unrecognized"
 
 
-def _extract_bounded(
-    data: bytes,
-    kind: str,
-    filename: str,
-    start: int | None,
-    end: int | None,
-) -> ExtractedDocument:
-    """``extract_text`` of the whole range, holding an extraction slot."""
-    with EXTRACTION_SLOTS:
-        return extract_text(data, kind, filename=filename, start=start, end=end)
-
-
 async def extract_document(
     data: bytes,
     kind: str,
@@ -110,11 +105,16 @@ async def extract_document(
 ) -> ExtractedDocument:
     """All text of ``data`` (or of the page range), parsed in a worker thread.
 
-    Raises ``DocumentTextError`` (including ``MissingDependencyError``, whose
-    message carries the documents-extra install hint).
+    Runs on ``EXTRACTION_EXECUTOR``, never the default executor. Raises
+    ``DocumentTextError`` (including ``MissingDependencyError``, whose message
+    carries the documents-extra install hint).
     """
-    return await asyncio.to_thread(
-        _extract_bounded, data, kind, filename, start_page, end_page
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        EXTRACTION_EXECUTOR,
+        functools.partial(
+            extract_text, data, kind, filename=filename, start=start_page, end=end_page
+        ),
     )
 
 
@@ -223,10 +223,10 @@ def oversized_text_error(
             f"start_page={first}, end_page={last} ({doc.total_units} {doc.unit}s in all)."
         )
     else:
-        error += (
-            " This format has no pages to select. On a local server, "
-            "download_course_file saves the file to disk."
-        )
+        error += " This format has no pages to select."
+        # download_course_file refuses over HTTP, so name it only where it works.
+        if not is_http_request_active():
+            error += " download_course_file saves the file to disk on this local server."
     return error
 
 

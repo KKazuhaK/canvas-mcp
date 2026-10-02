@@ -3408,7 +3408,7 @@
       "examples": [
         "Download the syllabus PDF from the course files"
       ],
-      "notes": "Use list_course_files or list_module_items to find file IDs. Local (stdio) servers only: the file is written to the server's filesystem, so the tool refuses over HTTP transport and directs callers to read_course_file. Never overwrites an existing destination."
+      "notes": "Use list_course_files or list_module_items to find file IDs. Local (stdio) servers only: the file is written to the server's filesystem, so the tool refuses over HTTP transport and directs callers to read_course_file (the file as it is) and read_course_file_text (plain text). Never overwrites an existing destination. Capped at 1 GB by default (DOWNLOAD_FILE_MAX_SIZE_MB raises or lowers it; the refusal names the setting); the Canvas token goes only to the Canvas origin, storage redirects get no credentials and must be HTTPS, and once a hop leaves Canvas no later hop carries the token, even one back to Canvas."
     },
     {
       "name": "get_conversation_details",
@@ -3741,7 +3741,7 @@
           "description": "\"asc\" or \"desc\" (default: desc)"
         }
       ],
-      "returns": "List of course files with IDs, names, sizes, and folders. When Canvas refuses the course file list (Files tab hidden), lists files linked from modules instead and says so",
+      "returns": "List of course files with IDs, names, sizes, and folders. When Canvas refuses the course file list (Files tab hidden), lists files linked from modules instead and says so, naming read_course_file (the file as it is) and read_course_file_text (plain text) to read them by ID",
       "examples": [
         "List the PDF files in this course"
       ]

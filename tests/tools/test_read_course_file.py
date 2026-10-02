@@ -706,6 +706,114 @@ class TestTextFallbackBudget:
         assert "start_page=1, end_page=" in result and "(40 pages in all)" in result
 
 
+class TestLimitGuidance:
+    """A size refusal names a way forward that works on this server.
+
+    download_course_file refuses over HTTP, so it is named only on a local
+    server; when the caller's own max_size_mb is the limit, the refusal says
+    which value would read the file.
+    """
+
+    @pytest.fixture
+    def hosted(self):
+        with patch("canvas_mcp.tools.files.is_http_request_active", return_value=True):
+            yield
+
+    @pytest.fixture
+    def text_client(self):
+        with patch("canvas_mcp.tools.files.client_mishandles_file_blobs", return_value=True):
+            yield
+
+    @pytest.mark.asyncio
+    async def test_hosted_text_read_over_the_callers_cap_names_what_works(
+        self, api, hosted, text_client
+    ):
+        # claude.ai over HTTP, default max_size_mb=25, a 30 MB lecture PDF:
+        # 50 MB is the text path's limit, so a larger max_size_mb reads it.
+        api.request.return_value = file_info(size=30 * 1024 * 1024)
+
+        result = await get_tool_function()("60366", 12345)
+
+        assert result.startswith("Error: File") and "exceeds the 25 MB limit" in result
+        assert "max_size_mb=50" in result
+        assert "read_course_file_text" in result
+        assert "download_course_file" not in result
+        api.download.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_hosted_streaming_overrun_does_not_name_download_course_file(
+        self, api, hosted, text_client
+    ):
+        api.request.return_value = file_info(size=0)
+        api.download.return_value = {"error": "File exceeds the size limit during download"}
+
+        result = await get_tool_function()("60366", 12345)
+
+        assert "exceeds the 25 MB limit during download" in result
+        assert "max_size_mb=50" in result
+        assert "download_course_file" not in result
+
+    @pytest.mark.asyncio
+    async def test_local_text_read_also_names_download_course_file(self, api, text_client):
+        with patch("canvas_mcp.tools.files.is_http_request_active", return_value=False):
+            api.request.return_value = file_info(size=30 * 1024 * 1024)
+            result = await get_tool_function()("60366", 12345)
+
+        assert "max_size_mb=50" in result
+        assert "download_course_file" in result
+
+    @pytest.mark.asyncio
+    async def test_server_cap_is_named_when_it_is_the_limit(self, api, hosted, text_client):
+        api.config.read_file_max_size_mb = 20.0
+        api.request.return_value = file_info(size=30 * 1024 * 1024)
+
+        result = await get_tool_function()("60366", 12345, max_size_mb=100.0)
+
+        assert "exceeds the 20 MB limit" in result
+        assert "READ_FILE_MAX_SIZE_MB" in result
+        # No larger max_size_mb helps, and the text tool has the same cap.
+        assert "pass max_size_mb" not in result
+        assert "read_course_file_text" not in result
+        assert "download_course_file" not in result
+
+    @pytest.mark.asyncio
+    async def test_hosted_file_read_over_the_wire_limit_without_text(self, api, hosted):
+        api.request.return_value = file_info(
+            display_name="data.zip", size=20 * 1024 * 1024,
+            **{"content-type": "application/zip"},
+        )
+
+        result = await get_tool_function()("60366", 12345)
+
+        assert "exceeds the 11.5 MB limit" in result
+        assert "download_course_file" not in result
+        assert "read_course_file_text" not in result
+
+    @pytest.mark.asyncio
+    async def test_file_read_under_a_low_cap_names_the_value_that_fits(self, api, hosted):
+        api.request.return_value = file_info(size=8 * 1024 * 1024)
+
+        result = await get_tool_function()("60366", 12345, max_size_mb=5.0)
+
+        assert "exceeds the 5 MB limit" in result
+        assert "max_size_mb=11.5" in result
+        assert "read_course_file_text" in result
+        assert "download_course_file" not in result
+
+    @pytest.mark.parametrize(("http", "named"), [(True, False), (False, True)])
+    def test_unpaged_text_too_big_names_download_only_locally(self, http, named):
+        from canvas_mcp.core.document_text import ExtractedDocument, TextSection
+        from canvas_mcp.tools import file_text
+
+        doc = ExtractedDocument("text", [TextSection(None, "x")])
+        with patch.object(file_text, "TEXT_RESULT_MAX_BYTES", 10), \
+             patch.object(file_text, "is_http_request_active", return_value=http):
+            error = file_text.oversized_text_error("y" * 100, shown_name="notes", doc=doc)
+
+        assert error is not None and "no pages to select" in error
+        assert ("download_course_file" in error) is named
+
+
 class TestClientDetectionOverHttp:
     """The hosted server runs stateless HTTP: no session keeps clientInfo."""
 
@@ -854,24 +962,53 @@ class TestPageCount:
     @pytest.mark.asyncio
     async def test_busy_extraction_slots_do_not_block_the_file(self, api, make_pdf):
         from canvas_mcp.tools.file_text import (
-            EXTRACTION_SLOTS,
+            EXTRACTION_EXECUTOR,
             MAX_CONCURRENT_EXTRACTIONS,
         )
 
         pdf = make_pdf(["a", "b", "c"])
         api.request.return_value = file_info(size=len(pdf))
         api.download.return_value = pdf
-        for _ in range(MAX_CONCURRENT_EXTRACTIONS):
-            EXTRACTION_SLOTS.acquire()
+        # Occupy every extraction worker, plus a queued parse behind them.
+        release = threading.Event()
+        busy = [
+            EXTRACTION_EXECUTOR.submit(release.wait, 10)
+            for _ in range(MAX_CONCURRENT_EXTRACTIONS + 1)
+        ]
         try:
             text, _ = _split(
                 await asyncio.wait_for(get_tool_function()("60366", 12345), timeout=10)
             )
         finally:
-            for _ in range(MAX_CONCURRENT_EXTRACTIONS):
-                EXTRACTION_SLOTS.release()
+            release.set()
+            for job in busy:
+                job.result(timeout=10)
 
         assert "Pages: 3" in text
+
+    @pytest.mark.asyncio
+    async def test_the_count_runs_in_its_own_pool_not_the_default_executor(
+        self, api, make_pdf, monkeypatch
+    ):
+        from canvas_mcp.tools import files
+
+        threads: list[str] = []
+        real_count = files._count_pdf_pages
+
+        def recording_count(data):
+            threads.append(threading.current_thread().name)
+            return real_count(data)
+
+        monkeypatch.setattr(files, "_count_pdf_pages", recording_count)
+        pdf = make_pdf(["a", "b"])
+        api.request.return_value = file_info(size=len(pdf))
+        api.download.return_value = pdf
+
+        text, _ = _split(await get_tool_function()("60366", 12345))
+
+        assert "Pages: 2" in text
+        assert len(threads) == 1
+        assert threads[0].startswith("canvas-mcp-page-count")
 
     @pytest.mark.asyncio
     async def test_a_count_already_running_is_skipped_not_awaited(self, api, make_pdf):
@@ -908,10 +1045,19 @@ class TestPageCount:
         api.download.return_value = pdf
         try:
             text, _ = _split(await get_tool_function()("60366", 12345))
+            # The abandoned count still holds the slot while it runs, so a
+            # second count meanwhile is skipped rather than queued behind it.
+            assert not files._PAGE_COUNT_SLOT.acquire(blocking=False)
         finally:
             release.set()
 
         assert "Pages:" not in text
+        # Once the abandoned count ends, the slot is free again (no leak).
+        deadline = asyncio.get_running_loop().time() + 5
+        while not files._PAGE_COUNT_SLOT.acquire(blocking=False):
+            assert asyncio.get_running_loop().time() < deadline, "page-count slot leaked"
+            await asyncio.sleep(0.01)
+        files._PAGE_COUNT_SLOT.release()
 
 
 class TestToolPointers:
@@ -951,6 +1097,11 @@ class TestToolPointers:
             file_text.format_document_text,
         ):
             text += inspect.getsource(helper)
+        for helper in (files._own_limit_reason, files._download_limit_note):
+            text += inspect.getsource(helper)
         text += files._FALLBACK_LEAD_NOTE + file_text.SEE_PAGES_WITH_READ_COURSE_FILE
+        # download_course_file's hosted-server refusal is a module constant,
+        # which getsource of the tool only shows by name.
+        text += files._READ_TOOLS_INSTEAD
         named = set(re.findall(r"[a-z][a-z0-9_]+", text)) & all_names
         assert named - set(tools) == set()

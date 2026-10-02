@@ -50,6 +50,27 @@ def test_reset_config_clears_invalid_env_caches(monkeypatch):
 
 @pytest.mark.parametrize(
     "raw,expected",
+    [(None, 1024.0), ("2048", 2048.0), ("0.5", 0.5), ("0", 1024.0), ("lots", 1024.0)],
+)
+def test_download_file_max_size_mb(monkeypatch, raw, expected):
+    """DOWNLOAD_FILE_MAX_SIZE_MB sets download_course_file's cap (default 1 GB).
+
+    A non-positive or unparseable value falls back to the default and is
+    recorded for the startup warning.
+    """
+    if raw is None:
+        monkeypatch.delenv("DOWNLOAD_FILE_MAX_SIZE_MB", raising=False)
+    else:
+        monkeypatch.setenv("DOWNLOAD_FILE_MAX_SIZE_MB", raw)
+    config_module.reset_config()
+
+    assert config_module.get_config().download_file_max_size_mb == expected
+    invalid = raw is not None and expected == 1024.0
+    assert ("DOWNLOAD_FILE_MAX_SIZE_MB" in config_module._INVALID_FLOAT_ENV_VARS) is invalid
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
     [
         # Base host (the common footgun) gets the suffix appended.
         ("https://canvas.school.edu", "https://canvas.school.edu/api/v1"),

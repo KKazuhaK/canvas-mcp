@@ -260,6 +260,8 @@ class Config:
         self.cache_ttl = _int_env("CACHE_TTL", 300)
         self.max_concurrent_requests = _int_env("MAX_CONCURRENT_REQUESTS", 10)
         self.read_file_max_size_mb = _float_env("READ_FILE_MAX_SIZE_MB", 100.0)
+        # Largest file download_course_file writes to disk (local servers only).
+        self.download_file_max_size_mb = _float_env("DOWNLOAD_FILE_MAX_SIZE_MB", 1024.0)
 
         # Development configuration
         self.log_level = os.getenv("LOG_LEVEL", "INFO").upper()

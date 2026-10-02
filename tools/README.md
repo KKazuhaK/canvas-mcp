@@ -2306,7 +2306,7 @@ List files in a course with optional search.
 "List the PDF files in this course"
 ```
 
-**Returns:** Course files with IDs, names, sizes, and folders. If the Files tab is hidden, files linked from modules (see below).
+**Returns:** Course files with IDs, names, sizes, and folders. If the Files tab is hidden, files linked from modules (see below), with a note that `read_course_file` (the file as it is) and `read_course_file_text` (its plain text) read them by ID.
 
 ---
 
@@ -2315,9 +2315,20 @@ Download a course file to the local filesystem of the machine running the MCP se
 
 > **Local (stdio) servers only.** The write lands on the *server's* filesystem,
 > which a remote caller cannot read anyway, so the tool refuses over HTTP and
-> points at `read_course_file` instead. It also never overwrites: the
-> destination is created exclusively, so a Canvas file named e.g. `.zshrc`
-> cannot clobber a real file in the chosen directory.
+> points at `read_course_file` (the file as it is) and `read_course_file_text`
+> (its plain text) instead. It also never overwrites: the destination is
+> created exclusively, so a Canvas file named e.g. `.zshrc` cannot clobber a
+> real file in the chosen directory.
+
+The download streams to disk through the same downloader as the read tools:
+each redirect hop is followed by hand, the Canvas token goes only to the
+Canvas origin, a storage hop gets no credentials and must be HTTPS, once a
+hop has left Canvas no later hop carries the token (not even one that points
+back at Canvas), and at most 5 redirects are followed. Files are capped at
+1 GB by default, set by `DOWNLOAD_FILE_MAX_SIZE_MB` in the server's
+environment: a larger reported size is refused before anything is written
+(the refusal names the setting), a body that grows past the cap is cut off,
+and a failed download leaves no partial file.
 
 **Parameters:**
 - `course_identifier`: Course code or ID
@@ -2330,7 +2341,8 @@ Download a course file to the local filesystem of the machine running the MCP se
 ```
 
 **Returns:** Local path of the downloaded file with size and content type. Errors
-if the destination already exists rather than overwriting it.
+if the destination already exists rather than overwriting it, or if the file is
+over the download cap (1 GB unless `DOWNLOAD_FILE_MAX_SIZE_MB` says otherwise).
 
 ---
 
