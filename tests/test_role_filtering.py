@@ -27,8 +27,6 @@ STUDENT_ONLY_TOOLS = {
     "list_calendar_events",
     "get_calendar_event",
     "list_planner_notes",
-    # Lecture-file text extraction is registered with the student profile.
-    "read_course_file_text",
     # cross-course "what's new" feed (tools/student_feed.py)
     "list_my_announcements",
     "get_my_activity_stream",
@@ -90,8 +88,11 @@ SHARED_TOOLS = {
     # shared modules
     "list_modules",
     "get_course_structure",
-    # shared files
+    # shared files (read_course_file_text comes with read_course_file, which
+    # points to it)
     "list_course_files",
+    "read_course_file",
+    "read_course_file_text",
     "download_course_file",
     # shared messaging
     "list_conversations",

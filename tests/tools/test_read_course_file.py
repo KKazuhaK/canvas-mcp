@@ -20,7 +20,10 @@ are all real. The end-to-end test runs the real request client and real
 download path over an ``httpx.MockTransport``.
 """
 
+import asyncio
 import base64
+import inspect
+import threading
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -29,16 +32,22 @@ import httpx
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.tools import ToolResult
+from fastmcp.utilities.tests import asgi_server
 from mcp.types import (
     BlobResourceContents,
+    CallToolResult,
     EmbeddedResource,
     ImageContent,
     Implementation,
+    JSONRPCResponse,
     TextContent,
 )
 
+from canvas_mcp.core.tool_results import MAX_WIRE_MESSAGE_BYTES
 from canvas_mcp.core.untrusted_content import FENCE_TEXT_END, FENCE_TEXT_START
 from canvas_mcp.core.write_outcome import RequestFailure, WriteOutcome
+from canvas_mcp.tools.file_text import TEXT_READ_MAX_SIZE_MB
+from canvas_mcp.tools.files import FILE_RESULT_MAX_BYTES
 
 PDF_TYPE = "application/pdf"
 PPTX_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -126,9 +135,10 @@ class TestFileResult:
         result = await get_tool_function()("CS_161_F26", 12345)
 
         # Canvas contract: metadata from the course-scoped Get File route,
-        # bytes through the safe downloader with the 25 MB default cap.
+        # bytes through the safe downloader, capped at what one MCP result
+        # can carry (the 25 MB default is above it).
         api.request.assert_awaited_once_with("get", "/courses/60366/files/12345")
-        api.download.assert_awaited_once_with(URL, 25 * 1024 * 1024)
+        api.download.assert_awaited_once_with(URL, FILE_RESULT_MAX_BYTES)
 
         text, blocks = _split(result)
         assert len(blocks) == 1
@@ -185,7 +195,7 @@ class TestFileResult:
         api.request.return_value = file_info(
             display_name="photo.png", **{"content-type": "image/png"}
         )
-        api.download.return_value = b"not really a png"
+        api.download.return_value = b"\x00\x01not really a png"
 
         _, blocks = _split(await get_tool_function()("60366", 12345))
 
@@ -261,12 +271,12 @@ class TestFileResult:
 class TestSizeCapBeforeDownload:
     @pytest.mark.asyncio
     async def test_reported_size_over_cap_is_refused_without_downloading(self, api):
-        api.request.return_value = file_info(size=50 * 1024 * 1024)
+        api.request.return_value = file_info(size=8 * 1024 * 1024)
 
-        result = await get_tool_function()("60366", 12345, max_size_mb=25.0)
+        result = await get_tool_function()("60366", 12345, max_size_mb=5.0)
 
         assert result.startswith("Error")
-        assert "exceeds the 25 MB limit" in result
+        assert "exceeds the 5 MB limit" in result
         assert "Nothing was downloaded" in result
         assert "download_course_file" in result
         api.download.assert_not_awaited()
@@ -540,3 +550,407 @@ class TestEndToEnd:
             # The storage host never receives the Canvas token.
             ("GET", "https://inst-fs.example.net/files/777/blob", None),
         ]
+
+
+# --- Delivery limits, client detection over HTTP, and the declared type ------
+
+
+def _wire_message_bytes(result: CallToolResult) -> int:
+    """Bytes of the JSON-RPC response that carries ``result``, as the server
+    writes it (``model_dump_json(by_alias=True, exclude_unset=True)``)."""
+    envelope = JSONRPCResponse(
+        jsonrpc="2.0",
+        id=1,
+        result=result.model_dump(by_alias=True, exclude_none=True, mode="json"),
+    )
+    return len(envelope.model_dump_json(by_alias=True, exclude_unset=True).encode())
+
+
+async def _call(client: Client, **arguments) -> CallToolResult:
+    return await client.call_tool_mcp(
+        "read_course_file", {"course_identifier": "60366", "file_id": 12345, **arguments}
+    )
+
+
+class TestWireLimit:
+    """Claude Code drops the connection on a JSON-RPC message over 16 MiB."""
+
+    @pytest.mark.asyncio
+    async def test_a_file_at_the_limit_fits_in_one_message(self, api):
+        # The longest file name Canvas allows, to leave no slack in the header.
+        data = b"%PDF-1.7\n" + b"\xff" * (FILE_RESULT_MAX_BYTES - 9)
+        api.request.return_value = file_info(display_name="L" * 255 + ".pdf", size=len(data))
+        api.download.return_value = data
+
+        async with Client(_server()) as client:
+            result = await _call(client, max_size_mb=100)
+
+        assert result.is_error is False
+        assert base64.b64decode(result.content[1].resource.blob) == data
+        size = _wire_message_bytes(result)
+        # Close to the limit (so the test means something), but under it.
+        assert MAX_WIRE_MESSAGE_BYTES - 1024 * 1024 < size < MAX_WIRE_MESSAGE_BYTES
+
+    @pytest.mark.asyncio
+    async def test_a_file_over_the_limit_is_refused_before_download(self, api):
+        api.request.return_value = file_info(size=FILE_RESULT_MAX_BYTES + 1)
+
+        async with Client(_server()) as client:
+            result = await _call(client, max_size_mb=100)
+
+        assert result.is_error is True
+        text = result.content[0].text
+        assert "exceeds the 11.5 MB limit" in text
+        assert "Nothing was downloaded" in text
+        assert "disconnect on a result over 16 MB" in text
+        # A PDF has text, so the way forward is the text tool.
+        assert "read_course_file_text" in text
+        api.download.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_large_lecture_pdf_with_the_default_cap_is_refused(self, api):
+        # 13-25 MB image-heavy decks were the reported failure: under the
+        # 25 MB default, over what one message can carry.
+        api.request.return_value = file_info(size=13 * 1024 * 1024)
+
+        result = await get_tool_function()("60366", 12345)
+
+        assert result.startswith("Error: File") and "11.5 MB" in result
+        api.download.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_download_is_capped_at_the_wire_limit(self, api):
+        api.request.return_value = file_info(size=0)
+        api.download.return_value = {"error": "File exceeds the size limit during download"}
+
+        result = await get_tool_function()("60366", 12345, max_size_mb=100.0)
+
+        assert api.download.await_args.args[1] == FILE_RESULT_MAX_BYTES
+        assert "exceeds the 11.5 MB limit during download" in result
+
+    @pytest.mark.asyncio
+    async def test_a_type_without_text_points_at_download_course_file(self, api):
+        api.request.return_value = file_info(
+            display_name="data.zip", size=20 * 1024 * 1024,
+            **{"content-type": "application/zip"},
+        )
+
+        result = await get_tool_function()("60366", 12345)
+
+        assert "download_course_file" in result
+        assert "read_course_file_text" not in result
+
+    @pytest.mark.asyncio
+    async def test_a_lower_requested_cap_still_wins(self, api):
+        api.request.return_value = file_info(size=0)
+        api.download.return_value = b"%PDF-1.4"
+
+        await get_tool_function()("60366", 12345, max_size_mb=2.0)
+
+        assert api.download.await_args.args[1] == 2 * 1024 * 1024
+
+
+class TestTextFallbackBudget:
+    """Clients that get text get read_course_file_text's size budget."""
+
+    @pytest.fixture
+    def text_client(self):
+        with patch("canvas_mcp.tools.files.client_mishandles_file_blobs", return_value=True):
+            yield
+
+    @pytest.mark.asyncio
+    async def test_download_is_capped_at_the_text_extraction_limit(self, api, text_client):
+        api.request.return_value = file_info(size=0)
+        api.download.return_value = b"%PDF-1.4"
+
+        await get_tool_function()("60366", 12345, max_size_mb=100.0)
+
+        assert api.download.await_args.args[1] == int(TEXT_READ_MAX_SIZE_MB * 1024 * 1024)
+
+    @pytest.mark.asyncio
+    async def test_reported_size_over_the_text_limit_is_refused(self, api, text_client):
+        api.request.return_value = file_info(size=60 * 1024 * 1024)
+
+        result = await get_tool_function()("60366", 12345, max_size_mb=100.0)
+
+        assert "exceeds the 50 MB limit" in result
+        assert "limit for text extraction" in result
+        api.download.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_image_too_big_for_one_message_is_refused(self, api, text_client):
+        api.request.return_value = file_info(
+            display_name="poster.png", size=0, **{"content-type": "image/png"}
+        )
+        api.download.return_value = PNG_BYTES + b"\x00" * FILE_RESULT_MAX_BYTES
+
+        result = await get_tool_function()("60366", 12345, max_size_mb=100.0)
+
+        assert isinstance(result, str)
+        assert result.startswith("Error: File") and "11.5 MB" in result
+
+    @pytest.mark.asyncio
+    async def test_text_too_big_for_one_message_is_refused_with_a_page_range(
+        self, api, text_client, make_pdf
+    ):
+        pdf = make_pdf([f"page {n} " + "x" * 400 for n in range(1, 41)])
+        api.request.return_value = file_info(size=len(pdf))
+        api.download.return_value = pdf
+
+        with patch("canvas_mcp.tools.file_text.TEXT_RESULT_MAX_BYTES", 4000):
+            result = await get_tool_function()("60366", 12345)
+
+        assert result.startswith("Error: the text of")
+        assert "Nothing was cut" in result
+        assert "call read_course_file_text with start_page and end_page" in result
+        assert "start_page=1, end_page=" in result and "(40 pages in all)" in result
+
+
+class TestClientDetectionOverHttp:
+    """The hosted server runs stateless HTTP: no session keeps clientInfo."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("client_kwargs", "expect_file"), [
+        # claude.ai connectors on a handshake-era protocol: unnamed per request.
+        ({"mode": "legacy", "client_info": Implementation(name="claude-ai", version="0.1.0")}, False),
+        ({"mode": "legacy"}, False),
+        # Claude Code's HTTP transport identifies itself in User-Agent.
+        ({"mode": "legacy", "headers": {"User-Agent": "claude-code/2.1.286 (cli)"}}, True),
+        # Newer protocol: clientInfo travels with every request.
+        ({"client_info": Implementation(name="claude-ai", version="0.1.0")}, False),
+        ({"client_info": Implementation(name="claude-code", version="2.1.286")}, True),
+    ])
+    async def test_stateless_http_delivery(self, api, make_pdf, client_kwargs, expect_file):
+        pdf = make_pdf(["Dijkstra"])
+        api.request.return_value = file_info(size=len(pdf))
+        api.download.return_value = pdf
+
+        async with asgi_server(_server(), stateless_http=True) as server:
+            async with server.client(**client_kwargs) as client:
+                result = await _call(client)
+
+        assert result.is_error is False
+        kinds = [type(block) for block in result.content]
+        if expect_file:
+            assert kinds == [TextContent, EmbeddedResource]
+            assert base64.b64decode(result.content[1].resource.blob) == pdf
+        else:
+            assert kinds == [TextContent]
+            assert "cannot receive files from tools" in result.content[0].text
+            assert "Dijkstra" in result.content[0].text
+
+    @pytest.mark.asyncio
+    async def test_a_named_client_over_stateful_http_is_judged_by_name(self, api, make_pdf):
+        pdf = make_pdf(["Prim"])
+        api.request.return_value = file_info(size=len(pdf))
+        api.download.return_value = pdf
+
+        async with asgi_server(_server(), stateless_http=False) as server:
+            async with server.client(
+                mode="legacy", client_info=Implementation(name="some-new-client", version="1")
+            ) as client:
+                result = await _call(client)
+
+        assert [type(block) for block in result.content] == [TextContent, EmbeddedResource]
+
+
+class TestDeclaredType:
+    """The blob's mimeType decides the extension Claude Code saves it under
+    (anything outside its table becomes .bin, which Read refuses)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("ctype", "name", "body", "true_type"), [
+        ("text/x-python", "hw1.py", b"def main():\n    pass\n", "text/x-python"),
+        ("application/octet-stream", "Main.java", b"class Main {}\n", None),
+        ("application/x-ipynb+json", "lab.ipynb", b'{"cells": []}', "application/x-ipynb+json"),
+        ("application/xml", "pom.xml", b"<project/>", "application/xml"),
+        ("text/tab-separated-values", "grades.tsv", b"a\tb\n", "text/tab-separated-values"),
+        ("application/x-tex", "hw.tex", b"\\section{A}", "application/x-tex"),
+    ])
+    async def test_text_and_code_are_sent_as_text_read_can_open(
+        self, api, ctype, name, body, true_type
+    ):
+        api.request.return_value = file_info(display_name=name, **{"content-type": ctype})
+        api.download.return_value = body
+
+        text, blocks = _split(await get_tool_function()("60366", 12345))
+
+        resource = blocks[0].resource
+        assert resource.mime_type == "text/plain"
+        assert resource.uri == "canvas://files/12345.txt"
+        assert base64.b64decode(resource.blob) == body
+        if true_type:
+            assert f"Type: {true_type}" in text
+        assert "Sent as: text/plain" in text
+        assert "open the saved path with Read" in text
+        assert "read_course_file_text returns the same text" in text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("ctype", "name", "body"), [
+        ("application/x-msdownload", "setup.exe", b"MZ\x90\x00\x03\x00"),
+        ("application/hta", "page.hta", b"\x00\x01binary"),
+        ("application/octet-stream", "a.exe", b"MZ\x90\x00\x03\x00"),
+        ("application/x-sh", "run.sh", b"\x00\x01\x02"),
+    ])
+    async def test_executable_and_unknown_types_become_octet_stream(
+        self, api, ctype, name, body
+    ):
+        api.request.return_value = file_info(display_name=name, **{"content-type": ctype})
+        api.download.return_value = body
+
+        text, blocks = _split(await get_tool_function()("60366", 12345))
+
+        assert blocks[0].resource.mime_type == "application/octet-stream"
+        assert blocks[0].resource.uri == "canvas://files/12345"
+        assert "Read tool cannot open this type" in text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("ctype", "body"), [
+        ("text/javascript", b"alert(1)"),
+        ("application/x-sh", b"#!/bin/sh\nrm -rf /\n"),
+    ])
+    async def test_script_types_are_sent_as_plain_text(self, api, ctype, body):
+        api.request.return_value = file_info(display_name="x", **{"content-type": ctype})
+        api.download.return_value = body
+
+        _, blocks = _split(await get_tool_function()("60366", 12345))
+
+        assert blocks[0].resource.mime_type == "text/plain"
+        assert blocks[0].resource.uri == "canvas://files/12345.txt"
+
+    @pytest.mark.asyncio
+    async def test_uri_extension_comes_only_from_the_fixed_table(self, api):
+        # mimetypes would say .xsl on some Windows machines.
+        api.request.return_value = file_info(
+            display_name="a", **{"content-type": "application/xml"}
+        )
+        api.download.return_value = b"<a/>"
+
+        _, blocks = _split(await get_tool_function()("60366", 12345))
+
+        assert blocks[0].resource.uri == "canvas://files/12345.txt"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("ctype", "label", "text_tool"), [
+        (PPTX_TYPE, "PPTX", True),
+        ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "DOCX", True),
+        ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "XLSX", False),
+        ("application/msword", "DOC", False),
+    ])
+    async def test_office_files_say_read_cannot_open_them(self, api, ctype, label, text_tool):
+        api.request.return_value = file_info(display_name="f", **{"content-type": ctype})
+        api.download.return_value = b"PK\x03\x04office"
+
+        text, blocks = _split(await get_tool_function()("60366", 12345))
+
+        assert blocks[0].resource.mime_type == ctype
+        assert f"Read tool cannot open {label} files, so do not try" in text
+        assert ("read_course_file_text returns its text" in text) is text_tool
+
+
+class TestPageCount:
+    """The page count is optional and never blocks text extraction."""
+
+    @pytest.mark.asyncio
+    async def test_busy_extraction_slots_do_not_block_the_file(self, api, make_pdf):
+        from canvas_mcp.tools.file_text import (
+            EXTRACTION_SLOTS,
+            MAX_CONCURRENT_EXTRACTIONS,
+        )
+
+        pdf = make_pdf(["a", "b", "c"])
+        api.request.return_value = file_info(size=len(pdf))
+        api.download.return_value = pdf
+        for _ in range(MAX_CONCURRENT_EXTRACTIONS):
+            EXTRACTION_SLOTS.acquire()
+        try:
+            text, _ = _split(
+                await asyncio.wait_for(get_tool_function()("60366", 12345), timeout=10)
+            )
+        finally:
+            for _ in range(MAX_CONCURRENT_EXTRACTIONS):
+                EXTRACTION_SLOTS.release()
+
+        assert "Pages: 3" in text
+
+    @pytest.mark.asyncio
+    async def test_a_count_already_running_is_skipped_not_awaited(self, api, make_pdf):
+        from canvas_mcp.tools import files
+
+        pdf = make_pdf(["a"])
+        api.request.return_value = file_info(size=len(pdf))
+        api.download.return_value = pdf
+        files._PAGE_COUNT_SLOT.acquire()
+        try:
+            text, blocks = _split(
+                await asyncio.wait_for(get_tool_function()("60366", 12345), timeout=10)
+            )
+        finally:
+            files._PAGE_COUNT_SLOT.release()
+
+        assert "Pages:" not in text
+        assert base64.b64decode(blocks[0].resource.blob) == pdf
+
+    @pytest.mark.asyncio
+    async def test_a_slow_count_is_dropped_after_the_timeout(self, api, make_pdf, monkeypatch):
+        from canvas_mcp.tools import files
+
+        release = threading.Event()
+
+        def slow_count(_data):
+            release.wait(5)
+            return 99
+
+        monkeypatch.setattr(files, "_count_pdf_pages", slow_count)
+        monkeypatch.setattr(files, "PAGE_COUNT_TIMEOUT_SECONDS", 0.05)
+        pdf = make_pdf(["a"])
+        api.request.return_value = file_info(size=len(pdf))
+        api.download.return_value = pdf
+        try:
+            text, _ = _split(await get_tool_function()("60366", 12345))
+        finally:
+            release.set()
+
+        assert "Pages:" not in text
+
+
+class TestToolPointers:
+    """Tool text names only tools the same profile has."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("role", ["student", "educator", "all"])
+    async def test_file_tools_only_name_tools_registered_beside_them(self, role):
+        import re
+
+        from canvas_mcp.server import register_all_tools
+        from canvas_mcp.tools import file_text, files
+
+        every = FastMCP("every")
+        register_all_tools(every, role="all")
+        all_names = {tool.name for tool in await every.list_tools(run_middleware=False)}
+
+        mcp = FastMCP(role)
+        register_all_tools(mcp, role=role)
+        tools = {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
+        assert {"read_course_file", "read_course_file_text"} <= set(tools)
+
+        # Docstrings and code (result hints, errors) of the file-reading tools.
+        file_tools = [
+            tools[name]
+            for name in ("read_course_file", "read_course_file_text",
+                         "list_course_files", "download_course_file")
+        ]
+        text = " ".join(tool.description or "" for tool in file_tools)
+        text += " ".join(inspect.getsource(tool.fn) for tool in file_tools)
+        for helper in (
+            files._file_hint,
+            files._file_result_limit_reason,
+            files._file_as_text_fallback,
+            files._list_module_linked_files,
+            file_text.oversized_text_error,
+            file_text.format_document_text,
+        ):
+            text += inspect.getsource(helper)
+        text += files._FALLBACK_LEAD_NOTE + file_text.SEE_PAGES_WITH_READ_COURSE_FILE
+        named = set(re.findall(r"[a-z][a-z0-9_]+", text)) & all_names
+        assert named - set(tools) == set()

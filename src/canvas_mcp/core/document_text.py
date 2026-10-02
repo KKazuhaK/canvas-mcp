@@ -61,7 +61,58 @@ KIND_LABELS = {
     KIND_TEXT: "text",
 }
 
-SUPPORTED_FORMATS = "PDF, PPTX, DOCX, plain text, Markdown, HTML, CSV, and JSON"
+SUPPORTED_FORMATS = (
+    "PDF, PPTX, DOCX, and text files (plain text, Markdown, HTML, CSV, JSON, XML, "
+    "LaTeX, notebooks, and source code)"
+)
+
+#: MIME types outside ``text/*`` whose content is text. Any ``+xml`` or
+#: ``+json`` type counts too (see ``is_textual_type``).
+TEXTUAL_TYPES = frozenset({
+    "application/json",
+    "application/csv",
+    "application/xml",
+    "application/javascript",
+    "application/x-javascript",
+    "application/ecmascript",
+    "application/x-ipynb+json",
+    "application/x-tex",
+    "application/x-latex",
+    "application/x-sh",
+    "application/x-python",
+    "application/x-python-code",
+    "application/x-yaml",
+    "application/yaml",
+    "application/toml",
+    "application/sql",
+    "application/x-sql",
+    "application/x-httpd-php",
+    "application/x-perl",
+    "application/x-ruby",
+})
+
+#: File extensions of text formats a course commonly hands out: notes, data,
+#: markup, and starter code. Read as plain text.
+TEXT_EXTENSIONS = frozenset({
+    ".txt", ".text", ".md", ".markdown", ".rst", ".csv", ".tsv", ".json",
+    ".ipynb", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".log",
+    ".tex", ".bib", ".sty", ".py", ".pyi", ".java", ".c", ".h", ".cpp", ".cc",
+    ".cxx", ".hpp", ".hh", ".hxx", ".cs", ".js", ".mjs", ".cjs", ".ts", ".tsx",
+    ".jsx", ".css", ".scss", ".go", ".rs", ".rb", ".php", ".pl", ".kt", ".kts",
+    ".swift", ".scala", ".r", ".m", ".jl", ".lua", ".hs", ".ml", ".rkt",
+    ".scm", ".lisp", ".clj", ".sql", ".sh", ".bash", ".zsh", ".ps1", ".bat",
+    ".asm", ".s", ".v", ".sv", ".vhd", ".vhdl", ".mk", ".cmake", ".gradle",
+    ".dockerfile", ".gitignore", ".srt", ".vtt",
+})
+
+
+def is_textual_type(mime: str) -> bool:
+    """True when the MIME type names text content (a bare, lowercase token)."""
+    return (
+        mime.startswith("text/")
+        or mime in TEXTUAL_TYPES
+        or mime.endswith(("+xml", "+json"))
+    )
 
 _CONTENT_TYPES = {
     "application/pdf": KIND_PDF,
@@ -74,18 +125,12 @@ _CONTENT_TYPES = {
 }
 
 _EXTENSIONS = {
+    **dict.fromkeys(TEXT_EXTENSIONS, KIND_TEXT),
     ".pdf": KIND_PDF,
     ".pptx": KIND_PPTX,
     ".docx": KIND_DOCX,
     ".html": KIND_HTML,
     ".htm": KIND_HTML,
-    ".txt": KIND_TEXT,
-    ".text": KIND_TEXT,
-    ".md": KIND_TEXT,
-    ".markdown": KIND_TEXT,
-    ".csv": KIND_TEXT,
-    ".tsv": KIND_TEXT,
-    ".json": KIND_TEXT,
 }
 
 
@@ -129,8 +174,8 @@ def detect_kind(content_type: str | None, filename: str | None) -> str | None:
     ctype = (content_type or "").split(";", 1)[0].strip().lower()
     if ctype in _CONTENT_TYPES:
         return _CONTENT_TYPES[ctype]
-    if ctype.startswith("text/"):
-        return KIND_HTML if ctype == "text/html" else KIND_TEXT
+    if is_textual_type(ctype):
+        return KIND_TEXT
     suffix = PurePosixPath((filename or "").lower()).suffix
     return _EXTENSIONS.get(suffix)
 

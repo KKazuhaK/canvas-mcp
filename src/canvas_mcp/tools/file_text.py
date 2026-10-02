@@ -43,13 +43,21 @@ from ..core.document_text import (
     extract_text,
 )
 from ..core.file_validation import format_file_size
-from ..core.tool_results import FULL_CONTENT_TOOL_META
+from ..core.tool_results import (
+    FULL_CONTENT_TOOL_META,
+    MAX_WIRE_MESSAGE_BYTES,
+    text_wire_bytes,
+)
 from ..core.untrusted_content import fence_untrusted, fence_untrusted_inline
 from ..core.validation import coerce_canvas_id, validate_params
 
 #: Largest file this tool downloads, before the server's READ_FILE_MAX_SIZE_MB
 #: clamp. Lecture decks are usually well under this; video is not a target.
 TEXT_READ_MAX_SIZE_MB = 50.0
+
+#: Largest text result, as serialized JSON, either file tool returns. The rest
+#: of the 16 MiB message limit is headroom for the header and the envelope.
+TEXT_RESULT_MAX_BYTES = MAX_WIRE_MESSAGE_BYTES - 1024 * 1024
 
 #: Parses running at once. Office parsing holds a whole document's XML tree in
 #: memory and cannot be cancelled once started, so concurrent calls queue here
@@ -180,6 +188,48 @@ def format_document_text(
     return result + "\n" + fence_untrusted(text, "course file text") + "\n"
 
 
+def oversized_text_error(
+    result: str,
+    *,
+    shown_name: str,
+    doc: ExtractedDocument,
+    range_tool: str | None = None,
+) -> str | None:
+    """An error when ``result`` is too big for one MCP message, else None.
+
+    Claude Code drops the server connection on a message over 16 MiB rather
+    than cutting or saving it, so text that would serialize past
+    ``TEXT_RESULT_MAX_BYTES`` is refused, never cut. For a paged document the
+    error proposes a page range that fits; ``range_tool`` names the tool that
+    takes one when it is not the caller.
+    """
+    size = text_wire_bytes(result)
+    if size <= TEXT_RESULT_MAX_BYTES:
+        return None
+    error = (
+        f"Error: the text of {shown_name} is {format_file_size(size)}, more than "
+        f"the {TEXT_RESULT_MAX_BYTES // (1024 * 1024)} MB one result can carry "
+        "(MCP clients disconnect on a result over 16 MB). Nothing was cut or returned."
+    )
+    numbered = [s for s in doc.sections if s.number is not None]
+    if doc.unit and numbered:
+        # Assume text is spread evenly; aim for 80% of the budget.
+        fits = max(1, int(len(numbered) * TEXT_RESULT_MAX_BYTES * 0.8 / size))
+        first = numbered[0].number or 1
+        last = min(first + fits - 1, numbered[-1].number or first)
+        how = f"call {range_tool} with" if range_tool else "pass"
+        error += (
+            f" Read it in parts: {how} start_page and end_page, for example "
+            f"start_page={first}, end_page={last} ({doc.total_units} {doc.unit}s in all)."
+        )
+    else:
+        error += (
+            " This format has no pages to select. On a local server, "
+            "download_course_file saves the file to disk."
+        )
+    return error
+
+
 def register_file_text_tools(mcp: FastMCP) -> None:
     """Register the course-file text extraction tool."""
 
@@ -198,9 +248,11 @@ def register_file_text_tools(mcp: FastMCP) -> None:
 
         Returns the complete extracted text, never cut: PDF page text,
         PowerPoint slide titles/text/speaker notes, Word paragraphs and
-        tables, and plain text/Markdown/CSV/JSON/HTML, with page or slide
-        markers. Works for files linked from modules even when the course
-        Files tab is hidden.
+        tables, and text files (plain text, Markdown, CSV, JSON, HTML, XML,
+        LaTeX, notebooks, source code), with page or slide markers. Works for
+        files linked from modules even when the course Files tab is hidden.
+        Text too large for one response (over 15 MB) is refused, not cut:
+        read a PDF or deck in parts with start_page/end_page.
 
         Text extraction misses layout, figures, equations drawn as images,
         and scanned pages (no OCR). To see the file the way a person does,
@@ -283,7 +335,7 @@ def register_file_text_tools(mcp: FastMCP) -> None:
             return f"Error reading {shown_name}: {exc}"
 
         course_display = await get_course_code(course_id) or course_identifier
-        return format_document_text(
+        result = format_document_text(
             shown_name=shown_name,
             course_display=course_display,
             kind=kind,
@@ -293,3 +345,4 @@ def register_file_text_tools(mcp: FastMCP) -> None:
             route_note=route_note,
             see_pages_hint=SEE_PAGES_WITH_READ_COURSE_FILE,
         )
+        return oversized_text_error(result, shown_name=shown_name, doc=doc) or result

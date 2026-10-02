@@ -157,8 +157,10 @@ READ_TOOL_CONTENT_POLICIES: dict[str, ReadToolContentPolicy] = {
         guards=("fence_untrusted_inline", "_file_as_text_fallback"),
         rationale=(
             "The text line fences the uploader-chosen file name and lock "
-            "explanation, prints a type sanitized to a bare MIME token, and builds "
-            "the resource URI from the numeric file ID only. The attached file "
+            "explanation, prints a type sanitized to a bare MIME token, declares "
+            "the blob only with a type from a fixed allowlist (else "
+            "application/octet-stream), and builds the resource URI from the "
+            "numeric file ID and that fixed type table only. The attached file "
             "bytes are Canvas-authored content that cannot be fenced: a fence "
             "inside a PDF or image would corrupt the file, and the point of the "
             "tool is to hand over the original exactly as a person would see it, "

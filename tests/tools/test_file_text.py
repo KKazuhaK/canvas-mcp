@@ -634,3 +634,126 @@ class TestEndToEnd:
             # The storage host never receives the Canvas token.
             ("GET", "https://inst-fs.example.net/files/777/blob", None),
         ]
+
+
+class TestOneMessageLimit:
+    """Claude Code drops the server on a JSON-RPC message over 16 MiB, so text
+    that would not fit is refused whole (never cut) with a way to read it."""
+
+    @needs_pypdf
+    @pytest.mark.asyncio
+    async def test_paged_text_over_the_limit_proposes_a_page_range(self, api, make_pdf):
+        api.request.return_value = file_info()
+        api.download.return_value = make_pdf([f"page {n} " + "y" * 300 for n in range(1, 31)])
+
+        with patch("canvas_mcp.tools.file_text.TEXT_RESULT_MAX_BYTES", 3000):
+            result = await get_tool_function()("60366", 12345)
+
+        assert result.startswith("Error: the text of")
+        assert "Nothing was cut or returned" in result
+        assert "disconnect on a result over 16 MB" in result
+        assert "pass start_page and end_page, for example start_page=1, end_page=" in result
+        assert "(30 pages in all)" in result
+        assert "y" * 300 not in result
+
+    @needs_pypdf
+    @pytest.mark.asyncio
+    async def test_the_proposed_range_fits(self, api, make_pdf):
+        pages = [f"page {n} " + "z" * 300 for n in range(1, 31)]
+        api.request.return_value = file_info()
+        api.download.return_value = make_pdf(pages)
+
+        with patch("canvas_mcp.tools.file_text.TEXT_RESULT_MAX_BYTES", 3000):
+            refused = await get_tool_function()("60366", 12345)
+            end = int(refused.split("end_page=", 1)[1].split(" ", 1)[0])
+            api.download.return_value = make_pdf(pages)
+            part = await get_tool_function()("60366", 12345, start_page=1, end_page=end)
+
+        assert not part.startswith("Error"), part
+        assert f"--- Page {end} ---" in part
+
+    @pytest.mark.asyncio
+    async def test_unpaged_text_over_the_limit_says_it_has_no_pages(self, api):
+        api.request.return_value = file_info(
+            display_name="dump.csv", **{"content-type": "text/csv"}
+        )
+        api.download.return_value = b"a,b\n" * 2000
+
+        with patch("canvas_mcp.tools.file_text.TEXT_RESULT_MAX_BYTES", 3000):
+            result = await get_tool_function()("60366", 12345)
+
+        assert result.startswith("Error: the text of")
+        assert "no pages to select" in result
+        assert "start_page" not in result
+
+    @pytest.mark.asyncio
+    async def test_real_limit_on_the_wire(self, api):
+        """At full size, over a real client: the largest text that is returned
+        fits in one message, and a bigger one is refused, not sent."""
+        from fastmcp import Client, FastMCP
+        from mcp.types import JSONRPCResponse
+
+        from canvas_mcp.core.tool_results import (
+            MAX_WIRE_MESSAGE_BYTES,
+            install_tool_result_contract,
+        )
+        from canvas_mcp.tools.file_text import (
+            TEXT_RESULT_MAX_BYTES,
+            register_file_text_tools,
+        )
+
+        mcp = FastMCP("t")
+        install_tool_result_contract(mcp)
+        register_file_text_tools(mcp)
+
+        def wire_bytes(result) -> int:
+            envelope = JSONRPCResponse(
+                jsonrpc="2.0", id=1,
+                result=result.model_dump(by_alias=True, exclude_none=True, mode="json"),
+            )
+            return len(envelope.model_dump_json(by_alias=True, exclude_unset=True).encode())
+
+        # Newlines and quotes are escaped on the wire, so size them in.
+        line = 'row "quoted", value\n'
+        fits = line * ((TEXT_RESULT_MAX_BYTES - 4096) // (len(line) + 3))
+        too_big = line * (TEXT_RESULT_MAX_BYTES // len(line))
+        api.request.return_value = file_info(
+            display_name="big.txt", size=0, **{"content-type": "text/plain"}
+        )
+
+        async with Client(mcp) as client:
+            api.download.return_value = fits.encode()
+            ok = await client.call_tool_mcp(
+                "read_course_file_text", {"course_identifier": "60366", "file_id": 12345}
+            )
+            api.download.return_value = too_big.encode()
+            refused = await client.call_tool_mcp(
+                "read_course_file_text", {"course_identifier": "60366", "file_id": 12345}
+            )
+
+        assert ok.is_error is False
+        assert fits.strip() in ok.content[0].text
+        assert MAX_WIRE_MESSAGE_BYTES - 2 * 1024 * 1024 < wire_bytes(ok) < MAX_WIRE_MESSAGE_BYTES
+        assert refused.is_error is True
+        assert wire_bytes(refused) < 4096
+
+
+class TestTextAndCodeFiles:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("ctype", "name"), [
+        ("application/octet-stream", "Main.java"),
+        ("application/octet-stream", "hw1.py"),
+        ("application/x-ipynb+json", "lab.ipynb"),
+        ("application/xml", "build.xml"),
+        ("text/x-c++src", "list.cpp"),
+    ])
+    async def test_starter_code_and_markup_are_read_as_text(self, api, ctype, name):
+        body = "int main() { return 0; } // starter\n"
+        api.request.return_value = file_info(display_name=name, **{"content-type": ctype})
+        api.download.return_value = body.encode()
+
+        result = await get_tool_function()("60366", 12345)
+
+        assert not result.startswith("Error"), result
+        assert body.strip() in result
+        assert FENCE_TEXT_START in result

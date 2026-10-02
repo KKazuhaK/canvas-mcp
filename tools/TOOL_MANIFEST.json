@@ -3898,7 +3898,7 @@
     {
       "name": "read_course_file",
       "category": "shared",
-      "description": "Open a course file exactly as a person sees it: returns the original file (PDF, slides, image, document), not a text conversion.",
+      "description": "Open a course file as a person would: returns the original file (PDF, image, text or code, document), not a text conversion.",
       "parameters": [
         {
           "name": "course_identifier",
@@ -3917,19 +3917,19 @@
           "type": "number",
           "required": false,
           "default": 25.0,
-          "description": "Maximum file size in MB to read (default: 25). Clamped server-side to READ_FILE_MAX_SIZE_MB (default 100). Larger files are refused before anything is downloaded."
+          "description": "Maximum file size in MB to read (default: 25). Clamped server-side to READ_FILE_MAX_SIZE_MB (default 100); a file is returned as a file only up to 11.5 MB. Larger files are refused before anything is downloaded."
         }
       ],
-      "returns": "A short text line (fenced file name, type, size, PDF page count, hint) plus the file as an EmbeddedResource blob with its true MIME type, or ImageContent for PNG/JPEG/GIF/WebP. For clientInfo.name 'claude-ai' (Claude Desktop chat, claude.ai connectors), the complete extracted text instead of a blob.",
+      "returns": "A short text line (fenced file name, type, the type it was sent as when different, size, PDF page count, hint) plus the file as an EmbeddedResource blob, or ImageContent for PNG/JPEG/GIF/WebP. Text and code are declared text/plain (or their own text type) so Claude Code saves a file Read opens; types outside a fixed allowlist are declared application/octet-stream. For clients that cannot take a file (clientInfo.name 'claude-ai'; on the stateless HTTP server, any unnamed client whose User-Agent is not claude-code/...), the complete extracted text instead.",
       "examples": [
         "Look at the week 5 lecture slides and explain the diagram on slide 12",
         "This handout is a scan; read it and tell me what problem 3 asks"
       ],
-      "notes": "Claude Code saves the blob under tool-results/ and gives its path; open it with Read to view the file like an attachment (a PDF arrives as page images plus text). Unknown clients get the spec-compliant file. The MIME type comes from the file signature first; the resource URI is canvas://files/<id>.<ext>, never the uploader's file name. The Canvas token is sent only to the Canvas origin. Works for module-linked files when the Files tab is hidden. Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
+      "notes": "Claude Code saves the blob under tool-results/ and gives its path; open it with Read to view the file like an attachment (a PDF arrives as page images plus text). Read cannot open PPTX/DOCX/XLSX; the hint says so and points to read_course_file_text. At most 11.5 MB is returned as a file because Claude Code disconnects on a JSON-RPC message over 16 MiB; larger files are refused before download. The MIME type comes from the file signature first; the resource URI is canvas://files/<id>.<ext> from a fixed table, never the uploader's file name. The Canvas token is sent only to the Canvas origin. Works for module-linked files when the Files tab is hidden. Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "read_course_file_text",
-      "category": "student",
+      "category": "shared",
       "description": "Read ALL the text of a course file (PDF, slides, Word doc, text), never cut.",
       "parameters": [
         {
@@ -3964,7 +3964,7 @@
         "Summarize the week 3 lecture slides",
         "What does page 12 of the lab manual say about grading?"
       ],
-      "notes": "Supports PDF (page text, no OCR), PPTX (slide titles, text, tables, speaker notes), DOCX (paragraphs and tables), and plain text/Markdown/CSV/JSON/HTML. Checks the reported size against a 50 MB cap (clamped to READ_FILE_MAX_SIZE_MB) before downloading, and refuses Office files whose XML would inflate past 20 MB (or any part more than 100x) before parsing; at most two files are parsed at once. The Canvas token is sent only to the Canvas host; storage redirects are fetched without credentials. Works for files linked from modules when the course Files tab is hidden. PDF/PPTX/DOCX need the optional 'documents' extra: pip install 'canvas-mcp[documents]'. The max_chars and start_char parameters and the 40,000-character default cut were removed; only an explicit page range limits the output. Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
+      "notes": "Supports PDF (page text, no OCR), PPTX (slide titles, text, tables, speaker notes), DOCX (paragraphs and tables), and text files (plain text, Markdown, CSV/TSV, JSON, HTML, XML, notebooks, LaTeX, source code). Checks the reported size against a 50 MB cap (clamped to READ_FILE_MAX_SIZE_MB) before downloading, and refuses Office files whose XML would inflate past 20 MB (or any part more than 100x) before parsing; at most two files are parsed at once. The Canvas token is sent only to the Canvas host; storage redirects are fetched without credentials. Works for files linked from modules when the course Files tab is hidden. PDF/PPTX/DOCX need the optional 'documents' extra: pip install 'canvas-mcp[documents]'. The max_chars and start_char parameters and the 40,000-character default cut were removed; only an explicit page range limits the output. Text over 15 MB serialized (one MCP message is at most 16 MiB) is refused, not cut, with a page range that fits. Registered in every profile together with read_course_file. Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "reply_to_discussion_entry",

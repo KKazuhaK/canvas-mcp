@@ -49,7 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   course staff and show everyone else under the same `Student_<hash>`
   pseudonym the `/courses/:id/users` tier uses; they cannot be used to map
   pseudonymised user IDs back to real names.
-- `read_course_file_text` (student profile): read a course file as plain text
+- `read_course_file_text` (every profile; it is registered together with
+  `read_course_file`, which points to it): read a course file as plain text
   with page/slide markers. PDF pages, PowerPoint slide titles/text/tables/speaker
   notes, Word paragraphs and tables, and plain text, Markdown, CSV, JSON and
   HTML. The reported size is checked before downloading (50 MB, lowered by
@@ -75,6 +76,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chat and claude.ai connectors (`clientInfo.name` `claude-ai`), which mishandle
   blob resources, get the complete extracted text instead. Downloads now go
   through the same token-safe downloader as `read_course_file_text`.
+- `read_course_file` returns at most 11.5 MB as a file. Claude Code drops the
+  server connection on any JSON-RPC message over 16 MiB, and base64 adds a
+  third, so a larger file is refused before download with a pointer to
+  `read_course_file_text`. Text results from either tool that would not fit in
+  one message (over 15 MB) are refused rather than cut, with a page range that
+  fits. Clients that get text use the text tool's 50 MB download budget.
+- On the hosted (stateless HTTP) server, where no session keeps the
+  `initialize` `clientInfo`, an unnamed client gets the file only when its
+  `User-Agent` is Claude Code's (`claude-code/...`); other unnamed HTTP
+  clients, such as claude.ai connectors, get the extracted text.
+- Text and code files (`.py`, `.java`, notebooks, XML, LaTeX, ...) are sent as
+  `text/plain`, which Claude Code saves as a `.txt` its Read tool opens (it
+  saves unmapped types as `.bin` and refuses them); the result names the real
+  type. For PPTX/DOCX/XLSX the hint says plainly that Read cannot open them and
+  points to `read_course_file_text`. `read_course_file_text` also reads text
+  and code files by extension when Canvas reports a generic type.
+- `get_rubric` block-fences the now-complete criterion and rating long
+  descriptions instead of using the one-line inline fence.
 - **No more truncation in full-content tools.** `read_course_file_text` returns
   the complete text (`max_chars`, `start_char` and the 40,000-character default
   removed; only `start_page`/`end_page` limit it). `get_syllabus` lost its
@@ -96,6 +115,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out without credentials and must be HTTPS.
 - The file tools now reject a non-numeric `file_id` before it reaches a
   request path.
+- `read_course_file` declares a returned file only with a fixed allowlist of
+  MIME types (documents, text, common images); anything else, including an
+  uploader-declared executable or script type, is sent as
+  `application/octet-stream` with no URI extension, so Claude Code cannot be led
+  to write such a type to the student's disk. The URI extension no longer
+  comes from the platform's MIME registry.
+- The `Pages:` count of a returned PDF is best effort: one at a time, skipped
+  when busy, dropped after 5 seconds, and never holding a text-extraction slot.
 - `read_course_file_text` refuses Office files whose XML would inflate past
   20 MB, or with any part that inflates more than 100x, before a parser runs,
   parses at most two files at once, and prints only a validated MIME token for

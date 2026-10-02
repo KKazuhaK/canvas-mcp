@@ -5,9 +5,10 @@
 spec-compliant way to hand a client a file. Some clients handle that badly, so
 the tool needs to know who is asking.
 
-The answer comes from the ``clientInfo`` the client sent in ``initialize`` (or,
-on the 2026-07-28 protocol, in the request envelope). Names were read from the
-clients themselves on 2026-10-02:
+The first answer is the ``clientInfo`` the client sent. It is known when the
+session keeps the ``initialize`` handshake (stdio, in-memory, stateful HTTP) or
+when the request envelope carries it (2026-07-28 protocol, where it is still
+optional). Names were read from the clients themselves on 2026-10-02:
 
 - Claude Code 2.1.286 builds its MCP client as ``{name: "claude-code"}``. It
   saves a non-image blob to ``tool-results/`` and tells the model the path, so
@@ -17,16 +18,29 @@ clients themselves on 2026-10-02:
   handling of blob resources in tool results is broken (``-32602`` invalid
   ``tools/call`` result, blobs misread), so they get extracted text instead.
 
-Clients are matched by exact name. A client that sends no name, or one not
-listed, gets the spec-compliant file result: only clients known to break are
-special-cased, so a new or fixed client is never silently downgraded.
+The hosted server runs ``http_app(stateless_http=True)``: every request is
+handled on a fresh connection, so on a handshake-era protocol (2024-11-05 to
+2025-11-25) the ``initialize`` clientInfo is gone by the time a tool runs and
+the client is unnamed for everybody, claude.ai connectors included. Over HTTP
+an unnamed client is therefore judged by its ``User-Agent``: Claude Code's MCP
+HTTP/SSE transports send ``claude-code/<version>`` (read from the 2.1.285
+binary), and they get the file. Any other unnamed HTTP client gets text,
+because the remote clients of a hosted server are mostly connectors, and text
+always arrives while a blob can fail the whole call there.
+
+A named client is matched by exact name, and a client not on the list gets
+the spec-compliant file result, as does an unnamed client on a local (stdio)
+server: only clients known to break are special-cased.
 """
 
-from fastmcp.server.dependencies import get_context
+from fastmcp.server.dependencies import get_context, get_http_request
 
 #: ``clientInfo.name`` values of clients known to mishandle embedded-resource
 #: blobs in a tool result.
 BLOB_INCAPABLE_CLIENTS = frozenset({"claude-ai"})
+
+#: Start of the ``User-Agent`` Claude Code's MCP HTTP and SSE transports send.
+CLAUDE_CODE_USER_AGENT_PREFIX = "claude-code/"
 
 
 def current_client_name() -> str | None:
@@ -40,6 +54,25 @@ def current_client_name() -> str | None:
     return name if isinstance(name, str) else None
 
 
+def _http_user_agent() -> str | None:
+    """The HTTP ``User-Agent`` ("" when absent), or None when not over HTTP."""
+    try:
+        request = get_http_request()
+    except RuntimeError:
+        return None
+    return request.headers.get("user-agent", "")
+
+
 def client_mishandles_file_blobs() -> bool:
-    """True only for a client known to break on a blob resource in a result."""
-    return current_client_name() in BLOB_INCAPABLE_CLIENTS
+    """True when a blob resource in a result should not be sent to this client.
+
+    A named client is judged by name. An unnamed one is given the file on a
+    local server, and over HTTP only when its User-Agent is Claude Code's.
+    """
+    name = current_client_name()
+    if name is not None:
+        return name in BLOB_INCAPABLE_CLIENTS
+    user_agent = _http_user_agent()
+    if user_agent is None:
+        return False
+    return not user_agent.lower().startswith(CLAUDE_CODE_USER_AGENT_PREFIX)
