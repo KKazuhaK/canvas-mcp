@@ -521,6 +521,17 @@ class TestListMyAnnouncementsOutput:
         assert "xxxx" not in titles_only
         cut = await run(fake, "list_my_announcements", preview_chars=50)
         assert "x" * 47 + "..." in cut and "x" * 48 not in cut
+        # A listing may preview, but must say where the whole text is.
+        assert "(Preview shortened; get_discussion_topic_details reads the full text.)" in cut
+
+    @pytest.mark.asyncio
+    async def test_short_body_carries_no_shortened_note(self):
+        fake = FakeCanvas()
+        fake.route("/courses", COURSES)
+        fake.route("/announcements", [announcement(1, 101, "2026-09-28T00:00:00Z")])
+        result = await run(fake, "list_my_announcements")
+        assert "Bring a pencil." in result
+        assert "Preview shortened" not in result
 
 
 STREAM = [
@@ -681,6 +692,32 @@ class TestActivityStreamOutput:
         # Only the newest message is previewed, regardless of list order.
         assert "Kickoff thread" not in result
         assert "Participants: 3" in result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("index", "tool"), [
+        (0, "get_discussion_topic_details"),
+        (2, "get_conversation_details"),
+        (3, "get_my_submission"),
+        (4, None),
+    ])
+    async def test_shortened_preview_names_where_the_full_text_is(self, index, tool):
+        item = dict(STREAM[index])
+        long_text = "word " * 400
+        if item["type"] == "Conversation":
+            item["latest_messages"] = [{"id": 1, "created_at": "2026-09-29T09:00:00Z", "message": long_text}]
+        elif item["type"] == "Submission":
+            item["submission_comments"] = [{"id": 1, "author_name": "TA", "comment": long_text,
+                                            "created_at": "2026-09-30T08:00:00Z"}]
+        else:
+            item["message"] = long_text
+        result = await run(
+            stream_fake(stream=[item]), "get_my_activity_stream", include_summary=False
+        )
+        expected = (
+            f"(Preview shortened; {tool} reads the full text.)" if tool
+            else "(Preview shortened; the link opens the full text in Canvas.)"
+        )
+        assert expected in result
 
     @pytest.mark.asyncio
     async def test_conversation_without_visible_messages_has_no_preview(self):

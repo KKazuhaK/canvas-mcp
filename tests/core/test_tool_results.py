@@ -159,14 +159,13 @@ async def test_register_all_tools_marks_existing_validation_failure_as_mcp_error
             "get_syllabus",
             {
                 "course_identifier": 60366,
-                "output_format": "text",
-                "max_chars": 0,
+                "output_format": "pdf",
             },
             raise_on_error=False,
         )
 
     assert result.is_error is True
-    assert getattr(result.content[0], "text", "").startswith("Error: max_chars")
+    assert getattr(result.content[0], "text", "").startswith("Error: invalid output_format")
 
 
 @pytest.mark.asyncio

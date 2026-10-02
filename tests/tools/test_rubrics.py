@@ -1253,6 +1253,44 @@ class TestRubricTools:
         assert "Assignment ID: 9901" in output
 
     @pytest.mark.asyncio
+    async def test_get_rubric_shows_long_descriptions_whole(
+        self, mcp, mock_canvas_request, mock_course_id, mock_course_code, mock_fetch_all
+    ):
+        """get_rubric used to cut criterion text at 200 and ratings at 100
+        characters; the grading guidance is exactly what a student reads it for."""
+        criterion_text = "Criterion guidance " + "c" * 600 + " END-CRITERION"
+        rating_text = "Rating guidance " + "r" * 300 + " END-RATING"
+        mock_canvas_request.return_value = {
+            "title": "Essay Rubric",
+            "points_possible": 10,
+            "data": [{
+                "id": "_c1", "description": "Thesis", "long_description": criterion_text,
+                "points": 10,
+                "ratings": [{"id": "_r1", "description": "Full", "points": 10,
+                             "long_description": rating_text}],
+            }],
+        }
+
+        register_rubric_tools(mcp)
+        output = (await _call_tool(mcp, "get_rubric", {
+            "course_identifier": "TEST101", "rubric_id": 999,
+        })).content[0].text
+
+        assert criterion_text in output
+        assert rating_text in output
+
+        # The listing still shortens, and says where the whole text is.
+        mock_fetch_all.return_value = [{
+            "id": 999, "title": "Essay Rubric", "points_possible": 10,
+            "data": mock_canvas_request.return_value["data"],
+        }]
+        listing = (await _call_tool(mcp, "list_rubrics", {
+            "course_identifier": "TEST101",
+        })).content[0].text
+        assert "END-CRITERION" not in listing
+        assert "get_rubric with the rubric ID shows them in full" in listing
+
+    @pytest.mark.asyncio
     async def test_get_rubric_by_assignment_id(self, mcp, mock_canvas_request, mock_course_id, mock_course_code):
         """Test get_rubric with assignment_id returns grading config."""
         mock_canvas_request.return_value = {

@@ -42,6 +42,7 @@ from mcp.types import ToolAnnotations
 from ..core.cache import get_course_code, get_course_id
 from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.dates import format_date, parse_date
+from ..core.tool_results import FULL_CONTENT_TOOL_META
 from ..core.untrusted_content import fence_untrusted, fence_untrusted_inline
 from ..core.validation import coerce_canvas_id, validate_params
 
@@ -561,7 +562,9 @@ def register_student_quiz_tools(mcp: FastMCP) -> None:
         )
         return "\n".join(lines)
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(
+        annotations=ToolAnnotations(read_only_hint=True), meta=FULL_CONTENT_TOOL_META
+    )
     @validate_params
     async def get_quiz_details(
         course_identifier: str | int,

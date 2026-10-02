@@ -11,6 +11,7 @@ from mcp.types import ToolAnnotations
 from ..core.cache import get_course_code, get_course_id
 from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.dates import format_date, parse_date
+from ..core.tool_results import FULL_CONTENT_TOOL_META
 from ..core.untrusted_content import (
     FENCE_LEAK_ERROR,
     contains_fence_markers,
@@ -76,7 +77,9 @@ def register_shared_assignment_tools(mcp: FastMCP) -> None:
         course_display = await get_course_code(course_id) or course_identifier
         return f"Assignments for Course {course_display}:\n\n" + "\n".join(assignments_info)
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(
+        annotations=ToolAnnotations(read_only_hint=True), meta=FULL_CONTENT_TOOL_META
+    )
     @validate_params
     async def get_assignment_details(course_identifier: str | int, assignment_id: str | int) -> str:
         """Get detailed information about a specific assignment.
