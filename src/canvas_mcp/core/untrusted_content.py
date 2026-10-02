@@ -113,7 +113,7 @@ READ_TOOL_CONTENT_POLICIES: dict[str, ReadToolContentPolicy] = {
     "get_peer_review_comments": _fenced("fence_untrusted_fields"),
     "get_peer_review_completion_analytics": _fenced("_fence_peer_review_names"),
     "get_peer_review_followup_list": _fenced("_fence_peer_review_names"),
-    "get_rubric": _fenced("fence_untrusted_inline"),
+    "get_rubric": _fenced("fence_untrusted", "fence_untrusted_inline"),
     "get_rubric_assessment": _fenced("fence_untrusted_inline"),
     "get_student_analytics": _fenced("fence_untrusted_inline"),
     "get_syllabus": _fenced("fence_untrusted"),

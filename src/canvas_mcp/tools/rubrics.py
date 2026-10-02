@@ -985,7 +985,7 @@ def register_rubric_tools(mcp: FastMCP) -> None:
                     result += f"  Points: {points}\n"
 
                     if long_description and long_description != description:
-                        result += f"  Description: {fence_untrusted_inline(long_description, 'rubric criterion description')}\n"
+                        result += f"  Description:\n{fence_untrusted(long_description, 'rubric criterion description')}\n"
 
                     if ratings:
                         sorted_ratings = sorted(ratings, key=lambda x: x.get("points", 0), reverse=True)
@@ -997,7 +997,7 @@ def register_rubric_tools(mcp: FastMCP) -> None:
 
                             rating_long_desc = rating.get("long_description", "")
                             if rating_long_desc and rating_long_desc != rating_desc:
-                                result += f"    {fence_untrusted_inline(rating_long_desc, 'rubric rating description')}\n"
+                                result += f"{fence_untrusted(rating_long_desc, 'rubric rating description')}\n"
 
                     result += "\n"
             else:
@@ -1060,7 +1060,7 @@ def register_rubric_tools(mcp: FastMCP) -> None:
             result += f"  Points: {points}\n"
 
             if long_description and long_description != description:
-                result += f"  Description: {fence_untrusted_inline(long_description, 'rubric criterion description')}\n"
+                result += f"  Description:\n{fence_untrusted(long_description, 'rubric criterion description')}\n"
 
             if ratings:
                 sorted_ratings = sorted(ratings, key=lambda x: x.get("points", 0), reverse=True)
@@ -1072,7 +1072,7 @@ def register_rubric_tools(mcp: FastMCP) -> None:
 
                     rating_long_desc = rating.get("long_description", "")
                     if rating_long_desc and rating_long_desc != rating_desc:
-                        result += f"    {fence_untrusted_inline(rating_long_desc, 'rubric rating description')}\n"
+                        result += f"{fence_untrusted(rating_long_desc, 'rubric rating description')}\n"
 
             total_points += points
             result += "\n"
@@ -1394,7 +1394,7 @@ def register_rubric_tools(mcp: FastMCP) -> None:
                             if rating_long_desc and rating_long_desc != rating_description:
                                 truncated_rating_desc = truncate_text(rating_long_desc, 100)
                                 shortened = shortened or truncated_rating_desc != rating_long_desc
-                                result +=f"     {fence_untrusted_inline(truncated_rating_desc, 'rubric rating description')}\n"
+                                result += f"     {fence_untrusted_inline(truncated_rating_desc, 'rubric rating description')}\n"
                     else:
                         result += "   No rating scale defined for this criterion.\n"
             elif include_criteria:
