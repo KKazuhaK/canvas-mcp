@@ -167,6 +167,73 @@ Your own planner notes (the personal to-do items in the Canvas planner).
 
 ---
 
+### Groups
+
+Read-only tools for the Canvas groups you belong to (project teams, study
+groups). Every tool except `list_my_groups` first checks `/users/self/groups`
+and refuses a group you are not a member of, even if Canvas would let your
+token read it. Group names, descriptions, discussion text and file names are
+fenced as untrusted Canvas content.
+
+#### `list_my_groups`
+List your groups with their course, group category ID and member count.
+
+**Parameters:**
+- `course_identifier` (optional): Only show your groups in this course (course
+  code, `sis_course_id:...` or numeric ID). A course that cannot be found is
+  reported as an error, not as "no groups".
+
+**Example:**
+```
+"Which project team am I on in ICS 33?"
+```
+
+#### `get_group_members`
+List the members of one of your groups: name and Canvas user ID. Emails, login
+IDs and SIS IDs are never shown. Students whose enrollment is inactive are left
+out (`exclude_inactive`). With `ENABLE_DATA_ANONYMIZATION` on (the default),
+classmates' names appear as stable pseudonyms.
+
+**Parameters:**
+- `group_id` (required): Canvas group ID from `list_my_groups`
+
+#### `list_group_discussion_topics`
+List the discussion topics in one of your groups.
+
+**Parameters:**
+- `group_id` (required): Canvas group ID
+
+#### `get_group_discussion`
+Read a group discussion topic (or group announcement): title, body, and every
+entry and reply as a thread, including recent posts Canvas has not yet added
+to its cached view (`include_new_entries`). Deleted entries are marked
+`[deleted]` with no author. If the topic requires you to post first, the tool
+says so instead of showing the replies.
+
+**Parameters:**
+- `group_id` (required): Canvas group ID
+- `topic_id` (required): Topic ID from `list_group_discussion_topics` or `list_group_announcements`
+
+#### `list_group_announcements`
+List a group's announcements (read through the group's discussion topics with
+`only_announcements=true`, because Canvas's `/announcements` endpoint accepts
+only courses).
+
+**Parameters:**
+- `group_id` (required): Canvas group ID
+
+#### `list_group_files`
+List the files stored in one of your groups. A group with files turned off
+returns a clear permission message.
+
+**Parameters:**
+- `group_id` (required): Canvas group ID
+- `search_term` (optional): Part of a file name (2+ characters)
+- `sort` (optional): `name`, `size`, `created_at`, `updated_at` (default) or `content_type`
+- `order` (optional): `asc` or `desc` (default)
+
+---
+
 ### Student Write Tools
 
 > **Off by default.** These tools only exist if the server operator enabled them
