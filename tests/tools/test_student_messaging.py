@@ -275,11 +275,16 @@ class TestFindMessageRecipients:
         tools = await _tools()
         result = await tools["find_message_recipients"](COURSE, search="  ada ")
 
-        [request] = canvas.calls("GET", "/search/recipients")
-        assert request.url.params["context"] == f"course_{COURSE}"
-        assert request.url.params["type"] == "user"
-        assert request.url.params["search"] == "ada"
-        assert request.url.params["per_page"] == "100"
+        # Anonymization is on by default, so a search asks Canvas for staff
+        # only: one request per staff sub-context of the course.
+        requests = canvas.calls("GET", "/search/recipients")
+        assert [r.url.params["context"] for r in requests] == [
+            f"course_{COURSE}_teachers", f"course_{COURSE}_tas", f"course_{COURSE}_designers",
+        ]
+        for request in requests:
+            assert request.url.params["type"] == "user"
+            assert request.url.params["search"] == "ada"
+            assert request.url.params["per_page"] == "100"
         assert not canvas.posts()
 
         assert result["success"] is True
@@ -305,6 +310,7 @@ class TestFindMessageRecipients:
         await tools["find_message_recipients"](COURSE, search="   ")
         [request] = canvas.calls("GET", "/search/recipients")
         assert "search" not in request.url.params
+        assert request.url.params["context"] == f"course_{COURSE}"
 
     @pytest.mark.asyncio
     async def test_hostile_display_name_cannot_escape_its_fence(self, canvas):

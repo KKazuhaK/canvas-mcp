@@ -17,6 +17,7 @@ transport whose address book filters by the search term the way Canvas does
 from __future__ import annotations
 
 import json
+import re
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -57,11 +58,40 @@ ADDRESS_BOOK = [PROF, TA, DESIGNER, CLASSMATE, NAMESAKE, OBSERVER, STAFF_ELSEWHE
 NON_STAFF = [CLASSMATE, NAMESAKE, OBSERVER, STAFF_ELSEWHERE]
 
 
+# Canvas address-book sub-contexts (``course_<id>_<type>``) and the enrollment
+# type each one lists.
+SUBCONTEXT_TYPES = {
+    "teachers": "TeacherEnrollment",
+    "tas": "TaEnrollment",
+    "designers": "DesignerEnrollment",
+    "students": "StudentEnrollment",
+    "observers": "ObserverEnrollment",
+}
+STAFF_CONTEXTS = [f"course_{COURSE}_{t}" for t in ("teachers", "tas", "designers")]
+
+
 class AddressBook:
-    """Canvas's course address book, with server-side real-name search."""
+    """Canvas's course address book, with server-side real-name search.
+
+    ``context=course_<id>_<type>`` lists only people with that enrollment type
+    in the course, as Canvas's address book does, unless
+    ``honor_subcontexts`` is off (a Canvas that ignores the suffix). Results
+    are paginated by ``per_page`` with a ``Link: rel="next"`` header.
+    """
 
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
+        self.people: list[dict] = list(ADDRESS_BOOK)
+        self.honor_subcontexts = True
+
+    def _in_context(self, person: dict, context: str) -> bool:
+        if not self.honor_subcontexts:
+            return True
+        match = re.fullmatch(rf"course_{COURSE}_([a-z]+)", context)
+        if match is None:
+            return True
+        roles = person["common_courses"].get(COURSE, [])
+        return SUBCONTEXT_TYPES.get(match.group(1)) in roles
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -74,14 +104,25 @@ class AddressBook:
         if path == "/search/recipients":
             if "user_id" in params:
                 user = next(
-                    (u for u in ADDRESS_BOOK if str(u["id"]) == params["user_id"]), None
+                    (u for u in self.people if str(u["id"]) == params["user_id"]), None
                 )
                 return httpx.Response(200, json=[user] if user else [])
             term = params.get("search", "").lower()
-            return httpx.Response(200, json=[
-                u for u in ADDRESS_BOOK
-                if term in u["full_name"].lower() or term in u["name"].lower()
-            ])
+            context = params.get("context", "")
+            hits = [
+                u for u in self.people
+                if (term in u["full_name"].lower() or term in u["name"].lower())
+                and self._in_context(u, context)
+            ]
+            per_page = int(params.get("per_page", "10"))
+            page = int(params.get("page", "1"))
+            headers = {}
+            if page * per_page < len(hits):
+                nxt = request.url.copy_merge_params({"page": str(page + 1)})
+                headers["Link"] = f'<{nxt}>; rel="next"'
+            return httpx.Response(
+                200, json=hits[(page - 1) * per_page:page * per_page], headers=headers
+            )
         return httpx.Response(404, json={"errors": [{"message": f"unrouted {path}"}]})
 
     def lookups(self) -> list[httpx.Request]:
@@ -135,8 +176,11 @@ def _assert_no_trace_of_non_staff(result: dict) -> None:
 async def test_real_name_search_returns_no_student_and_no_pseudonym(address_book, term, role):
     result = await _find(search=term, role=role)
 
-    # Canvas really was asked, and its real-name match really hit someone.
-    assert [r.url.params["search"] for r in address_book.lookups()] == [term]
+    # Canvas really was asked, but only for staff: the search went to the
+    # staff sub-contexts, never to the whole-course address book.
+    lookups = address_book.lookups()
+    assert lookups and all(r.url.params["search"] == term for r in lookups)
+    assert all(r.url.params["context"] in STAFF_CONTEXTS for r in lookups)
     assert result["success"] is True
     assert result["recipients"] == []
     assert result["count"] == 0 and result["total_matches"] == 0
@@ -226,3 +270,97 @@ async def test_send_preview_looks_recipients_up_by_id_never_by_search(address_bo
     names = {r["user_id"]: r["name"] for r in preview["recipients"]}
     assert names["503"] == generate_anonymous_id("503")
     assert "Alan Turing" not in json.dumps(preview)
+
+
+# ---------------------------------------------------------------------------
+# A staff-only search asks Canvas for staff, not for everyone
+# ---------------------------------------------------------------------------
+
+
+def _many_students(count: int, surname: str = "Smith") -> list[dict]:
+    return [
+        {"id": 10_000 + i, "name": f"Kid{i}", "full_name": f"Kid{i} {surname}",
+         "common_courses": {COURSE: ["StudentEnrollment"]}}
+        for i in range(count)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role,contexts", [
+    ("any", STAFF_CONTEXTS),
+    ("staff", STAFF_CONTEXTS),
+    ("student", STAFF_CONTEXTS),
+    ("teacher", [f"course_{COURSE}_teachers"]),
+    ("ta", [f"course_{COURSE}_tas"]),
+])
+async def test_staff_only_search_queries_staff_subcontexts(address_book, role, contexts):
+    await _find(search="smith", role=role)
+    lookups = address_book.lookups()
+    assert [r.url.params["context"] for r in lookups] == contexts
+    assert all(r.url.params["search"] == "smith" for r in lookups)
+
+
+@pytest.mark.asyncio
+async def test_many_matching_students_cost_no_extra_pages_and_no_truncation(address_book):
+    """Hundreds of students named Smith are not read and then thrown away,
+    and their number does not surface as a misleading truncation note."""
+    smith = {"id": 520, "name": "Prof", "full_name": "Prof Smith",
+             "common_courses": {COURSE: ["TeacherEnrollment"]}}
+    address_book.people = [smith, *_many_students(600)]
+
+    result = await _find(search="smith")
+
+    assert [r["user_id"] for r in result["recipients"]] == ["520"]
+    # One page per staff sub-context, nothing more.
+    assert len(address_book.lookups()) == len(STAFF_CONTEXTS)
+    assert result["truncated"] is False
+    assert result["total_is_lower_bound"] is False
+    assert "note" not in result
+
+
+@pytest.mark.asyncio
+async def test_students_dropped_even_if_canvas_ignores_the_subcontext(address_book):
+    """If Canvas returned students for a staff sub-context, they are still dropped."""
+    address_book.honor_subcontexts = False
+    for term in ("turing", "liskov", "a"):
+        result = await _find(search=term)
+        _assert_no_trace_of_non_staff(result)
+    result = await _find(search="ada")
+    assert [r["user_id"] for r in result["recipients"]] == ["501"]
+
+
+@pytest.mark.asyncio
+async def test_staff_search_still_pages_and_truncates(address_book):
+    """Paging across staff sub-contexts still stops at the page cap and says so."""
+    many_tas = [
+        {"id": 20_000 + i, "name": f"TA{i}", "full_name": f"TA{i} Jones",
+         "common_courses": {COURSE: ["TaEnrollment"]}}
+        for i in range(1_000)
+    ]
+    address_book.people = many_tas
+    result = await _find(search="jones", role="staff", limit=50)
+    assert len(address_book.lookups()) <= student_messaging._MAX_RECIPIENT_PAGES
+    assert result["count"] == 50
+    assert result["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_search_without_anonymization_uses_the_course_address_book(
+    address_book, monkeypatch
+):
+    monkeypatch.setenv("ENABLE_DATA_ANONYMIZATION", "false")
+    reset_config()
+    await _find(search="turing")
+    assert [r.url.params["context"] for r in address_book.lookups()] == [f"course_{COURSE}"]
+
+
+@pytest.mark.asyncio
+async def test_page_cap_is_shared_across_staff_subcontexts(address_book):
+    """A Canvas that ignored the sub-context would hand back every student on
+    every staff context; the page cap still bounds the whole call."""
+    address_book.honor_subcontexts = False
+    address_book.people = _many_students(600)
+    result = await _find(search="smith")
+    assert len(address_book.lookups()) == student_messaging._MAX_RECIPIENT_PAGES
+    assert result["recipients"] == []
+    assert result["truncated"] is True
