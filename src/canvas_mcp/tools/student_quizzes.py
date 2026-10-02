@@ -58,6 +58,15 @@ _SCORING_POLICY_LABELS = {
     "keep_average": "average of attempts counts",
 }
 
+
+def _label(labels: dict[str, str], raw: Any, default: str) -> str:
+    """Look up a Canvas enum value's label; unknown or non-string values get ``default``."""
+    return labels.get(raw, default) if isinstance(raw, str) else default
+
+
+def _quiz_type_label(raw: Any) -> str:
+    return _label(_QUIZ_TYPE_LABELS, raw, raw if isinstance(raw, str) and raw else "unknown type")
+
 # QuizSubmission states that represent a finished attempt. "untaken" is an
 # attempt in progress; "settings_only" is a placeholder Canvas creates when an
 # instructor grants extra attempts or time before the student starts; "preview"
@@ -272,7 +281,7 @@ def _classic_quiz_block(
     quiz: dict[str, Any], assignment: dict[str, Any] | None
 ) -> list[str]:
     title = fence_untrusted_inline(quiz.get("title") or "Untitled quiz", "quiz title")
-    quiz_type = _QUIZ_TYPE_LABELS.get(quiz.get("quiz_type"), quiz.get("quiz_type") or "unknown type")
+    quiz_type = _quiz_type_label(quiz.get("quiz_type"))
     head = f"  Quiz ID: {quiz.get('id')} | Type: {quiz_type}"
     if quiz.get("published") is not None:
         head += f" | Published: {_yes_no(quiz.get('published'))}"
@@ -383,7 +392,7 @@ def _attempt_summary(
     total = f"/{_fmt_points(points)}" if points is not None else ""
     kept = latest.get("kept_score") if latest else None
     if kept is not None:
-        policy = _SCORING_POLICY_LABELS.get(quiz.get("scoring_policy"), "")
+        policy = _label(_SCORING_POLICY_LABELS, quiz.get("scoring_policy"), "")
         suffix = f" ({policy})" if policy else ""
         lines.append(f"Kept score: {_fmt_points(kept)}{total}{suffix}")
     elif submitted_any:
@@ -647,7 +656,7 @@ def register_student_quiz_tools(mcp: FastMCP) -> None:
                 )
             return message
 
-        quiz_type = _QUIZ_TYPE_LABELS.get(quiz.get("quiz_type"), quiz.get("quiz_type") or "unknown type")
+        quiz_type = _quiz_type_label(quiz.get("quiz_type"))
         lines = [
             f"Classic quiz in {course_display}: "
             f"{fence_untrusted_inline(quiz.get('title') or 'Untitled quiz', 'quiz title')}",
@@ -668,7 +677,7 @@ def register_student_quiz_tools(mcp: FastMCP) -> None:
         if quiz.get("allowed_attempts") not in (None, 1) and quiz.get("scoring_policy"):
             lines.append(
                 "Scoring: "
-                + _SCORING_POLICY_LABELS.get(quiz["scoring_policy"], quiz["scoring_policy"])
+                + _label(_SCORING_POLICY_LABELS, quiz["scoring_policy"], str(quiz["scoring_policy"]))
             )
         if quiz.get("published") is not None:
             lines.append(f"Published: {_yes_no(quiz.get('published'))}")
