@@ -17,6 +17,7 @@ from ..core.cache import (
 from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.config import get_config
 from ..core.dates import format_date
+from ..core.tool_results import FULL_CONTENT_TOOL_META
 from ..core.untrusted_content import (
     FENCE_LEAK_ERROR,
     contains_fence_markers,
@@ -287,12 +288,13 @@ def register_course_tools(mcp: FastMCP) -> None:
         course_display = response.get("course_code", course_identifier)
         return f"Course Details for {course_display}:\n\n" + "\n".join(details)
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(
+        annotations=ToolAnnotations(read_only_hint=True), meta=FULL_CONTENT_TOOL_META
+    )
     @validate_params
     async def get_syllabus(course_identifier: str | int,
-                           output_format: str = "text",
-                           max_chars: int | None = None) -> str:
-        """Get the complete Canvas Syllabus tab content for a course, untruncated.
+                           output_format: str = "text") -> str:
+        """Get the complete Canvas Syllabus tab content for a course, never cut.
 
         Unlike get_course_content_overview (which returns only a ~1000-char
         preview), this returns the full syllabus body so later sections such as
@@ -302,9 +304,6 @@ def register_course_tools(mcp: FastMCP) -> None:
             course_identifier: Course code or Canvas ID
             output_format: "text" (plain text, default), "html" (raw HTML body),
                 or "both" (plain text followed by raw HTML)
-            max_chars: Optional positive cap on the returned characters per
-                section. When exceeded, the content is truncated with an explicit
-                "[truncated...]" marker. Defaults to None (no truncation).
         """
         # Validate inputs before any network I/O so bad arguments fail fast.
         fmt = (output_format or "text").lower()
@@ -313,8 +312,6 @@ def register_course_tools(mcp: FastMCP) -> None:
                 f"Error: invalid output_format '{output_format}'. "
                 "Use 'text', 'html', or 'both'."
             )
-        if max_chars is not None and max_chars <= 0:
-            return "Error: max_chars must be a positive integer (or omitted for no limit)."
 
         course_id = await get_course_id(course_identifier)
 
@@ -333,11 +330,6 @@ def register_course_tools(mcp: FastMCP) -> None:
         if not syllabus_body.strip():
             return f"No syllabus content found for course {course_display}."
 
-        def _maybe_truncate(text: str) -> str:
-            if max_chars is not None and len(text) > max_chars:
-                return text[:max_chars] + f"\n\n...[truncated at {max_chars} characters]"
-            return text
-
         # Section headers only help disambiguate when both formats are present.
         labeled = fmt == "both"
         sections = [f"Syllabus for Course {course_display}:"]
@@ -345,14 +337,14 @@ def register_course_tools(mcp: FastMCP) -> None:
         # Syllabus bodies are course-authored free text (issue 239): fence them
         # so embedded directives arrive marked as data, not instructions.
         if fmt in ("text", "both"):
-            plain_text = _maybe_truncate(strip_html_tags(syllabus_body))
+            plain_text = strip_html_tags(syllabus_body)
             sections.append(
                 ("\n--- Plain Text ---\n" if labeled else "\n")
                 + fence_untrusted(plain_text, "course syllabus")
             )
 
         if fmt in ("html", "both"):
-            raw_html = _maybe_truncate(syllabus_body)
+            raw_html = syllabus_body
             sections.append(
                 ("\n--- Raw HTML ---\n" if labeled else "\n")
                 + fence_untrusted(raw_html, "course syllabus")
@@ -415,6 +407,11 @@ def register_course_tools(mcp: FastMCP) -> None:
                             f"    {fence_untrusted(title, 'page title')} "
                             f"(Updated: {updated})"
                         )
+                    if len(sorted_pages) > 5:
+                        pages_summary.append(
+                            "    (5 most recent shown; list_pages lists every page and "
+                            "get_page_content reads one in full.)"
+                        )
 
                 overview_sections.append("\n".join(pages_summary))
 
@@ -460,6 +457,11 @@ def register_course_tools(mcp: FastMCP) -> None:
                         modules_summary.append(
                             f"    {fence_untrusted_inline(name, 'module name')} (Status: {state})"
                         )
+                    if len(modules) > 3:
+                        modules_summary.append(
+                            "    (First 3 shown; list_modules lists every module and "
+                            "list_module_items its contents.)"
+                        )
 
                 overview_sections.append("\n".join(modules_summary))
 
@@ -479,8 +481,10 @@ def register_course_tools(mcp: FastMCP) -> None:
                     # Clean the HTML content
                     clean_syllabus = strip_html_tags(syllabus_body)
 
-                    # For overview, limit to first 1000 characters
-                    if len(clean_syllabus) > 1000:
+                    # An overview shows only the first 1000 characters, and
+                    # says where the rest is.
+                    cut = len(clean_syllabus) > 1000
+                    if cut:
                         clean_syllabus = clean_syllabus[:1000] + "..."
 
                     indented = "\n".join(
@@ -491,6 +495,11 @@ def register_course_tools(mcp: FastMCP) -> None:
                         # Course-authored free text (issue 239): fence it.
                         fence_untrusted(indented, "course syllabus (preview)")
                     ]
+                    if cut:
+                        syllabus_summary.append(
+                            "  (Preview of the first 1000 characters; get_syllabus "
+                            "returns the complete syllabus.)"
+                        )
 
                     overview_sections.append("\n".join(syllabus_summary))
                 else:
@@ -565,7 +574,9 @@ def register_shared_content_tools(mcp: FastMCP) -> None:
         course_display = await get_course_code(course_id) or course_identifier
         return f"Pages for Course {course_display}:\n\n" + "\n".join(pages_info)
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(
+        annotations=ToolAnnotations(read_only_hint=True), meta=FULL_CONTENT_TOOL_META
+    )
     @validate_params
     async def get_page_content(course_identifier: str | int, page_url_or_id: str) -> str:
         """Get the full content body of a specific page.
@@ -706,7 +717,9 @@ def register_shared_content_tools(mcp: FastMCP) -> None:
 
         return result
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(
+        annotations=ToolAnnotations(read_only_hint=True), meta=FULL_CONTENT_TOOL_META
+    )
     @validate_params
     async def get_front_page(course_identifier: str | int) -> str:
         """Get the front page content for a course.

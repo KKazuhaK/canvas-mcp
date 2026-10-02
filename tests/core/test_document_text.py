@@ -112,6 +112,13 @@ class TestPdf:
         assert [s.number for s in doc.sections] == [1, 2]
         assert doc.stopped_early is True
 
+    def test_no_budget_by_default_extracts_every_page(self, make_pdf):
+        # The default used to be a 40,000-character budget.
+        pages = ["P" * 2000] * 30
+        doc = dt.extract_text(make_pdf(pages), dt.KIND_PDF)
+        assert [s.number for s in doc.sections] == list(range(1, 31))
+        assert doc.stopped_early is False
+
     def test_corrupt_pdf_is_a_clean_error(self):
         with pytest.raises(dt.DocumentTextError, match="Could not parse the PDF"):
             dt.extract_text(b"%PDF-1.4 this is not really a pdf", dt.KIND_PDF)

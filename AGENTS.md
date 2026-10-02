@@ -62,7 +62,6 @@ Personal academic tracking uses Canvas "self" endpoints. Shared course-content t
 | `get_group_discussion` | One group topic or announcement with all posts |
 | `list_group_announcements` | Announcements in one of your groups |
 | `list_group_files` | Files stored in one of your groups |
-| `read_course_file_text` | Read lecture slides, PDFs, Word docs, or text files as plain text with page/slide markers (PDF/PPTX/DOCX need the `documents` extra) |
 | `list_my_announcements` | Announcements across ALL active courses (default last 14 days); `list_announcements` is per-course |
 | `get_my_activity_stream` | Recent activity feed grouped by kind: announcements, discussions, conversations, grades/comments (course activity only; no group or non-course inbox items) |
 
@@ -71,6 +70,16 @@ before every call and refuse other groups even when Canvas would allow the read.
 
 If a course hides its Files tab, `list_course_files` lists the files linked from
 modules instead, and the file read tools reach those files through their module.
+
+**Reading course files.** To see a file the way the student does (slides with
+diagrams, a scanned handout, an image, a formatted PDF), call `read_course_file`:
+it returns the file itself, and in Claude Code you open the saved path with
+Read (PDFs, images, text and code; not Office files). Use
+`read_course_file_text` when only the words matter, for PowerPoint/Word files,
+and for files over 11.5 MB. Neither tool cuts
+content, and neither do the tools that read one page, syllabus, discussion,
+message, assignment or rubric; a listing that shows a shortened preview names
+the tool that returns the rest.
 
 ### Student Write Tools (off by default)
 Let an agent act on Canvas for the student rather than only read. **None of these
@@ -185,7 +194,9 @@ Content access tools available to all authenticated users.
 | `get_my_enrollments` | What am I enrolled in, and as what role? Needs no roster permission |
 | `list_courses` | Enrolled courses (includes your own role in each) |
 | `get_course_details` | Course info and syllabus (includes your own role) |
-| `get_syllabus` | Full Syllabus tab content, untruncated (text/html/both). Educators write it with `update_syllabus` |
+| `get_syllabus` | Full Syllabus tab content, never cut (text/html/both). Educators write it with `update_syllabus` |
+| `read_course_file` | **See a course file as a person does**: returns the original file (up to 11.5 MB, the most one MCP message carries). In Claude Code, open the saved path it gives with Read: a PDF arrives as page images plus text, like an attachment, and text or code files open as text; Read cannot open PPTX/DOCX/XLSX (use `read_course_file_text`). Images show inline. Claude Desktop chat and claude.ai connectors (also any unnamed client over the hosted HTTP server unless its User-Agent is Claude Code's) get the complete extracted text instead |
+| `read_course_file_text` | ALL the text of lecture slides, PDFs, Word docs, or text and code files, never cut (optional page range), with page/slide markers (PDF/PPTX/DOCX need the `documents` extra). Text too large for one message is refused with a page range to read instead. For figures, layout or scanned pages use `read_course_file` |
 | `list_pages` | Course pages |
 | `get_page_content` | Read page content |
 | `update_page_settings` | Publish/unpublish, set front page, editing roles |

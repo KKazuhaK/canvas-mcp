@@ -61,6 +61,7 @@ from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.config import get_config
 from ..core.dates import format_date
 from ..core.file_validation import format_file_size
+from ..core.tool_results import FULL_CONTENT_TOOL_META
 from ..core.untrusted_content import fence_untrusted, fence_untrusted_inline
 from ..core.validation import coerce_canvas_id, validate_params
 
@@ -453,7 +454,9 @@ def register_student_group_tools(mcp: FastMCP) -> None:
             lines.append("")
         return "\n".join(lines).rstrip()
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(
+        annotations=ToolAnnotations(read_only_hint=True), meta=FULL_CONTENT_TOOL_META
+    )
     @validate_params
     async def get_group_discussion(group_id: str | int, topic_id: str | int) -> str:
         """Read a group discussion topic (or group announcement) with all its posts.

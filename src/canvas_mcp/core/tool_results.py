@@ -12,6 +12,33 @@ from fastmcp.tools import ToolResult
 
 _INSTALL_ATTR = "_canvas_tool_result_contract_installed"
 
+#: Largest text result Claude Code accepts from an MCP tool when the tool asks
+#: for it (its hard ceiling). Without the declaration Claude Code caps a tool
+#: result at about 25k tokens; with it, a text result up to this many
+#: characters is delivered whole, and a longer one is saved to a file the
+#: model reads instead of being cut. Other clients ignore the key.
+MAX_RESULT_SIZE_CHARS = 500_000
+
+#: ``tools/list`` metadata for tools whose job is to return a complete piece of
+#: Canvas content (a page, a syllabus, a discussion, a course file). Pass it as
+#: ``@mcp.tool(meta=FULL_CONTENT_TOOL_META)`` so the client does not shorten
+#: what the server deliberately returns whole.
+FULL_CONTENT_TOOL_META: dict[str, Any] = {
+    "anthropic/maxResultSizeChars": MAX_RESULT_SIZE_CHARS,
+}
+
+#: Largest single JSON-RPC message Claude Code reads from an MCP server, on
+#: stdio and HTTP/SSE alike (16 MiB, read from the 2.1.285 binary). A bigger
+#: message is not saved or cut: the client drops the whole server connection,
+#: before maxResultSizeChars is ever consulted. Every result a tool returns,
+#: base64 file bytes included, must serialize below it.
+MAX_WIRE_MESSAGE_BYTES = 16 * 1024 * 1024
+
+
+def text_wire_bytes(text: str) -> int:
+    """Bytes ``text`` takes as a JSON string in a serialized MCP message."""
+    return len(json.dumps(text, ensure_ascii=False).encode("utf-8", "surrogatepass"))
+
 
 def _text_is_error(text: str) -> bool:
     candidate = text.lstrip()

@@ -189,6 +189,26 @@ def _preview(text: Any, max_chars: int) -> str:
     return plain
 
 
+def _preview_was_cut(text: Any, max_chars: int) -> bool:
+    """True when ``_preview`` had to shorten ``text``."""
+    return isinstance(text, str) and len(strip_html_tags(text)) > max_chars
+
+
+#: Where the full text of a shortened feed preview lives, by item type.
+_FULL_TEXT_TOOL = {
+    "Announcement": "get_discussion_topic_details",
+    "DiscussionTopic": "get_discussion_topic_details",
+    "Conversation": "get_conversation_details",
+    "Submission": "get_my_submission",
+}
+
+
+def _cut_note(tool: str | None) -> str:
+    if tool:
+        return f"  (Preview shortened; {tool} reads the full text.)"
+    return "  (Preview shortened; the link opens the full text in Canvas.)"
+
+
 def _as_count(value: Any) -> int:
     try:
         return max(int(value or 0), 0)
@@ -345,6 +365,8 @@ def _format_announcement(
         body = _preview(announcement.get("message"), preview_chars)
         if body:
             lines.append(fence_untrusted(body, "announcement body preview"))
+            if _preview_was_cut(announcement.get("message"), preview_chars):
+                lines.append(_cut_note(_FULL_TEXT_TOOL["Announcement"]))
     return "\n".join(lines) + "\n"
 
 
@@ -429,6 +451,8 @@ async def _format_stream_item(
                 text = _preview(latest.get("comment"), preview_chars)
                 if text:
                     lines.append(fence_untrusted(text, "submission comment preview"))
+                    if _preview_was_cut(latest.get("comment"), preview_chars):
+                        lines.append(_cut_note(_FULL_TEXT_TOOL["Submission"]))
     else:
         title = item.get("title") or "(no title)"
         lines.append(f"  Title: {fence_untrusted_inline(title, 'activity item title')}")
@@ -455,6 +479,8 @@ async def _format_stream_item(
             text = _preview(source, preview_chars)
             if text:
                 lines.append(fence_untrusted(text, label))
+                if _preview_was_cut(source, preview_chars):
+                    lines.append(_cut_note(_FULL_TEXT_TOOL.get(item_type)))
 
     if item.get("html_url"):
         lines.append(f"  Link: {item['html_url']}")
@@ -490,7 +516,9 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
                 account's time zone; ISO timestamps are exact.
             limit: Maximum announcements to show (1-200, default 50).
             preview_chars: Characters of body text to preview per
-                announcement (0-2000, default 400; 0 shows titles only).
+                announcement (0-2000, default 400; 0 shows titles only). A
+                shortened preview says so; get_discussion_topic_details with
+                the course and announcement ID reads the whole announcement.
         """
         if not 1 <= limit <= MAX_LIMIT:
             return f"Error: limit must be between 1 and {MAX_LIMIT}."

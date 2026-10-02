@@ -286,7 +286,7 @@ Cross-course by design: for one course's full announcement history use the share
 - `end_date` (optional): Latest post date (default: now). Date-only values are whole days in your Canvas
   account's time zone (Canvas applies the day boundaries); ISO timestamps are exact
 - `limit` (optional): Maximum announcements to show, 1-200 (default 50)
-- `preview_chars` (optional): Body preview length, 0-2000 (default 400; `0` = titles only)
+- `preview_chars` (optional): Body preview length, 0-2000 (default 400; `0` = titles only). A shortened preview says so and names `get_discussion_topic_details`, which reads the whole announcement
 
 **Example:**
 ```
@@ -1110,7 +1110,9 @@ List all rubrics in a course.
 ---
 
 #### `get_rubric`
-View rubric criteria and point values. Accepts either a rubric ID or an assignment ID.
+View rubric criteria and point values, with every criterion and rating
+description complete. Accepts either a rubric ID or an assignment ID.
+(`list_rubrics` shortens long descriptions and points here when it does.)
 
 **Parameters:**
 - `course_identifier`: Course code or ID
@@ -1949,12 +1951,11 @@ Get detailed course information including syllabus.
 ---
 
 #### `get_syllabus`
-Get the complete Canvas Syllabus tab content for a course, **untruncated**. Unlike `get_course_content_overview` (which returns only a ~1000-character preview), this returns the full syllabus body, so later sections such as grading policies, weighting, and final-exam details remain accessible.
+Get the complete Canvas Syllabus tab content for a course, **never cut**. Unlike `get_course_content_overview` (which returns only a ~1000-character preview), this returns the full syllabus body, so later sections such as grading policies, weighting, and final-exam details remain accessible. There is no character cap (the optional `max_chars` parameter was removed), and the tool declares a 500,000-character result size to Claude Code (see [Complete content](#complete-content-no-truncation)).
 
 **Parameters:**
 - `course_identifier`: Course code or ID
 - `output_format` (optional): `text` (plain text, default), `html` (raw HTML body), or `both`
-- `max_chars` (optional): Cap on returned characters per section. When exceeded, the content is truncated with an explicit `[truncated...]` marker. Defaults to no truncation.
 
 **Example:**
 ```
@@ -2334,19 +2335,71 @@ if the destination already exists rather than overwriting it.
 ---
 
 #### `read_course_file`
-Read a course file and return its content directly in the response as base64. Unlike `download_course_file`, nothing is written to the server's filesystem, so this works when the MCP server runs on a different machine than the client.
+Open a course file the way a person sees it: the tool returns **the original
+file**, like a file attached to the chat, so scanned handouts, figures,
+equations and layout reach the model. Nothing is written to the server's
+filesystem, so it works when the server runs on a different machine.
+
+What the client receives:
+
+| File | MCP content | What the model gets in Claude Code |
+|------|-------------|---------------------|
+| PNG, JPEG, GIF, WebP | `ImageContent` | The image, inline |
+| PDF | `EmbeddedResource` with `BlobResourceContents` (`application/pdf`) | Saved under `tool-results/` (2.1.69+); Read sends it as page images plus text, exactly like a manual attachment |
+| Text, data and code (TXT, Markdown, CSV, JSON, HTML, XML, notebooks, LaTeX, `.py`, `.java`, ...) | Blob declared `text/plain` (or `text/markdown`, `text/csv`, `text/html`, `application/json`) | Saved as a text file Read opens |
+| PPTX, DOCX, XLSX, DOC, XLS | Blob with its Office type | Saved, but Claude Code's Read refuses Office files; the hint says so and points to `read_course_file_text` (PPTX/DOCX) |
+| Anything else | Blob declared `application/octet-stream` | Saved; Read cannot open it |
+
+Claude Code names a saved blob from its MIME type with a fixed table and calls
+anything else `.bin`, which Read refuses, so text of any kind is declared as a
+text type it maps to a readable extension. Each result starts with a short text
+line: the file name (fenced as untrusted), the file's type and, when it
+differs, the type it was sent as, its size, the page count for PDFs (best
+effort: skipped if pypdf is busy or slow), and what to do with the saved file.
+The type comes from the file's own signature when it has one (PDF, PNG, JPEG,
+GIF, WebP), then a clean Canvas content type, then the extension; the declared
+type is always one of a fixed allowlist, so an uploader cannot get a script or
+executable type written to the student's disk. The resource URI is built from
+the file ID and the same fixed table (`canvas://files/<id>.<ext>`), never from
+the uploader-chosen name or the platform's MIME registry.
+
+**At most 11.5 MB comes back as a file.** Claude Code drops the MCP server
+connection on any JSON-RPC message over 16 MiB (stdio and HTTP alike), and
+base64 makes a file 4/3 larger. A bigger file is refused before download, with
+a pointer to `read_course_file_text` (its text, whole or by page range) or, for
+a format without text, `download_course_file` on a local server.
+
+**Clients that cannot take a file.** Claude Desktop chat and claude.ai
+connectors (MCP `clientInfo.name` `claude-ai`) mishandle blob resources in tool
+results and have no Read tool, so for them a non-image file comes back as its
+**complete extracted text** (the same extractor and the same 50 MB download
+budget as `read_course_file_text`, fenced), with a note that figures and
+scanned pages need the file attached to the chat by hand. Images still come
+back as images. A named client not on that list gets the spec-compliant file.
+
+The hosted server runs stateless streamable HTTP, where the `initialize`
+`clientInfo` is gone by the time a tool runs (protocols up to 2025-11-25). An
+unnamed client over HTTP gets the file only when its `User-Agent` is Claude
+Code's (`claude-code/<version>`), and text otherwise, since a hosted server's
+other remote clients are mostly connectors. An unnamed client of a local
+(stdio) server gets the file.
+
+The reported size is checked before anything is downloaded, the body is capped
+while streaming, and the Canvas token is only sent to the Canvas host (storage
+redirects are fetched without credentials).
 
 **Parameters:**
 - `course_identifier`: Course code or ID
 - `file_id`: Canvas file ID (find it with `list_course_files` or `list_module_items`)
-- `max_size_mb` (optional): Maximum file size in MB to read (default: 25). Clamped server-side to `READ_FILE_MAX_SIZE_MB` (default 100); larger files are rejected to avoid excessive memory usage.
+- `max_size_mb` (optional): Maximum file size in MB to read (default: 25). Clamped server-side to `READ_FILE_MAX_SIZE_MB` (default 100), and to 11.5 MB for a file returned as a file; larger files are refused before download.
 
 **Example:**
 ```
-"Read the rubric spreadsheet from course files"
+"Look at the week 5 lecture PDF and explain the diagram on page 12"
+"This handout is a scan; read it and tell me what problem 3 asks"
 ```
 
-**Returns:** File content as base64 with name, size, and content type.
+**Returns:** A text line plus the file (`EmbeddedResource`) or image (`ImageContent`); for clients that cannot take a file, the file's complete text instead.
 
 > **Hidden Files tab.** When a course hides its Files tab, Canvas refuses
 > `list_course_files` for students (401/403). The tool then lists the files
@@ -2357,16 +2410,19 @@ Read a course file and return its content directly in the response as base64. Un
 ---
 
 #### `read_course_file_text`
-*(student profile)* Read a course file as plain text: lecture slides, PDFs, Word
-documents, and text files. Output carries `--- Page N ---` / `--- Slide N ---`
-markers and is fenced as untrusted Canvas content.
+*(every profile, registered with `read_course_file`)* Read **all** the text of
+a course file: lecture slides, PDFs, Word documents, and text files. Nothing is
+cut; the only limit is a page range the caller asks for. Output carries
+`--- Page N ---` / `--- Slide N ---` markers and is fenced as untrusted Canvas
+content. Pages or slides with no text (scans, figures) are listed, with a
+pointer to `read_course_file` to see them as images.
 
 | Format | What is extracted |
 |--------|-------------------|
 | PDF | Page text (no OCR: scanned pages come back empty, with a note) |
 | PPTX | Slide title, text boxes, tables, and speaker notes |
 | DOCX | Paragraphs (headings marked `#`) and tables |
-| TXT, Markdown, CSV, JSON, HTML | Decoded text; HTML is converted to text |
+| Text files: TXT, Markdown, CSV/TSV, JSON, HTML, XML, notebooks, LaTeX, source code | Decoded text; HTML is converted to text |
 
 PDF, PPTX and DOCX need the optional `documents` extra on the machine running
 the server: `pip install 'canvas-mcp[documents]'`. Without it the tool answers
@@ -2379,12 +2435,14 @@ parsing, and at most two files are parsed at once. The Canvas token is only
 sent to the Canvas host; the redirect to file storage is fetched without
 credentials.
 
+Text that would not fit in one MCP message (over 15 MB serialized; clients
+disconnect past 16 MiB) is refused rather than cut: for a PDF or deck the
+error proposes a `start_page`/`end_page` range that fits.
+
 **Parameters:**
 - `course_identifier`: Course code or ID
 - `file_id`: Canvas file ID (find it with `list_course_files` or `list_module_items`)
-- `max_chars` (optional): Maximum characters of text to return (default 40000, max 200000)
 - `start_page` / `end_page` (optional): 1-based inclusive page (PDF) or slide (PPTX) range
-- `start_char` (optional): for files without pages (DOCX, text, HTML), the 0-based character offset to start from
 
 **Example:**
 ```
@@ -2392,11 +2450,34 @@ credentials.
 "What does page 12 of the lab manual say about late work?"
 ```
 
-**Returns:** File name, type, size, the page/slide (or character) range shown, and
-the text. When the text is cut at `max_chars`, a note gives the `start_page` (PDF,
-PPTX) or `start_char` (everything else) to continue from. A single page or slide
-longer than `max_chars` is shown in part, and the note points past it rather
-than back at it.
+**Returns:** File name, type, size, the page/slide range (or the character
+count, marked complete), and the complete text. The `max_chars` and
+`start_char` parameters and the 40,000-character default cut were removed: the
+tool declares a 500,000-character result size to Claude Code, which delivers a
+longer result as a file the model reads rather than cutting it.
+
+---
+
+### Complete content (no truncation)
+
+Tools whose job is to return one complete piece of Canvas content never cut it,
+and declare `_meta: {"anthropic/maxResultSizeChars": 500000}` in `tools/list`
+(Claude Code's ceiling; without it Claude Code caps a tool result near 25k
+tokens). Other clients ignore the key. The tools: `read_course_file`,
+`read_course_file_text`, `get_page_content`, `get_syllabus`, `get_front_page`,
+`get_assignment_details`, `get_discussion_topic_details`,
+`get_discussion_entry_details`, `get_discussion_with_replies`,
+`list_discussion_entries`, `get_conversation_details`, `get_group_discussion`,
+`get_my_submission`, `get_calendar_event`, `get_quiz_details`, `get_rubric`, and
+`get_rubric_assessment`.
+
+Listing and overview tools may still preview long text, but only where a
+full-content tool exists, and the output names it when a preview was shortened
+(`get_course_content_overview` → `get_syllabus`, `list_pages`, `list_modules`;
+`list_my_announcements` and `get_my_activity_stream` → the item's own tool;
+`list_rubrics` → `get_rubric`; `list_discussion_entries` without
+`include_full_content` → `include_full_content=True`; `get_page_details` →
+`get_page_content`).
 
 ---
 
@@ -2510,11 +2591,15 @@ Get details about a specific discussion.
 ---
 
 #### `list_discussion_entries`
-View posts in a discussion.
+View posts in a discussion. By default each post is a short preview and the
+output says so; with `include_full_content=true` every post, and every reply
+when `include_replies=true`, is returned complete.
 
 **Parameters:**
 - `course_identifier`: Course code or ID
 - `topic_id`: Discussion topic ID
+- `include_full_content` (optional): Return the complete text of every entry and reply (default: false)
+- `include_replies` (optional): Fetch replies for each entry (default: false)
 
 **Example:**
 ```
@@ -2524,7 +2609,9 @@ View posts in a discussion.
 ---
 
 #### `get_discussion_with_replies`
-Get all discussion entries with nested replies in one call.
+Get every discussion entry in full, never cut, optionally with all its replies
+(also complete), in one call. Shows the topic title, not its body
+(`get_discussion_topic_details` has the body).
 
 **Parameters:**
 - `course_identifier`: Course code or ID

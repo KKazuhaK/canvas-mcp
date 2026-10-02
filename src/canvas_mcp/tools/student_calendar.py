@@ -63,6 +63,7 @@ from ..core.course_policy import (
     check_student_write_allowed,
 )
 from ..core.dates import format_date, output_timezone, parse_date
+from ..core.tool_results import FULL_CONTENT_TOOL_META
 from ..core.untrusted_content import (
     FENCE_LEAK_ERROR,
     contains_fence_markers,
@@ -766,7 +767,9 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
         lines.extend(notes)
         return "\n".join(lines)
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(
+        annotations=ToolAnnotations(read_only_hint=True), meta=FULL_CONTENT_TOOL_META
+    )
     @validate_params
     async def get_calendar_event(event_id: str | int) -> str:
         """Get one calendar event in full, including its description.

@@ -113,7 +113,7 @@ READ_TOOL_CONTENT_POLICIES: dict[str, ReadToolContentPolicy] = {
     "get_peer_review_comments": _fenced("fence_untrusted_fields"),
     "get_peer_review_completion_analytics": _fenced("_fence_peer_review_names"),
     "get_peer_review_followup_list": _fenced("_fence_peer_review_names"),
-    "get_rubric": _fenced("fence_untrusted_inline"),
+    "get_rubric": _fenced("fence_untrusted", "fence_untrusted_inline"),
     "get_rubric_assessment": _fenced("fence_untrusted_inline"),
     "get_student_analytics": _fenced("fence_untrusted_inline"),
     "get_syllabus": _fenced("fence_untrusted"),
@@ -152,8 +152,25 @@ READ_TOOL_CONTENT_POLICIES: dict[str, ReadToolContentPolicy] = {
     ),
     "list_users": _fenced("fence_untrusted_inline"),
     "parse_ufixit_violations": _fenced("fence_untrusted_fields"),
-    "read_course_file": _fenced("fence_untrusted_inline"),
-    "read_course_file_text": _fenced("fence_untrusted", "fence_untrusted_inline"),
+    "read_course_file": ReadToolContentPolicy(
+        "fenced",
+        guards=("fence_untrusted_inline", "_file_as_text_fallback"),
+        rationale=(
+            "The text line fences the uploader-chosen file name and lock "
+            "explanation, prints a type sanitized to a bare MIME token, declares "
+            "the blob only with a type from a fixed allowlist (else "
+            "application/octet-stream), and builds the resource URI from the "
+            "numeric file ID and that fixed type table only. The attached file "
+            "bytes are Canvas-authored content that cannot be fenced: a fence "
+            "inside a PDF or image would corrupt the file, and the point of the "
+            "tool is to hand over the original exactly as a person would see it, "
+            "the same trust position as a file the user attaches to the chat. "
+            "The text fallback for clients that cannot take a file "
+            "(_file_as_text_fallback) fences the extracted text with "
+            "fence_untrusted."
+        ),
+    ),
+    "read_course_file_text": _fenced("format_document_text", "fence_untrusted_inline"),
     "scan_course_content_accessibility": _fenced("fence_untrusted_fields"),
     "search_canvas_tools": _safe(
         "Returns registered tool and bundled source metadata, not Canvas content."
