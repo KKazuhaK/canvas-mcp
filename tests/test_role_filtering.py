@@ -32,6 +32,9 @@ STUDENT_ONLY_TOOLS = {
     # cross-course "what's new" feed (tools/student_feed.py)
     "list_my_announcements",
     "get_my_activity_stream",
+    # student grade insight (read-only, caller-scoped)
+    "get_my_assignment_scores",
+    "calculate_grade_scenarios",
 }
 
 # Calendar/planner writes: student profile only, and only when the operator

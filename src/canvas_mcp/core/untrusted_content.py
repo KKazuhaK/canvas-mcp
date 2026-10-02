@@ -58,6 +58,7 @@ def _deferred(rationale: str) -> ReadToolContentPolicy:
 # silently shrinking when a tool is added or its fencing path is removed.
 READ_TOOL_CONTENT_POLICIES: dict[str, ReadToolContentPolicy] = {
     "analyze_peer_review_quality": _fenced("fence_untrusted_fields"),
+    "calculate_grade_scenarios": _fenced("_render_grade_scenarios"),
     "check_enrollment": _safe(
         "Returns only yes, no, or indeterminate enrollment state; no Canvas-authored text."
     ),
@@ -89,6 +90,7 @@ READ_TOOL_CONTENT_POLICIES: dict[str, ReadToolContentPolicy] = {
     "get_front_page": _fenced("fence_untrusted"),
     "get_group_discussion": _fenced("fence_untrusted", "_render_view_entries"),
     "get_group_members": _fenced("fence_untrusted_inline"),
+    "get_my_assignment_scores": _fenced("_render_scores_report"),
     "get_my_course_grades": _deferred(
         "Returns the caller's numeric grades with course name/code, the documented course-identity exception."
     ),

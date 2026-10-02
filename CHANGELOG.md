@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Student grade insight (read-only).** `get_my_assignment_scores` lists every
+  assignment's score and status in a course, grouped by assignment group with
+  weights and drop rules. `calculate_grade_scenarios` recomputes the course grade
+  the way Canvas does (weighted or total points, drop lowest/highest and
+  never-drop, excused and omitted work), shows it next to Canvas's own current
+  score and flags disagreement, applies what-if scores, and reports the uniform
+  percentage needed on remaining work for a target percentage or letter. The
+  arithmetic is in `core/grade_calc.py`.
 - Student "what's new" feed (read-only, student profile): `list_my_announcements`
   lists announcements across all active courses in one call (default last 14
   days, optional course filter), and `get_my_activity_stream` summarises the
