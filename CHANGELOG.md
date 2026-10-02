@@ -65,6 +65,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `read_course_file_text` read such a file through `GET /files/:id`, but only
   when the course links it from a module.
 
+### Changed (breaking)
+
+- **`read_course_file` returns the original file**, not base64 text. Non-image
+  files come back as an MCP `EmbeddedResource` (`BlobResourceContents`, exact
+  bytes, MIME type from the file signature); Claude Code saves it and the model
+  opens it with Read, the same path as a manually attached PDF (page images
+  plus text). PNG/JPEG/GIF/WebP come back as `ImageContent`. Claude Desktop
+  chat and claude.ai connectors (`clientInfo.name` `claude-ai`), which mishandle
+  blob resources, get the complete extracted text instead. Downloads now go
+  through the same token-safe downloader as `read_course_file_text`.
+- **No more truncation in full-content tools.** `read_course_file_text` returns
+  the complete text (`max_chars`, `start_char` and the 40,000-character default
+  removed; only `start_page`/`end_page` limit it). `get_syllabus` lost its
+  optional `max_chars`. `get_discussion_with_replies` returns whole entries and
+  replies (were cut at 200/150 characters), `list_discussion_entries` with
+  `include_full_content=True` returns whole replies (were cut at 200), and
+  `get_rubric` shows whole criterion and rating descriptions (were cut at
+  200/100). Seventeen full-content tools declare
+  `anthropic/maxResultSizeChars: 500000` so Claude Code delivers large results
+  whole instead of capping them near 25k tokens.
+- Listing tools that preview (`get_course_content_overview`,
+  `list_my_announcements`, `get_my_activity_stream`, `list_rubrics`) now say
+  when a preview was shortened and which tool returns the full text.
+
 ### Security
 
 - `read_course_file_text` follows download redirects one hop at a time and

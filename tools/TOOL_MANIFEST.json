@@ -212,7 +212,8 @@
       "returns": "Title, time, calendar, location, address, description, series/appointment flags, Canvas link",
       "examples": [
         "Where is the review session?"
-      ]
+      ],
+      "notes": "Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "list_planner_notes",
@@ -289,7 +290,8 @@
       "returns": "Full assignment details including description, due date, submission types",
       "examples": [
         "Show me details for assignment 456 in course 123"
-      ]
+      ],
+      "notes": "Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "list_submissions",
@@ -727,7 +729,7 @@
     {
       "name": "get_syllabus",
       "category": "shared",
-      "description": "Get the complete Canvas Syllabus tab content for a course, untruncated (unlike the overview preview)",
+      "description": "Get the complete Canvas Syllabus tab content for a course, never cut (unlike the overview preview)",
       "parameters": [
         {
           "name": "course_identifier",
@@ -741,20 +743,14 @@
           "required": false,
           "default": "text",
           "description": "'text' (plain text), 'html' (raw HTML body), or 'both'"
-        },
-        {
-          "name": "max_chars",
-          "type": "integer",
-          "required": false,
-          "default": null,
-          "description": "Optional cap per section; truncation is explicitly marked. None = no truncation"
         }
       ],
-      "returns": "Full syllabus body with no silent truncation",
+      "returns": "Full syllabus body, never cut",
       "examples": [
         "Get the full syllabus for BADM 350 including the grading policy",
         "Show me the raw HTML of the CS101 syllabus"
-      ]
+      ],
+      "notes": "Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "update_syllabus",
@@ -834,12 +830,27 @@
           "type": "string | integer",
           "required": true,
           "description": "Discussion topic ID"
+        },
+        {
+          "name": "include_full_content",
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "Return the complete text of every entry and reply (default: False, which shows short previews)"
+        },
+        {
+          "name": "include_replies",
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "Fetch replies for each entry (default: False)"
         }
       ],
       "returns": "List of discussion posts with authors and content",
       "examples": [
         "Show me posts in the Week 5 discussion"
-      ]
+      ],
+      "notes": "Default output previews each post and says so; with include_full_content=True every entry and reply is complete. Declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "update_discussion_topic",
@@ -1022,7 +1033,8 @@
       "examples": [
         "Did my essay go through?",
         "How many attempts do I have left?"
-      ]
+      ],
+      "notes": "Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "submit_assignment",
@@ -2659,7 +2671,7 @@
       "examples": [
         "Show me the rubric attached to the final project"
       ],
-      "notes": "Accepts either rubric_id or assignment_id (at least one required). If both provided, uses rubric_id (more specific)."
+      "notes": "Accepts either rubric_id or assignment_id (at least one required). If both provided, uses rubric_id (more specific). Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "get_rubric_assessment",
@@ -2688,7 +2700,8 @@
       "returns": "Rubric scores and comments for the student's submission",
       "examples": [
         "What rubric scores did student 123 get on the essay?"
-      ]
+      ],
+      "notes": "Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "identify_problematic_peer_reviews",
@@ -3419,7 +3432,8 @@
       "returns": "Full conversation thread with all messages and participants",
       "examples": [
         "Show me the full thread of conversation 555"
-      ]
+      ],
+      "notes": "Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "get_course_content_overview",
@@ -3517,7 +3531,8 @@
       "returns": "Entry text plus all replies with authors and timestamps",
       "examples": [
         "Show me entry 42 in the Week 3 discussion, with its replies"
-      ]
+      ],
+      "notes": "Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "get_discussion_topic_details",
@@ -3540,12 +3555,13 @@
       "returns": "Topic metadata and full message body",
       "examples": [
         "Show the details of the 'Introductions' discussion topic"
-      ]
+      ],
+      "notes": "Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "get_discussion_with_replies",
       "category": "shared",
-      "description": "Enhanced function to get discussion entries with optional reply fetching.",
+      "description": "Read every entry of a discussion in full, optionally with all replies, never cut",
       "parameters": [
         {
           "name": "course_identifier",
@@ -3570,7 +3586,8 @@
       "returns": "All discussion entries with nested replies in one call",
       "examples": [
         "Get the whole Week 3 discussion including replies"
-      ]
+      ],
+      "notes": "Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "get_front_page",
@@ -3587,7 +3604,8 @@
       "returns": "Front page title and full content body",
       "examples": [
         "What's on the course front page?"
-      ]
+      ],
+      "notes": "Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "get_page_content",
@@ -3610,7 +3628,8 @@
       "returns": "Full HTML content body of the page",
       "examples": [
         "Show me the content of the 'Course Policies' page"
-      ]
+      ],
+      "notes": "Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "get_page_details",
@@ -3879,7 +3898,7 @@
     {
       "name": "read_course_file",
       "category": "shared",
-      "description": "Read a file from a Canvas course and return its content as base64.",
+      "description": "Open a course file exactly as a person sees it: returns the original file (PDF, slides, image, document), not a text conversion.",
       "parameters": [
         {
           "name": "course_identifier",
@@ -3898,19 +3917,20 @@
           "type": "number",
           "required": false,
           "default": 25.0,
-          "description": "Maximum file size in MB to read (default: 25). Clamped server-side to\nREAD_FILE_MAX_SIZE_MB (default 100). Files larger than the effective limit are\nrejected to avoid excessive memory usage."
+          "description": "Maximum file size in MB to read (default: 25). Clamped server-side to READ_FILE_MAX_SIZE_MB (default 100). Larger files are refused before anything is downloaded."
         }
       ],
-      "returns": "File content as base64 with name, size, and content type",
+      "returns": "A short text line (fenced file name, type, size, PDF page count, hint) plus the file as an EmbeddedResource blob with its true MIME type, or ImageContent for PNG/JPEG/GIF/WebP. For clientInfo.name 'claude-ai' (Claude Desktop chat, claude.ai connectors), the complete extracted text instead of a blob.",
       "examples": [
-        "Read the rubric spreadsheet from course files"
+        "Look at the week 5 lecture slides and explain the diagram on slide 12",
+        "This handout is a scan; read it and tell me what problem 3 asks"
       ],
-      "notes": "Unlike download_course_file which saves to the server's local filesystem, this tool returns the file content directly in the response. This is useful when the MCP server runs on a different machine than the client. Use list_course_files or list_module_items to find file IDs."
+      "notes": "Claude Code saves the blob under tool-results/ and gives its path; open it with Read to view the file like an attachment (a PDF arrives as page images plus text). Unknown clients get the spec-compliant file. The MIME type comes from the file signature first; the resource URI is canvas://files/<id>.<ext>, never the uploader's file name. The Canvas token is sent only to the Canvas origin. Works for module-linked files when the Files tab is hidden. Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "read_course_file_text",
       "category": "student",
-      "description": "Read a course file (PDF, slides, Word doc, text) as plain text.",
+      "description": "Read ALL the text of a course file (PDF, slides, Word doc, text), never cut.",
       "parameters": [
         {
           "name": "course_identifier",
@@ -3925,40 +3945,26 @@
           "description": "Canvas file ID"
         },
         {
-          "name": "max_chars",
-          "type": "integer",
-          "required": false,
-          "default": 40000,
-          "description": "Maximum characters of text to return (default 40000, max 200000)"
-        },
-        {
           "name": "start_page",
           "type": "integer",
           "required": false,
           "default": null,
-          "description": "First page (PDF) or slide (PPTX) to read, 1-based"
+          "description": "Optional first page (PDF) or slide (PPTX) to read, 1-based"
         },
         {
           "name": "end_page",
           "type": "integer",
           "required": false,
           "default": null,
-          "description": "Last page or slide to read, inclusive"
-        },
-        {
-          "name": "start_char",
-          "type": "integer",
-          "required": false,
-          "default": 0,
-          "description": "For files without pages (DOCX, text, HTML), the 0-based character offset to start from"
+          "description": "Optional last page or slide to read, inclusive"
         }
       ],
-      "returns": "Extracted text with page/slide markers inside an untrusted-content fence, plus file name, type, size, the page/slide (or character) range shown, and a start_page or start_char continuation hint when truncated",
+      "returns": "The complete extracted text with page/slide markers inside an untrusted-content fence, plus file name, type, size and the page/slide range (or the character count, marked complete). Pages with no text are listed with a pointer to read_course_file.",
       "examples": [
         "Summarize the week 3 lecture slides",
         "What does page 12 of the lab manual say about grading?"
       ],
-      "notes": "Supports PDF (page text, no OCR), PPTX (slide titles, text, tables, speaker notes), DOCX (paragraphs and tables), and plain text/Markdown/CSV/JSON/HTML. Checks the reported size against a 50 MB cap (clamped to READ_FILE_MAX_SIZE_MB) before downloading, and refuses Office files whose XML would inflate past 20 MB (or any part more than 100x) before parsing; at most two files are parsed at once. The Canvas token is sent only to the Canvas host; storage redirects are fetched without credentials. Works for files linked from modules when the course Files tab is hidden. PDF/PPTX/DOCX need the optional 'documents' extra: pip install 'canvas-mcp[documents]'."
+      "notes": "Supports PDF (page text, no OCR), PPTX (slide titles, text, tables, speaker notes), DOCX (paragraphs and tables), and plain text/Markdown/CSV/JSON/HTML. Checks the reported size against a 50 MB cap (clamped to READ_FILE_MAX_SIZE_MB) before downloading, and refuses Office files whose XML would inflate past 20 MB (or any part more than 100x) before parsing; at most two files are parsed at once. The Canvas token is sent only to the Canvas host; storage redirects are fetched without credentials. Works for files linked from modules when the course Files tab is hidden. PDF/PPTX/DOCX need the optional 'documents' extra: pip install 'canvas-mcp[documents]'. The max_chars and start_char parameters and the 40,000-character default cut were removed; only an explicit page range limits the output. Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "reply_to_discussion_entry",
@@ -4041,7 +4047,8 @@
       "examples": [
         "How many attempts do I have left on Quiz 3?",
         "What was my kept score on the midterm practice quiz?"
-      ]
+      ],
+      "notes": "Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "list_my_groups",
@@ -4116,7 +4123,8 @@
       "returns": "Topic title and body, then every entry and reply as a thread",
       "examples": [
         "Read the latest thread in my group's discussion"
-      ]
+      ],
+      "notes": "Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "list_group_announcements",
