@@ -64,11 +64,11 @@ from .tools import (
     register_shared_messaging_tools,
     register_shared_module_tools,
     register_student_calendar_tools,
-    register_student_quiz_tools,
-    register_student_group_tools,
-    register_student_messaging_tools,
     register_student_feed_tools,
     register_student_grade_tools,
+    register_student_group_tools,
+    register_student_messaging_tools,
+    register_student_quiz_tools,
     register_student_tools,
     register_student_write_tools,
 )
@@ -605,7 +605,7 @@ def main() -> None:
         "--role",
         choices=["student", "educator", "all"],
         default=None,
-        help="Tool profile: student (~40 tools), educator (~88 tools), all (default: all)"
+        help="Tool profile: student (~54 tools), educator (~92 tools), all (default: all)"
     )
     parser.add_argument(
         "--list-grants",

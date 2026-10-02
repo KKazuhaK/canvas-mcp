@@ -280,11 +280,11 @@ class TestRoleFiltering:
 
     @pytest.mark.asyncio
     async def test_student_tool_count(self):
-        """Student role should have approximately 43 tools."""
+        """Student role should have approximately 54 tools (no write tools enabled)."""
         mcp = FastMCP(name="test-student")
         register_all_tools(mcp, role="student")
         tools = await _get_tool_names(mcp)
-        assert 30 <= len(tools) <= 50, f"Expected ~43 student tools, got {len(tools)}: {sorted(tools)}"
+        assert 45 <= len(tools) <= 60, f"Expected ~54 student tools, got {len(tools)}: {sorted(tools)}"
 
     @pytest.mark.asyncio
     async def test_educator_tool_count(self):
