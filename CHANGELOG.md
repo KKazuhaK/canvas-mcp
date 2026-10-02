@@ -113,6 +113,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `read_course_file_text` follows download redirects one hop at a time and
   sends the Canvas token only to the configured Canvas origin; storage hops go
   out without credentials and must be HTTPS.
+- `download_course_file` now uses the same per-hop downloader (on the course
+  route and on the hidden-Files-tab module route), streaming to disk. It used
+  to send the token to whatever URL Canvas reported for the file, follow up to
+  20 redirects with the authenticated client, accept `http://` storage hops
+  and write without a size limit. It now caps a download at 1 GB (refused
+  before anything is written when Canvas reports a larger size, and cut off
+  while streaming otherwise), and removes the partial file on any failure.
+- `upload_file_to_storage` (used by `upload_course_file` and the student
+  `submit_assignment` file upload) sends the token to the storage host's
+  confirmation redirect only when it points at the caller's Canvas origin,
+  and does not follow it further; any other `Location` is refused unsent.
+- Text extraction and the PDF page count run in small thread pools of their
+  own (two workers and one). Reads waiting for an extraction slot no longer
+  hold threads of the event loop's default executor, which also resolves DNS
+  for every Canvas request, so many concurrent file reads cannot stall
+  unrelated Canvas calls.
 - The file tools now reject a non-numeric `file_id` before it reaches a
   request path.
 - `read_course_file` declares a returned file only with a fixed allowlist of
@@ -122,7 +138,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to write such a type to the student's disk. The URI extension no longer
   comes from the platform's MIME registry.
 - The `Pages:` count of a returned PDF is best effort: one at a time, skipped
-  when busy, dropped after 5 seconds, and never holding a text-extraction slot.
+  when busy, dropped after 5 seconds, and never holding a text-extraction
+  worker.
 - `read_course_file_text` refuses Office files whose XML would inflate past
   20 MB, or with any part that inflates more than 100x, before a parser runs,
   parses at most two files at once, and prints only a validated MIME token for

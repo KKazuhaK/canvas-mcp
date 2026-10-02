@@ -11,17 +11,19 @@ Two student problems this module solves:
    so it never widens access beyond what Canvas already shows the student.
 
 2. Downloading a file means following Canvas's download URL, which redirects
-   to a storage host (S3 / Instructure file service). ``download_file_bytes``
+   to a storage host (S3 / Instructure file service). ``stream_file_download``
    sends the Canvas token only to the configured Canvas origin and follows each
    redirect hop by hand, so a hop to any other host goes out without
    credentials and over HTTPS only. This does not rely on the HTTP library's
-   redirect-header policy, and avoids the pattern in
-   ``client.upload_file_to_storage``, which follows a ``Location`` with the
-   authenticated client.
+   redirect-header policy. Every file download goes through it:
+   ``download_file_bytes`` (into memory, for the read tools) and
+   ``download_course_file`` (streamed to disk). ``is_canvas_origin`` is the
+   same origin test, used by ``client.upload_file_to_storage`` before it sends
+   the token to an upload confirmation URL.
 """
 
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -169,6 +171,20 @@ def _canvas_origin() -> tuple[str, str, int | None] | None:
         return None
 
 
+def is_canvas_origin(url: str | httpx.URL) -> bool:
+    """True when ``url`` is on the caller's Canvas origin (scheme, host, port).
+
+    Only such a URL may receive the Canvas token. A lookalike host, another
+    port, or another scheme on the Canvas host is a different origin.
+    """
+    try:
+        parsed = url if isinstance(url, httpx.URL) else httpx.URL(url)
+    except (httpx.InvalidURL, TypeError):
+        return False
+    canvas_origin = _canvas_origin()
+    return canvas_origin is not None and _origin(parsed) == canvas_origin
+
+
 @asynccontextmanager
 async def _unauthenticated_client() -> AsyncIterator[httpx.AsyncClient]:
     """A client that carries no Canvas credentials, for non-Canvas hops."""
@@ -176,15 +192,27 @@ async def _unauthenticated_client() -> AsyncIterator[httpx.AsyncClient]:
         yield client
 
 
-async def download_file_bytes(url: str, max_bytes: int) -> bytes | dict[str, str]:
-    """Download a Canvas file URL into memory, never leaking the token.
+async def stream_file_download(
+    url: str, max_bytes: int, write: Callable[[bytes], object]
+) -> int | dict[str, str]:
+    """Follow a Canvas file URL hop by hop and hand the body to ``write``.
 
-    Each hop is fetched with ``follow_redirects=False``. A hop on the Canvas
-    origin uses the fail-closed authenticated client; any other hop uses a
-    client with no credentials and must be HTTPS. The body is capped at
-    ``max_bytes`` (checked against Content-Length first, then while streaming).
-    Error messages carry only the status, never the URL, because download
-    URLs embed verifiers and signed storage tokens.
+    The one download path for course files, so the token rule lives in one
+    place. Each hop is fetched with ``follow_redirects=False``. A hop on the
+    Canvas origin uses the fail-closed authenticated client; any other hop
+    uses a client with no credentials and must be HTTPS. At most
+    ``MAX_DOWNLOAD_REDIRECTS`` redirects are followed.
+
+    The body is capped at ``max_bytes``: a larger declared Content-Length is
+    refused before any byte is written, and the count is checked again before
+    each chunk, so ``write`` never receives more than ``max_bytes`` in all.
+    On an error dict ``write`` may already have received part of the body;
+    the caller discards it.
+
+    Returns the number of bytes written, or ``{"error": ...}``. Error messages
+    carry only the status, never the URL, because download URLs embed
+    verifiers and signed storage tokens. Any other ``OSError`` raised by
+    ``write`` (a full disk, say) propagates to the caller.
     """
     try:
         current = httpx.URL(url)
@@ -198,9 +226,11 @@ async def download_file_bytes(url: str, max_bytes: int) -> bytes | dict[str, str
         on_canvas = canvas_origin is not None and _origin(current) == canvas_origin
         if not on_canvas and current.scheme != "https":
             return {"error": "Refusing a non-HTTPS download from a non-Canvas host"}
-        client_cm = canvas_authenticated_client() if on_canvas else _unauthenticated_client()
 
         try:
+            client_cm = (
+                canvas_authenticated_client() if on_canvas else _unauthenticated_client()
+            )
             async with client_cm as client:
                 async with client.stream("GET", str(current), follow_redirects=False) as response:
                     status = response.status_code
@@ -220,15 +250,32 @@ async def download_file_bytes(url: str, max_bytes: int) -> bytes | dict[str, str
                     if declared and declared.isdigit() and int(declared) > max_bytes:
                         return {"error": "File exceeds the size limit (declared Content-Length)"}
 
-                    buffer = bytearray()
+                    total = 0
                     async for chunk in response.aiter_bytes():
-                        if len(buffer) + len(chunk) > max_bytes:
+                        if total + len(chunk) > max_bytes:
                             return {"error": "File exceeds the size limit during download"}
-                        buffer.extend(chunk)
-                    return bytes(buffer)
-        except PermissionError as exc:
-            return {"error": str(exc)}
+                        write(chunk)
+                        total += len(chunk)
+                    return total
         except httpx.HTTPError as exc:
             return {"error": f"Download failed: {type(exc).__name__}"}
+        except PermissionError as exc:
+            # The fail-closed authenticated client raises this in HTTP mode
+            # when the caller sent no token. A write the OS refuses is a
+            # PermissionError too; either way the caller discards the body.
+            return {"error": str(exc)}
 
     return {"error": f"Too many redirects (more than {MAX_DOWNLOAD_REDIRECTS})"}
+
+
+async def download_file_bytes(url: str, max_bytes: int) -> bytes | dict[str, str]:
+    """Download a Canvas file URL into memory, never leaking the token.
+
+    ``stream_file_download`` into a buffer: the same per-hop token rule,
+    HTTPS requirement, hop cap and ``max_bytes`` cap.
+    """
+    buffer = bytearray()
+    result = await stream_file_download(url, max_bytes, buffer.extend)
+    if isinstance(result, dict):
+        return result
+    return bytes(buffer)

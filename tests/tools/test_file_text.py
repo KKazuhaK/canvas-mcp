@@ -519,6 +519,64 @@ class TestSafety:
         assert state["peak"] == file_text.MAX_CONCURRENT_EXTRACTIONS == 2
 
     @pytest.mark.asyncio
+    async def test_queued_extractions_never_starve_the_default_executor(
+        self, api, monkeypatch
+    ):
+        """Reads waiting for an extraction slot hold no default-executor thread.
+
+        The event loop's default executor also runs DNS resolution for every
+        Canvas request and every other ``asyncio.to_thread`` call. More
+        waiting reads than it has threads (at most 32) must leave it free.
+        """
+        from canvas_mcp.core.document_text import ExtractedDocument, TextSection
+        from canvas_mcp.tools import file_text
+
+        release = threading.Event()
+        lock = threading.Lock()
+        state = {"now": 0, "peak": 0}
+
+        def blocked_extract(data, kind, **kwargs):
+            with lock:
+                state["now"] += 1
+                state["peak"] = max(state["peak"], state["now"])
+            release.wait(30)
+            with lock:
+                state["now"] -= 1
+            return ExtractedDocument(kind, [TextSection(None, "ok")])
+
+        monkeypatch.setattr(file_text, "extract_text", blocked_extract)
+        api.request.return_value = file_info(display_name="a.txt", **{"content-type": "text/plain"})
+        api.download.return_value = b"ok"
+
+        waiting = 64
+        tool = get_tool_function()
+        tasks = [asyncio.create_task(tool("60366", 12345)) for _ in range(waiting)]
+        try:
+            # Every read has downloaded and handed its parse to the pool.
+            deadline = asyncio.get_running_loop().time() + 10
+            while api.download.await_count < waiting or state["now"] < 2:
+                assert asyncio.get_running_loop().time() < deadline
+                await asyncio.sleep(0.01)
+            for _ in range(10):
+                await asyncio.sleep(0)
+
+            # Extraction is saturated; unrelated thread work still runs at once.
+            unrelated = await asyncio.wait_for(
+                asyncio.to_thread(lambda: "resolved"), timeout=2
+            )
+            assert unrelated == "resolved"
+            host = await asyncio.wait_for(
+                asyncio.get_running_loop().getaddrinfo("localhost", 443), timeout=5
+            )
+            assert host
+        finally:
+            release.set()
+            results = await asyncio.gather(*tasks)
+
+        assert all("ok" in r for r in results)
+        assert state["peak"] == file_text.MAX_CONCURRENT_EXTRACTIONS
+
+    @pytest.mark.asyncio
     async def test_missing_parser_returns_install_hint(self, api, monkeypatch):
         import builtins
 

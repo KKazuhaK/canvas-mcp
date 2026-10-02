@@ -694,10 +694,13 @@ class TestDownloadCourseFile:
     @pytest.fixture
     def mock_download_api(self):
         """Fixture to mock APIs needed for download_course_file."""
+        from unittest.mock import AsyncMock
+
         with patch('canvas_mcp.tools.files.get_course_id') as mock_get_id, \
              patch('canvas_mcp.tools.files.get_course_code') as mock_get_code, \
              patch('canvas_mcp.tools.files.make_canvas_request') as mock_request, \
-             patch('canvas_mcp.tools.files.canvas_authenticated_client') as mock_client:
+             patch('canvas_mcp.tools.files.stream_file_download',
+                   new_callable=AsyncMock) as mock_stream:
 
             mock_get_id.return_value = "60366"
             mock_get_code.return_value = "badm_350_120251"
@@ -706,35 +709,12 @@ class TestDownloadCourseFile:
                 'get_course_id': mock_get_id,
                 'get_course_code': mock_get_code,
                 'make_canvas_request': mock_request,
-                '_get_http_client': mock_client,
+                'stream_file_download': mock_stream,
             }
 
-    def _setup_mock_stream(self, mock_client, content=b"file content here"):
-        """Helper to set up a mock streaming response."""
-        from unittest.mock import AsyncMock, MagicMock
-
-        mock_response = AsyncMock()
-        mock_response.raise_for_status = MagicMock()
-
-        async def aiter_bytes(chunk_size=8192):
-            yield content
-
-        mock_response.aiter_bytes = aiter_bytes
-
-        # Create async context manager for client.stream()
-        mock_stream_cm = AsyncMock()
-        mock_stream_cm.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_stream_cm.__aexit__ = AsyncMock(return_value=False)
-
-        mock_http = AsyncMock()
-        mock_http.stream = MagicMock(return_value=mock_stream_cm)
-        # canvas_authenticated_client() is an async context manager yielding the client
-        client_cm = AsyncMock()
-        client_cm.__aenter__ = AsyncMock(return_value=mock_http)
-        client_cm.__aexit__ = AsyncMock(return_value=False)
-        mock_client.return_value = client_cm
-
-        return mock_http
+    def _setup_mock_stream(self, mock_stream, content=b"file content here"):
+        """Make the patched safe downloader hand ``content`` to the sink."""
+        return _setup_mock_stream(mock_stream, content)
 
     @pytest.mark.asyncio
     async def test_download_success(self, mock_download_api, tmp_path):
@@ -747,7 +727,7 @@ class TestDownloadCourseFile:
             "content-type": "application/pdf",
         }
 
-        self._setup_mock_stream(mock_download_api['_get_http_client'])
+        self._setup_mock_stream(mock_download_api['stream_file_download'])
 
         download_fn = get_tool_function('download_course_file')
         result = await download_fn("badm_350_120251", 12345, save_directory=str(tmp_path))
@@ -767,7 +747,7 @@ class TestDownloadCourseFile:
             "content-type": "application/pdf",
         }
 
-        self._setup_mock_stream(mock_download_api['_get_http_client'])
+        self._setup_mock_stream(mock_download_api['stream_file_download'])
 
         download_fn = get_tool_function('download_course_file')
         result = await download_fn("60366", 12345, save_directory=str(tmp_path))
@@ -829,7 +809,7 @@ class TestDownloadCourseFile:
             "content-type": "application/octet-stream",
         }
 
-        self._setup_mock_stream(mock_download_api['_get_http_client'])
+        self._setup_mock_stream(mock_download_api['stream_file_download'])
 
         download_fn = get_tool_function('download_course_file')
         result = await download_fn("60366", 12345, save_directory=str(tmp_path))
@@ -848,7 +828,7 @@ class TestDownloadCourseFile:
             "content-type": "application/pdf",
         }
 
-        self._setup_mock_stream(mock_download_api['_get_http_client'])
+        self._setup_mock_stream(mock_download_api['stream_file_download'])
 
         download_fn = get_tool_function('download_course_file')
         result = await download_fn("60366", 12345, save_directory=str(tmp_path))
@@ -858,8 +838,6 @@ class TestDownloadCourseFile:
     @pytest.mark.asyncio
     async def test_download_http_error(self, mock_download_api, tmp_path):
         """Test handling of HTTP download errors."""
-        from unittest.mock import AsyncMock, MagicMock
-
         mock_download_api['make_canvas_request'].return_value = {
             "id": 12345,
             "display_name": "test.pdf",
@@ -867,25 +845,17 @@ class TestDownloadCourseFile:
             "content-type": "application/pdf",
         }
 
-        # Set up client.stream() to raise an exception
-        mock_response = AsyncMock()
-        mock_response.raise_for_status = MagicMock(side_effect=Exception("403 Forbidden"))
-
-        mock_stream_cm = AsyncMock()
-        mock_stream_cm.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_stream_cm.__aexit__ = AsyncMock(return_value=False)
-
-        mock_http = AsyncMock()
-        mock_http.stream = MagicMock(return_value=mock_stream_cm)
-        client_cm = AsyncMock()
-        client_cm.__aenter__ = AsyncMock(return_value=mock_http)
-        client_cm.__aexit__ = AsyncMock(return_value=False)
-        mock_download_api['_get_http_client'].return_value = client_cm
+        mock_download_api['stream_file_download'].return_value = {
+            "error": "HTTP 403 while downloading the file"
+        }
 
         download_fn = get_tool_function('download_course_file')
         result = await download_fn("60366", 12345, save_directory=str(tmp_path))
 
         assert "error" in result.lower()
+        assert "HTTP 403" in result
+        # The destination created for the download is removed again.
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestListCourseFiles:
@@ -1015,29 +985,19 @@ class TestListCourseFiles:
         assert "Invalid order" not in result
 
 
-def _setup_mock_stream(mock_client, content=b"file content here"):
-    """Make a patched canvas_authenticated_client stream ``content``."""
-    from unittest.mock import AsyncMock, MagicMock
+def _setup_mock_stream(mock_stream, content=b"file content here"):
+    """Make a patched ``stream_file_download`` write ``content`` to the sink.
 
-    mock_response = AsyncMock()
-    mock_response.raise_for_status = MagicMock()
+    The token boundary of the real downloader is covered with a real HTTP
+    client in tests/core/test_course_files.py and
+    tests/security/test_file_tool_host_boundary.py.
+    """
+    async def fake(url, max_bytes, write):
+        write(content)
+        return len(content)
 
-    async def aiter_bytes(chunk_size=8192):
-        yield content
-
-    mock_response.aiter_bytes = aiter_bytes
-
-    mock_stream_cm = AsyncMock()
-    mock_stream_cm.__aenter__ = AsyncMock(return_value=mock_response)
-    mock_stream_cm.__aexit__ = AsyncMock(return_value=False)
-
-    mock_http = AsyncMock()
-    mock_http.stream = MagicMock(return_value=mock_stream_cm)
-    client_cm = AsyncMock()
-    client_cm.__aenter__ = AsyncMock(return_value=mock_http)
-    client_cm.__aexit__ = AsyncMock(return_value=False)
-    mock_client.return_value = client_cm
-    return mock_http
+    mock_stream.side_effect = fake
+    return mock_stream
 
 
 def _denied(status):
@@ -1094,6 +1054,10 @@ class TestListCourseFilesHiddenTabFallback:
         )
         assert f"HTTP {status}" in result
         assert "Files tab is probably hidden" in result
+        # The notice points at both read tools, each for what it does.
+        assert "read_course_file shows a file as it is" in result
+        assert "read_course_file_text returns its plain text" in result
+        assert "base64" not in result.lower()
         assert "Files linked from modules in CS_161_F26" in result
         assert "ID: 501 |" in result and "ID: 502 |" in result and "ID: 503 |" in result
         assert "ID: 9 |" not in result  # Page items are not files
@@ -1191,12 +1155,12 @@ class TestFileReadsHiddenTabFallback:
              patch('canvas_mcp.core.course_files.fetch_all_paginated_results', new_callable=AsyncMock) as module_fetch, \
              patch('canvas_mcp.core.course_files.make_canvas_request', new_callable=AsyncMock) as files_get, \
              patch('canvas_mcp.tools.files.download_file_bytes', new_callable=AsyncMock) as download, \
-             patch('canvas_mcp.tools.files.canvas_authenticated_client') as client:
+             patch('canvas_mcp.tools.files.stream_file_download', new_callable=AsyncMock) as stream:
             module_fetch.return_value = HIDDEN_TAB_MODULES
             download.return_value = b"hello"
-            _setup_mock_stream(client, b"hello")
+            _setup_mock_stream(stream, b"hello")
             yield {"course_get": course_get, "module_fetch": module_fetch,
-                   "files_get": files_get, "client": client, "download": download}
+                   "files_get": files_get, "stream": stream, "download": download}
 
     @pytest.mark.asyncio
     async def test_read_denied_course_route_reads_through_module(self, read_api):
@@ -1229,7 +1193,7 @@ class TestFileReadsHiddenTabFallback:
         assert "not linked from any module" in result
         read_api["files_get"].assert_not_awaited()
         read_api["download"].assert_not_awaited()
-        read_api["client"].assert_not_called()
+        read_api["stream"].assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_read_not_found_does_not_fall_back(self, read_api):
@@ -1258,6 +1222,8 @@ class TestFileReadsHiddenTabFallback:
             )
 
         read_api["files_get"].assert_awaited_once_with("get", "/files/501")
+        # The module route's download URL goes through the safe downloader.
+        assert read_api["stream"].await_args.args[0] == self.INFO["url"]
         assert (tmp_path / "lecture1.txt").read_bytes() == b"hello"
         assert "Note: Canvas refused the course Files route" in result
 

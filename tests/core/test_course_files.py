@@ -228,6 +228,92 @@ class TestDownloadLimitsAndErrors:
         assert "invalid download URL" in result["error"]
 
 
+class TestStreamFileDownload:
+    """The streaming form download_course_file writes to disk with."""
+
+    @pytest.mark.asyncio
+    async def test_body_reaches_the_sink_and_the_count_is_returned(self, transport_env):
+        recorder = transport_env({
+            DOWNLOAD_URL: redirect(STORAGE_URL),
+            STORAGE_URL: lambda r: httpx.Response(
+                200, stream=httpx.ByteStream(b"abc" * 10)
+            ),
+        })
+        received: list[bytes] = []
+
+        total = await cf.stream_file_download(DOWNLOAD_URL, 1024, received.append)
+
+        assert total == 30 and b"".join(received) == b"abc" * 10
+        assert recorder.auth_by_host() == [
+            ("canvas.example.edu", f"Bearer {TOKEN}"),
+            ("files.storage.example.net", None),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_sink_never_receives_more_than_the_cap(self, transport_env):
+        transport_env({STORAGE_URL: lambda r: httpx.Response(
+            200, stream=httpx.ByteStream(b"x" * 500)
+        )})
+        received: list[bytes] = []
+
+        result = await cf.stream_file_download(STORAGE_URL, 100, received.append)
+
+        assert "size limit" in result["error"]
+        assert sum(len(chunk) for chunk in received) <= 100
+
+    @pytest.mark.asyncio
+    async def test_declared_oversize_writes_nothing(self, transport_env):
+        transport_env({STORAGE_URL: body(b"x" * 10, **{"Content-Length": "999999"})})
+        received: list[bytes] = []
+
+        result = await cf.stream_file_download(STORAGE_URL, 100, received.append)
+
+        assert "size limit" in result["error"]
+        assert received == []
+
+    @pytest.mark.asyncio
+    async def test_a_failing_sink_propagates(self, transport_env):
+        transport_env({STORAGE_URL: body(b"bytes")})
+
+        def full_disk(_chunk: bytes) -> None:
+            raise OSError(28, "No space left on device")
+
+        with pytest.raises(OSError):
+            await cf.stream_file_download(STORAGE_URL, 1024, full_disk)
+
+
+class TestIsCanvasOrigin:
+    @pytest.fixture(autouse=True)
+    def canvas_config(self, monkeypatch):
+        config = SimpleNamespace(canvas_api_url=f"{CANVAS}/api/v1", api_timeout=5)
+        monkeypatch.setattr(cf, "get_config", lambda: config)
+        monkeypatch.setattr(cf, "get_request_credentials", lambda: None)
+
+    @pytest.mark.parametrize(("url", "expected"), [
+        (f"{CANVAS}/api/v1/files/1/create_success?uuid=x", True),
+        ("https://canvas.example.edu:443/api/v1/files/1", True),
+        ("http://canvas.example.edu/api/v1/files/1", False),
+        ("https://canvas.example.edu:8443/api/v1/files/1", False),
+        ("https://canvas.example.edu.attacker.example/api/v1/files/1", False),
+        ("https://attacker.example/canvas.example.edu", False),
+        ("/api/v1/files/1", False),
+        ("https://[::1", False),
+    ])
+    def test_origin_match(self, url, expected):
+        assert cf.is_canvas_origin(url) is expected
+
+    def test_hosted_caller_origin_comes_from_their_credentials(self, monkeypatch):
+        monkeypatch.setattr(
+            cf,
+            "get_request_credentials",
+            lambda: RequestCredentials(
+                api_token=TOKEN, api_url="https://other-school.instructure.com/api/v1"
+            ),
+        )
+        assert cf.is_canvas_origin("https://other-school.instructure.com/api/v1/files/1")
+        assert not cf.is_canvas_origin(f"{CANVAS}/api/v1/files/1")
+
+
 class TestErrorStatus:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("status", "denied"), [(401, True), (403, True), (404, False), (500, False)])

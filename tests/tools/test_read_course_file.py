@@ -854,24 +854,53 @@ class TestPageCount:
     @pytest.mark.asyncio
     async def test_busy_extraction_slots_do_not_block_the_file(self, api, make_pdf):
         from canvas_mcp.tools.file_text import (
-            EXTRACTION_SLOTS,
+            EXTRACTION_EXECUTOR,
             MAX_CONCURRENT_EXTRACTIONS,
         )
 
         pdf = make_pdf(["a", "b", "c"])
         api.request.return_value = file_info(size=len(pdf))
         api.download.return_value = pdf
-        for _ in range(MAX_CONCURRENT_EXTRACTIONS):
-            EXTRACTION_SLOTS.acquire()
+        # Occupy every extraction worker, plus a queued parse behind them.
+        release = threading.Event()
+        busy = [
+            EXTRACTION_EXECUTOR.submit(release.wait, 10)
+            for _ in range(MAX_CONCURRENT_EXTRACTIONS + 1)
+        ]
         try:
             text, _ = _split(
                 await asyncio.wait_for(get_tool_function()("60366", 12345), timeout=10)
             )
         finally:
-            for _ in range(MAX_CONCURRENT_EXTRACTIONS):
-                EXTRACTION_SLOTS.release()
+            release.set()
+            for job in busy:
+                job.result(timeout=10)
 
         assert "Pages: 3" in text
+
+    @pytest.mark.asyncio
+    async def test_the_count_runs_in_its_own_pool_not_the_default_executor(
+        self, api, make_pdf, monkeypatch
+    ):
+        from canvas_mcp.tools import files
+
+        threads: list[str] = []
+        real_count = files._count_pdf_pages
+
+        def recording_count(data):
+            threads.append(threading.current_thread().name)
+            return real_count(data)
+
+        monkeypatch.setattr(files, "_count_pdf_pages", recording_count)
+        pdf = make_pdf(["a", "b"])
+        api.request.return_value = file_info(size=len(pdf))
+        api.download.return_value = pdf
+
+        text, _ = _split(await get_tool_function()("60366", 12345))
+
+        assert "Pages: 2" in text
+        assert len(threads) == 1
+        assert threads[0].startswith("canvas-mcp-page-count")
 
     @pytest.mark.asyncio
     async def test_a_count_already_running_is_skipped_not_awaited(self, api, make_pdf):
@@ -908,10 +937,19 @@ class TestPageCount:
         api.download.return_value = pdf
         try:
             text, _ = _split(await get_tool_function()("60366", 12345))
+            # The abandoned count still holds the slot while it runs, so a
+            # second count meanwhile is skipped rather than queued behind it.
+            assert not files._PAGE_COUNT_SLOT.acquire(blocking=False)
         finally:
             release.set()
 
         assert "Pages:" not in text
+        # Once the abandoned count ends, the slot is free again (no leak).
+        deadline = asyncio.get_running_loop().time() + 5
+        while not files._PAGE_COUNT_SLOT.acquire(blocking=False):
+            assert asyncio.get_running_loop().time() < deadline, "page-count slot leaked"
+            await asyncio.sleep(0.01)
+        files._PAGE_COUNT_SLOT.release()
 
 
 class TestToolPointers:

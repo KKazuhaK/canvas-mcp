@@ -737,10 +737,31 @@ async def upload_file_to_storage(
                     # Follow the redirect to get file info. This goes back to the
                     # Canvas API and needs auth; route through the shared
                     # fail-closed resolver so HTTP mode never uses the server's
-                    # own token.
+                    # own token. The Location comes from the storage host, not
+                    # from Canvas, so the token goes only to a URL on the
+                    # caller's Canvas origin (one request, no further
+                    # redirects); anything else is refused unsent. Reachable
+                    # from student tools (submit_assignment file uploads).
+                    from .course_files import is_canvas_origin
+
+                    try:
+                        confirm_url = response.url.join(redirect_url)
+                    except httpx.InvalidURL:
+                        return {"error": "Storage redirected to an invalid URL"}
+                    if not is_canvas_origin(confirm_url):
+                        return {
+                            "error": (
+                                "Storage redirected the upload confirmation away "
+                                "from Canvas; it was not followed, so the Canvas "
+                                "token was not sent. The file may have reached "
+                                "storage without being confirmed."
+                            )
+                        }
                     try:
                         async with canvas_authenticated_client() as canvas_client:
-                            confirm_response = await canvas_client.get(redirect_url)
+                            confirm_response = await canvas_client.get(
+                                str(confirm_url), follow_redirects=False
+                            )
                             confirm_response.raise_for_status()
                             confirmed: dict[str, Any] = confirm_response.json()
                             return confirmed

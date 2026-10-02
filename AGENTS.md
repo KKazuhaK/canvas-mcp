@@ -69,7 +69,10 @@ The group tools only read groups you are a member of; they check your membership
 before every call and refuse other groups even when Canvas would allow the read.
 
 If a course hides its Files tab, `list_course_files` lists the files linked from
-modules instead, and the file read tools reach those files through their module.
+modules instead, and the file read tools reach those files through their module:
+`read_course_file` (the file as it is) and `read_course_file_text` (its plain
+text) take the listed ID. `download_course_file` saves a file to disk on a local
+server only; on a hosted server use the two read tools.
 
 **Reading course files.** To see a file the way the student does (slides with
 diagrams, a scanned handout, an image, a formatted PDF), call `read_course_file`:

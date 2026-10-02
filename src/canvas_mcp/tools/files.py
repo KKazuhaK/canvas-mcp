@@ -20,6 +20,7 @@ import mimetypes
 import os
 import tempfile
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -36,7 +37,6 @@ from mcp.types import (
 
 from ..core.cache import get_course_code, get_course_id
 from ..core.client import (
-    canvas_authenticated_client,
     fetch_all_paginated_results,
     make_canvas_request,
     upload_file_to_storage,
@@ -48,6 +48,7 @@ from ..core.course_files import (
     fetch_module_linked_file,
     is_access_denied,
     list_files_via_modules,
+    stream_file_download,
 )
 from ..core.credentials import is_http_request_active
 from ..core.document_text import (
@@ -86,6 +87,20 @@ INLINE_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/w
 #: 11.5 MiB encodes to 15.33 MiB, leaving room for the text line and envelope.
 FILE_RESULT_MAX_MB = 11.5
 FILE_RESULT_MAX_BYTES = int(FILE_RESULT_MAX_MB * 1024 * 1024)
+
+#: Largest file download_course_file writes to disk. It bounds what a hostile
+#: or broken storage host can stream onto the student's disk; course videos
+#: and datasets fit well under it.
+DOWNLOAD_MAX_SIZE_MB = 1024.0
+DOWNLOAD_MAX_SIZE_BYTES = int(DOWNLOAD_MAX_SIZE_MB * 1024 * 1024)
+
+#: What download_course_file says to use instead when it cannot write a file
+#: (hosted server). Both tools are registered beside it in every profile.
+_READ_TOOLS_INSTEAD = (
+    "use read_course_file to see the file as it is (PDF, image, text) or "
+    "read_course_file_text for its plain text; both return the content in "
+    "the response"
+)
 
 #: Leading bytes that identify a file regardless of what the uploader claimed.
 _MAGIC_TYPES: tuple[tuple[bytes, str], ...] = (
@@ -234,10 +249,16 @@ def _file_hint(sent_as: str, text_readable: bool) -> str:
 
 #: Seconds a PDF page count may take before it is dropped (it is optional).
 PAGE_COUNT_TIMEOUT_SECONDS = 5.0
-#: One page count at a time, never queued, and never an EXTRACTION_SLOTS
-#: slot: a slow or hostile PDF can hold this one, but cannot block text
-#: extraction, and a second count meanwhile is simply skipped.
+#: One page count at a time, never queued. The slot is taken on the event
+#: loop before dispatch and freed when the count ends, even one already given
+#: up on: a slow or hostile PDF can hold it, and a second count meanwhile is
+#: simply skipped. Counts run in a one-thread pool of their own, never the
+#: default executor (DNS lookups, ``asyncio.to_thread``) or the text
+#: extraction pool, so a stuck count blocks neither.
 _PAGE_COUNT_SLOT = threading.BoundedSemaphore(1)
+_PAGE_COUNT_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="canvas-mcp-page-count"
+)
 
 
 def _count_pdf_pages(data: bytes) -> int | None:
@@ -245,21 +266,30 @@ def _count_pdf_pages(data: bytes) -> int | None:
         from pypdf import PdfReader
     except ImportError:
         return None
-    if not _PAGE_COUNT_SLOT.acquire(blocking=False):
-        return None
     try:
         return len(PdfReader(io.BytesIO(data)).pages)
     except Exception:
         return None
-    finally:
-        _PAGE_COUNT_SLOT.release()
+
+
+def _free_page_count_slot(_future: Future[int | None]) -> None:
+    _PAGE_COUNT_SLOT.release()
 
 
 async def _pdf_page_count(data: bytes) -> int | None:
     """Page count when pypdf reads the file promptly, else None (best effort)."""
+    if not _PAGE_COUNT_SLOT.acquire(blocking=False):
+        return None
+    try:
+        count = _PAGE_COUNT_EXECUTOR.submit(_count_pdf_pages, data)
+    except BaseException:
+        _PAGE_COUNT_SLOT.release()
+        raise
+    # Runs once the count finishes, or is cancelled before it starts.
+    count.add_done_callback(_free_page_count_slot)
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_count_pdf_pages, data), PAGE_COUNT_TIMEOUT_SECONDS
+            asyncio.wrap_future(count), PAGE_COUNT_TIMEOUT_SECONDS
         )
     except TimeoutError:
         return None
@@ -340,6 +370,14 @@ async def _get_file_info(course_id: str, file_id: str) -> tuple[Any, str | None]
     return file_info, None
 
 
+def _discard_partial_download(path: os.PathLike[str] | str) -> None:
+    """Remove a download destination this call created, if it is still there."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 def _invalid_file_id(file_id: str | int) -> str:
     return f"Error: file_id must be a numeric Canvas file ID (got {file_id!r})."
 
@@ -361,8 +399,12 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
     ) -> str:
         """Download a file from a Canvas course to the local filesystem.
 
-        Only available on a local (stdio) server. Use read_course_file to get
-        file content back in the response instead.
+        Only available on a local (stdio) server: the file is written to the
+        server's disk (up to 1 GB) and the result gives its path. To look at
+        a file instead, call read_course_file, which returns the file as it
+        is (PDF pages, images, text); for its plain text, call
+        read_course_file_text. Works for files linked from modules even when
+        the course Files tab is hidden.
 
         Use list_course_files or list_module_items to find file IDs.
 
@@ -380,8 +422,8 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
         if is_http_request_active():
             return (
                 "Error: 'download_course_file' writes to the server's filesystem and is "
-                "only available on a local (stdio) server. On this hosted server, use "
-                "read_course_file instead, which returns the content in the response."
+                "only available on a local (stdio) server. On this hosted server, "
+                f"{_READ_TOOLS_INSTEAD}."
             )
 
         file_key = coerce_canvas_id(file_id)
@@ -395,14 +437,25 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
 
         if isinstance(file_info, dict) and "error" in file_info:
             return f"Error getting file info: {file_info['error']}"
+        if not isinstance(file_info, dict):
+            return "Error getting file info: unexpected response from Canvas."
 
         raw_filename = file_info.get("display_name") or file_info.get("filename", f"file_{file_id}")
         filename = sanitize_filename(raw_filename)
         download_url = file_info.get("url")
         content_type = file_info.get("content-type", "unknown")
+        reported_size = file_info.get("size") or 0
 
         if not download_url:
             return "Error: No download URL available for this file. Check permissions."
+
+        # Refuse an oversized file before creating anything on disk.
+        if isinstance(reported_size, int) and reported_size > DOWNLOAD_MAX_SIZE_BYTES:
+            return (
+                f"Error: {fence_untrusted_inline(filename, 'file name')} is "
+                f"{format_file_size(reported_size)}, over the {DOWNLOAD_MAX_SIZE_MB:g} MB "
+                "download limit. Nothing was downloaded."
+            )
 
         # Determine save path with symlink resolution
         from pathlib import Path
@@ -440,28 +493,31 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
             return f"Error creating destination file: {e}"
 
         # Wrap the descriptor immediately so it is closed even if the network call
-        # below fails before the first write, and download by streaming to handle
-        # large files efficiently.
+        # below fails before the first write, and stream the body to disk. The
+        # download follows Canvas's redirects hop by hop: the token goes to the
+        # Canvas origin only, a storage hop gets no credentials and must be
+        # HTTPS, and the size cap holds while streaming.
+        outcome: int | dict[str, str]
         try:
-            total_bytes = 0
             with os.fdopen(fd, 'wb') as f:
-                async with canvas_authenticated_client() as client:
-                    async with client.stream(
-                        "GET", download_url, follow_redirects=True
-                    ) as response:
-                        response.raise_for_status()
-
-                        async for chunk in response.aiter_bytes(chunk_size=8192):
-                            f.write(chunk)
-                            total_bytes += len(chunk)
+                outcome = await stream_file_download(
+                    download_url, DOWNLOAD_MAX_SIZE_BYTES, f.write
+                )
         except Exception as e:
+            outcome = {"error": str(e)}
+        except BaseException:
+            # Cancelled mid-download: still leave no partial file behind.
+            _discard_partial_download(save_path)
+            raise
+        if isinstance(outcome, dict):
             # We created this path, so a failed download leaves a truncated or
             # empty file that a later reader could mistake for real content.
-            try:
-                os.unlink(save_path)
-            except OSError:
-                pass
-            return f"Error downloading file: {str(e)}"
+            _discard_partial_download(save_path)
+            error = outcome["error"]
+            if "size limit" in error:
+                error = f"the file exceeds the {DOWNLOAD_MAX_SIZE_MB:g} MB download limit"
+            return f"Error downloading file: {error}. Nothing was saved."
+        total_bytes = outcome
 
         size_str = format_file_size(total_bytes)
         course_display = await get_course_code(course_id) or course_identifier
@@ -756,8 +812,10 @@ async def _list_module_linked_files(
         f"Note: Canvas refused the course file list (HTTP {canvas_error_status(denied)}); "
         "the Files tab is probably hidden for students. Showing files linked from "
         "modules instead. Files not placed in any module are not listed, names are "
-        "module item titles, and size/type are not shown here (read_course_file_text "
-        "and read_course_file report them).\n"
+        "module item titles, and size/type are not shown here. These files can "
+        "still be read by ID: read_course_file shows a file as it is (PDF, image, "
+        "text) and read_course_file_text returns its plain text; both report its "
+        "size and type.\n"
     )
     if sort == "name":
         module_files = sorted(
