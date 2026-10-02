@@ -63,6 +63,7 @@ from .tools import (
     register_shared_messaging_tools,
     register_shared_module_tools,
     register_student_calendar_tools,
+    register_student_quiz_tools,
     register_student_tools,
     register_student_write_tools,
 )
@@ -450,6 +451,8 @@ def register_all_tools(mcp: FastMCP, role: str = "all") -> None:
     # Student-specific tools
     if role in ("student", "all"):
         register_student_tools(mcp)
+        # Read-only quiz awareness; never takes a quiz or reads questions.
+        register_student_quiz_tools(mcp)
         # Tier 1 writes register only for tools the operator named in
         # STUDENT_WRITE_TOOLS (default: none). See tools/student_write.py.
         register_student_write_tools(mcp)

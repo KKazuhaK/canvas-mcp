@@ -17,6 +17,9 @@ STUDENT_ONLY_TOOLS = {
     "get_my_course_grades",
     "get_my_todo_items",
     "get_my_peer_reviews_todo",
+    # Read-only quiz awareness; registered only for the student profile.
+    "list_quizzes",
+    "get_quiz_details",
     # calendar and planner reads (tools/student_calendar.py)
     "list_calendar_events",
     "get_calendar_event",

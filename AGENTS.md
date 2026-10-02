@@ -28,9 +28,9 @@ Reduce tool overhead by setting a role-based profile. Only tools relevant to the
 
 ```
 # In .env:
-CANVAS_ROLE=student    # ~37 tools (student + shared)
+CANVAS_ROLE=student    # ~39 tools (student + shared)
 CANVAS_ROLE=educator   # 92 tools (educator + shared)
-CANVAS_ROLE=all        # Default profile; 98 tools by default, 103 with all feature-gated tools enabled
+CANVAS_ROLE=all        # Default profile; 100 tools by default, 105 with all feature-gated tools enabled
 ```
 
 Or via CLI flag: `canvas-mcp-server --role student` (CLI flag takes precedence over env var).
@@ -51,6 +51,8 @@ Personal academic tracking uses Canvas "self" endpoints. Shared course-content t
 | `list_calendar_events` | Calendar across courses, personal and group calendars: events and due dates |
 | `get_calendar_event` | One calendar event in full |
 | `list_planner_notes` | Your own planner notes (personal to-dos) in a date window |
+| `list_quizzes` | Classic quizzes and New Quizzes in a course: dates, limits, your submission state (read-only) |
+| `get_quiz_details` | One quiz's settings plus your own attempts used/remaining and kept score (read-only; New Quizzes details are limited) |
 
 ### Student Write Tools (off by default)
 Let an agent act on Canvas for the student rather than only read. **None of these
@@ -349,6 +351,7 @@ usual cause).
 - Access data outside user's Canvas permissions
 - Bypass Canvas API rate limits
 - Access other students' data (for student users)
+- Take quizzes, start quiz attempts, or read quiz questions and answers (quiz tools are read-only awareness)
 - Modify Canvas system configuration
 
 ### Known Canvas API Limitations
