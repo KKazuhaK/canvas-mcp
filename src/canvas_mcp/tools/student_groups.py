@@ -94,7 +94,7 @@ def _scrub(text: str) -> str:
     free-text fields there, because elsewhere they are instructor content).
     """
     if get_config().enable_data_anonymization:
-        return scrub_free_text(text)
+        return str(scrub_free_text(text))
     return text
 
 
