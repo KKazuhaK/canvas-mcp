@@ -259,6 +259,7 @@ class Config:
         self.api_timeout = _int_env("API_TIMEOUT", 30)
         self.cache_ttl = _int_env("CACHE_TTL", 300)
         self.max_concurrent_requests = _int_env("MAX_CONCURRENT_REQUESTS", 10)
+        self.mcp_max_result_chars = _int_env("MCP_MAX_RESULT_CHARS", 140000)
         self.read_file_max_size_mb = _float_env("READ_FILE_MAX_SIZE_MB", 100.0)
         # Largest file download_course_file writes to disk (local servers only).
         self.download_file_max_size_mb = _float_env("DOWNLOAD_FILE_MAX_SIZE_MB", 1024.0)
