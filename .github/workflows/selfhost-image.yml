@@ -1,0 +1,267 @@
+name: Self-hosted image
+
+# Fork-only publishing of ghcr.io/kkazuhak/canvas-mcp from Dockerfile.selfhost.
+# The root Dockerfile (upstream's Azure image) is untouched. There is no
+# pull_request or pull_request_target trigger: nothing here runs for code from
+# a fork, and the only secret used is the job's own GITHUB_TOKEN.
+#
+# Channels:
+#   :edge     every push to uci-student
+#   :<ver>    a tag v<major>.<minor>.<patch>-uci.<n>[-suffix]
+#   :latest   a stable tag (no suffix after -uci.<n>)
+#   :beta     every tag, stable or not
+on:
+  push:
+    branches: [uci-student]
+    tags: ['v*-uci.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selfhost-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/kkazuhak/canvas-mcp
+
+jobs:
+  meta:
+    name: Compute version
+    if: github.repository == 'KKazuhaK/canvas-mcp'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      stable: ${{ steps.v.outputs.stable }}
+      is_tag: ${{ steps.v.outputs.is_tag }}
+    steps:
+      - name: Derive version from the ref
+        id: v
+        env:
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF" == refs/tags/* ]]; then
+            version="${REF_NAME#v}"
+            re='^[0-9]+\.[0-9]+\.[0-9]+-uci\.[0-9]+(-[0-9A-Za-z.]+)?$'
+            if [[ ! "$version" =~ $re ]]; then
+              echo "tag '${REF_NAME}' is not v<x.y.z>-uci.<n>[-suffix]" >&2
+              exit 1
+            fi
+            # Stable means nothing follows -uci.<n>.
+            stable=true
+            sfx='-uci\.[0-9]+-'
+            if [[ "$version" =~ $sfx ]]; then stable=false; fi
+            is_tag=true
+          else
+            version=""
+            stable=false
+            is_tag=false
+          fi
+          {
+            echo "version=${version}"
+            echo "stable=${stable}"
+            echo "is_tag=${is_tag}"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build and push (${{ matrix.slug }})
+    needs: meta
+    if: github.repository == 'KKazuhaK/canvas-mcp'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Native runners for each architecture: no QEMU emulation.
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            slug: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            slug: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/kkazuhak/canvas-mcp
+          labels: |
+            org.opencontainers.image.title=canvas-mcp
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.meta.outputs.version != '' && needs.meta.outputs.version || format('edge-{0}', substr(github.sha, 0, 7)) }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.description=Canvas LMS MCP server, self-hosted multi-user build (Entra ID sign-in, per-user Canvas tokens)
+
+      # Built into the local Docker daemon only; nothing is pushed or logged in
+      # until the smoke test below has passed.
+      - name: Build image for the smoke test
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.selfhost
+          platforms: ${{ matrix.platform }}
+          load: true
+          push: false
+          tags: canvas-mcp:smoke
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Smoke test
+        run: bash deploy/selfhost/smoke-test.sh canvas-mcp:smoke
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Same inputs as the build above, so the builder cache makes this a
+      # rebuild-free push. Pushed by digest only; the publish job tags the
+      # multi-arch index.
+      - name: Push image by digest
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.selfhost
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=ghcr.io/kkazuhak/canvas-mcp,push-by-digest=true,name-canonical=true,push=true
+          provenance: false
+
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "the push reported no valid digest" >&2
+            exit 1
+          }
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digests-${{ matrix.slug }}
+          path: ${{ runner.temp }}/digests/*
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    name: Publish multi-arch image
+    needs: [meta, build]
+    if: github.repository == 'KKazuhaK/canvas-mcp'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/kkazuhak/canvas-mcp
+          tags: |
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/uci-student' }}
+            type=raw,value=${{ needs.meta.outputs.version }},enable=${{ needs.meta.outputs.is_tag == 'true' }}
+            type=raw,value=latest,enable=${{ needs.meta.outputs.is_tag == 'true' && needs.meta.outputs.stable == 'true' }}
+            type=raw,value=beta,enable=${{ needs.meta.outputs.is_tag == 'true' }}
+
+      - name: Create the multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+          REVISION: ${{ github.sha }}
+          VERSION: ${{ needs.meta.outputs.version != '' && needs.meta.outputs.version || format('edge-{0}', substr(github.sha, 0, 7)) }}
+        run: |
+          set -euo pipefail
+          tag_args=()
+          while IFS= read -r tag; do
+            if [ -n "$tag" ]; then tag_args+=(-t "$tag"); fi
+          done <<<"$TAGS"
+          if [ "${#tag_args[@]}" -eq 0 ]; then
+            echo "no tags to publish for ${GITHUB_REF}" >&2
+            exit 1
+          fi
+          sources=()
+          for digest in *; do
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "unexpected digest file name: ${digest}" >&2
+              exit 1
+            }
+            sources+=("${IMAGE}@sha256:${digest}")
+          done
+          docker buildx imagetools create \
+            "${tag_args[@]}" \
+            --annotation "index:org.opencontainers.image.source=${SOURCE}" \
+            --annotation "index:org.opencontainers.image.revision=${REVISION}" \
+            --annotation "index:org.opencontainers.image.version=${VERSION}" \
+            "${sources[@]}"
+
+      - name: Read the index digest
+        id: digest
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          first_tag="$(printf '%s\n' "$TAGS" | head -n 1)"
+          digest="$(docker buildx imagetools inspect "$first_tag" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "could not read a valid index digest" >&2
+            exit 1
+          }
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          {
+            echo "Published \`${IMAGE}@${digest}\`, tagged:"
+            while IFS= read -r tag; do
+              if [ -n "$tag" ]; then echo "- \`${tag}\`"; fi
+            done <<<"$TAGS"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attest the image provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/kkazuhak/canvas-mcp
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
