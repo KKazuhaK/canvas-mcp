@@ -749,7 +749,7 @@
     {
       "name": "get_syllabus",
       "category": "shared",
-      "description": "Get the complete Canvas Syllabus tab content for a course, never cut (unlike the overview preview)",
+      "description": "Get the complete Canvas Syllabus tab content for a course; complete by default (unlike the overview preview), cut only by the optional max_chars cap, which is disclosed",
       "parameters": [
         {
           "name": "course_identifier",
@@ -763,14 +763,21 @@
           "required": false,
           "default": "text",
           "description": "'text' (plain text), 'html' (raw HTML body), or 'both'"
+        },
+        {
+          "name": "max_chars",
+          "type": "integer",
+          "required": false,
+          "default": null,
+          "description": "Optional cap per section; truncation is explicitly marked. None = no truncation"
         }
       ],
-      "returns": "Full syllabus body, never cut",
+      "returns": "Full syllabus body; when max_chars cuts it, an explicit [truncated at N characters] marker",
       "examples": [
         "Get the full syllabus for BADM 350 including the grading policy",
         "Show me the raw HTML of the CS101 syllabus"
       ],
-      "notes": "Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
+      "notes": "Complete unless max_chars is passed; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
     },
     {
       "name": "update_syllabus",

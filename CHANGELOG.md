@@ -141,8 +141,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   descriptions instead of using the one-line inline fence.
 - **No more truncation in full-content tools.** `read_course_file_text` returns
   the complete text (`max_chars`, `start_char` and the 40,000-character default
-  removed; only `start_page`/`end_page` limit it). `get_syllabus` lost its
-  optional `max_chars`. `get_discussion_with_replies` returns whole entries and
+  removed; only `start_page`/`end_page` limit it). `get_syllabus` stays complete
+  by default; its optional `max_chars` cap is kept, and a cut is always marked
+  with `[truncated at N characters]`. `get_discussion_with_replies` returns whole entries and
   replies (were cut at 200/150 characters), `list_discussion_entries` with
   `include_full_content=True` returns whole replies (were cut at 200), and
   `get_rubric` shows whole criterion and rating descriptions (were cut at

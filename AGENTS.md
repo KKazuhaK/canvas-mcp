@@ -194,7 +194,7 @@ Content access tools available to all authenticated users.
 | `get_my_enrollments` | What am I enrolled in, and as what role? Needs no roster permission |
 | `list_courses` | Enrolled courses (includes your own role in each) |
 | `get_course_details` | Course info and syllabus (includes your own role) |
-| `get_syllabus` | Full Syllabus tab content, never cut (text/html/both). Educators write it with `update_syllabus` |
+| `get_syllabus` | Full Syllabus tab content (text/html/both), complete by default; the optional `max_chars` cap is the only way it is cut, and a cut is marked `[truncated at N characters]`. Educators write it with `update_syllabus` |
 | `read_course_file` | **See a course file as a person does**: returns the original file (up to 11.5 MB, the most one MCP message carries). In Claude Code, open the saved path it gives with Read: a PDF arrives as page images plus text, like an attachment, and text or code files open as text; Read cannot open PPTX/DOCX/XLSX (use `read_course_file_text`). Images show inline. Claude Desktop chat and claude.ai connectors (also any unnamed client over the hosted HTTP server unless its User-Agent is Claude Code's) get the complete extracted text instead |
 | `read_course_file_text` | ALL the text of lecture slides, PDFs, Word docs, or text and code files, never cut (optional page range), with page/slide markers (PDF/PPTX/DOCX need the `documents` extra). Text too large for one message is refused with a page range to read instead. For figures, layout or scanned pages use `read_course_file` |
 | `list_pages` | Course pages |

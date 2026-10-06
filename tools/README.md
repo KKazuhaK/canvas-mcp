@@ -1991,11 +1991,12 @@ Get detailed course information including syllabus.
 ---
 
 #### `get_syllabus`
-Get the complete Canvas Syllabus tab content for a course, **never cut**. Unlike `get_course_content_overview` (which returns only a ~1000-character preview), this returns the full syllabus body, so later sections such as grading policies, weighting, and final-exam details remain accessible. There is no character cap (the optional `max_chars` parameter was removed), and the tool declares a 500,000-character result size to Claude Code (see [Complete content](#complete-content-no-truncation)).
+Get the complete Canvas Syllabus tab content for a course. Unlike `get_course_content_overview` (which returns only a ~1000-character preview), this returns the full syllabus body, so later sections such as grading policies, weighting, and final-exam details remain accessible. It is complete by default: it is cut only if you pass the optional `max_chars` cap, and a cut is always marked. The tool declares a 500,000-character result size to Claude Code (see [Complete content](#complete-content-no-truncation)).
 
 **Parameters:**
 - `course_identifier`: Course code or ID
 - `output_format` (optional): `text` (plain text, default), `html` (raw HTML body), or `both`
+- `max_chars` (optional): Cap on returned characters per section. When exceeded, the content is truncated with an explicit `[truncated at N characters]` marker. Defaults to no truncation.
 
 The output starts with the body's SHA-256, which `update_syllabus` accepts as `expect_body_sha256`.
 
@@ -2528,7 +2529,9 @@ tokens). Other clients ignore the key. The tools: `read_course_file`,
 `get_discussion_entry_details`, `get_discussion_with_replies`,
 `list_discussion_entries`, `get_conversation_details`,
 `get_my_submission`, `get_calendar_event`, `get_quiz_details`, `get_rubric`, and
-`get_rubric_assessment`.
+`get_rubric_assessment`. The one exception to "never cut" is `get_syllabus`'s
+optional `max_chars`: without it the syllabus is complete, and with it a cut is
+marked `[truncated at N characters]`.
 
 Listing and overview tools may still preview long text, but only where a
 full-content tool exists, and the output names it when a preview was shortened

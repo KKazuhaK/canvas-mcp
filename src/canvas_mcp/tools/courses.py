@@ -337,17 +337,23 @@ def register_course_tools(mcp: FastMCP) -> None:
     )
     @validate_params
     async def get_syllabus(course_identifier: str | int,
-                           output_format: str = "text") -> str:
-        """Get the complete Canvas Syllabus tab content for a course, never cut.
+                           output_format: str = "text",
+                           max_chars: int | None = None) -> str:
+        """Get the complete Canvas Syllabus tab content for a course.
 
         Unlike get_course_content_overview (which returns only a ~1000-char
         preview), this returns the full syllabus body so later sections such as
         grading policies, weighting, and final-exam details remain accessible.
+        The syllabus is complete by default; it is cut only if you pass
+        max_chars, and a cut is always marked with "[truncated at N characters]".
 
         Args:
             course_identifier: Course code or Canvas ID
             output_format: "text" (plain text, default), "html" (raw HTML body),
                 or "both" (plain text followed by raw HTML)
+            max_chars: Optional positive cap on the returned characters per
+                section. When exceeded, the content is truncated with an explicit
+                "[truncated...]" marker. Defaults to None (no truncation).
         """
         # Validate inputs before any network I/O so bad arguments fail fast.
         fmt = (output_format or "text").lower()
@@ -356,6 +362,8 @@ def register_course_tools(mcp: FastMCP) -> None:
                 f"Error: invalid output_format '{output_format}'. "
                 "Use 'text', 'html', or 'both'."
             )
+        if max_chars is not None and max_chars <= 0:
+            return "Error: max_chars must be a positive integer (or omitted for no limit)."
 
         course_id = await get_course_id(course_identifier)
 
@@ -374,6 +382,11 @@ def register_course_tools(mcp: FastMCP) -> None:
         if not syllabus_body.strip():
             return f"No syllabus content found for course {course_display}."
 
+        def _maybe_truncate(text: str) -> str:
+            if max_chars is not None and len(text) > max_chars:
+                return text[:max_chars] + f"\n\n...[truncated at {max_chars} characters]"
+            return text
+
         # Section headers only help disambiguate when both formats are present.
         labeled = fmt == "both"
         sections = [
@@ -385,14 +398,14 @@ def register_course_tools(mcp: FastMCP) -> None:
         # Syllabus bodies are course-authored free text (issue 239): fence them
         # so embedded directives arrive marked as data, not instructions.
         if fmt in ("text", "both"):
-            plain_text = strip_html_tags(syllabus_body)
+            plain_text = _maybe_truncate(strip_html_tags(syllabus_body))
             sections.append(
                 ("\n--- Plain Text ---\n" if labeled else "\n")
                 + fence_untrusted(plain_text, "course syllabus")
             )
 
         if fmt in ("html", "both"):
-            raw_html = syllabus_body
+            raw_html = _maybe_truncate(syllabus_body)
             sections.append(
                 ("\n--- Raw HTML ---\n" if labeled else "\n")
                 + fence_untrusted(raw_html, "course syllabus")

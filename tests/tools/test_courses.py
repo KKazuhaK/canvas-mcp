@@ -306,11 +306,7 @@ class TestGetSyllabus:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("output_format", ["text", "html", "both"])
     async def test_very_long_syllabus_is_never_cut(self, mock_api, output_format):
-        """Every format returns the whole body; there is no character cap.
-
-        Replaces the max_chars tests: the optional cut was removed so a model
-        cannot shorten the syllabus by habit.
-        """
+        """Without max_chars every format returns the whole body, however long."""
         sections = "".join(
             f"<p>Section {n:05d}: policy text for this part.</p>" for n in range(7000)
         )
@@ -331,10 +327,37 @@ class TestGetSyllabus:
         assert "truncated" not in result.lower()
 
     @pytest.mark.asyncio
-    async def test_max_chars_is_no_longer_a_parameter(self, mock_api):
+    async def test_max_chars_truncates_explicitly(self, mock_api):
+        """max_chars truncates but flags it — no silent truncation."""
+        mock_api['make_canvas_request'].return_value = {
+            "course_code": "CS101",
+            "syllabus_body": "<p>" + ("word " * 200) + "</p>",
+        }
+
         get_syllabus = get_tool_function('get_syllabus')
-        with pytest.raises(TypeError):
-            await get_syllabus("CS101", max_chars=50)
+        result = await get_syllabus("CS101", output_format="text", max_chars=50)
+
+        assert "[truncated at 50 characters]" in result
+
+    @pytest.mark.asyncio
+    async def test_max_chars_zero_rejected(self, mock_api):
+        """max_chars=0 is invalid and rejected before any API call."""
+        get_syllabus = get_tool_function('get_syllabus')
+        result = await get_syllabus("CS101", max_chars=0)
+
+        assert "max_chars must be a positive integer" in result
+        # Validation happens before any I/O — neither lookup nor Canvas runs.
+        mock_api['get_course_id'].assert_not_called()
+        mock_api['make_canvas_request'].assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_max_chars_negative_rejected(self, mock_api):
+        """Negative max_chars is rejected by the same positive-int guard."""
+        get_syllabus = get_tool_function('get_syllabus')
+        result = await get_syllabus("CS101", max_chars=-5)
+
+        assert "max_chars must be a positive integer" in result
+        mock_api['get_course_id'].assert_not_called()
         mock_api['make_canvas_request'].assert_not_called()
 
     @pytest.mark.asyncio
