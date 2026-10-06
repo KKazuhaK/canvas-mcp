@@ -51,7 +51,7 @@ STUDENT_CALENDAR_WRITE_TOOLS = {
 STUDENT_GROUP_TOOLS = {
     "list_my_groups",
     "get_group_members",
-    "list_group_discussion_topics",
+    "list_my_group_discussion_topics",
     "get_group_discussion",
     "list_group_announcements",
     "list_group_files",
@@ -76,6 +76,7 @@ SHARED_TOOLS = {
     "get_assignment_details",
     # shared discussions
     "list_discussion_topics",
+    "list_group_discussion_topics",
     # Announcements are student-visible course content and this tool is
     # read-only, so every role gets an announcements-only listing (issue #238).
     "list_announcements",

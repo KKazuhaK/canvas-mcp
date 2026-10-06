@@ -197,7 +197,7 @@ classmates' names appear as stable pseudonyms.
 **Parameters:**
 - `group_id` (required): Canvas group ID from `list_my_groups`
 
-#### `list_group_discussion_topics`
+#### `list_my_group_discussion_topics`
 List the discussion topics in one of your groups.
 
 **Parameters:**
@@ -212,7 +212,7 @@ says so instead of showing the replies.
 
 **Parameters:**
 - `group_id` (required): Canvas group ID
-- `topic_id` (required): Topic ID from `list_group_discussion_topics` or `list_group_announcements`
+- `topic_id` (required): Topic ID from `list_my_group_discussion_topics` or `list_group_announcements`
 
 #### `list_group_announcements`
 List a group's announcements (read through the group's discussion topics with
@@ -729,6 +729,13 @@ List all assignments for a course.
 
 **Parameters:**
 - `course_identifier`: Course code (e.g., "badm_350_120251_246794") or ID
+- `raw_dates` (optional, default `false`): append a JSON block with each
+  assignment's `due_at`, `unlock_at`, `lock_at`, `updated_at`, `all_dates` and,
+  for checkpointed discussions, `has_sub_assignments` and each checkpoint's
+  dates, exactly as Canvas returns them (ISO 8601, `null` stays `null`). A
+  checkpointed discussion has a null parent `due_at` by design; its dates are on
+  the checkpoints. Metadata only: no submission, grade or user fields. Section
+  and group titles and checkpoint names are left out.
 
 **Example:**
 ```
@@ -744,6 +751,9 @@ Get detailed information about a specific assignment.
 **Parameters:**
 - `course_identifier`: Course code or ID
 - `assignment_id`: Assignment ID
+- `raw_dates` (optional, default `false`): append the same JSON dates block as
+  `list_assignments` for this assignment (requests `all_dates=true` and
+  `include[]=checkpoints` on the same endpoint).
 
 **Example:**
 ```
@@ -836,6 +846,11 @@ Update an existing assignment in a course.
 - `peer_reviews`: Enable/disable peer reviews
 - `automatic_peer_reviews`: Enable/disable auto-assign peer reviews
 - `allowed_extensions`: Comma-separated file extensions for uploads
+- `expect_updated_at` (optional): The assignment's `updated_at` when you read it. The tool fetches the assignment first and refuses, writing nothing, unless it is the same instant. Compared as timestamps, so `...Z` and `...-05:00` forms of one instant match.
+- `find` / `replace` (optional): Edit one fragment of the current description instead of sending `description`. `find` must occur exactly once in the freshly fetched description; on zero or several matches the tool refuses and reports the count. `replace` may be empty to delete the fragment. Supplying `description` as well is an error.
+- `require` (optional): List of strings that must already be present in the current description (for example, to confirm an earlier edit is still in place), else the tool refuses.
+
+**Guarded edits (issue 419):** with any of the three guards the tool fetches the assignment, runs the checks, writes once, then reads it back. It reports success only if the read-back proves the write: `updated_at` advanced, the stored body equals the body the write should have produced (for find/replace, the fetched body with the one substitution), compared after whitespace normalization only, so dropped attributes and lost unrelated content both count, and every other field you asked to change reads back with the value sent. It prints the old and new `updated_at`. Anything it cannot establish, including HTML that Canvas rewrote, is reported as unconfirmed, never as success. With none of them the call behaves exactly as before.
 
 **Example:**
 ```
@@ -1151,11 +1166,22 @@ Link a rubric to an assignment.
 #### `grade_with_rubric`
 Grade a student submission using a rubric.
 
+Before submitting, the tool reads the assignment's rubric and grading settings.
+It submits nothing if those settings cannot be read or
+`use_rubric_for_grading` is not explicitly true. Attach the rubric with
+`associate_rubric(..., use_for_grading=true)` or configure it in Canvas first.
+After submission, success requires a returned grade and a score matching the
+expected total for a complete rubric assessment, excluding criteria marked
+`ignore_for_scoring`.
+An unconfirmed result may already have saved an
+assessment; check Canvas before retrying.
+
 **Parameters:**
 - `course_identifier`: Course code or ID
 - `assignment_id`: Assignment ID
 - `user_id`: Student ID
 - `rubric_assessment`: JSON with criterion ratings
+- `comment` (optional): Student-visible feedback; omit unless explicitly requested
 
 ---
 
@@ -1209,6 +1235,13 @@ Grade multiple submissions concurrently.
 - `dry_run: true` previews the grade **and** any comment that would be posted
 - Can mix and match grading styles for different students
 - Automatically validates rubric configuration before grading
+- For any rubric-based grade, it first reads the rubric and grading settings;
+  an unreadable assignment or `use_rubric_for_grading` other than true stops
+  the entire batch before any grade is submitted
+- A rubric grade counts as successful only when Canvas returns a grade and
+  a score matching the expected total for a complete rubric assessment, excluding
+  criteria marked `ignore_for_scoring`; unconfirmed entries are reported as failed even
+  though an assessment may have been saved, so check Canvas before retrying
 - Use `dry_run=true` to preview grades before applying
 - For custom bulk grading logic that can return selected output, consider `execute_typescript` with `bulkGrade` from the code execution API
 
@@ -1269,6 +1302,8 @@ List all peer review assignments.
 **Parameters:**
 - `course_identifier`: Course code or ID
 - `assignment_id`: Assignment ID
+
+**Returns:** Reviews grouped by reviewee, each naming its reviewer (`assessor_id`) and status. Every page of each submission's reviews is read. If any submission's reviews cannot be read, a warning listing those students appears before the list, so a partial list is never presented as complete.
 
 **Example:**
 ```
@@ -1345,7 +1380,12 @@ Manually assign a peer review.
 - `course_identifier`: Course code or ID
 - `assignment_id`: Assignment ID
 - `reviewer_id`: Student who will review
-- `reviewee_id`: Student being reviewed
+- `reviewee_id`: Numeric Canvas user ID of the student being reviewed
+
+Looks up the reviewee's submission directly. If Canvas has no submission record
+for that student on the assignment (for example, they are not assigned to it),
+the tool returns an error and assigns nothing. It never creates a submission on
+the student's behalf.
 
 ---
 
@@ -1591,6 +1631,11 @@ Start a new discussion forum.
 #### `update_discussion_topic`
 Edit an existing discussion topic or announcement (title, body, publish state, etc.).
 
+Every update first reads the topic through REST. Anonymous topics are refused
+without sending an update; open them in the Canvas UI to edit them. If REST
+returns 404 but the topic is still listed, the tool explains that it exists
+and REST does not serve it. The optional GraphQL fallback is read-only.
+
 **Parameters:**
 - `course_identifier`: Course code or ID
 - `topic_id`: Discussion topic ID
@@ -1602,6 +1647,12 @@ Edit an existing discussion topic or announcement (title, body, publish state, e
 - `delayed_post_at`: Schedule posting, ISO 8601 (optional)
 - `lock_at`: Auto-lock datetime, ISO 8601 (optional)
 - `require_initial_post`: Require initial post before viewing replies (optional)
+- `expect_body_sha256` (optional): SHA-256 (hex) of the message exactly as Canvas returned it when you read it. Canvas gives discussion topics **no `updated_at`** (a topic GET's only timestamps are `created_at`, `delayed_post_at`, `last_reply_at`, `lock_at` and `posted_at`), so the body hash is the drift check: the tool refuses, writing nothing, if the current message hashes differently. Every guarded edit prints the new hash for the next edit.
+- `expect_updated_at`: not supported on topics; passing it is an error that points to `expect_body_sha256`.
+- `find` / `replace` (optional): Edit one fragment of the current message instead of sending `message`. `find` must occur exactly once in the freshly fetched message; on zero or several matches the tool refuses and reports the count. `replace` may be empty to delete the fragment. Supplying `message` as well is an error.
+- `require` (optional): List of strings that must already be present in the current message (for example, to confirm an earlier edit is still in place), else the tool refuses.
+
+**Guarded edits (issue 419):** with any of the guards the tool uses the preflight topic read, runs the checks, writes once, then reads it back. It reports success only if the read-back proves the write: the stored message equals the message the write should have produced (for find/replace, the fetched message with the one substitution), compared after whitespace normalization only, so dropped attributes and lost unrelated content both count, and every other field you asked to change reads back with the value sent. It prints the old and new body SHA-256. Anything it cannot establish, including HTML that Canvas rewrote, is reported as unconfirmed, never as success. Without guards, ordinary topic updates still use the preflight read but do not add read-back verification.
 
 **Example:**
 ```
@@ -1715,8 +1766,13 @@ Replace the content of an existing page.
 **Parameters:**
 - `course_identifier`: Course code or ID
 - `page_url_or_id`: Page URL slug or page ID
-- `new_content`: New HTML content for the page
+- `new_content`: New HTML body for the page; replaces the whole body. Required unless `find`/`replace` is used.
 - `title` (optional): New title for the page
+- `expect_updated_at` (optional): The page's `updated_at` when you read it. The tool fetches the page first and refuses, writing nothing, unless it is the same instant. Compared as timestamps, so `...Z` and `...-05:00` forms of one instant match.
+- `find` / `replace` (optional): Edit one fragment of the current body instead of sending `new_content`. `find` must occur exactly once in the freshly fetched body; on zero or several matches the tool refuses and reports the count. `replace` may be empty to delete the fragment. Supplying `new_content` as well is an error.
+- `require` (optional): List of strings that must already be present in the current body (for example, to confirm an earlier edit is still in place), else the tool refuses.
+
+**Guarded edits (issue 419):** with any of the three guards the tool fetches the page, runs the checks, writes once, then reads it back. It reports success only if the read-back proves the write: `updated_at` advanced, the stored body equals the body the write should have produced (for find/replace, the fetched body with the one substitution), compared after whitespace normalization only, so dropped attributes and lost unrelated content both count, and every other field you asked to change reads back with the value sent. It prints the old and new `updated_at`. Anything it cannot establish, including HTML that Canvas rewrote, is reported as unconfirmed, never as success. With none of them the call behaves exactly as before.
 
 **Example:**
 ```
@@ -1957,6 +2013,8 @@ Get the complete Canvas Syllabus tab content for a course, **never cut**. Unlike
 - `course_identifier`: Course code or ID
 - `output_format` (optional): `text` (plain text, default), `html` (raw HTML body), or `both`
 
+The output starts with the body's SHA-256, which `update_syllabus` accepts as `expect_body_sha256`.
+
 **Example:**
 ```
 "Get the full syllabus for BADM 350 including the grading policy"
@@ -1977,6 +2035,11 @@ After writing, the tool reads the syllabus back from Canvas and checks that what
 - `syllabus_body`: HTML for the syllabus. Canvas stores this as HTML; plain text is accepted but renders unformatted.
 - `mode` (optional): `replace` (default) swaps the whole body, `append` adds to the end, `prepend` adds to the start
 - `confirmation_token` (optional): Token from the preview call. Only required when replacing a syllabus that already has content.
+- `expect_body_sha256` (optional): SHA-256 of the body when you read it, as printed by `get_syllabus`. The syllabus has no `updated_at`, so this is its drift check: the tool refuses, writing nothing, if the current body hashes differently.
+- `find` / `replace` (optional): Edit one fragment of the current syllabus instead of sending `syllabus_body`; `find` must occur exactly once, and `mode` must be `replace`. A find/replace over existing content is still a replace, so it still previews and needs the token.
+- `require` (optional): Strings that must already be present in the current syllabus, else the tool refuses.
+
+The guards are independent of the confirmation token and are checked on both the preview call and the confirming call; the token binds the guard arguments too. A guarded write prints the previous and new body SHA-256 and is confirmed only if the stored syllabus equals the expected HTML (the full body, current+new for `append`, new+current for `prepend`, or the fetched body with the substitution) after whitespace normalization; otherwise it is unconfirmed. Calls without guards keep the visible-text check.
 
 **Example:**
 ```
@@ -2002,7 +2065,7 @@ Get a comprehensive overview of course content including pages, modules, and syl
 "Give me an overview of everything in BADM 350"
 ```
 
-**Returns:** Structured overview of the course's pages, modules, and syllabus. The syllabus portion is a ~1000-character preview — use `get_syllabus` for the full body.
+**Returns:** Structured overview of the course's pages, modules, and syllabus. The syllabus portion is a ~1000-character preview — use `get_syllabus` for the full body. Module item counts cover the first 10 modules only; the output states how many modules were analyzed out of the total (`Modules Analyzed for Items: 10 of 25`) and notes any module whose items could not be read. Use `list_module_items` for the rest.
 
 ---
 
@@ -2510,7 +2573,7 @@ List Canvas inbox conversations for the current user.
 "Show my Canvas inbox"
 ```
 
-**Returns:** Conversations with participants, subjects, and read state.
+**Returns:** One page of conversations (Canvas's default page size) with participants, subjects, and read state. `returned` is the number of conversations in this response (`count` is kept as an alias); `more_available` is `true` when Canvas has further pages that were not fetched, with a `note` saying so. Narrow with `scope` or `filter_ids` to reach older conversations. With `include_all_ids=true`, the result also carries `conversation_ids` (every matching ID, per Canvas) and `total`.
 
 ---
 
@@ -2584,11 +2647,57 @@ are a separate Canvas collection and are excluded unless you opt in.
   announcements alongside its discussion topics. Each entry is labelled
   `Type: Announcement` or `Type: Discussion`. To list announcements on their
   own, use [`list_announcements`](#list_announcements) instead.
+- `group_id` (optional): Canvas group ID, to read a discussion inside a group
+  space instead of the course. Discussions that students start in a group exist
+  only there. The group must belong to the course.
+
+Without `group_id` this lists course-level topics only. Topics that students
+start inside a group space are missing; use
+[`list_group_discussion_topics`](#list_group_discussion_topics) to find them.
+
+When Canvas reports a non-null `anonymous_state` for a topic
+(`partial_anonymity` or `full_anonymity`), the entry shows an `Anonymity:` line.
+`list_group_discussion_topics` does the same.
+
+**Anonymous topics:** Canvas's REST API answers 404 for anonymous topics
+(partial or full anonymity), although the topic list includes them. When
+`get_discussion_topic_details`, `list_discussion_entries`,
+`get_discussion_with_replies` or `get_discussion_entry_details` gets a 404, the
+tool checks the topic list of the same course (or group). If the topic is
+listed, the tool explains the REST limitation and links to Canvas by default. With
+`DISCUSSION_GRAPHQL_ENABLED=true` (operator opt-in), it reads through Canvas GraphQL and returns the same
+output as for any other topic; anonymous posts show only their anonymous alias.
+Pin status is unavailable in the fixed GraphQL query and is omitted. Entry read
+state is reported as unknown. `raw_dates=True` explicitly reports unavailable
+scheduling/assignment/checkpoint metadata on this path. Reaching the GraphQL
+page cap returns an incomplete-result error rather than partial content.
+A topic read this way is remembered for ten minutes, so later reads go straight
+to GraphQL. If GraphQL fails too, the tool says the topic exists, that REST does
+not serve it, and to open it in the Canvas UI. A 404 for a topic that is not
+listed is reported as not found.
 
 **Example:**
 ```
 "What discussions are active in my course?"
 "Show me discussion topics for ENGL 101"
+```
+
+---
+
+#### `list_group_discussion_topics`
+List the discussion topics inside every group space of a course in one call.
+Each topic is marked either as a group copy of a course topic or as started in
+the group itself, with its entry count. Read a topic's posts with
+`list_discussion_entries` or `get_discussion_with_replies`, passing its `group_id`.
+
+**Parameters:**
+- `course_identifier`: Course code or ID
+- `group_category_id` (optional): Only include groups in this group set
+  (default: all groups in the course)
+
+**Example:**
+```
+"Which project groups started their own discussions?"
 ```
 
 ---
@@ -2599,6 +2708,18 @@ Get details about a specific discussion.
 **Parameters:**
 - `course_identifier`: Course code or ID
 - `topic_id`: Discussion topic ID
+- `group_id` (optional): Canvas group ID, to read a discussion inside a group
+  space instead of the course. Discussions that students start in a group exist
+  only there. The group must belong to the course.
+- `raw_dates` (optional, default `false`): append a JSON block with the topic's
+  `delayed_post_at`, `lock_at`, `todo_date`, `is_checkpointed` and, for a graded
+  discussion, its assignment's dates and checkpoint dates as Canvas returns them.
+  No extra request. The topic endpoint does not return `all_dates`; use
+  `get_assignment_details` with `raw_dates` for section and override dates.
+
+For a course topic (no `group_id`) the output includes the message's SHA-256,
+which `update_discussion_topic` accepts as `expect_body_sha256` (topics have no
+`updated_at`).
 
 ---
 
@@ -2612,6 +2733,9 @@ when `include_replies=true`, is returned complete.
 - `topic_id`: Discussion topic ID
 - `include_full_content` (optional): Return the complete text of every entry and reply (default: false)
 - `include_replies` (optional): Fetch replies for each entry (default: false)
+- `group_id` (optional): Canvas group ID, to read a discussion inside a group
+  space instead of the course. Discussions that students start in a group exist
+  only there. The group must belong to the course.
 
 **Example:**
 ```
@@ -2629,6 +2753,9 @@ Get every discussion entry in full, never cut, optionally with all its replies
 - `course_identifier`: Course code or ID
 - `topic_id`: Discussion topic ID
 - `include_replies` (optional): Fetch detailed replies for all entries (default: false)
+- `group_id` (optional): Canvas group ID, to read a discussion inside a group
+  space instead of the course. Discussions that students start in a group exist
+  only there. The group must belong to the course.
 
 **Example:**
 ```
@@ -2644,6 +2771,9 @@ Read a specific discussion post.
 - `course_identifier`: Course code or ID
 - `topic_id`: Discussion topic ID
 - `entry_id`: Post ID
+- `group_id` (optional): Canvas group ID, to read a discussion inside a group
+  space instead of the course. Discussions that students start in a group exist
+  only there. The group must belong to the course.
 
 **Example:**
 ```
@@ -2670,7 +2800,7 @@ These tools help developers discover, explore, and execute Canvas code execution
 
 #### `search_canvas_tools`
 Search and discover available Canvas tools by keyword — both the registered
-MCP tools (the ~99 Python tools like `list_peer_reviews`,
+MCP tools (the Python tools like `list_peer_reviews`,
 `create_assignment`, called directly) and the TypeScript code execution API
 operations (used from `execute_typescript`). Matches against tool name and
 description.

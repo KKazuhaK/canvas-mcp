@@ -65,6 +65,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and says so. `read_course_file`, `download_course_file` and
   `read_course_file_text` read such a file through `GET /files/:id`, but only
   when the course links it from a module.
+- **`raw_dates` on `list_assignments`, `get_assignment_details` and
+  `get_discussion_topic_details`** (opt-in, default output unchanged). Appends a
+  JSON block with `due_at`, `unlock_at`, `lock_at`, `updated_at`, `all_dates` and,
+  for checkpointed discussions, `has_sub_assignments` and each checkpoint's dates,
+  exactly as Canvas returns them (`null` stays `null`). A checkpointed
+  discussion's parent `due_at` is null by design, which the summaries used to
+  report as "no due date". Metadata only: no submission, grade or user fields.
+- **Discussions inside group spaces.** The discussion read tools
+  (`list_discussion_topics`, `get_discussion_topic_details`,
+  `list_discussion_entries`, `get_discussion_entry_details`,
+  `get_discussion_with_replies`) take an optional `group_id`. Topics that
+  students start inside a group live only under `/groups/{id}/discussion_topics`
+  and have no course-level parent, so the course-scoped tools never returned
+  them. The group must belong to the named course.
+- `list_group_discussion_topics` lists the topics in every group of a course
+  (optionally one group set) in one call, with entry counts, and marks each
+  topic as a group copy of a course topic or as started in the group.
+- **Guarded body edits (issue 419).** `edit_page_content` and
+  `update_assignment` take optional `expect_updated_at` (refuse if the object
+  changed since it was read; `Z` and offset forms of one instant match),
+  `find`/`replace` (edit one fragment, which must occur exactly once, instead
+  of resending the whole body) and `require` (strings that must already be
+  present). Discussion topics and the syllabus have no `updated_at`, so
+  `update_discussion_topic` and `update_syllabus` take `expect_body_sha256`
+  instead, plus the same `find`/`replace`/`require`; `get_syllabus` and
+  `get_discussion_topic_details` now print that hash, and the syllabus
+  confirmation token is unchanged and independent.
+  A guarded write is read back and reported as confirmed only when the
+  read-back proves it (timestamp advanced where there is one, the whole stored
+  body equal to the expected body after whitespace-only normalization, every
+  other requested field as sent); otherwise it is reported unconfirmed. Calls without the new
+  parameters send exactly the same requests as before.
 
 ### Changed (breaking)
 
@@ -167,6 +199,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   limitation, now documented: pseudonyms depend only on the user ID, so a
   person named as staff in one shared course is not anonymous where they are a
   student.
+
+### Fixed
+
+- `assign_peer_review` no longer creates a placeholder submission. It scanned
+  one page (100) of submissions for the reviewee and, on a miss, POSTed a
+  placeholder on the student's behalf, so in a large assignment a truncated read
+  became a write. It now reads the reviewee's submission directly and refuses
+  when there is none. `reviewee_id` must be a numeric Canvas user ID (#420).
+- `list_conversations` reports `returned` and `more_available` instead of
+  presenting Canvas's first inbox page as the whole inbox (#420).
+- `list_peer_reviews` reads every page of each submission's reviews, reports
+  submissions whose reviews could not be read instead of skipping them, and
+  names the reviewer from `assessor_id` (it printed the reviewee as their own
+  reviewer) (#420).
+- `get_course_content_overview` states how many modules its item counts cover
+  (`Modules Analyzed for Items: 10 of N`) and any module it could not read (#420).
+- New guard test fails CI when a tool adds a single-request GET on a Canvas
+  collection endpoint (#420).
+- **Anonymous discussion topics no longer read as missing** (issue 421, part 1).
+  Canvas's REST API answers 404 for fully anonymous topics that its topic list
+  still includes. `list_discussion_topics` and `list_group_discussion_topics`
+  now show `Anonymity:` when Canvas reports an `anonymous_state`. On a 404,
+  `get_discussion_topic_details`, `list_discussion_entries` and
+  `get_discussion_with_replies` check the course's (or group's) topic list; a
+  listed topic gets a message that it exists, REST does not serve it, and it
+  can be opened in the Canvas UI. A 404 for an unlisted topic is still not found.
+- **Anonymous discussion topics can be read** (issue 421, part 2). After the
+  part-1 404 check finds a topic in the list, the four topic read tools
+  (`get_discussion_entry_details` included) can read it through Canvas GraphQL when
+  the operator sets `DISCUSSION_GRAPHQL_ENABLED=true` (off by default), and
+  return the same output as for any other topic. Anonymous posts keep only
+  their anonymous alias, and replies nested deeper than one level are kept. A
+  topic read this way is remembered for ten minutes, so later reads take one
+  request. The client gains a `graphql` API root; every GraphQL response is
+  anonymized at the full tier. If GraphQL fails too, the part-1 message is
+  returned with the reason appended.
+- **Anonymous discussion updates are refused** (issue 421). Every
+  `update_discussion_topic` call reads the topic before writing. A listed topic
+  whose detail read returns 404 is explained as existing and unsupported by
+  REST; a readable topic marked anonymous is also refused. Neither path sends
+  an update or a GraphQL request. Guarded edits reuse the preflight read;
+  ordinary updates add one REST read before their existing write.
 
 ## [1.13.0] — 2026-09-27
 

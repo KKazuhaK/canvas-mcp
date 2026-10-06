@@ -303,7 +303,7 @@ class TestUploadRefusedOverHttp:
     @pytest.mark.asyncio
     async def test_upload_refused_over_http(self, tmp_path):
         secret = tmp_path / "secret.txt"
-        secret.write_text("service-account readable content")
+        secret.write_text("service-account readable content", encoding="utf-8")
 
         with patch(
             "canvas_mcp.tools.files.is_http_request_active", return_value=True
@@ -745,7 +745,7 @@ class TestUploadConfirmationTokenBoundary:
     @staticmethod
     async def _upload(tmp_path):
         source = tmp_path / "essay.txt"
-        source.write_text("my essay")
+        source.write_text("my essay", encoding="utf-8")
         return await client_module.upload_file_to_storage(
             UPLOAD_URL, {"key": "k"}, str(source), "essay.txt", "text/plain"
         )

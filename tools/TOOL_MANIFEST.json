@@ -261,9 +261,16 @@
           "type": "string | integer",
           "required": true,
           "description": "Course code or Canvas ID"
+        },
+        {
+          "name": "raw_dates",
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "Append a JSON block with each assignment's due_at, unlock_at, lock_at, updated_at, all_dates and checkpoint dates exactly as Canvas returns them (null stays null). Adds include[]=checkpoints. Metadata only: no submission, grade or user fields."
         }
       ],
-      "returns": "List of assignments with IDs, names, due dates, points",
+      "returns": "List of assignments with IDs, names, due dates, points; with raw_dates, also a JSON dates block",
       "examples": [
         "Show me all assignments in BADM 350",
         "List assignments for course 12345"
@@ -285,9 +292,16 @@
           "type": "string | integer",
           "required": true,
           "description": "Assignment ID"
+        },
+        {
+          "name": "raw_dates",
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "Append a JSON block with due_at, unlock_at, lock_at, updated_at, all_dates and checkpoint dates exactly as Canvas returns them (null stays null). Adds all_dates=true and include[]=checkpoints."
         }
       ],
-      "returns": "Full assignment details including description, due date, submission types",
+      "returns": "Full assignment details including description, due date, submission types; with raw_dates, also a JSON dates block",
       "examples": [
         "Show me details for assignment 456 in course 123"
       ],
@@ -621,9 +635,15 @@
           "type": "object",
           "required": true,
           "description": "Rubric criterion ratings: {criterion_id: {points, comments?}}"
+        },
+        {
+          "name": "comment",
+          "type": "string",
+          "required": false,
+          "description": "Optional student-visible overall feedback; omit unless explicitly requested. Each call appends a new comment."
         }
       ],
-      "returns": "Confirmation of grade submission",
+      "returns": "Canvas response with grade/score consistent with the complete requested rubric total, refusal if rubric grading settings cannot be confirmed, or an unconfirmed-result warning; persistence and publication are not read back",
       "examples": [
         "Grade student 123's submission with 80 points on criterion _8027"
       ]
@@ -766,8 +786,8 @@
         {
           "name": "syllabus_body",
           "type": "string",
-          "required": true,
-          "description": "HTML for the syllabus. Canvas stores this as HTML; plain text renders without formatting"
+          "required": false,
+          "description": "HTML for the syllabus. Canvas stores this as HTML; plain text renders without formatting. Required unless find/replace is used"
         },
         {
           "name": "mode",
@@ -781,6 +801,30 @@
           "type": "string",
           "required": false,
           "description": "Token from the preview call. Only required when replacing a syllabus that already has content"
+        },
+        {
+          "name": "expect_body_sha256",
+          "type": "string",
+          "required": false,
+          "description": "SHA-256 of the syllabus body when you read it (get_syllabus prints it). The syllabus has no updated_at, so this is its drift check: refuse, writing nothing, if the body has changed"
+        },
+        {
+          "name": "find",
+          "type": "string",
+          "required": false,
+          "description": "Exact fragment of the current syllabus to change; must occur exactly once. Use with replace instead of syllabus_body; mode must be 'replace'"
+        },
+        {
+          "name": "replace",
+          "type": "string",
+          "required": false,
+          "description": "Text that replaces find (may be empty to delete it)"
+        },
+        {
+          "name": "require",
+          "type": "array",
+          "required": false,
+          "description": "Strings that must already be present in the current syllabus, else the tool refuses"
         }
       ],
       "returns": "Confirmation that the syllabus was written, verified by reading it back from Canvas. Replacing existing content first returns a preview plus a single-use token and writes nothing.",
@@ -788,12 +832,12 @@
         "Add a link to the course website at the top of the BADM 350 syllabus",
         "Replace the CS101 syllabus with this HTML"
       ],
-      "notes": "Canvas keeps no revision history for syllabus_body, so a replace cannot be undone. Append and prepend, and any write into an empty syllabus, are single-call because they destroy nothing."
+      "notes": "Canvas keeps no revision history for syllabus_body, so a replace cannot be undone. Append and prepend, and any write into an empty syllabus, are single-call because they destroy nothing. Optional guards (issue 419) are independent of the confirmation token: a find/replace over existing content still previews first. A guarded write is confirmed only if the stored syllabus equals the expected HTML (full body, current+new for append, new+current for prepend, or the substituted body) after whitespace normalization; otherwise unconfirmed, and reports the old and new body SHA-256."
     },
     {
       "name": "list_discussion_topics",
       "category": "shared",
-      "description": "View discussion forums in a course. Returns discussion topics only; announcements are excluded unless include_announcements is set. Use list_announcements to list announcements on their own.",
+      "description": "View discussion forums in a course. Returns discussion topics only; announcements are excluded unless include_announcements is set. Use list_announcements to list announcements on their own. Without group_id it lists course-level topics only; topics that students start inside a group space are missing, so use list_group_discussion_topics to find them.",
       "parameters": [
         {
           "name": "course_identifier",
@@ -807,11 +851,40 @@
           "required": false,
           "default": false,
           "description": "Also list the course's announcements alongside its discussion topics; each entry is labelled Type: Announcement or Type: Discussion"
+        },
+        {
+          "name": "group_id",
+          "type": "string | integer",
+          "required": false,
+          "description": "Canvas group ID, to read a discussion inside a group space instead of the course. Discussions that students start in a group exist only there. The group must belong to the course."
         }
       ],
       "returns": "List of discussion topics with IDs and titles",
       "examples": [
         "What discussions are active in my course?"
+      ]
+    },
+    {
+      "name": "list_group_discussion_topics",
+      "category": "shared",
+      "description": "List the discussion topics inside every group space of a course, marking each as a group copy of a course topic or as started in the group itself. Topics that students start in a group exist only there, so list_discussion_topics never returns them.",
+      "parameters": [
+        {
+          "name": "course_identifier",
+          "type": "string | integer",
+          "required": true,
+          "description": "Course code or Canvas ID"
+        },
+        {
+          "name": "group_category_id",
+          "type": "string | integer",
+          "required": false,
+          "description": "Only include groups in this group set (default: all groups in the course)"
+        }
+      ],
+      "returns": "Per group: topic IDs, titles, entry counts, origin, and post dates",
+      "examples": [
+        "Which reference groups started their own discussions in PV1425?"
       ]
     },
     {
@@ -844,6 +917,12 @@
           "required": false,
           "default": false,
           "description": "Fetch replies for each entry (default: False)"
+        },
+        {
+          "name": "group_id",
+          "type": "string | integer",
+          "required": false,
+          "description": "Canvas group ID, to read a discussion inside a group space instead of the course. Discussions that students start in a group exist only there. The group must belong to the course."
         }
       ],
       "returns": "List of discussion posts with authors and content",
@@ -855,7 +934,7 @@
     {
       "name": "update_discussion_topic",
       "category": "educator",
-      "description": "Edit an existing discussion topic or announcement",
+      "description": "Edit an existing discussion topic or announcement after a REST preflight; anonymous and REST-unservable topics are refused without an update request",
       "parameters": [
         {
           "name": "course_identifier",
@@ -916,12 +995,43 @@
           "type": "boolean",
           "required": false,
           "description": "Students must post before seeing others"
+        },
+        {
+          "name": "find",
+          "type": "string",
+          "required": false,
+          "description": "Exact fragment of the current message to change; must occur exactly once or the tool refuses and reports the count. Use with replace instead of message"
+        },
+        {
+          "name": "replace",
+          "type": "string",
+          "required": false,
+          "description": "Text that replaces find (may be empty to delete it)"
+        },
+        {
+          "name": "require",
+          "type": "array",
+          "required": false,
+          "description": "Strings that must already be present in the current message, else the tool refuses"
+        },
+        {
+          "name": "expect_updated_at",
+          "type": "string",
+          "required": false,
+          "description": "Not supported: Canvas returns no updated_at for discussion topics. Passing it is an error; use expect_body_sha256"
+        },
+        {
+          "name": "expect_body_sha256",
+          "type": "string",
+          "required": false,
+          "description": "SHA-256 (hex) of the message as Canvas returned it when you read it. Topics have no updated_at, so this is the drift check: refuse, writing nothing, if the message changed"
         }
       ],
       "returns": "Confirmation with updated fields and topic type",
       "examples": [
         "Update the Week 1 discussion prompt to mention Claude and Gemini"
-      ]
+      ],
+      "notes": "Optional guards (issue 419): expect_body_sha256, find/replace on message, require. Any guard makes the tool fetch the topic first, refuse on a failed check without writing, and read it back after: confirmed only if the stored message equals the expected message (whole body, whitespace-normalized HTML) and every other requested field reads back as sent, otherwise reported unconfirmed, with old and new body SHA-256. Omitting every guard parameter leaves the call unchanged."
     },
     {
       "name": "search_canvas_tools",
@@ -2197,20 +2307,45 @@
         {
           "name": "new_content",
           "type": "string",
-          "required": true,
-          "description": "New HTML content for the page"
+          "required": false,
+          "description": "Complete new HTML body (replaces the old body). Required unless find/replace is used"
         },
         {
           "name": "title",
           "type": "string",
           "required": false,
           "description": "Optional new title for the page"
+        },
+        {
+          "name": "expect_updated_at",
+          "type": "string",
+          "required": false,
+          "description": "The page's updated_at when you read it. The tool fetches the page first and refuses, writing nothing, unless it is the same instant; Z and offset forms of one instant match"
+        },
+        {
+          "name": "find",
+          "type": "string",
+          "required": false,
+          "description": "Exact fragment of the current body to change; must occur exactly once or the tool refuses and reports the count. Use with replace instead of new_content"
+        },
+        {
+          "name": "replace",
+          "type": "string",
+          "required": false,
+          "description": "Text that replaces find (may be empty to delete it)"
+        },
+        {
+          "name": "require",
+          "type": "array",
+          "required": false,
+          "description": "Strings that must already be present in the current body, else the tool refuses"
         }
       ],
       "returns": "Updated page details confirming the new content was saved",
       "examples": [
         "Update the 'Course Policies' page with this new HTML"
-      ]
+      ],
+      "notes": "Optional guards (issue 419): expect_updated_at, find/replace, require. Any guard parameter makes the tool fetch the object first, refuse on a failed check without writing, and read it back after the write: the result is reported as confirmed only if updated_at advanced, the stored body equals the expected body (whole body, whitespace-normalized HTML), and every other requested field reads back as sent, otherwise as unconfirmed with old and new updated_at. Omitting every guard parameter leaves the call unchanged."
     },
     {
       "name": "extract_peer_review_dataset",
@@ -3103,13 +3238,38 @@
           "type": "string",
           "required": false,
           "description": "Comma-separated file extensions (e.g., \"pdf,docx,txt\")"
+        },
+        {
+          "name": "expect_updated_at",
+          "type": "string",
+          "required": false,
+          "description": "The assignment's updated_at when you read it. The tool fetches the assignment first and refuses, writing nothing, unless it is the same instant; Z and offset forms of one instant match"
+        },
+        {
+          "name": "find",
+          "type": "string",
+          "required": false,
+          "description": "Exact fragment of the current description to change; must occur exactly once or the tool refuses and reports the count. Use with replace instead of description"
+        },
+        {
+          "name": "replace",
+          "type": "string",
+          "required": false,
+          "description": "Text that replaces find (may be empty to delete it)"
+        },
+        {
+          "name": "require",
+          "type": "array",
+          "required": false,
+          "description": "Strings that must already be present in the current description, else the tool refuses"
         }
       ],
       "returns": "Updated assignment details confirming the changes",
       "examples": [
         "Move the essay deadline to Friday 11:59pm",
         "Change the assignment to 25 points"
-      ]
+      ],
+      "notes": "Optional guards (issue 419): expect_updated_at, find/replace on description, require. Any guard parameter makes the tool fetch the object first, refuse on a failed check without writing, and read it back after the write: the result is reported as confirmed only if updated_at advanced, the stored body equals the expected body (whole body, whitespace-normalized HTML), and every other requested field reads back as sent, otherwise as unconfirmed with old and new updated_at. Omitting every guard parameter leaves the call unchanged."
     },
     {
       "name": "delete_assignment_with_confirmation",
@@ -3526,6 +3686,12 @@
           "required": false,
           "default": true,
           "description": "Fetch and include replies (default: True)"
+        },
+        {
+          "name": "group_id",
+          "type": "string | integer",
+          "required": false,
+          "description": "Canvas group ID, to read a discussion inside a group space instead of the course. Discussions that students start in a group exist only there. The group must belong to the course."
         }
       ],
       "returns": "Entry text plus all replies with authors and timestamps",
@@ -3550,9 +3716,22 @@
           "type": "string | integer",
           "required": true,
           "description": "Discussion topic ID"
+        },
+        {
+          "name": "group_id",
+          "type": "string | integer",
+          "required": false,
+          "description": "Canvas group ID, to read a discussion inside a group space instead of the course. Discussions that students start in a group exist only there. The group must belong to the course."
+        },
+        {
+          "name": "raw_dates",
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "Append a JSON block with the topic's dates and, for a graded discussion, its assignment's due_at, unlock_at, lock_at, updated_at and checkpoint dates exactly as Canvas returns them. No extra request."
         }
       ],
-      "returns": "Topic metadata and full message body",
+      "returns": "Topic metadata and full message body; with raw_dates, also a JSON dates block",
       "examples": [
         "Show the details of the 'Introductions' discussion topic"
       ],
@@ -3581,6 +3760,12 @@
           "required": false,
           "default": false,
           "description": "Fetch detailed replies for all entries (default: False)"
+        },
+        {
+          "name": "group_id",
+          "type": "string | integer",
+          "required": false,
+          "description": "Canvas group ID, to read a discussion inside a group space instead of the course. Discussions that students start in a group exist only there. The group must belong to the course."
         }
       ],
       "returns": "All discussion entries with nested replies in one call",
@@ -3704,7 +3889,7 @@
           "description": "Include all participant IDs"
         }
       ],
-      "returns": "List of conversations with participants, subjects, and read state",
+      "returns": "One page of conversations with participants, subjects, and read state; count and returned report the page size, more_available indicates another page, and note warns when the result is incomplete",
       "examples": [
         "Show my Canvas inbox"
       ]
@@ -4086,7 +4271,7 @@
       ]
     },
     {
-      "name": "list_group_discussion_topics",
+      "name": "list_my_group_discussion_topics",
       "category": "student",
       "description": "List the discussion topics in one of your groups",
       "parameters": [
@@ -4117,7 +4302,7 @@
           "name": "topic_id",
           "type": "string | integer",
           "required": true,
-          "description": "Discussion topic ID from list_group_discussion_topics or list_group_announcements"
+          "description": "Discussion topic ID from list_my_group_discussion_topics or list_group_announcements"
         }
       ],
       "returns": "Topic title and body, then every entry and reply as a thread",

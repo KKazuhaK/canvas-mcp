@@ -15,6 +15,9 @@ def mock_canvas_api():
          patch('canvas_mcp.tools.discussions.fetch_all_paginated_results') as mock_fetch, \
          patch('canvas_mcp.tools.discussions.make_canvas_request') as mock_request:
 
+        from canvas_mcp.tools import discussions as discussions_module
+        discussions_module._unservable_topics.clear()
+
         mock_get_id.return_value = "60366"
         mock_get_code.return_value = "badm_350_120251"
 
@@ -80,7 +83,9 @@ class TestUpdateDiscussionTopic:
         )
 
         mock_canvas_api['get_course_id'].assert_called_once_with("badm_350_120251")
-        mock_canvas_api['make_canvas_request'].assert_called_once()
+        assert [call.args[0] for call in mock_canvas_api['make_canvas_request'].call_args_list] == [
+            "get", "put",
+        ]
 
         call_args = mock_canvas_api['make_canvas_request'].call_args
         assert call_args[0][0] == "put"
@@ -790,3 +795,770 @@ class TestDiscussionTextIsComplete:
         for name in ("get_discussion_topic_details", "get_discussion_entry_details",
                      "get_discussion_with_replies", "list_discussion_entries"):
             assert tools[name].to_mcp_tool().meta["anthropic/maxResultSizeChars"] == 500_000
+class TestGroupDiscussionReads:
+    """Read tools reach discussions inside a group space via group_id."""
+
+    @staticmethod
+    def _group_aware_request(group_course_id="60366"):
+        async def request(method, path, **kwargs):
+            if path == "/groups/298062":
+                return {"id": 298062, "course_id": group_course_id}
+            if path.endswith("/discussion_topics/814175"):
+                return {"id": 814175, "title": "Utkast till Första Referensgruppsmötet"}
+            return {"error": f"unexpected path {path}"}
+        return request
+
+    @pytest.mark.asyncio
+    async def test_list_topics_uses_group_path(self, mock_canvas_api):
+        mock_canvas_api['make_canvas_request'].side_effect = self._group_aware_request()
+        mock_canvas_api['fetch_all_paginated_results'].return_value = [
+            {"id": 814175, "title": "Utkast till Första Referensgruppsmötet",
+             "published": True, "posted_at": "2026-09-25T10:00:00Z"},
+        ]
+
+        list_discussion_topics = get_tool_function('list_discussion_topics')
+        result = await list_discussion_topics("badm_350_120251", group_id=298062)
+
+        path = mock_canvas_api['fetch_all_paginated_results'].call_args[0][0]
+        assert path == "/groups/298062/discussion_topics"
+        assert "814175" in result
+
+    @pytest.mark.asyncio
+    async def test_list_topics_without_group_keeps_course_path(self, mock_canvas_api):
+        mock_canvas_api['fetch_all_paginated_results'].return_value = []
+
+        list_discussion_topics = get_tool_function('list_discussion_topics')
+        await list_discussion_topics("badm_350_120251")
+
+        path = mock_canvas_api['fetch_all_paginated_results'].call_args[0][0]
+        assert path == "/courses/60366/discussion_topics"
+        mock_canvas_api['make_canvas_request'].assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_group_from_another_course_is_rejected(self, mock_canvas_api):
+        mock_canvas_api['make_canvas_request'].side_effect = self._group_aware_request(
+            group_course_id="99999"
+        )
+
+        list_discussion_entries = get_tool_function('list_discussion_entries')
+        result = await list_discussion_entries(
+            "badm_350_120251", 814175, group_id=298062
+        )
+
+        assert "does not belong to course 60366" in result
+        mock_canvas_api['fetch_all_paginated_results'].assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_group_id", [
+        "298062/discussion_topics", "298062?as_user_id=1", "../courses/60366", "", "12a",
+    ])
+    async def test_non_numeric_group_id_is_refused_before_any_request(
+        self, mock_canvas_api, bad_group_id
+    ):
+        list_discussion_entries = get_tool_function('list_discussion_entries')
+        result = await list_discussion_entries(
+            "badm_350_120251", 814175, group_id=bad_group_id
+        )
+
+        assert "group_id must be a numeric Canvas group ID" in result
+        requested = [c.args[1] for c in mock_canvas_api['make_canvas_request'].call_args_list]
+        assert not any(path.startswith("/groups") for path in requested)
+        mock_canvas_api['fetch_all_paginated_results'].assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_entries_and_replies_use_group_path(self, mock_canvas_api):
+        mock_canvas_api['make_canvas_request'].side_effect = self._group_aware_request()
+
+        async def fetch(path, params=None):
+            if path.endswith("/entries"):
+                return [{"id": 1, "user_id": 7, "user_name": "Student",
+                         "message": "<p>Feedback</p>", "created_at": "2026-09-26T08:00:00Z",
+                         "recent_replies": [], "has_more_replies": False}]
+            return []
+        mock_canvas_api['fetch_all_paginated_results'].side_effect = fetch
+
+        get_discussion_with_replies = get_tool_function('get_discussion_with_replies')
+        result = await get_discussion_with_replies(
+            "badm_350_120251", 814175, include_replies=True, group_id=298062
+        )
+
+        fetched = [c[0][0] for c in mock_canvas_api['fetch_all_paginated_results'].call_args_list]
+        assert fetched == [
+            "/groups/298062/discussion_topics/814175/entries",
+            "/groups/298062/discussion_topics/814175/entries/1/replies",
+        ]
+        assert "Feedback" in result
+
+    def test_group_discussion_content_is_anonymization_gated(self):
+        from canvas_mcp.core.client import ANONYMIZE_FULL, _endpoint_anonymization_mode
+
+        for path in (
+            "/groups/298062/discussion_topics/814175/entries",
+            "/groups/298062/discussion_topics/814175/view",
+            "/groups/298062/discussion_topics/814175/entries/1/replies",
+        ):
+            assert _endpoint_anonymization_mode(path) == ANONYMIZE_FULL
+
+
+class TestListGroupDiscussionTopics:
+    """list_group_discussion_topics sweeps every group space of a course."""
+
+    GROUPS = [
+        {"id": 298061, "name": "Referensgrupp A", "group_category_id": 47901},
+        {"id": 298062, "name": "Referensgrupp B", "group_category_id": 47901},
+        {"id": 294537, "name": "Projektgrupp 1", "group_category_id": 47915},
+    ]
+    TOPICS = {
+        "/groups/298061/discussion_topics": [
+            {"id": 807009, "title": "Första referensgruppsmöte - Referensgrupp A",
+             "root_topic_id": 803256, "discussion_subentry_count": 6},
+        ],
+        "/groups/298062/discussion_topics": [
+            {"id": 814175, "title": "Utkast till Första Referensgruppsmötet",
+             "root_topic_id": None, "discussion_subentry_count": 4,
+             "author": {"display_name": "Julia Student"}},
+        ],
+        "/groups/294537/discussion_topics": [],
+    }
+
+    def _fetch(self):
+        async def fetch(path, params=None):
+            if path == "/courses/60366/groups":
+                return self.GROUPS
+            return self.TOPICS[path]
+        return fetch
+
+    @pytest.mark.asyncio
+    async def test_marks_topics_started_in_a_group(self, mock_canvas_api):
+        mock_canvas_api['fetch_all_paginated_results'].side_effect = self._fetch()
+
+        tool = get_tool_function('list_group_discussion_topics')
+        result = await tool("badm_350_120251")
+
+        assert "(3 groups)" in result
+        assert "Group copy of course topic 803256" in result
+        assert "Started in this group by" in result
+        assert "Julia Student" in result
+        assert "Entries: 4" in result
+        assert "No discussion topics." in result
+
+    @pytest.mark.asyncio
+    async def test_filters_by_group_category(self, mock_canvas_api):
+        mock_canvas_api['fetch_all_paginated_results'].side_effect = self._fetch()
+
+        tool = get_tool_function('list_group_discussion_topics')
+        result = await tool("badm_350_120251", group_category_id=47901)
+
+        fetched = {c[0][0] for c in mock_canvas_api['fetch_all_paginated_results'].call_args_list}
+        assert "/groups/294537/discussion_topics" not in fetched
+        assert "(2 groups)" in result
+
+    @pytest.mark.asyncio
+    async def test_reports_a_failing_group_without_dropping_the_rest(self, mock_canvas_api):
+        topics = dict(self.TOPICS)
+        topics["/groups/298061/discussion_topics"] = {"error": "HTTP error: 403"}
+
+        async def fetch(path, params=None):
+            if path == "/courses/60366/groups":
+                return self.GROUPS
+            return topics[path]
+        mock_canvas_api['fetch_all_paginated_results'].side_effect = fetch
+
+        tool = get_tool_function('list_group_discussion_topics')
+        result = await tool("badm_350_120251")
+
+        assert "Error fetching topics: HTTP error: 403" in result
+        assert "814175" in result
+
+
+class TestAnonymousTopics:
+    """Issue 421 Part 1: REST answers 404 for anonymous topics the list still shows."""
+
+    NOT_FOUND = {"error": (
+        "HTTP error: 404, Details: {'errors': [{'message': "
+        "'The specified resource does not exist.'}]}"
+    )}
+    ANON_TOPIC = {
+        "id": 555, "title": "Anonymous feedback", "published": True,
+        "posted_at": "2026-09-20T10:00:00Z", "anonymous_state": "full_anonymity",
+        "html_url": "https://canvas.example.edu/courses/60366/discussion_topics/555",
+    }
+    PLAIN_TOPIC = {
+        "id": 556, "title": "Week 3", "published": True,
+        "posted_at": "2026-09-21T10:00:00Z", "anonymous_state": None,
+    }
+
+    def _list_fetch(self, topics_path="/courses/60366/discussion_topics"):
+        """Entries 404; the topic index at topics_path lists both topics."""
+        async def fetch(path, params=None):
+            if path == topics_path:
+                return [self.ANON_TOPIC, self.PLAIN_TOPIC]
+            if "/entries" in path:
+                return dict(self.NOT_FOUND)
+            return {"error": f"unexpected path {path}"}
+        return fetch
+
+    @pytest.mark.asyncio
+    async def test_list_shows_anonymous_state_only_when_canvas_sends_one(
+        self, mock_canvas_api
+    ):
+        legacy = {"id": 557, "title": "No field", "published": True}
+        mock_canvas_api['fetch_all_paginated_results'].return_value = [
+            self.ANON_TOPIC, self.PLAIN_TOPIC, legacy,
+        ]
+
+        result = await get_tool_function('list_discussion_topics')("badm_350_120251")
+
+        assert result.count("Anonymity:") == 1
+        assert "Anonymity: full_anonymity" in result
+
+    @pytest.mark.asyncio
+    async def test_group_list_shows_anonymous_state(self, mock_canvas_api):
+        async def fetch(path, params=None):
+            if path == "/courses/60366/groups":
+                return [{"id": 298062, "name": "B", "group_category_id": 1}]
+            return [dict(self.ANON_TOPIC, anonymous_state="partial_anonymity")]
+        mock_canvas_api['fetch_all_paginated_results'].side_effect = fetch
+
+        result = await get_tool_function('list_group_discussion_topics')("badm_350_120251")
+
+        assert "  Anonymity: partial_anonymity" in result
+
+    @pytest.mark.asyncio
+    async def test_details_404_for_listed_topic_explains_anonymity(self, mock_canvas_api):
+        mock_canvas_api['make_canvas_request'].return_value = dict(self.NOT_FOUND)
+        mock_canvas_api['fetch_all_paginated_results'].side_effect = self._list_fetch()
+
+        result = await get_tool_function('get_discussion_topic_details')(
+            "badm_350_120251", 555
+        )
+
+        assert "topic 555 exists" in result
+        assert "anonymous_state: full_anonymity" in result
+        assert "returns 404" in result
+        assert "Canvas UI" in result
+        assert self.ANON_TOPIC["html_url"] in result
+        assert "Error fetching discussion topic details" not in result
+        fetched = [c[0][0] for c in mock_canvas_api['fetch_all_paginated_results'].call_args_list]
+        assert fetched == ["/courses/60366/discussion_topics"]
+
+    @pytest.mark.asyncio
+    async def test_details_404_for_unlisted_topic_stays_not_found(self, mock_canvas_api):
+        mock_canvas_api['make_canvas_request'].return_value = dict(self.NOT_FOUND)
+        mock_canvas_api['fetch_all_paginated_results'].side_effect = self._list_fetch()
+
+        result = await get_tool_function('get_discussion_topic_details')(
+            "badm_350_120251", 999
+        )
+
+        assert result.startswith("Error fetching discussion topic details: HTTP error: 404")
+        assert "anonymous" not in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_details_404_when_list_fails_stays_not_found(self, mock_canvas_api):
+        mock_canvas_api['make_canvas_request'].return_value = dict(self.NOT_FOUND)
+        mock_canvas_api['fetch_all_paginated_results'].return_value = {"error": "HTTP error: 403"}
+
+        result = await get_tool_function('get_discussion_topic_details')(
+            "badm_350_120251", 555
+        )
+
+        assert result.startswith("Error fetching discussion topic details: HTTP error: 404")
+
+    @pytest.mark.asyncio
+    async def test_non_404_error_makes_no_list_call(self, mock_canvas_api):
+        mock_canvas_api['make_canvas_request'].return_value = {"error": "HTTP error: 403"}
+
+        result = await get_tool_function('get_discussion_topic_details')(
+            "badm_350_120251", 555
+        )
+
+        assert result == "Error fetching discussion topic details: HTTP error: 403"
+        mock_canvas_api['fetch_all_paginated_results'].assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_details_success_makes_no_list_call(self, mock_canvas_api):
+        mock_canvas_api['make_canvas_request'].return_value = {
+            "id": 556, "title": "Week 3", "message": "<p>Hi</p>",
+            "author": {"id": 1, "display_name": "Prof"},
+        }
+
+        result = await get_tool_function('get_discussion_topic_details')(
+            "badm_350_120251", 556
+        )
+
+        assert "Discussion Details" in result
+        mock_canvas_api['fetch_all_paginated_results'].assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool_name", [
+        "list_discussion_entries", "get_discussion_with_replies",
+    ])
+    async def test_entry_readers_explain_listed_404(self, mock_canvas_api, tool_name):
+        # Without operator opt-in, explain the REST limitation without GraphQL.
+        mock_canvas_api['fetch_all_paginated_results'].side_effect = self._list_fetch()
+        mock_canvas_api['make_canvas_request'].return_value = dict(self.NOT_FOUND)
+
+        result = await get_tool_function(tool_name)("badm_350_120251", 555)
+
+        assert "topic 555 exists" in result
+        assert "Canvas UI" in result
+        assert "Error fetching discussion entries" not in result
+        paths = [c.args[1] for c in mock_canvas_api['make_canvas_request'].call_args_list]
+        assert paths == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool_name", [
+        "list_discussion_entries", "get_discussion_with_replies",
+    ])
+    async def test_entry_readers_keep_not_found_for_unlisted(self, mock_canvas_api, tool_name):
+        mock_canvas_api['fetch_all_paginated_results'].side_effect = self._list_fetch()
+
+        result = await get_tool_function(tool_name)("badm_350_120251", 999)
+
+        assert result.startswith("Error fetching discussion entries: HTTP error: 404")
+
+    @pytest.mark.asyncio
+    async def test_group_topic_404_checks_the_group_list(self, mock_canvas_api):
+        async def request(method, path, **kwargs):
+            if path == "/groups/298062":
+                return {"id": 298062, "course_id": "60366"}
+            if path == "/groups/298062/discussion_topics/555":
+                return dict(self.NOT_FOUND)
+            return {"error": f"unexpected path {path}"}
+        mock_canvas_api['make_canvas_request'].side_effect = request
+        mock_canvas_api['fetch_all_paginated_results'].side_effect = self._list_fetch(
+            "/groups/298062/discussion_topics"
+        )
+
+        result = await get_tool_function('get_discussion_topic_details')(
+            "badm_350_120251", 555, group_id=298062
+        )
+
+        assert "in this group's topic list" in result
+        fetched = [c[0][0] for c in mock_canvas_api['fetch_all_paginated_results'].call_args_list]
+        assert fetched == ["/groups/298062/discussion_topics"]
+
+
+@pytest.mark.asyncio
+async def test_anonymous_topic_404_through_real_client_transport(monkeypatch):
+    """The 404 detector must match what the real client produces for a 404."""
+    import httpx
+
+    from canvas_mcp.core import client as cm
+    from canvas_mcp.core.config import reset_config
+
+    # The real client builds absolute URLs from config; pin it so the test does
+    # not depend on a developer's .env (CI has none).
+    monkeypatch.setenv("CANVAS_API_URL", "https://canvas.example/api/v1")
+    monkeypatch.setenv("CANVAS_API_TOKEN", "test-token")
+    reset_config()
+
+    requested = []
+
+    async def transport(request):
+        requested.append(request.url.path)
+        if request.url.path.endswith("/discussion_topics/555"):
+            return httpx.Response(
+                404, json={"errors": [{"message": "The specified resource does not exist."}]}
+            )
+        if request.url.path.endswith("/courses/60366/discussion_topics"):
+            return httpx.Response(200, json=[TestAnonymousTopics.ANON_TOPIC])
+        if request.url.path == "/api/graphql":
+            # GraphQL cannot serve it either, so the explanation stands.
+            return httpx.Response(200, json={"data": {"legacyNode": None}})
+        return httpx.Response(500, json={"error": "unexpected"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        with patch.object(cm, "_get_http_client", return_value=client), \
+             patch('canvas_mcp.tools.discussions.get_course_id',
+                   AsyncMock(return_value="60366")), \
+             patch('canvas_mcp.tools.discussions.get_course_code',
+                   AsyncMock(return_value="badm_350_120251")):
+            result = await get_tool_function('get_discussion_topic_details')(
+                "badm_350_120251", 555
+            )
+
+    assert "topic 555 exists" in result, result
+    assert [p.rsplit("/api/v1", 1)[-1] for p in requested] == [
+        "/courses/60366/discussion_topics/555",
+        "/courses/60366/discussion_topics",
+    ]
+
+
+@pytest.fixture
+def enable_discussion_graphql(monkeypatch):
+    monkeypatch.setenv("DISCUSSION_GRAPHQL_ENABLED", "true")
+
+
+@pytest.mark.usefixtures("enable_discussion_graphql")
+class TestAnonymousDiscussionFallback:
+    """REST reads of an anonymous topic fall back to GraphQL transparently."""
+
+    NOT_FOUND = {"error": "HTTP error: 404, Details: {'errors': [{'message': 'The specified resource does not exist.'}]}"}
+    LISTING = [
+        {"id": 805022, "title": "Frågor om kursen", "published": True,
+         "anonymous_state": "partial_anonymity"},
+        {"id": 803256, "title": "Första referensgruppsmöte", "published": True,
+         "anonymous_state": None},
+    ]
+    ROOT = {"_id": "1", "parentId": None, "deleted": False,
+            "createdAt": "2026-09-01T08:00:00Z", "updatedAt": None,
+            "message": "<p>When is the deadline?</p>",
+            "author": None, "anonymousAuthor": {"shortName": "8x6pv"}}
+    REPLY = {"_id": "2", "parentId": "1", "deleted": False,
+             "createdAt": "2026-09-01T09:00:00Z", "updatedAt": None,
+             "message": "<p>Friday.</p>",
+             "author": {"id": "2448", "display_name": "Teacher Name"}, "anonymousAuthor": None}
+    NESTED = {"_id": "3", "parentId": "2", "deleted": False,
+              "createdAt": "2026-09-01T10:00:00Z", "updatedAt": None,
+              "message": "<p>Thanks!</p>",
+              "author": None, "anonymousAuthor": {"shortName": "8x6pv"}}
+
+    @classmethod
+    def _graphql(cls, nodes=None, *, has_next=False, cursor=None, context=("Course", "60366")):
+        return {"data": {"legacyNode": {
+            "_id": "805022", "title": "Frågor om kursen", "message": "<p>Ask here.</p>",
+            "createdAt": "2026-08-31T16:38:36Z", "postedAt": "2026-08-31T16:38:36Z",
+            "locked": False, "requireInitialPost": False, "isAnnouncement": False,
+            "anonymousState": "partial_anonymity",
+            "contextType": context[0], "contextId": context[1],
+            "author": {"id": "2448", "display_name": "Teacher Name"}, "anonymousAuthor": None,
+            "entryCounts": {"repliesCount": 3, "unreadCount": 0}, "participant": {"read": True},
+            "discussionEntriesConnection": {
+                "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+                "nodes": nodes if nodes is not None else [cls.NESTED, cls.REPLY, cls.ROOT],
+            },
+        }}}
+
+    def _wire(self, mock_canvas_api, graphql_responses=None, listing=None):
+        """REST discussion paths 404; the listing and GraphQL answer."""
+        graphql = list(graphql_responses or [self._graphql()])
+
+        async def request(method, path, **kwargs):
+            if path == "/graphql":
+                return graphql.pop(0)
+            return self.NOT_FOUND
+
+        async def fetch(path, params=None):
+            if path.endswith("/discussion_topics"):
+                return self.LISTING if listing is None else listing
+            return self.NOT_FOUND
+
+        mock_canvas_api['make_canvas_request'].side_effect = request
+        mock_canvas_api['fetch_all_paginated_results'].side_effect = fetch
+
+    @staticmethod
+    def _graphql_calls(mock_canvas_api):
+        return [c for c in mock_canvas_api['make_canvas_request'].call_args_list
+                if c.args[1] == "/graphql"]
+
+    @pytest.mark.asyncio
+    async def test_graphql_raw_dates_are_explicitly_unavailable(self, mock_canvas_api):
+        self._wire(mock_canvas_api, graphql_responses=[self._graphql(), self._graphql()])
+        tool = get_tool_function('get_discussion_topic_details')
+        for _ in range(2):  # cold fallback and cached route
+            result = await tool("badm_350_120251", 805022, raw_dates=True)
+            assert "Raw dates unavailable" in result
+            assert "Ungraded topic" not in result
+            assert "Raw dates (JSON" not in result
+
+    @pytest.mark.asyncio
+    async def test_graphql_entry_read_state_is_unknown(self, mock_canvas_api):
+        self._wire(mock_canvas_api)
+        result = await get_tool_function('get_discussion_entry_details')(
+            "badm_350_120251", 805022, 2
+        )
+        assert "Read State: Unknown" in result
+        assert "Read State: Read" not in result
+
+    @pytest.mark.asyncio
+    async def test_graphql_page_cap_refuses_partial_discussion(self, mock_canvas_api, monkeypatch):
+        from canvas_mcp.tools import discussions
+        monkeypatch.setattr(discussions, "_GRAPHQL_MAX_PAGES", 1)
+        self._wire(mock_canvas_api, graphql_responses=[
+            self._graphql([self.ROOT], has_next=True, cursor="c1")
+        ])
+        result = await get_tool_function('get_discussion_with_replies')("badm_350_120251", 805022)
+        assert "page limit" in result
+        assert "incomplete" in result
+        assert "When is the deadline?" not in result
+        assert ("/courses/60366", "805022") not in discussions._unservable_topics
+
+    @pytest.mark.asyncio
+    async def test_graphql_deep_reply_chain_does_not_recurse(self, mock_canvas_api):
+        from canvas_mcp.tools import discussions
+        nodes = [dict(self.ROOT, _id=str(i), parentId=str(i - 1) if i else None)
+                 for i in range(1100)]
+        self._wire(mock_canvas_api, graphql_responses=[self._graphql(nodes)])
+        discussion, reason = await discussions._read_discussion_via_graphql("60366", 805022, None)
+        assert reason is None
+        assert discussion is not None
+        root = discussion.find("0")
+        assert root is not None
+        assert len(root["replies"]) == 1099
+        assert {e["id"] for e in root["replies"]} == {str(i) for i in range(1, 1100)}
+
+    @pytest.mark.asyncio
+    async def test_graphql_preserves_canvas_connection_order(self, mock_canvas_api):
+        from canvas_mcp.tools import discussions
+        newer_root = dict(self.ROOT, _id="4", createdAt="2026-09-02T08:00:00Z")
+        self._wire(mock_canvas_api, graphql_responses=[
+            self._graphql([newer_root, self.NESTED, self.REPLY, self.ROOT])
+        ])
+        discussion, reason = await discussions._read_discussion_via_graphql("60366", 805022, None)
+        assert reason is None
+        assert discussion is not None
+        assert [e["id"] for e in discussion.entries] == ["4", "1"]
+        root = discussion.find("1")
+        assert root is not None
+        assert [e["id"] for e in root["replies"]] == ["3", "2"]
+
+    @pytest.mark.asyncio
+    async def test_topic_details_fall_back(self, mock_canvas_api):
+        self._wire(mock_canvas_api)
+
+        result = await get_tool_function('get_discussion_topic_details')("badm_350_120251", 805022)
+
+        assert "Total Entries: 3" in result
+        assert "Anonymity: partial_anonymity" in result
+        assert "404" not in result
+        call = self._graphql_calls(mock_canvas_api)[0]
+        assert call.kwargs["api_root"] == "graphql"
+        assert call.kwargs["data"]["variables"] == {"id": "805022", "after": None}
+
+    @pytest.mark.asyncio
+    async def test_with_replies_falls_back_and_keeps_nested_replies(self, mock_canvas_api):
+        self._wire(mock_canvas_api)
+
+        result = await get_tool_function('get_discussion_with_replies')(
+            "badm_350_120251", 805022, include_replies=True
+        )
+
+        assert "📝 Entry 1 by" in result
+        assert "Anonymous 8x6pv" in result
+        assert "Replies (2)" in result  # the direct reply and the nested one
+        # Canvas supplied NESTED before REPLY; retain that connection order.
+        assert result.index("Thanks!") < result.index("Friday.")
+        # No REST reply calls once GraphQL has answered.
+        fetched = [c.args[0] for c in mock_canvas_api['fetch_all_paginated_results'].call_args_list]
+        assert not any("/replies" in p for p in fetched)
+
+    @pytest.mark.asyncio
+    async def test_list_entries_falls_back_with_full_content(self, mock_canvas_api):
+        self._wire(mock_canvas_api)
+
+        result = await get_tool_function('list_discussion_entries')(
+            "badm_350_120251", 805022, include_full_content=True, include_replies=True
+        )
+
+        assert result.count("Entry ID:") == 1
+        assert "When is the deadline?" in result
+        assert "Replies (2):" in result
+        assert len(self._graphql_calls(mock_canvas_api)) == 1
+
+    @pytest.mark.asyncio
+    async def test_entry_details_find_a_reply(self, mock_canvas_api):
+        self._wire(mock_canvas_api)
+
+        result = await get_tool_function('get_discussion_entry_details')(
+            "badm_350_120251", 805022, 2
+        )
+
+        assert "Entry ID: 2" in result
+        assert "Teacher Name" in result
+        assert "Replies (1):" in result
+
+    @pytest.mark.asyncio
+    async def test_follows_the_pagination_cursor(self, mock_canvas_api):
+        self._wire(mock_canvas_api, graphql_responses=[
+            self._graphql([self.ROOT], has_next=True, cursor="c1"),
+            self._graphql([self.REPLY, self.NESTED]),
+        ])
+
+        result = await get_tool_function('get_discussion_with_replies')(
+            "badm_350_120251", 805022, include_replies=True
+        )
+
+        afters = [c.kwargs["data"]["variables"]["after"] for c in self._graphql_calls(mock_canvas_api)]
+        assert afters == [None, "c1"]
+        assert "Replies (2)" in result
+
+    @pytest.mark.asyncio
+    async def test_unlisted_topic_keeps_its_404_and_skips_graphql(self, mock_canvas_api):
+        self._wire(mock_canvas_api)
+
+        result = await get_tool_function('get_discussion_topic_details')("badm_350_120251", 999999)
+
+        assert "HTTP error: 404" in result
+        assert self._graphql_calls(mock_canvas_api) == []
+
+    @pytest.mark.asyncio
+    async def test_listed_topic_without_anonymous_state_is_still_read(self, mock_canvas_api):
+        # Issue 421 treats any listed topic that 404s as unservable by REST,
+        # whether or not the listing reports anonymous_state.
+        self._wire(mock_canvas_api)
+
+        result = await get_tool_function('get_discussion_topic_details')("badm_350_120251", 803256)
+
+        assert "Discussion Details" in result
+        assert len(self._graphql_calls(mock_canvas_api)) == 1
+
+    @pytest.mark.asyncio
+    async def test_graphql_failure_is_explained(self, mock_canvas_api):
+        self._wire(mock_canvas_api, graphql_responses=[{"errors": [{"message": "max query aliases exceeded"}]}])
+
+        result = await get_tool_function('list_discussion_entries')("badm_350_120251", 805022)
+
+        assert "topic 805022 exists" in result
+        assert "reading it through Canvas GraphQL failed: max query aliases exceeded" in result
+
+    @pytest.mark.asyncio
+    async def test_topic_from_another_course_is_rejected(self, mock_canvas_api):
+        self._wire(mock_canvas_api, graphql_responses=[self._graphql(context=("Course", "99999"))])
+
+        result = await get_tool_function('get_discussion_with_replies')("badm_350_120251", 805022)
+
+        assert "topic 805022 exists" in result
+        assert "does not belong to course 60366" in result
+        assert "deadline" not in result
+
+
+    @pytest.mark.asyncio
+    async def test_second_read_goes_straight_to_graphql(self, mock_canvas_api):
+        self._wire(mock_canvas_api, graphql_responses=[self._graphql(), self._graphql()])
+        tool = get_tool_function('get_discussion_with_replies')
+
+        await tool("badm_350_120251", 805022, include_replies=True)
+        mock_canvas_api['make_canvas_request'].reset_mock()
+        mock_canvas_api['fetch_all_paginated_results'].reset_mock()
+        result = await tool("badm_350_120251", 805022, include_replies=True)
+
+        assert "📝 Entry 1 by" in result
+        mock_canvas_api['fetch_all_paginated_results'].assert_not_called()
+        paths = [c.args[1] for c in mock_canvas_api['make_canvas_request'].call_args_list]
+        assert paths == ["/graphql"]
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_serves_every_read_tool(self, mock_canvas_api):
+        self._wire(mock_canvas_api, graphql_responses=[self._graphql() for _ in range(5)])
+        await get_tool_function('get_discussion_topic_details')("badm_350_120251", 805022)
+
+        for name, args in (
+            ('get_discussion_topic_details', (805022,)),
+            ('list_discussion_entries', (805022,)),
+            ('get_discussion_entry_details', (805022, 2)),
+            ('get_discussion_with_replies', (805022,)),
+        ):
+            mock_canvas_api['make_canvas_request'].reset_mock()
+            mock_canvas_api['fetch_all_paginated_results'].reset_mock()
+            result = await get_tool_function(name)("badm_350_120251", *args)
+            assert "404" not in result, name
+            if name == "get_discussion_entry_details":
+                assert "Replies (1):" in result
+                assert "Thanks!" in result
+            mock_canvas_api['fetch_all_paginated_results'].assert_not_called()
+            paths = [c.args[1] for c in mock_canvas_api['make_canvas_request'].call_args_list]
+            assert paths == ["/graphql"], (name, paths)
+
+    @pytest.mark.asyncio
+    async def test_cache_entry_expires(self, mock_canvas_api, monkeypatch):
+        from canvas_mcp.tools import discussions as discussions_module
+
+        self._wire(mock_canvas_api, graphql_responses=[self._graphql(), self._graphql()])
+        tool = get_tool_function('get_discussion_topic_details')
+        await tool("badm_350_120251", 805022)
+
+        later = discussions_module.time.monotonic() + discussions_module._UNSERVABLE_TOPIC_TTL_SECONDS + 1
+        monkeypatch.setattr(discussions_module.time, "monotonic", lambda: later)
+        mock_canvas_api['make_canvas_request'].reset_mock()
+        await tool("badm_350_120251", 805022)
+
+        paths = [c.args[1] for c in mock_canvas_api['make_canvas_request'].call_args_list]
+        assert paths[0] != "/graphql"  # REST is tried again first
+        assert paths[-1] == "/graphql"
+
+    @pytest.mark.asyncio
+    async def test_graphql_failure_on_a_cache_hit_falls_back_to_rest(self, mock_canvas_api):
+        self._wire(mock_canvas_api, graphql_responses=[
+            self._graphql(),
+            {"errors": [{"message": "temporarily unavailable"}]},
+            {"errors": [{"message": "temporarily unavailable"}]},
+        ])
+        tool = get_tool_function('get_discussion_topic_details')
+        await tool("badm_350_120251", 805022)
+
+        result = await tool("badm_350_120251", 805022)
+
+        # The cached GraphQL read failed, so REST and the explanation ran again.
+        assert "topic 805022 exists" in result
+        assert "temporarily unavailable" in result
+
+@pytest.mark.asyncio
+async def test_anonymous_topic_graphql_fallback_through_real_client(monkeypatch, enable_discussion_graphql):
+    """The fallback's GraphQL answer goes through the real client and its anonymization."""
+    import httpx
+
+    from canvas_mcp.core import client as cm
+    from canvas_mcp.core.config import reset_config
+
+    monkeypatch.setenv("CANVAS_API_URL", "https://canvas.example/api/v1")
+    monkeypatch.setenv("CANVAS_API_TOKEN", "test-token")
+    monkeypatch.setenv("ENABLE_DATA_ANONYMIZATION", "true")
+    reset_config()
+    from canvas_mcp.tools import discussions as discussions_module
+    discussions_module._unservable_topics.clear()
+
+    graphql = TestAnonymousDiscussionFallback._graphql()
+    requested = []
+
+    async def transport(request):
+        requested.append((request.method, request.url.path))
+        if request.url.path.endswith("/discussion_topics/805022/entries"):
+            return httpx.Response(
+                404, json={"errors": [{"message": "The specified resource does not exist."}]}
+            )
+        if request.url.path.endswith("/courses/60366/discussion_topics"):
+            return httpx.Response(200, json=TestAnonymousDiscussionFallback.LISTING)
+        if request.url.path == "/api/graphql":
+            return httpx.Response(200, json=graphql)
+        return httpx.Response(500, json={"error": "unexpected"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        with patch.object(cm, "_get_http_client", return_value=client), \
+             patch('canvas_mcp.tools.discussions.get_course_id',
+                   AsyncMock(return_value="60366")), \
+             patch('canvas_mcp.tools.discussions.get_course_code',
+                   AsyncMock(return_value="badm_350_120251")):
+            result = await get_tool_function('get_discussion_with_replies')(
+                "badm_350_120251", 805022, include_replies=True
+            )
+    reset_config()
+
+    assert ("POST", "/api/graphql") in requested
+    assert "📝 Entry 1 by" in result
+    assert "Anonymous 8x6pv" in result
+    # The real author name is pseudonymised by the client layer.
+    assert "Teacher Name" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("setting", [None, "false", "invalid"])
+@pytest.mark.parametrize("tool_name", ["get_discussion_topic_details", "list_discussion_entries", "get_discussion_with_replies", "get_discussion_entry_details"])
+async def test_graphql_requires_operator_opt_in(mock_canvas_api, monkeypatch, setting, tool_name):
+    from canvas_mcp.tools import discussions
+    if setting is None:
+        monkeypatch.delenv("DISCUSSION_GRAPHQL_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("DISCUSSION_GRAPHQL_ENABLED", setting)
+    case = TestAnonymousDiscussionFallback()
+    case._wire(mock_canvas_api)
+    # Even a marker left by a previously enabled read cannot bypass the gate.
+    discussions._unservable_topics[("/courses/60366", "805022")] = float("inf")
+    args = ["badm_350_120251", 805022]
+    if tool_name == "get_discussion_entry_details":
+        args.append(2)
+    result = await get_tool_function(tool_name)(*args)
+    assert "topic 805022 exists" in result
+    assert "Canvas UI" in result
+    assert case._graphql_calls(mock_canvas_api) == []

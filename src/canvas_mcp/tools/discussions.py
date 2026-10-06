@@ -1,7 +1,9 @@
 """Discussion and announcement MCP tools for Canvas API."""
 
+import asyncio
 import json
 import re
+import time
 from typing import Any
 
 from fastmcp import FastMCP
@@ -9,8 +11,16 @@ from mcp.types import ToolAnnotations
 
 from ..core.cache import get_course_code, get_course_id
 from ..core.client import fetch_all_paginated_results, make_canvas_request
+from ..core.config import get_config
 from ..core.dates import format_date, parse_date, truncate_text
+from ..core.guarded_edit import (
+    BodyGuard,
+    body_sha256,
+    run_guarded_write,
+    validate_guard,
+)
 from ..core.logging import log_warning
+from ..core.raw_dates import render_raw_dates, topic_raw_dates
 from ..core.tool_results import FULL_CONTENT_TOOL_META
 from ..core.untrusted_content import (
     FENCE_LEAK_ERROR,
@@ -18,7 +28,7 @@ from ..core.untrusted_content import (
     fence_untrusted,
     fence_untrusted_inline,
 )
-from ..core.validation import validate_params
+from ..core.validation import coerce_canvas_id, validate_params
 from ..core.write_confirmation import (
     ConfirmationGuard,
     preview_with_token,
@@ -68,6 +78,346 @@ def _is_permission_error(error_text: str) -> bool:
     return any(marker.lower() in lowered for marker in _PERMISSION_ERROR_MARKERS)
 
 
+async def _discussion_prefix(
+    course_id: str, group_id: str | int | None
+) -> tuple[str, str | None]:
+    """Resolve the API path prefix for discussions in a course or one of its groups.
+
+    Canvas keeps discussions that students start inside a group space under
+    /groups/{id}/discussion_topics only. They have no course-level parent, so
+    the /courses/{id}/... endpoints never return them. The group must belong to
+    the course, so a group id cannot be used to read outside the course the
+    caller named.
+
+    Returns:
+        (prefix, error): prefix such as "/courses/1" or "/groups/2", and an
+        error message when the group cannot be used (prefix is then "").
+    """
+    if group_id is None:
+        return f"/courses/{course_id}", None
+
+    # group_id is interpolated into every request path, so anything but plain
+    # digits (a "/" or "?" could retarget the call) is refused before any I/O.
+    canonical_group_id = coerce_canvas_id(group_id)
+    if canonical_group_id is None:
+        return "", f"Error: group_id must be a numeric Canvas group ID, got {group_id!r}."
+    group_id = canonical_group_id
+
+    group = await make_canvas_request("get", f"/groups/{group_id}")
+    if not isinstance(group, dict):
+        return "", f"Error fetching group {group_id}: unexpected response."
+    if "error" in group:
+        return "", f"Error fetching group {group_id}: {group['error']}"
+    if str(group.get("course_id")) != str(course_id):
+        return "", (
+            f"Error: group {group_id} does not belong to course {course_id}."
+        )
+    return f"/groups/{group_id}", None
+
+
+def _anonymity_line(topic: dict[str, Any], indent: str = "") -> str:
+    """Show a topic's anonymous_state when Canvas sent a non-null one (issue 421).
+
+    Canvas documents null (not anonymous), "partial_anonymity" and
+    "full_anonymity". Nothing is shown when the field is absent or null, so
+    the output never claims a state Canvas did not report.
+    """
+    state = topic.get("anonymous_state")
+    if not state:
+        return ""
+    return f"{indent}Anonymity: {state}\n"
+
+
+def _is_not_found_error(error: Any) -> bool:
+    """True for make_canvas_request's 404 payload ("HTTP error: 404, ...")."""
+    return str(error).startswith("HTTP error: 404")
+
+
+async def _find_listed_topic(prefix: str, topic_id: str | int) -> dict[str, Any] | None:
+    """The topic list's entry for `topic_id`, or None if it is not listed."""
+    topics = await fetch_all_paginated_results(
+        f"{prefix}/discussion_topics", {"per_page": 100}
+    )
+    if not isinstance(topics, list):
+        return None
+    return next(
+        (t for t in topics if isinstance(t, dict) and str(t.get("id")) == str(topic_id)),
+        None,
+    )
+
+
+def _unservable_topic_message(prefix: str, topic_id: str | int, match: dict[str, Any]) -> str:
+    """Explain a 404 on a topic that the topic list still contains (issue 421)."""
+    state = match.get("anonymous_state")
+    if state:
+        reason = f"Canvas lists it with anonymous_state: {state}."
+    else:
+        reason = (
+            "The list did not report an anonymous_state for it, but anonymous "
+            "topics are the known case of a listed topic that REST does not serve."
+        )
+    scope = "group" if prefix.startswith("/groups/") else "course"
+    message = (
+        f"Error: discussion topic {topic_id} exists (it is in this {scope}'s "
+        "topic list), but Canvas's REST API returns 404 for it. It is most "
+        f"likely an anonymous discussion, which REST does not serve. {reason} "
+        "It has not been deleted. Open it in the Canvas UI to read it."
+    )
+    title = match.get("title")
+    if title:
+        message += f"\nTitle:\n{fence_untrusted(title, 'discussion topic title')}"
+    html_url = match.get("html_url")
+    if html_url:
+        message += f"\nCanvas URL: {html_url}"
+    return message
+
+
+# ===== GraphQL fallback for anonymous discussions =====
+#
+# Canvas lists anonymous discussions but its REST API answers 404 when they are
+# read (issue 421). Its GraphQL API serves them. After such a 404, the REST read
+# tools read the topic through GraphQL and convert the answer to the REST shapes
+# they already format, so callers never need to know which API answered.
+#
+# The author fields are aliased to REST names (author.id, author.display_name)
+# so the client-layer scrubber, which is keyed on REST names, recognises them;
+# `message` already has its REST name. Canvas caps aliases per query, so the
+# remaining camelCase fields are mapped to REST names in Python, after the
+# client layer has scrubbed the response. rootEntries: false returns every
+# entry as one flat list with parentId, replies included.
+_GRAPHQL_DISCUSSION_QUERY = """
+query($id: ID!, $after: String) {
+  legacyNode(_id: $id, type: Discussion) {
+    ... on Discussion {
+      _id title message createdAt postedAt locked requireInitialPost
+      isAnnouncement anonymousState contextType contextId
+      author { id: _id display_name: name }
+      anonymousAuthor { shortName }
+      entryCounts { repliesCount unreadCount }
+      participant { read }
+      discussionEntriesConnection(first: 100, after: $after, rootEntries: false) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          _id parentId deleted createdAt updatedAt message
+          author { id: _id display_name: name }
+          anonymousAuthor { shortName }
+        }
+      }
+    }
+  }
+}
+"""
+
+# Upper bound on GraphQL pages (100 entries each) for one discussion.
+_GRAPHQL_MAX_PAGES = 50
+
+
+class _GraphqlDiscussion:
+    """A discussion read through GraphQL, converted to REST shapes.
+
+    ``topic`` has the fields of GET /discussion_topics/{id}. ``entries`` are
+    the top-level entries as GET .../entries returns them. Every entry
+    carries ``replies`` and ``recent_replies``: all of its descendants,
+    flattened in Canvas connection order, so replies nested deeper than one level are
+    not lost.
+    """
+
+    def __init__(self, topic: dict[str, Any], entries: list[dict[str, Any]],
+                 by_id: dict[str, dict[str, Any]]) -> None:
+        self.topic = topic
+        self.entries = entries
+        self._by_id = by_id
+
+    def find(self, entry_id: str | int) -> dict[str, Any] | None:
+        return self._by_id.get(str(entry_id))
+
+
+def _author_fields(node: dict[str, Any]) -> tuple[Any, str]:
+    """(user_id, user_name) for a GraphQL node: real name, else anonymous alias."""
+    author = node.get("author") or {}
+    if author.get("display_name"):
+        return author.get("id"), author["display_name"]
+    alias = (node.get("anonymousAuthor") or {}).get("shortName")
+    if alias:
+        return None, f"Anonymous {alias}"
+    return None, "Unknown user"
+
+
+def _rest_entry(node: dict[str, Any]) -> dict[str, Any]:
+    user_id, user_name = _author_fields(node)
+    return {
+        "id": node.get("_id"),
+        "parent_id": node.get("parentId"),
+        "user_id": user_id,
+        "user_name": user_name,
+        "message": "" if node.get("deleted") else (node.get("message") or ""),
+        "deleted": bool(node.get("deleted")),
+        "created_at": node.get("createdAt"),
+        "updated_at": node.get("updatedAt"),
+        "read_state": "unknown",
+        "has_more_replies": False,
+    }
+
+
+def _rest_topic(node: dict[str, Any], entry_total: int) -> dict[str, Any]:
+    user_id, user_name = _author_fields(node)
+    counts = node.get("entryCounts") or {}
+    return {
+        "id": node.get("_id"),
+        "title": node.get("title"),
+        "message": node.get("message") or "",
+        "is_announcement": bool(node.get("isAnnouncement")),
+        "author": {"id": user_id, "display_name": user_name},
+        "created_at": node.get("createdAt"),
+        "posted_at": node.get("postedAt"),
+        "discussion_entries_count": counts.get("repliesCount", entry_total),
+        "unread_count": counts.get("unreadCount", 0),
+        "read_state": "read" if (node.get("participant") or {}).get("read") else "unread",
+        "locked": bool(node.get("locked")),
+        # This fixed query does not return pin status; omit it rather than
+        # inventing an unpinned state. The formatter only prints known pins.
+        "require_initial_post": bool(node.get("requireInitialPost")),
+        "anonymous_state": node.get("anonymousState"),
+    }
+
+
+async def _read_discussion_via_graphql(
+    course_id: str, topic_id: str | int, group_id: str | int | None
+) -> tuple[_GraphqlDiscussion | None, str | None]:
+    """Read a whole discussion through Canvas GraphQL, converted to REST shapes.
+
+    Returns:
+        (discussion, None) on success, or (None, reason) on failure.
+    """
+    failed = "reading it through Canvas GraphQL failed"
+
+    node: dict[str, Any] | None = None
+    nodes: list[dict[str, Any]] = []
+    after: str | None = None
+    for _ in range(_GRAPHQL_MAX_PAGES):
+        response = await make_canvas_request(
+            "post", "/graphql", api_root="graphql",
+            data={"query": _GRAPHQL_DISCUSSION_QUERY,
+                  "variables": {"id": str(topic_id), "after": after}},
+        )
+        if "error" in response:
+            return None, f"{failed}: {response['error']}"
+        if response.get("errors"):
+            messages = "; ".join(str(e.get("message")) for e in response["errors"])
+            return None, f"{failed}: {messages}"
+        node = (response.get("data") or {}).get("legacyNode")
+        if not node:
+            return None, f"{failed}: the topic was not returned."
+        connection = node.get("discussionEntriesConnection") or {}
+        nodes.extend(connection.get("nodes") or [])
+        page_info = connection.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            break
+        after = page_info.get("endCursor")
+    else:
+        log_warning("GraphQL discussion read hit the page limit",
+                    topic_id=topic_id, pages=_GRAPHQL_MAX_PAGES)
+        return None, f"{failed}: page limit reached; results are incomplete. Open it in the Canvas UI."
+
+    expected_type, expected_id = (
+        ("Group", group_id) if group_id is not None else ("Course", course_id)
+    )
+    if node.get("contextType") != expected_type or str(node.get("contextId")) != str(expected_id):
+        where = f"group {group_id}" if group_id is not None else f"course {course_id}"
+        return None, f"Error: discussion {topic_id} does not belong to {where}."
+
+    by_id = {str(n.get("_id")): _rest_entry(n) for n in nodes}
+    children: dict[str | None, list[str]] = {}
+    order = {entry_id: index for index, entry_id in enumerate(by_id)}
+    for entry_id, entry in by_id.items():
+        parent = entry.get("parent_id")
+        # A reply whose parent was not returned is shown at top level, not dropped.
+        key = str(parent) if parent is not None and str(parent) in by_id else None
+        children.setdefault(key, []).append(entry_id)
+
+    def descendants(entry_id: str) -> list[dict[str, Any]]:
+        found: list[dict[str, Any]] = []
+        seen = {entry_id}
+        pending = list(reversed(children.get(entry_id, [])))
+        while pending:
+            child_id = pending.pop()
+            if child_id in seen:
+                continue
+            seen.add(child_id)
+            found.append(by_id[child_id])
+            pending.extend(reversed(children.get(child_id, [])))
+        return sorted(found, key=lambda e: order[str(e["id"])])
+
+    for entry_id, entry in by_id.items():
+        replies = descendants(entry_id)
+        entry["replies"] = replies
+        entry["recent_replies"] = replies
+    top_level = [by_id[i] for i in children.get(None, [])]
+    return _GraphqlDiscussion(_rest_topic(node, len(by_id)), top_level, by_id), None
+
+
+# Topics that REST refused and GraphQL served recently. A repeat read goes
+# straight to GraphQL instead of paying for the REST 404 and the topic list
+# again. Canvas does not let a discussion's anonymity change once it has
+# replies; the TTL bounds staleness otherwise. If GraphQL fails on a cache hit,
+# the entry is dropped and the normal REST path runs.
+_UNSERVABLE_TOPIC_TTL_SECONDS = 600
+_unservable_topics: dict[tuple[str, str], float] = {}
+
+
+def _is_known_unservable(prefix: str, topic_id: str | int) -> bool:
+    key = (prefix, str(topic_id))
+    expires = _unservable_topics.get(key)
+    if expires is None:
+        return False
+    if time.monotonic() >= expires:
+        del _unservable_topics[key]
+        return False
+    return True
+
+
+async def _known_unservable_discussion(
+    course_id: str, prefix: str, topic_id: str | int, group_id: str | int | None
+) -> _GraphqlDiscussion | None:
+    """GraphQL read for a topic recently found unservable by REST, else None."""
+    if not get_config().discussion_graphql_enabled:
+        return None
+    if not _is_known_unservable(prefix, topic_id):
+        return None
+    discussion, _reason = await _read_discussion_via_graphql(course_id, topic_id, group_id)
+    if discussion is None:
+        _unservable_topics.pop((prefix, str(topic_id)), None)
+    return discussion
+
+
+async def _read_unservable_topic(
+    course_id: str, prefix: str, topic_id: str | int,
+    group_id: str | int | None, error: Any,
+) -> tuple[_GraphqlDiscussion | None, str | None]:
+    """After a REST 404, read a listed topic through GraphQL instead (issue 421).
+
+    Returns:
+        (discussion, None) when GraphQL served the topic; (None, message) when
+        the topic is listed but GraphQL failed too, with the reason appended to
+        the issue-421 explanation; (None, None) when the error is not a 404 or
+        the topic is not listed, so the caller keeps its ordinary error.
+    """
+    if not _is_not_found_error(error):
+        return None, None
+    match = await _find_listed_topic(prefix, topic_id)
+    if match is None:
+        return None, None
+    if not get_config().discussion_graphql_enabled:
+        return None, _unservable_topic_message(prefix, topic_id, match)
+    discussion, reason = await _read_discussion_via_graphql(course_id, topic_id, group_id)
+    if discussion is not None:
+        _unservable_topics[(prefix, str(topic_id))] = (
+            time.monotonic() + _UNSERVABLE_TOPIC_TTL_SECONDS
+        )
+        return discussion, None
+    return None, f"{_unservable_topic_message(prefix, topic_id, match)}\nAlso, {reason}"
+
+
 def register_shared_discussion_tools(mcp: FastMCP) -> None:
     """Register discussion tools accessible to both students and educators."""
 
@@ -76,20 +426,32 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
     @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
     @validate_params
     async def list_discussion_topics(course_identifier: str | int,
-                                   include_announcements: bool = False) -> str:
+                                   include_announcements: bool = False,
+                                   group_id: str | int | None = None) -> str:
         """List discussion topics for a specific course.
 
         Returns discussion topics only. Announcements are a separate Canvas
         collection and are NOT included unless include_announcements=True.
         To list announcements on their own, use list_announcements instead.
 
+        Without group_id this lists course-level topics only. Topics that
+        students start inside a group space are missing from that list; use
+        list_group_discussion_topics to find them across all groups.
+
         Args:
             course_identifier: Course code or Canvas ID
             include_announcements: Also list the course's announcements
                 alongside its discussion topics (default: False). Each entry is
                 labelled "Type: Announcement" or "Type: Discussion".
+            group_id: Canvas group ID, to read a discussion inside a group
+                space instead of the course (default: None). Discussions that
+                students start in a group exist only there. The group must
+                belong to the course.
         """
         course_id = await get_course_id(course_identifier)
+        prefix, prefix_error = await _discussion_prefix(course_id, group_id)
+        if prefix_error:
+            return prefix_error
 
         # Canvas serves discussions and announcements from the same endpoint but
         # as disjoint sets: the index excludes announcements unless
@@ -98,7 +460,7 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
         # calls. (include[]=announcement is NOT a supported include value --
         # Canvas silently ignores it. Issue #238.)
         topics = await fetch_all_paginated_results(
-            f"/courses/{course_id}/discussion_topics", {"per_page": 100}
+            f"{prefix}/discussion_topics", {"per_page": 100}
         )
 
         if isinstance(topics, dict) and "error" in topics:
@@ -106,7 +468,7 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
 
         if include_announcements:
             announcements = await fetch_all_paginated_results(
-                f"/courses/{course_id}/discussion_topics",
+                f"{prefix}/discussion_topics",
                 {"only_announcements": True, "per_page": 100},
             )
             if isinstance(announcements, dict) and "error" in announcements:
@@ -144,10 +506,96 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
                 f"ID: {topic_id}\nType: {topic_type}\n"
                 f"Title:\n{fence_untrusted(title, 'discussion topic title')}\n"
                 f"Status: {status}\nPosted: {posted_at}\n"
+                f"{_anonymity_line(topic)}"
             )
 
         course_display = await get_course_code(course_id) or course_identifier
         return f"Discussion Topics for Course {course_display}:\n\n" + "\n".join(topics_info)
+
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @validate_params
+    async def list_group_discussion_topics(
+        course_identifier: str | int,
+        group_category_id: str | int | None = None,
+    ) -> str:
+        """List the discussion topics inside every group space of a course.
+
+        list_discussion_topics only sees course-level topics. Topics that
+        students start inside a group space exist only in that group, so use
+        this tool to find them. Each topic is marked either as a group copy of
+        a course topic or as started in the group itself. Read a topic's posts
+        with list_discussion_entries or get_discussion_with_replies, passing
+        the topic's group_id.
+
+        Args:
+            course_identifier: Course code or Canvas ID
+            group_category_id: Only include groups in this group set
+                (default: None, all groups in the course)
+        """
+        course_id = await get_course_id(course_identifier)
+
+        groups = await fetch_all_paginated_results(
+            f"/courses/{course_id}/groups", {"per_page": 100}
+        )
+        if isinstance(groups, dict) and "error" in groups:
+            return f"Error fetching groups: {groups['error']}"
+        if group_category_id is not None:
+            groups = [
+                g for g in groups
+                if str(g.get("group_category_id")) == str(group_category_id)
+            ]
+        if not groups:
+            return f"No groups found for course {course_identifier}."
+
+        # The client's request semaphore bounds concurrency across the fan-out.
+        topic_lists = await asyncio.gather(*(
+            fetch_all_paginated_results(
+                f"/groups/{g.get('id')}/discussion_topics", {"per_page": 100}
+            )
+            for g in groups
+        ))
+
+        sections = []
+        for group, topics in zip(groups, topic_lists, strict=True):
+            header = (
+                f"Group: {fence_untrusted_inline(group.get('name', 'Unnamed group'), 'group name')} "
+                f"(ID: {group.get('id')}, Category ID: {group.get('group_category_id')})"
+            )
+            if isinstance(topics, dict) and "error" in topics:
+                sections.append(f"{header}\n  Error fetching topics: {topics['error']}\n")
+                continue
+            if not topics:
+                sections.append(f"{header}\n  No discussion topics.\n")
+                continue
+
+            lines = [header]
+            for topic in topics:
+                root_id = topic.get("root_topic_id")
+                if root_id:
+                    origin = f"Group copy of course topic {root_id}"
+                else:
+                    author = (topic.get("author") or {}).get("display_name") or topic.get(
+                        "user_name", "Unknown author"
+                    )
+                    origin = (
+                        "Started in this group by "
+                        f"{fence_untrusted_inline(author, 'author name')}"
+                    )
+                lines.append(
+                    f"  ID: {topic.get('id')}\n"
+                    f"  Title:\n{fence_untrusted(topic.get('title', 'Untitled topic'), 'discussion topic title')}\n"
+                    f"  Entries: {topic.get('discussion_subentry_count', 0)}\n"
+                    f"  Origin: {origin}\n"
+                    f"  Posted: {format_date(topic.get('posted_at'))}\n"
+                    f"{_anonymity_line(topic, '  ')}".rstrip("\n")
+                )
+            sections.append("\n".join(lines) + "\n")
+
+        course_display = await get_course_code(course_id) or course_identifier
+        return (
+            f"Group Discussion Topics for Course {course_display} "
+            f"({len(groups)} groups):\n\n" + "\n".join(sections)
+        )
 
     @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
     @validate_params
@@ -199,21 +647,44 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
     )
     @validate_params
     async def get_discussion_topic_details(course_identifier: str | int,
-                                         topic_id: str | int) -> str:
+                                         topic_id: str | int,
+                                         group_id: str | int | None = None,
+                                         raw_dates: bool = False) -> str:
         """Get detailed information about a specific discussion topic.
 
         Args:
             course_identifier: Course code or Canvas ID
             topic_id: Discussion topic ID
+            group_id: Canvas group ID, to read a discussion inside a group
+                space instead of the course (default: None). Discussions that
+                students start in a group exist only there. The group must
+                belong to the course.
+            raw_dates: Append a JSON block with the topic's dates and, for a
+                graded discussion, its assignment's due_at, unlock_at, lock_at,
+                updated_at and checkpoint dates exactly as Canvas returns them
+                (null stays null). Default False.
         """
         course_id = await get_course_id(course_identifier)
+        prefix, prefix_error = await _discussion_prefix(course_id, group_id)
+        if prefix_error:
+            return prefix_error
 
-        response = await make_canvas_request(
-            "get", f"/courses/{course_id}/discussion_topics/{topic_id}"
+        known = await _known_unservable_discussion(course_id, prefix, topic_id, group_id)
+        graphql_read = known is not None
+        response = known.topic if known is not None else await make_canvas_request(
+            "get", f"{prefix}/discussion_topics/{topic_id}"
         )
 
         if "error" in response:
-            return f"Error fetching discussion topic details: {response['error']}"
+            fallback, explained = await _read_unservable_topic(
+                course_id, prefix, topic_id, group_id, response["error"]
+            )
+            if explained:
+                return explained
+            if fallback is None:
+                return f"Error fetching discussion topic details: {response['error']}"
+            response = fallback.topic
+            graphql_read = True
 
         # Extract topic details
         title = response.get("title", "Untitled")
@@ -261,11 +732,32 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
         if unread_count > 0:
             result += f"Unread Entries: {unread_count}\n"
         result += f"Read State: {read_state.title()}\n"
+        result += _anonymity_line(response)
+        if group_id is None:
+            # Topics have no updated_at, so this hash of the raw message (the
+            # same bytes the guard hashes) is update_discussion_topic's drift
+            # signal (issue 419). Group topics are not editable by that tool.
+            result += (
+                "Body SHA-256 (pass as expect_body_sha256 to update_discussion_topic): "
+                f"{body_sha256(response.get('message'))}\n"
+            )
 
         if message:
             # Topic bodies are third-party text (issue 239): mark provenance
             # so embedded directives read as data, not instructions.
             result += f"\nContent:\n{fence_untrusted(message, 'discussion topic body')}"
+
+        if raw_dates:
+            # No extra request: the topic response embeds its assignment,
+            # checkpoints included (measured 2026-10-01).
+            if graphql_read:
+                result += (
+                    "\n\nRaw dates unavailable: the GraphQL fallback does not return "
+                    "topic scheduling, assignment, or checkpoint date metadata. "
+                    "Grading status is unknown on this path. Check the Canvas UI."
+                )
+            else:
+                result += render_raw_dates(topic_raw_dates(response, topic_id))
 
         return result
 
@@ -276,7 +768,8 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
     async def list_discussion_entries(course_identifier: str | int,
                                     topic_id: str | int,
                                     include_full_content: bool = False,
-                                    include_replies: bool = False) -> str:
+                                    include_replies: bool = False,
+                                    group_id: str | int | None = None) -> str:
         """List discussion entries (posts) for a specific discussion topic with optional full content and replies.
 
         Args:
@@ -285,17 +778,33 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
             include_full_content: Return the complete text of every entry and
                 reply (default: False, which shows short previews)
             include_replies: Fetch replies for each entry (default: False)
+            group_id: Canvas group ID, to read a discussion inside a group
+                space instead of the course (default: None). Discussions that
+                students start in a group exist only there. The group must
+                belong to the course.
         """
         course_id = await get_course_id(course_identifier)
+        prefix, prefix_error = await _discussion_prefix(course_id, group_id)
+        if prefix_error:
+            return prefix_error
 
         # Get basic entries first
-        entries = await fetch_all_paginated_results(
-            f"/courses/{course_id}/discussion_topics/{topic_id}/entries",
+        known = await _known_unservable_discussion(course_id, prefix, topic_id, group_id)
+        entries = known.entries if known is not None else await fetch_all_paginated_results(
+            f"{prefix}/discussion_topics/{topic_id}/entries",
             {"per_page": 100}
         )
 
+        fallback = known
         if isinstance(entries, dict) and "error" in entries:
-            return f"Error fetching discussion entries: {entries['error']}"
+            fallback, explained = await _read_unservable_topic(
+                course_id, prefix, topic_id, group_id, entries["error"]
+            )
+            if explained:
+                return explained
+            if fallback is None:
+                return f"Error fetching discussion entries: {entries['error']}"
+            entries = fallback.entries
 
         if not entries:
             return f"No discussion entries found for topic {topic_id}."
@@ -304,12 +813,15 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
         # ENABLE_DATA_ANONYMIZATION -- this endpoint matches _should_anonymize_endpoint (#179)
 
         # Enhanced content fetching using multiple methods
-        if include_full_content or include_replies:
+        if fallback is not None:
+            # GraphQL already returned every entry with its replies.
+            full_entries_map = {str(e.get("id")): e for e in entries}
+        elif include_full_content or include_replies:
             # Method 1: Try to get everything from discussion view (most efficient)
             full_entries_map = {}
             try:
                 view_response = await make_canvas_request(
-                    "get", f"/courses/{course_id}/discussion_topics/{topic_id}/view"
+                    "get", f"{prefix}/discussion_topics/{topic_id}/view"
                 )
 
                 if "error" not in view_response and "view" in view_response:
@@ -326,14 +838,14 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
             # Method 2: For entries not found in view, try entry_list endpoint
             missing_entry_ids = []
             for entry in entries:
-                entry_id = str(entry.get("id"))
-                if entry_id not in full_entries_map:
-                    missing_entry_ids.append(entry_id)
+                missing_entry_id = str(entry.get("id"))
+                if missing_entry_id not in full_entries_map:
+                    missing_entry_ids.append(missing_entry_id)
 
             if missing_entry_ids:
                 try:
                     entry_list_response = await make_canvas_request(
-                        "get", f"/courses/{course_id}/discussion_topics/{topic_id}/entry_list",
+                        "get", f"{prefix}/discussion_topics/{topic_id}/entry_list",
                         params={"ids[]": missing_entry_ids}
                     )
 
@@ -350,8 +862,8 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
                     )
 
         # Get topic details for context
-        topic_response = await make_canvas_request(
-            "get", f"/courses/{course_id}/discussion_topics/{topic_id}"
+        topic_response = fallback.topic if fallback is not None else await make_canvas_request(
+            "get", f"{prefix}/discussion_topics/{topic_id}"
         )
 
         topic_title = "Unknown Topic"
@@ -411,10 +923,10 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
 
                 # If still no replies or need more, try direct API call
                 has_more_replies = entry.get("has_more_replies", False)
-                if not replies or has_more_replies:
+                if (not replies or has_more_replies) and fallback is None:
                     try:
                         replies_response = await fetch_all_paginated_results(
-                            f"/courses/{course_id}/discussion_topics/{topic_id}/entries/{entry_id}/replies",
+                            f"{prefix}/discussion_topics/{topic_id}/entries/{entry_id}/replies",
                             {"per_page": 100}
                         )
 
@@ -511,7 +1023,8 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
     async def get_discussion_entry_details(course_identifier: str | int,
                                          topic_id: str | int,
                                          entry_id: str | int,
-                                         include_replies: bool = True) -> str:
+                                         include_replies: bool = True,
+                                         group_id: str | int | None = None) -> str:
         """Get detailed information about a specific discussion entry including all its replies.
 
         Args:
@@ -519,41 +1032,55 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
             topic_id: Discussion topic ID
             entry_id: Discussion entry ID
             include_replies: Fetch and include replies (default: True)
+            group_id: Canvas group ID, to read a discussion inside a group
+                space instead of the course (default: None). Discussions that
+                students start in a group exist only there. The group must
+                belong to the course.
         """
         course_id = await get_course_id(course_identifier)
+        prefix, prefix_error = await _discussion_prefix(course_id, group_id)
+        if prefix_error:
+            return prefix_error
 
         # Method 1: Try to get entry details from the discussion view endpoint
         entry_response = None
+        entries_error: Any = None
         replies: list[Any] | Any = []
+        known = await _known_unservable_discussion(course_id, prefix, topic_id, group_id)
+        if known is not None:
+            entry_response = known.find(entry_id)
+            if entry_response and include_replies:
+                replies = entry_response.get("replies", [])
 
-        try:
-            # First try the discussion view endpoint which includes all entries
-            view_response = await make_canvas_request(
-                "get", f"/courses/{course_id}/discussion_topics/{topic_id}/view"
-            )
+        if known is None:
+            try:
+                # First try the discussion view endpoint which includes all entries
+                view_response = await make_canvas_request(
+                    "get", f"{prefix}/discussion_topics/{topic_id}/view"
+                )
 
-            if "error" not in view_response and "view" in view_response:
-                # Find our specific entry in the view
-                for entry in view_response.get("view", []):
-                    if str(entry.get("id")) == str(entry_id):
-                        entry_response = entry
-                        if include_replies:
-                            replies = entry.get("replies", [])
-                        break
-        except Exception as e:
-            log_warning(
-                "Failed to fetch discussion view for entry details",
-                exc=e,
-                course_id=course_id,
-                topic_id=topic_id,
-                entry_id=entry_id
-            )
+                if "error" not in view_response and "view" in view_response:
+                    # Find our specific entry in the view
+                    for entry in view_response.get("view", []):
+                        if str(entry.get("id")) == str(entry_id):
+                            entry_response = entry
+                            if include_replies:
+                                replies = entry.get("replies", [])
+                            break
+            except Exception as e:
+                log_warning(
+                    "Failed to fetch discussion view for entry details",
+                    exc=e,
+                    course_id=course_id,
+                    topic_id=topic_id,
+                    entry_id=entry_id
+                )
 
         # Method 2: If view method failed, try the entry_list endpoint
-        if not entry_response:
+        if not entry_response and known is None:
             try:
                 entry_list_response = await make_canvas_request(
-                    "get", f"/courses/{course_id}/discussion_topics/{topic_id}/entry_list",
+                    "get", f"{prefix}/discussion_topics/{topic_id}/entry_list",
                     params={"ids[]": entry_id}
                 )
 
@@ -570,14 +1097,16 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
                 )
 
         # Method 3: Fallback to getting all entries and finding our target
-        if not entry_response:
+        if not entry_response and known is None:
             try:
                 all_entries = await fetch_all_paginated_results(
-                    f"/courses/{course_id}/discussion_topics/{topic_id}/entries",
+                    f"{prefix}/discussion_topics/{topic_id}/entries",
                     {"per_page": 100}
                 )
 
-                if not isinstance(all_entries, dict) or "error" not in all_entries:
+                if isinstance(all_entries, dict) and "error" in all_entries:
+                    entries_error = all_entries["error"]
+                else:
                     for entry in all_entries:
                         if str(entry.get("id")) == str(entry_id):
                             entry_response = entry
@@ -594,15 +1123,28 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
                     entry_id=entry_id
                 )
 
+        # Anonymous topics: REST answers 404 for every method above (issue 421).
+        fallback = known
+        if not entry_response and entries_error is not None:
+            fallback, explained = await _read_unservable_topic(
+                course_id, prefix, topic_id, group_id, entries_error
+            )
+            if explained:
+                return explained
+            if fallback is not None:
+                entry_response = fallback.find(entry_id)
+                if entry_response and include_replies:
+                    replies = entry_response.get("replies", [])
+
         # If we still don't have the entry, return error
         if not entry_response:
             return f"Error: Could not find discussion entry {entry_id} in topic {topic_id}. The entry may not exist or you may not have permission to view it."
 
         # Method 4: If we have the entry but no replies yet, try the replies endpoint
-        if include_replies and not replies:
+        if include_replies and not replies and fallback is None:
             try:
                 replies_response = await fetch_all_paginated_results(
-                    f"/courses/{course_id}/discussion_topics/{topic_id}/entries/{entry_id}/replies",
+                    f"{prefix}/discussion_topics/{topic_id}/entries/{entry_id}/replies",
                     {"per_page": 100}
                 )
 
@@ -618,8 +1160,8 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
                 )
 
         # Get topic details for context
-        topic_response = await make_canvas_request(
-            "get", f"/courses/{course_id}/discussion_topics/{topic_id}"
+        topic_response = fallback.topic if fallback is not None else await make_canvas_request(
+            "get", f"{prefix}/discussion_topics/{topic_id}"
         )
 
         topic_title = "Unknown Topic"
@@ -690,7 +1232,8 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
     @validate_params
     async def get_discussion_with_replies(course_identifier: str | int,
                                         topic_id: str | int,
-                                        include_replies: bool = False) -> str:
+                                        include_replies: bool = False,
+                                        group_id: str | int | None = None) -> str:
         """Read every entry of a discussion in full, optionally with all replies.
 
         Returns the topic title (not its body; get_discussion_topic_details has
@@ -702,24 +1245,40 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
             course_identifier: Course code or Canvas ID
             topic_id: Discussion topic ID
             include_replies: Fetch detailed replies for all entries (default: False)
+            group_id: Canvas group ID, to read a discussion inside a group
+                space instead of the course (default: None). Discussions that
+                students start in a group exist only there. The group must
+                belong to the course.
         """
         course_id = await get_course_id(course_identifier)
+        prefix, prefix_error = await _discussion_prefix(course_id, group_id)
+        if prefix_error:
+            return prefix_error
 
         # Get basic entries first
-        entries = await fetch_all_paginated_results(
-            f"/courses/{course_id}/discussion_topics/{topic_id}/entries",
+        known = await _known_unservable_discussion(course_id, prefix, topic_id, group_id)
+        entries = known.entries if known is not None else await fetch_all_paginated_results(
+            f"{prefix}/discussion_topics/{topic_id}/entries",
             {"per_page": 100}
         )
 
+        fallback = known
         if isinstance(entries, dict) and "error" in entries:
-            return f"Error fetching discussion entries: {entries['error']}"
+            fallback, explained = await _read_unservable_topic(
+                course_id, prefix, topic_id, group_id, entries["error"]
+            )
+            if explained:
+                return explained
+            if fallback is None:
+                return f"Error fetching discussion entries: {entries['error']}"
+            entries = fallback.entries
 
         if not entries:
             return f"No discussion entries found for topic {topic_id}."
 
         # Get topic details for context
-        topic_response = await make_canvas_request(
-            "get", f"/courses/{course_id}/discussion_topics/{topic_id}"
+        topic_response = fallback.topic if fallback is not None else await make_canvas_request(
+            "get", f"{prefix}/discussion_topics/{topic_id}"
         )
 
         topic_title = "Unknown Topic"
@@ -760,10 +1319,10 @@ def register_shared_discussion_tools(mcp: FastMCP) -> None:
 
                 # Method 2: If no recent_replies or has_more_replies, try direct API call
                 has_more_replies = entry.get("has_more_replies", False)
-                if not replies or has_more_replies:
+                if (not replies or has_more_replies) and fallback is None:
                     try:
                         replies_response = await fetch_all_paginated_results(
-                            f"/courses/{course_id}/discussion_topics/{topic_id}/entries/{entry_id}/replies",
+                            f"{prefix}/discussion_topics/{topic_id}/entries/{entry_id}/replies",
                             {"per_page": 100}
                         )
 
@@ -1007,8 +1566,25 @@ def register_educator_discussion_tools(mcp: FastMCP) -> None:
         delayed_post_at: str | None = None,
         lock_at: str | None = None,
         require_initial_post: bool | None = None,
+        expect_updated_at: str | None = None,
+        find: str | None = None,
+        replace: str | None = None,
+        require: list[str] | None = None,
+        expect_body_sha256: str | None = None,
     ) -> str:
         """Update an existing discussion topic or announcement.
+
+        message replaces the whole body. To change one fragment, pass find and
+        replace instead. Optional guards (any of them makes the tool fetch the
+        topic first, refuse rather than write on a failed check, and read it
+        back after): expect_body_sha256 refuses if the message changed since
+        you read it (Canvas gives topics no updated_at, so expect_updated_at is
+        rejected); find/replace edits one fragment of the current message;
+        require lists strings that must already be present in it.
+
+        Every update checks the topic through REST before writing. Anonymous
+        topics cannot be updated here; use the Canvas UI instead. The optional
+        GraphQL fallback is for reads only.
 
         Args:
             course_identifier: Course code or Canvas ID
@@ -1021,7 +1597,31 @@ def register_educator_discussion_tools(mcp: FastMCP) -> None:
             delayed_post_at: ISO 8601 datetime to schedule posting
             lock_at: ISO 8601 datetime to auto-lock the discussion
             require_initial_post: Students must post before seeing others
+            expect_updated_at: Not supported: Canvas returns no updated_at for
+                discussion topics. Use expect_body_sha256 instead.
+            find: Exact HTML fragment that must occur exactly once in the current message
+            replace: Text that replaces find (may be empty to delete it)
+            require: Strings that must already be present in the current message
+            expect_body_sha256: SHA-256 (hex) of the message as Canvas returned
+                it when you read it; refuse if the message has changed. Each
+                guarded edit reports the new hash for the next edit.
         """
+        if expect_updated_at is not None:
+            return (
+                "❌ Discussion topics have no updated_at in Canvas, so "
+                "expect_updated_at cannot be checked. Pass expect_body_sha256 "
+                "(SHA-256 of the message as Canvas returned it) instead. "
+                "Nothing was written."
+            )
+        guard = BodyGuard(
+            find=find, replace=replace, require=require,
+            expect_body_sha256=expect_body_sha256,
+        )
+        if guard.active:
+            guard_error = validate_guard(guard, "message", message)
+            if guard_error:
+                return guard_error
+
         course_id = await get_course_id(course_identifier)
 
         # Backstop for issue 239: never publish our provenance fence markers.
@@ -1068,10 +1668,60 @@ def register_educator_discussion_tools(mcp: FastMCP) -> None:
                 )
             data["lock_at"] = parsed_lock.isoformat()
 
-        if not data:
+        if not data and not guard.fragment:
             return (
                 "No fields provided to update. Specify at least one field to modify "
                 "(e.g., title, message, published, pinned, locked)."
+            )
+
+        topic_path = f"/courses/{course_id}/discussion_topics/{topic_id}"
+        topic = await make_canvas_request("get", topic_path)
+        if "error" in topic:
+            if _is_not_found_error(topic["error"]):
+                prefix = f"/courses/{course_id}"
+                match = await _find_listed_topic(prefix, topic_id)
+                if match is not None:
+                    return (
+                        _unservable_topic_message(prefix, topic_id, match)
+                        + "\nThis tool cannot update topics that REST does not serve. "
+                        "Use the Canvas UI to edit it. Nothing was written."
+                    )
+            return f"Error updating discussion topic: {topic['error']}. Nothing was written."
+        if topic.get("anonymous_state"):
+            return (
+                f"Error: discussion topic {topic_id} exists, but this tool cannot "
+                "update anonymous discussions "
+                f"(anonymous_state: {topic['anonymous_state']}). "
+                "Open it in the Canvas UI to edit it. Nothing was written."
+            )
+
+        if guard.active:
+
+            async def fetch_topic() -> Any:
+                return topic
+
+            async def write_topic(body: str | None) -> Any:
+                if body is not None:
+                    data["message"] = body
+                return await make_canvas_request("put", topic_path, data=data)
+
+            async def refetch_topic(_response: Any) -> Any:
+                return await make_canvas_request(
+                    "get", f"/courses/{course_id}/discussion_topics/{topic_id}"
+                )
+
+            guarded_display = await get_course_code(course_id) or course_identifier
+            return await run_guarded_write(
+                guard,
+                what="discussion topic",
+                body_field="message",
+                full_body=message,
+                fetch=fetch_topic,
+                write=write_topic,
+                refetch=refetch_topic,
+                requested=dict(data),
+                facts={"Course": guarded_display, "Topic ID": topic_id},
+                has_updated_at=False,
             )
 
         response = await make_canvas_request(

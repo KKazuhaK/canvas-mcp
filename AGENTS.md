@@ -58,7 +58,7 @@ Personal academic tracking uses Canvas "self" endpoints. Shared course-content t
 | `get_quiz_details` | One quiz's settings plus your own attempts used/remaining and kept score (read-only; New Quizzes details are limited) |
 | `list_my_groups` | Groups you belong to, with course and member count |
 | `get_group_members` | Members of one of your groups (no emails) |
-| `list_group_discussion_topics` | Discussion topics in one of your groups |
+| `list_my_group_discussion_topics` | Discussion topics in one of your groups |
 | `get_group_discussion` | One group topic or announcement with all posts |
 | `list_group_announcements` | Announcements in one of your groups |
 | `list_group_files` | Files stored in one of your groups |
@@ -138,12 +138,12 @@ Course management, grading, and analytics. Requires instructor/TA role.
 
 | Tool | Purpose |
 |------|---------|
-| `list_assignments` | All assignments in a course |
-| `get_assignment_details` | Full assignment info including description |
+| `list_assignments` | All assignments in a course; `raw_dates=True` appends every date as Canvas returns it (`due_at`, `unlock_at`, `lock_at`, `updated_at`, `all_dates`, checkpoint dates). Use it for due-date audits: a checkpointed discussion's `due_at` is null by design |
+| `get_assignment_details` | Full assignment info including description; `raw_dates=True` appends the same dates block |
 | `list_submissions` | Student submissions for grading |
 | `get_assignment_analytics` | Performance statistics |
 | `create_assignment` | Create new assignment with due date, submission types, peer reviews |
-| `update_assignment` | Update existing assignment (name, due date, points, published, etc.) |
+| `update_assignment` | Update existing assignment (name, due date, points, published, etc.). Optional guards: `expect_updated_at`, `find`/`replace` on the description, `require` (see Guarded edits) |
 | `delete_assignment_with_confirmation` | Delete an assignment (two-step: preview, then confirm with the token) |
 | `create_content_migration` | Preview target occupancy, then request a full course-copy migration after explicit confirmation |
 | `get_content_migration_status` | Poll one migration once and review terminal migration issues |
@@ -162,8 +162,8 @@ Course management, grading, and analytics. Requires instructor/TA role.
 | `send_bulk_messages_from_list` | Templated bulk messaging. **Two calls:** the first returns a preview + confirmation token and sends nothing; show the preview to the educator, then call again with the token and identical arguments. The token is single-use and dies if any argument changed |
 | `send_peer_review_inbox_messages` | Send direct Canvas Inbox messages about incomplete peer reviews; this is not Canvas's native reminder action. Requires `manage_grades` permission and uses **two calls** (preview + confirm) |
 | `create_announcement` | Post course announcements. Pre-checks Canvas's announcement permission; if Canvas silently creates a discussion instead, the tool deletes that unintended topic and reports failure (or warns if cleanup cannot be confirmed) |
-| `update_discussion_topic` | Edit discussion or announcement title/body and settings |
-| `update_syllabus` | Write the course Syllabus tab (`replace`, `append`, or `prepend`). Canvas keeps no revision history for the syllabus, so **replacing a syllabus that already has content is two calls** — preview + token, then confirm. Writing into an empty syllabus, appending, or prepending is a single call. The write is verified by reading the syllabus back |
+| `update_discussion_topic` | Edit discussion or announcement title/body and settings. Reads the topic before writing; anonymous or REST-unservable topics are refused with a Canvas UI direction and no update request. Optional guards: `expect_body_sha256` (topics have no `updated_at`), `find`/`replace` on the message, `require` (see Guarded edits) |
+| `update_syllabus` | Write the course Syllabus tab (`replace`, `append`, or `prepend`). Canvas keeps no revision history for the syllabus, so **replacing a syllabus that already has content is two calls** — preview + token, then confirm. Writing into an empty syllabus, appending, or prepending is a single call. The write is verified by reading the syllabus back. Optional guards: `expect_body_sha256` (printed by `get_syllabus`), `find`/`replace`, `require`; independent of the token |
 
 ### Untrusted Canvas content is fenced
 
@@ -202,6 +202,7 @@ Content access tools available to all authenticated users.
 | `read_course_file_text` | ALL the text of lecture slides, PDFs, Word docs, or text and code files, never cut (optional page range), with page/slide markers (PDF/PPTX/DOCX need the `documents` extra). Text too large for one message is refused with a page range to read instead. For figures, layout or scanned pages use `read_course_file` |
 | `list_pages` | Course pages |
 | `get_page_content` | Read page content |
+| `edit_page_content` | Replace a page body (and optionally title). Optional guards: `expect_updated_at`, `find`/`replace` instead of `new_content`, `require` (see Guarded edits) |
 | `update_page_settings` | Publish/unpublish, set front page, editing roles |
 | `bulk_update_pages` | Update multiple pages at once |
 | `list_modules` | List course modules |
@@ -212,7 +213,9 @@ Content access tools available to all authenticated users.
 | `update_module_item` | Update module item settings |
 | `delete_module_item` | Remove item from module |
 | `list_announcements` | Course announcements, and nothing else |
-| `list_discussion_topics` | Discussion forums (discussions only; set `include_announcements` to also list announcements) |
+| `list_discussion_topics` | Discussion forums (discussions only; set `include_announcements` to also list announcements). Shows `Anonymity:` when Canvas reports an `anonymous_state`. Canvas REST returns 404 for anonymous topics; by default the read tools explain this and link to Canvas. Set `DISCUSSION_GRAPHQL_ENABLED=true` to enable the read-only GraphQL fallback |
+| `list_group_discussion_topics` | Topics inside every group space, including topics students started in a group (pass `group_id` to the other discussion read tools to read them) |
+| `get_discussion_topic_details` | One topic's details; `raw_dates=True` appends the topic's dates and, for a graded discussion, its assignment and checkpoint dates. On a GraphQL fallback, `raw_dates=True` reports unavailable date metadata and unknown grading status. Prints the message's SHA-256 for `update_discussion_topic`'s `expect_body_sha256` |
 | `list_discussion_entries` | Posts in a discussion |
 | `post_discussion_entry` | Add a discussion post |
 | `reply_to_discussion_entry` | Reply to a post |
@@ -330,6 +333,11 @@ recomputation; when they disagree, trust Canvas and read the caveats it lists.
 1. "Show discussion posts for Topic 3"
    → list_discussion_entries(course_id, topic_id)
 
+   For group discussions, find every group's topics first, because topics that
+   students start in a group are not in list_discussion_topics:
+   → list_group_discussion_topics(course_id)
+   → list_discussion_entries(course_id, topic_id, group_id=...)
+
 2. "Who hasn't participated?"
    → Analyze entries to find missing students
 
@@ -352,6 +360,30 @@ The token expires in 5 minutes and stops matching if the target changed in betwe
 Applies to: delete_announcement_with_confirmation, bulk_delete_announcements,
 delete_announcements_by_criteria, delete_page, delete_module, delete_module_item,
 delete_assignment_with_confirmation. There is no un-tokened delete tool.
+```
+
+### Educator: Guarded Edits (pages, assignments, discussions, syllabus)
+```
+To change one fragment without reverting anyone else's edits:
+   → edit_page_content(course_id, "week-1", find="Monday 2pm", replace="Tuesday 3pm",
+                       expect_updated_at="<updated_at you read>")
+The tool fetches the object, refuses (writing nothing) if it changed since
+you read it, if find matches 0 or 2+ times, or if a `require` string is
+missing; then writes once and reads back. Success means the read-back proves
+the write: updated_at advanced (pages, assignments), the stored body equals
+the expected body after whitespace normalization (whole body, not just the
+edited fragment), and every other field you changed reads back as sent.
+Anything else is reported as unconfirmed, never success.
+Same parameters on update_assignment (description). Read it first with
+get_assignment_details(course_id, assignment_id, raw_dates=True) and use the
+raw_dates JSON block's updated_at as expect_updated_at. Discussion topics and the
+syllabus have NO updated_at: pass expect_body_sha256 instead (SHA-256 of the
+body as Canvas returned it; get_syllabus and get_discussion_topic_details
+print it, and every guarded edit
+prints the new hash). A find/replace over an existing syllabus still previews
+and needs the confirmation token.
+Omit every guard parameter for the normal write behavior; discussion-topic
+updates still perform the anonymous-topic preflight described above.
 ```
 
 ### Educator: Write the Syllabus
@@ -534,7 +566,7 @@ Most student tools read only your own data via Canvas "self" endpoints. The grou
 tools are the exception: they show classmates in groups you belong to.
 `get_group_members` lists their names and Canvas user IDs; `get_group_discussion`
 shows their posts and topic bodies and names the authors;
-`list_group_discussion_topics` and `list_group_announcements` show titles they wrote;
+`list_my_group_discussion_topics` and `list_group_announcements` show titles they wrote;
 `list_group_files` shows the names of files they uploaded. Emails, login IDs and SIS
 IDs are never shown. With `ENABLE_DATA_ANONYMIZATION` on, classmates' names appear
 as pseudonyms (IDs stay real), and emails, phone numbers and SSNs are redacted from

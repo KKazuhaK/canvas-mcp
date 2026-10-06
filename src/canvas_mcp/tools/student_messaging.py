@@ -73,7 +73,7 @@ from mcp.types import ToolAnnotations
 
 from ..core.anonymization import generate_anonymous_id
 from ..core.cache import get_course_code, resolve_numeric_course_id
-from ..core.client import make_canvas_request
+from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.config import get_config
 from ..core.course_policy import (
     assert_no_identity_override,
@@ -232,10 +232,11 @@ async def _resolve_recipient(user_id: str, course_id: str) -> dict[str, Any] | s
     Canvas at send time. ``common_courses`` must still list this course, for
     the roles shown in the preview.
     """
-    response = await make_canvas_request(
-        "get",
+    # Filtered by user_id the address book holds at most this one person, but
+    # it is still a collection endpoint, so read it the way every list is read.
+    response = await fetch_all_paginated_results(
         "/search/recipients",
-        params={"user_id": user_id, "context": f"course_{course_id}"},
+        {"user_id": user_id, "context": f"course_{course_id}", "per_page": 100},
     )
     if isinstance(response, dict) and "error" in response:
         return f"Could not look up recipient {user_id}: {response['error']}"

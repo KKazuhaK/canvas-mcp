@@ -133,7 +133,7 @@ def http_error(status: int, detail: str = "") -> dict[str, str]:
 
 GROUP_TOOLS_WITH_GROUP_ID = [
     ("get_group_members", {}),
-    ("list_group_discussion_topics", {}),
+    ("list_my_group_discussion_topics", {}),
     ("get_group_discussion", {"topic_id": 55}),
     ("list_group_announcements", {}),
     ("list_group_files", {}),
@@ -415,7 +415,7 @@ class TestListGroupDiscussionTopics:
     @pytest.mark.asyncio
     async def test_request_contract_and_output(self):
         result, fake = await run_tool(
-            "list_group_discussion_topics",
+            "list_my_group_discussion_topics",
             {"/users/self/groups": [MY_GROUP], "/groups/7/discussion_topics": TOPICS},
             group_id=7,
         )
@@ -428,7 +428,7 @@ class TestListGroupDiscussionTopics:
     @pytest.mark.asyncio
     async def test_titles_are_fenced(self):
         result, _ = await run_tool(
-            "list_group_discussion_topics",
+            "list_my_group_discussion_topics",
             {"/users/self/groups": [MY_GROUP], "/groups/7/discussion_topics": TOPICS},
             group_id=7,
         )
@@ -439,7 +439,7 @@ class TestListGroupDiscussionTopics:
     async def test_listing_does_not_print_unanonymized_author_names(self):
         """The topic listing endpoint is not anonymized at the client layer."""
         result, _ = await run_tool(
-            "list_group_discussion_topics",
+            "list_my_group_discussion_topics",
             {"/users/self/groups": [MY_GROUP], "/groups/7/discussion_topics": TOPICS},
             group_id=7,
         )
@@ -448,7 +448,7 @@ class TestListGroupDiscussionTopics:
     @pytest.mark.asyncio
     async def test_empty(self):
         result, _ = await run_tool(
-            "list_group_discussion_topics",
+            "list_my_group_discussion_topics",
             {"/users/self/groups": [MY_GROUP], "/groups/7/discussion_topics": []},
             group_id=7,
         )
@@ -457,7 +457,7 @@ class TestListGroupDiscussionTopics:
     @pytest.mark.asyncio
     async def test_permission_error(self):
         result, _ = await run_tool(
-            "list_group_discussion_topics",
+            "list_my_group_discussion_topics",
             {"/users/self/groups": [MY_GROUP], "/groups/7/discussion_topics": http_error(401)},
             group_id=7,
         )
@@ -1026,7 +1026,7 @@ class TestGroupMembersReviewFixes:
 
 class TestGroupTitlesAndDescriptionsScrubbed:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("tool_name", ["list_group_discussion_topics", "list_group_announcements"])
+    @pytest.mark.parametrize("tool_name", ["list_my_group_discussion_topics", "list_group_announcements"])
     async def test_listing_titles_scrubbed_when_anonymization_is_on(self, tool_name):
         items = [{"id": 55, "title": "ping jane@uci.edu", "posted_at": None}]
         result, _ = await run_tool(
@@ -1110,7 +1110,7 @@ class TestRealClientGroupTopicPii:
         assert view_request.url.params.get("include_new_entries") == "1"
 
         listing = await _run_with_transport(
-            real_client, handler, "list_group_discussion_topics", group_id=7
+            real_client, handler, "list_my_group_discussion_topics", group_id=7
         )
         assert "jane@uci.edu" not in listing
 

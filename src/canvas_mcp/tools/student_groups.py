@@ -70,7 +70,7 @@ _INVALID_GROUP_ID = (
 )
 _INVALID_TOPIC_ID = (
     "Error: topic_id must be a numeric Canvas discussion topic ID. "
-    "Use list_group_discussion_topics or list_group_announcements to find it."
+    "Use list_my_group_discussion_topics or list_group_announcements to find it."
 )
 
 _VALID_FILE_SORTS = frozenset(
@@ -282,7 +282,7 @@ def register_student_group_tools(mcp: FastMCP) -> None:
 
         Shows each group's name, ID, course, group category ID and member
         count. Use the group ID with get_group_members,
-        list_group_discussion_topics, list_group_announcements and
+        list_my_group_discussion_topics, list_group_announcements and
         list_group_files.
 
         Args:
@@ -378,7 +378,7 @@ def register_student_group_tools(mcp: FastMCP) -> None:
 
     @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
     @validate_params
-    async def list_group_discussion_topics(group_id: str | int) -> str:
+    async def list_my_group_discussion_topics(group_id: str | int) -> str:
         """List the discussion topics in one of your groups.
 
         Group discussions are separate from course discussions. Use
@@ -425,7 +425,7 @@ def register_student_group_tools(mcp: FastMCP) -> None:
 
         Args:
             group_id: Canvas group ID from list_my_groups
-            topic_id: Discussion topic ID from list_group_discussion_topics
+            topic_id: Discussion topic ID from list_my_group_discussion_topics
                 or list_group_announcements
         """
         clean_topic_id = coerce_canvas_id(topic_id)

@@ -57,6 +57,17 @@ async def _tools() -> dict:
     return {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
 
 
+def _paged(responder):
+    """Route the paginated recipient lookup through a make_canvas_request fake.
+
+    send_message reads /search/recipients with fetch_all_paginated_results; the
+    fake still sees a GET with the same params, so "never writes" stays checked.
+    """
+    async def paged(endpoint, params=None, **kwargs):
+        return await responder("get", endpoint, params=params)
+    return paged
+
+
 def test_write_tools_are_opt_in_canvas_writes():
     for name in WRITE_TOOLS:
         assert name in STUDENT_WRITE_TOOL_NAMES
@@ -106,7 +117,9 @@ async def test_first_send_call_never_writes(recipients):
         return [{"id": int(user_id), "name": "X", "common_courses": {"123": ["TeacherEnrollment"]}}]
 
     tools = await _tools()
-    with patch.object(student_messaging, "make_canvas_request", responder), patch(
+    with patch.object(student_messaging, "make_canvas_request", responder), patch.object(
+        student_messaging, "fetch_all_paginated_results", _paged(responder)
+    ), patch(
         "canvas_mcp.tools.messaging.make_canvas_request", AsyncMock(side_effect=AssertionError)
     ), patch.object(student_messaging, "get_course_code", AsyncMock(return_value="C")):
         preview = await tools["send_message"].fn("123", recipients, "Hi", "Body")
@@ -174,6 +187,8 @@ async def test_send_is_one_group_conversation_never_the_batch_path():
     post = AsyncMock(return_value={"success": True, "conversation": [{"id": 1}]})
     tools = await _tools()
     with patch.object(student_messaging, "make_canvas_request", lookup), patch.object(
+        student_messaging, "fetch_all_paginated_results", _paged(lookup)
+    ), patch.object(
         student_messaging, "_post_conversation", post
     ), patch.object(student_messaging, "get_course_code", AsyncMock(return_value="C")):
         args = ("123", ["501", "502"], "Hi", "Body")
