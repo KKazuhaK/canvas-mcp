@@ -12,6 +12,7 @@ from mcp.types import ToolAnnotations
 from ..core.cache import get_course_code, get_course_id
 from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.config import get_config
+from ..core.credentials import current_principal_key
 from ..core.dates import format_date, parse_date, truncate_text
 from ..core.guarded_edit import (
     BodyGuard,
@@ -362,11 +363,12 @@ async def _read_discussion_via_graphql(
 # replies; the TTL bounds staleness otherwise. If GraphQL fails on a cache hit,
 # the entry is dropped and the normal REST path runs.
 _UNSERVABLE_TOPIC_TTL_SECONDS = 600
-_unservable_topics: dict[tuple[str, str], float] = {}
+# Keyed by caller too: the hint was learned with one user's token.
+_unservable_topics: dict[tuple[str, str, str], float] = {}
 
 
 def _is_known_unservable(prefix: str, topic_id: str | int) -> bool:
-    key = (prefix, str(topic_id))
+    key = (current_principal_key(), prefix, str(topic_id))
     expires = _unservable_topics.get(key)
     if expires is None:
         return False
@@ -386,7 +388,7 @@ async def _known_unservable_discussion(
         return None
     discussion, _reason = await _read_discussion_via_graphql(course_id, topic_id, group_id)
     if discussion is None:
-        _unservable_topics.pop((prefix, str(topic_id)), None)
+        _unservable_topics.pop((current_principal_key(), prefix, str(topic_id)), None)
     return discussion
 
 
@@ -411,7 +413,7 @@ async def _read_unservable_topic(
         return None, _unservable_topic_message(prefix, topic_id, match)
     discussion, reason = await _read_discussion_via_graphql(course_id, topic_id, group_id)
     if discussion is not None:
-        _unservable_topics[(prefix, str(topic_id))] = (
+        _unservable_topics[(current_principal_key(), prefix, str(topic_id))] = (
             time.monotonic() + _UNSERVABLE_TOPIC_TTL_SECONDS
         )
         return discussion, None

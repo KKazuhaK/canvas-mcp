@@ -64,8 +64,7 @@ def isolated_client(monkeypatch):
     monkeypatch.setattr("canvas_mcp.core.config.get_config", lambda: config)
     monkeypatch.setattr(cm, "get_request_credentials", lambda: None)
     monkeypatch.setattr(cm, "is_http_request_active", lambda: False)
-    monkeypatch.setattr(course_cache, "course_code_to_id_cache", {})
-    monkeypatch.setattr(course_cache, "id_to_course_code_cache", {})
+    course_cache.reset_course_cache()
     yield config
 
 

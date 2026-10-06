@@ -676,7 +676,7 @@ class TestErrorClassification:
                 policy = await get_course_policy("555")
         assert policy.allow_writes is False
         assert policy.source == "default"
-        assert "555" in _policy_cache
+        assert ("local", "555") in _policy_cache
 
     @pytest.mark.asyncio
     async def test_syllabus_mode_404_denies_rather_than_assuming_absence(self):

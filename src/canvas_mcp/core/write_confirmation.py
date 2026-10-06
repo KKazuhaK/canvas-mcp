@@ -33,7 +33,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .credentials import get_request_credentials
+from .credentials import get_request_credentials, get_request_principal
 from .write_outcome import WriteOutcome
 
 
@@ -114,8 +114,17 @@ class ConfirmationGuard:
         """A stable, non-reversible handle for whoever is calling.
 
         Hosted deployments pass a per-user Canvas token on every request; in
-        stdio mode there is a single user and the constant is fine.
+        stdio mode there is a single user and the constant is fine. With a
+        verified identity (the self-hosted Entra mode) the handle is bound to
+        that identity instead of the token, so re-enrolling a Canvas token does
+        not void a pending preview and one user's preview cannot be redeemed
+        by another.
         """
+        principal = get_request_principal()
+        if principal is not None:
+            return hmac.new(
+                self._secret, ("principal|" + principal.key).encode(), hashlib.sha256
+            ).hexdigest()
         credentials = get_request_credentials()
         if credentials is None:
             return "stdio"

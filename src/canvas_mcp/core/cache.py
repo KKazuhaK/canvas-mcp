@@ -2,20 +2,19 @@
 
 import asyncio
 import time
+from collections import OrderedDict
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from .client import fetch_all_paginated_results, make_canvas_request
+from .credentials import current_principal_key
 from .logging import log_error, log_info
 from .validation import coerce_canvas_id, validate_params
 
-# Global cache for course codes to IDs
-course_code_to_id_cache: dict[str, str] = {}
-id_to_course_code_cache: dict[str, str] = {}
 # Every course from the last refresh as (id, course_code, name, sis_course_id),
 # so resolve_numeric_course_id can also find a course by name or SIS ID.
 CourseRecord = tuple[str, str, str, str]
-course_records_cache: list[CourseRecord] = []
 
 SIS_COURSE_PREFIX = "sis_course_id:"
 # A SIS token is sent as one path segment, so nothing that could end the
@@ -26,16 +25,81 @@ _SIS_TOKEN_FORBIDDEN = frozenset("/\\?#%")
 # a model retrying a typo, or garbage input, must not page through /courses on
 # every call. A miss within the window is answered from the cache.
 REFRESH_ON_MISS_INTERVAL_SECONDS = 30.0
-# time.monotonic() of the last successful refresh, and the refresh in flight,
-# which concurrent misses share instead of each starting their own.
-_last_refresh_at: float | None = None
-_refresh_task: asyncio.Task[bool] | None = None
+
+# Most principals whose course lists are kept at once; the least recently used
+# one is dropped beyond this.
+MAX_CACHED_PRINCIPALS = 256
+
+
+@dataclass
+class CourseCacheState:
+    """One caller's course cache: course lists differ per user, so nothing here
+    may be shared between principals."""
+
+    code_to_id: dict[str, str] = field(default_factory=dict)
+    id_to_code: dict[str, str] = field(default_factory=dict)
+    records: list[CourseRecord] = field(default_factory=list)
+    # time.monotonic() of the last successful refresh.
+    last_refresh_at: float | None = None
+    # The refresh in flight, which this caller's concurrent misses share
+    # instead of each starting their own. Never shared across principals: it
+    # runs with its owner's Canvas token.
+    refresh_task: asyncio.Task[bool] | None = None
+
+
+# Keyed by current_principal_key(), least recently used first.
+_STATES: OrderedDict[str, CourseCacheState] = OrderedDict()
+
+
+def current_cache_state() -> CourseCacheState:
+    """The course cache of whoever is making the current request."""
+    key = current_principal_key()
+    state = _STATES.get(key)
+    if state is not None:
+        _STATES.move_to_end(key)
+        return state
+    state = CourseCacheState()
+    _STATES[key] = state
+    while len(_STATES) > MAX_CACHED_PRINCIPALS:
+        oldest = next(k for k in _STATES if k != key)
+        del _STATES[oldest]
+    return state
+
+
+def reset_course_cache(principal_key: str | None = None) -> None:
+    """Forget one principal's course cache, or every principal's when ``None``."""
+    if principal_key is None:
+        _STATES.clear()
+    else:
+        _STATES.pop(principal_key, None)
+
+
+def remember_course_code(course_id: str, course_code: str) -> None:
+    """Record a course code the current caller has seen for ``course_id``.
+
+    ``setdefault`` for code to ID: a course outside the caller's list (a past
+    quarter's COMPSCI 161, say) must not take over a code that already names
+    one of the caller's own courses.
+    """
+    state = current_cache_state()
+    state.id_to_code[str(course_id)] = course_code
+    state.code_to_id.setdefault(course_code, str(course_id))
+
+
+def __getattr__(name: str) -> Any:
+    """Legacy read-only names, resolved to the current principal's live objects."""
+    if name == "course_code_to_id_cache":
+        return current_cache_state().code_to_id
+    if name == "id_to_course_code_cache":
+        return current_cache_state().id_to_code
+    if name == "course_records_cache":
+        return current_cache_state().records
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 async def refresh_course_cache() -> bool:
-    """Refresh the global course cache."""
-    global course_code_to_id_cache, id_to_course_code_cache, course_records_cache
-    global _last_refresh_at
+    """Refresh the current caller's course cache."""
+    state = current_cache_state()
 
     log_info("Refreshing course cache")
     courses = await fetch_all_paginated_results("/courses", {"per_page": 100})
@@ -44,43 +108,46 @@ async def refresh_course_cache() -> bool:
         log_error("Error building course cache", error=courses.get("error"))
         return False
 
-    # Build caches for bidirectional lookups
-    course_code_to_id_cache = {}
-    id_to_course_code_cache = {}
-    course_records_cache = course_records(courses)
+    # Build caches for bidirectional lookups, then swap them in whole.
+    code_to_id: dict[str, str] = {}
+    id_to_code: dict[str, str] = {}
 
     for course in courses:
         course_id = str(course.get("id"))
         course_code = course.get("course_code")
 
         if course_code and course_id:
-            course_code_to_id_cache[course_code] = course_id
-            id_to_course_code_cache[course_id] = course_code
+            code_to_id[course_code] = course_id
+            id_to_code[course_id] = course_code
 
-    _last_refresh_at = time.monotonic()
-    log_info(f"Cached {len(course_code_to_id_cache)} course codes")
+    state.code_to_id = code_to_id
+    state.id_to_code = id_to_code
+    state.records = course_records(courses)
+    state.last_refresh_at = time.monotonic()
+    log_info(f"Cached {len(code_to_id)} course codes")
     return True
 
 
 async def _refresh_after_miss() -> bool:
     """Refresh the course cache because a lookup missed; False if that failed.
 
-    A refresh already in flight is shared, and none is made when one
-    succeeded within ``REFRESH_ON_MISS_INTERVAL_SECONDS``: the cache is then
-    as current as a new read would make it, so a repeated miss costs nothing.
+    A refresh already in flight for this caller is shared, and none is made
+    when one succeeded within ``REFRESH_ON_MISS_INTERVAL_SECONDS``: the cache
+    is then as current as a new read would make it, so a repeated miss costs
+    nothing.
     """
-    global _refresh_task
+    state = current_cache_state()
     loop = asyncio.get_running_loop()
-    task = _refresh_task
+    task = state.refresh_task
     if task is not None and not task.done() and task.get_loop() is loop:
         return await asyncio.shield(task)
     if (
-        _last_refresh_at is not None
-        and time.monotonic() - _last_refresh_at < REFRESH_ON_MISS_INTERVAL_SECONDS
+        state.last_refresh_at is not None
+        and time.monotonic() - state.last_refresh_at < REFRESH_ON_MISS_INTERVAL_SECONDS
     ):
         return True
     task = loop.create_task(refresh_course_cache())
-    _refresh_task = task
+    state.refresh_task = task
     # Shielded so a caller that is cancelled does not cancel the refresh the
     # other callers are waiting on.
     return await asyncio.shield(task)
@@ -89,16 +156,16 @@ async def _refresh_after_miss() -> bool:
 def _match_cached(identifier: str) -> tuple[str | None, str | None]:
     """Match ``identifier`` against the cache: the course list once there is one.
 
-    ``course_code_to_id_cache`` also holds codes that ``get_course_code``
-    fetched for courses outside the caller's list (a past course looked up by
-    ID). Once the list is cached it alone decides, or a foreign course that
-    reuses a code (UCI reuses ``COMPSCI 161`` every quarter) would make the
-    caller's own course ambiguous. The code map is used only before the first
-    successful refresh.
+    The code map also holds codes that ``get_course_code`` fetched for courses
+    outside the caller's list (a past course looked up by ID). Once the list
+    is cached it alone decides, or a foreign course that reuses a code (UCI
+    reuses ``COMPSCI 161`` every quarter) would make the caller's own course
+    ambiguous. The code map is used only before the first successful refresh.
     """
-    if course_records_cache:
-        return _match_course(identifier, course_records_cache)
-    return _match_course(identifier, (), course_code_to_id_cache)
+    state = current_cache_state()
+    if state.records:
+        return _match_course(identifier, state.records)
+    return _match_course(identifier, (), state.code_to_id)
 
 
 @validate_params
@@ -121,8 +188,6 @@ async def get_course_id(course_identifier: str | int) -> str:
     Returns:
         The course ID as a string
     """
-    global course_code_to_id_cache, id_to_course_code_cache
-
     # Convert to string for consistent handling
     course_str = str(course_identifier)
 
@@ -135,8 +200,9 @@ async def get_course_id(course_identifier: str | int) -> str:
         return course_str
 
     # If it's in our cache, return the ID
-    if course_str in course_code_to_id_cache:
-        return course_code_to_id_cache[course_str]
+    cached_id = current_cache_state().code_to_id.get(course_str)
+    if cached_id is not None:
+        return cached_id
 
     # One of the caller's courses by code (spaces allowed, as in 'COMPSCI
     # 161'), name or SIS ID, ignoring case and surrounding whitespace. On a
@@ -145,8 +211,9 @@ async def get_course_id(course_identifier: str | int) -> str:
     # retried; it falls through like a miss.
     found, ambiguous = _match_cached(course_str)
     if found is None and ambiguous is None and await _refresh_after_miss():
-        if course_str in course_code_to_id_cache:
-            return course_code_to_id_cache[course_str]
+        cached_id = current_cache_state().code_to_id.get(course_str)
+        if cached_id is not None:
+            return cached_id
         found, _ = _match_cached(course_str)
     if found is not None:
         return found
@@ -164,8 +231,6 @@ async def get_course_id(course_identifier: str | int) -> str:
 
 async def get_course_code(course_id: str | int) -> str | None:
     """Get course code from ID, with caching."""
-    global id_to_course_code_cache, course_code_to_id_cache
-
     course_id = str(course_id)
 
     # If it's already a code-like string with underscores
@@ -173,14 +238,16 @@ async def get_course_code(course_id: str | int) -> str | None:
         return course_id
 
     # If it's in our cache, return the code
-    if course_id in id_to_course_code_cache:
-        return id_to_course_code_cache[course_id]
+    state = current_cache_state()
+    if course_id in state.id_to_code:
+        return state.id_to_code[course_id]
 
     # Try to refresh cache if it's not there
-    if not id_to_course_code_cache:
+    if not state.id_to_code:
         await refresh_course_cache()
-        if course_id in id_to_course_code_cache:
-            return id_to_course_code_cache[course_id]
+        state = current_cache_state()
+        if course_id in state.id_to_code:
+            return state.id_to_code[course_id]
 
     # If we can't find a code, try to fetch the course directly
     response = await make_canvas_request("get", f"/courses/{course_id}")
@@ -188,11 +255,7 @@ async def get_course_code(course_id: str | int) -> str | None:
         code: str | None = response.get("course_code", "")
         # Update our cache
         if code:
-            id_to_course_code_cache[course_id] = code
-            # setdefault: a course outside the caller's list (a past
-            # quarter's COMPSCI 161, say) must not take over a code that
-            # already names one of the caller's own courses.
-            course_code_to_id_cache.setdefault(code, course_id)
+            remember_course_code(course_id, code)
         return code
 
     # Last resort, return the ID

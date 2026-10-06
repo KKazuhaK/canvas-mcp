@@ -1283,7 +1283,7 @@ class TestAnonymousDiscussionFallback:
         assert "page limit" in result
         assert "incomplete" in result
         assert "When is the deadline?" not in result
-        assert ("/courses/60366", "805022") not in discussions._unservable_topics
+        assert ("local", "/courses/60366", "805022") not in discussions._unservable_topics
 
     @pytest.mark.asyncio
     async def test_graphql_deep_reply_chain_does_not_recurse(self, mock_canvas_api):
@@ -1554,7 +1554,7 @@ async def test_graphql_requires_operator_opt_in(mock_canvas_api, monkeypatch, se
     case = TestAnonymousDiscussionFallback()
     case._wire(mock_canvas_api)
     # Even a marker left by a previously enabled read cannot bypass the gate.
-    discussions._unservable_topics[("/courses/60366", "805022")] = float("inf")
+    discussions._unservable_topics[("local", "/courses/60366", "805022")] = float("inf")
     args = ["badm_350_120251", 805022]
     if tool_name == "get_discussion_entry_details":
         args.append(2)
