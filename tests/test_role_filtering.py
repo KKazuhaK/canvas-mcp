@@ -51,9 +51,6 @@ STUDENT_CALENDAR_WRITE_TOOLS = {
 STUDENT_GROUP_TOOLS = {
     "list_my_groups",
     "get_group_members",
-    "list_my_group_discussion_topics",
-    "get_group_discussion",
-    "list_group_announcements",
     "list_group_files",
 }
 
@@ -282,19 +279,19 @@ class TestRoleFiltering:
 
     @pytest.mark.asyncio
     async def test_student_tool_count(self):
-        """Student role should have approximately 54 tools (no write tools enabled)."""
+        """Student role should have approximately 52 tools (no write tools enabled)."""
         mcp = FastMCP(name="test-student")
         register_all_tools(mcp, role="student")
         tools = await _get_tool_names(mcp)
-        assert 45 <= len(tools) <= 60, f"Expected ~54 student tools, got {len(tools)}: {sorted(tools)}"
+        assert 45 <= len(tools) <= 60, f"Expected ~52 student tools, got {len(tools)}: {sorted(tools)}"
 
     @pytest.mark.asyncio
     async def test_educator_tool_count(self):
-        """Educator role should have approximately 88 tools."""
+        """Educator role should have approximately 94 tools."""
         mcp = FastMCP(name="test-educator")
         register_all_tools(mcp, role="educator")
         tools = await _get_tool_names(mcp)
-        assert 75 <= len(tools) <= 95, f"Expected ~88 educator tools, got {len(tools)}: {sorted(tools)}"
+        assert 75 <= len(tools) <= 95, f"Expected ~94 educator tools, got {len(tools)}: {sorted(tools)}"
 
 
 class TestStudentCalendarWriteGate:

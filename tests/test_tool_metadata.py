@@ -352,7 +352,6 @@ FULL_CONTENT_TOOLS = {
     "get_discussion_with_replies",
     "list_discussion_entries",
     "get_conversation_details",
-    "get_group_discussion",
     "get_my_submission",
     "get_calendar_event",
     "get_quiz_details",

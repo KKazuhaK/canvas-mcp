@@ -41,9 +41,6 @@ SINGLE_OBJECT_PATHS: dict[str, str] = {
     "/conversations/unread_count": "one count object",
     "/courses/{}/permissions": "one permissions map",
     # Student tools added by this fork.
-    "/groups/{}/discussion_topics/{}/view": (
-        "the full-topic view of one group topic: one object holding the whole tree"
-    ),
     "/courses/{}/quizzes/{}/submission": (
         "Get the quiz submission: one object wrapping the caller's own live record"
     ),

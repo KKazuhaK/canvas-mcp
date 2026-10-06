@@ -28,9 +28,9 @@ Reduce tool overhead by setting a role-based profile. Only tools relevant to the
 
 ```
 # In .env:
-CANVAS_ROLE=student    # 54 tools by default (student + shared), 65 with every student write tool enabled
-CANVAS_ROLE=educator   # 92 tools (educator + shared)
-CANVAS_ROLE=all        # Default profile; 115 tools by default, 128 with all feature-gated tools enabled
+CANVAS_ROLE=student    # 52 tools by default (student + shared), 63 with every student write tool enabled
+CANVAS_ROLE=educator   # 94 tools (educator + shared)
+CANVAS_ROLE=all        # Default profile; 113 tools by default, 126 with all feature-gated tools enabled
 ```
 
 Or via CLI flag: `canvas-mcp-server --role student` (CLI flag takes precedence over env var).
@@ -56,11 +56,8 @@ Personal academic tracking uses Canvas "self" endpoints. Shared course-content t
 | `list_planner_notes` | Your own planner notes (personal to-dos) in a date window |
 | `list_quizzes` | Classic quizzes and New Quizzes in a course: dates, limits, your submission state (read-only) |
 | `get_quiz_details` | One quiz's settings plus your own attempts used/remaining and kept score (read-only; New Quizzes details are limited) |
-| `list_my_groups` | Groups you belong to, with course and member count |
+| `list_my_groups` | Groups you belong to, with course, course ID and member count. To read a group's discussions or announcements, pass its course ID and group ID to `list_discussion_topics(course_identifier, group_id=..., include_announcements=True)` and `get_discussion_with_replies(course_identifier, topic_id, include_replies=True, group_id=...)` |
 | `get_group_members` | Members of one of your groups (no emails) |
-| `list_my_group_discussion_topics` | Discussion topics in one of your groups |
-| `get_group_discussion` | One group topic or announcement with all posts |
-| `list_group_announcements` | Announcements in one of your groups |
 | `list_group_files` | Files stored in one of your groups |
 | `list_my_announcements` | Announcements across ALL active courses (default last 14 days); `list_announcements` is per-course |
 | `get_my_activity_stream` | Recent activity feed grouped by kind: announcements, discussions, conversations, grades/comments (course activity only; no group or non-course inbox items) |
@@ -564,14 +561,14 @@ This converts student names to anonymous IDs (e.g., `Student_a8f7e23d`) before d
 ### For Students
 Most student tools read only your own data via Canvas "self" endpoints. The group
 tools are the exception: they show classmates in groups you belong to.
-`get_group_members` lists their names and Canvas user IDs; `get_group_discussion`
-shows their posts and topic bodies and names the authors;
-`list_my_group_discussion_topics` and `list_group_announcements` show titles they wrote;
-`list_group_files` shows the names of files they uploaded. Emails, login IDs and SIS
-IDs are never shown. With `ENABLE_DATA_ANONYMIZATION` on, classmates' names appear
-as pseudonyms (IDs stay real), and emails, phone numbers and SSNs are redacted from
-group discussion posts, topic bodies and titles, and group descriptions. File names
-and group names are shown as Canvas returns them.
+`get_group_members` lists their names and Canvas user IDs; `list_group_files` shows
+the names of files they uploaded. A group's discussions are read with the shared
+discussion tools' `group_id`, which show classmates' posts and topic bodies and name
+the authors. Emails, login IDs and SIS IDs are never shown. With
+`ENABLE_DATA_ANONYMIZATION` on, classmates' names appear as pseudonyms (IDs stay
+real), and emails, phone numbers and SSNs are redacted from group discussion posts
+and topic bodies and from group descriptions. File names, group names and topic
+titles are shown as Canvas returns them.
 
 ## Additional Resources
 

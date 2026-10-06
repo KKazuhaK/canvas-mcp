@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Student group tools (read-only, student profile).** `list_my_groups` lists
+  the groups you belong to with the course ID and group ID, `get_group_members`
+  lists a group's members (names and user IDs, never emails), and
+  `list_group_files` lists a group's files. Each group-scoped tool re-reads
+  `/users/self/groups` first and refuses a group you are not in, even where
+  Canvas would allow the read. Discussions and announcements in a group are read
+  with the existing discussion tools' `group_id` (`list_discussion_topics` with
+  `include_announcements=True`, then `get_discussion_with_replies`); `list_my_groups`
+  prints the IDs and the call to make. Group topic records
+  (`/groups/{id}/discussion_topics`) are written by group members, so they are
+  anonymized in the `full` tier, which also covers the discussion tools' `group_id`
+  path. Group names, descriptions, file names and member names are fenced as
+  untrusted Canvas content.
 - **Student grade insight (read-only).** `get_my_assignment_scores` lists every
   assignment's score and status in a course, grouped by assignment group with
   weights and drop rules. `calculate_grade_scenarios` recomputes the course grade
@@ -133,7 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replies (were cut at 200/150 characters), `list_discussion_entries` with
   `include_full_content=True` returns whole replies (were cut at 200), and
   `get_rubric` shows whole criterion and rating descriptions (were cut at
-  200/100). Seventeen full-content tools declare
+  200/100). Sixteen full-content tools declare
   `anthropic/maxResultSizeChars: 500000` so Claude Code delivers large results
   whole instead of capping them near 25k tokens.
 - Listing tools that preview (`get_course_content_overview`,

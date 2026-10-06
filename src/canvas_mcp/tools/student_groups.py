@@ -1,6 +1,11 @@
-"""Student group tools: the caller's own Canvas groups and what is inside them.
+"""Student group tools: the caller's own Canvas groups, members and files.
 
 Everything here is read-only and scoped to groups the caller BELONGS to.
+
+A group's discussions and announcements are not read here. The shared
+discussion tools take a ``group_id`` (``list_discussion_topics``,
+``get_discussion_with_replies`` and the other discussion readers), and
+``list_my_groups`` prints the course ID and group ID those calls need.
 
 Why membership is checked here rather than left to Canvas
 ---------------------------------------------------------
@@ -8,8 +13,8 @@ Canvas can authorize group reads more widely than membership: course-level
 group permissions, self-signup categories (whose rosters students see in
 order to pick a group) and public community groups may let a token read a
 group it is not in. A 401 from Canvas is therefore not a membership oracle,
-and relying on it would let an agent browse other teams' rosters, discussions
-and files whenever an institution's settings happen to allow it. Before any group-scoped
+and relying on it would let an agent browse other teams' rosters and files
+whenever an institution's settings happen to allow it. Before any group-scoped
 request, every tool re-reads ``/users/self/groups`` (the caller's own active
 groups) and refuses a group that is not on it. That costs one extra request
 per call and fails closed: if the membership list cannot be read, nothing else
@@ -25,24 +30,17 @@ Privacy (CLAUDE.md "Privacy")
   server. Independently of that setting, ``get_group_members`` prints only the
   member's ID and name — never an email, login ID or SIS ID — because the
   output is built from an explicit field allowlist.
-- ``/groups/{id}/discussion_topics/{id}/view`` matches the discussion-content
-  rule (``full`` tier), so participant names and the PII in entry bodies
-  (including ``new_entries``) are scrubbed. Unlike course topics, the group
-  topic records themselves (``/groups/{id}/discussion_topics`` and
-  ``.../{topic_id}``) are written by group members, so they have their own
-  ``full``-tier rule in ``core/client.py``: the topic ``message`` and author
-  fields are scrubbed there. Topic and announcement titles and the group
-  description are not free-text fields at that layer, so this module applies
-  ``scrub_free_text`` to them when anonymization is on. The topic's author is
-  named from the anonymized ``/view`` participant list only.
+- A group description is not a free-text field at the client layer (elsewhere
+  ``description`` is instructor content), so ``list_my_groups`` applies
+  ``scrub_free_text`` to it when anonymization is on.
 - ``/users/self/groups`` lands in the ``full`` tier through its ``users``
   segment. Group records carry ``avatar_url``, which used to make the scrubber
   mistake a group for a person and rename it ``Student_<hash>``;
   ``group_category_id`` is now a non-person marker in ``core/anonymization.py``.
 
-All Canvas-authored text (group names and descriptions, topic titles and
-bodies, entry bodies, file names, member names) is fenced at the output
-boundary (issue 239): group members write most of it.
+All Canvas-authored text (group names and descriptions, file names, member
+names) is fenced at the output boundary (issue 239): group members write most
+of it.
 """
 
 from __future__ import annotations
@@ -56,21 +54,16 @@ from mcp.types import ToolAnnotations
 
 from ..core.anonymization import scrub_free_text
 from ..core.cache import get_course_code, resolve_numeric_course_id
-from ..core.client import fetch_all_paginated_results, make_canvas_request
+from ..core.client import fetch_all_paginated_results
 from ..core.config import get_config
 from ..core.dates import format_date
 from ..core.file_validation import format_file_size
-from ..core.tool_results import FULL_CONTENT_TOOL_META
 from ..core.untrusted_content import fence_untrusted, fence_untrusted_inline
 from ..core.validation import coerce_canvas_id, validate_params
 
 _INVALID_GROUP_ID = (
     "Error: group_id must be a numeric Canvas group ID. "
     "Use list_my_groups to find it."
-)
-_INVALID_TOPIC_ID = (
-    "Error: topic_id must be a numeric Canvas discussion topic ID. "
-    "Use list_my_group_discussion_topics or list_group_announcements to find it."
 )
 
 _VALID_FILE_SORTS = frozenset(
@@ -89,8 +82,8 @@ def _scrub(text: str) -> str:
     """Redact emails/phones/SSNs when data anonymization is on.
 
     Covers group-member-authored text the client-layer tier does not scrub:
-    topic titles and group descriptions (``title`` / ``description`` are not
-    free-text fields there, because elsewhere they are instructor content).
+    group descriptions (``description`` is not a free-text field there,
+    because elsewhere it is instructor content).
     """
     if get_config().enable_data_anonymization:
         return str(scrub_free_text(text))
@@ -183,95 +176,6 @@ async def _group_label(group: dict) -> str:
     return name
 
 
-def _merge_new_entries(view: list[dict], new_entries: Any) -> list[dict]:
-    """Fold /view ``new_entries`` into the entry tree.
-
-    The full-topic view is eventually consistent; entries not yet reflected in
-    it come back (with ``include_new_entries=1``) as a flat list in ascending
-    ``created_at`` order, each with a ``parent_id``. Each one is attached under
-    its parent when the parent is in the tree (including an earlier new entry)
-    and at top level otherwise; IDs already in the tree are skipped.
-    """
-    if not isinstance(new_entries, list) or not new_entries:
-        return view
-
-    by_id: dict[str, dict] = {}
-
-    def index(entries: list[Any]) -> None:
-        for entry in entries:
-            if isinstance(entry, dict):
-                by_id[str(entry.get("id"))] = entry
-                replies = entry.get("replies")
-                if isinstance(replies, list):
-                    index(replies)
-
-    index(view)
-    merged = list(view)
-    for entry in new_entries:
-        if not isinstance(entry, dict) or str(entry.get("id")) in by_id:
-            continue
-        node = dict(entry)
-        parent_id = entry.get("parent_id")
-        parent = by_id.get(str(parent_id)) if parent_id is not None else None
-        if parent is not None:
-            replies = parent.get("replies")
-            if not isinstance(replies, list):
-                replies = []
-                parent["replies"] = replies
-            replies.append(node)
-        else:
-            merged.append(node)
-        by_id[str(entry.get("id"))] = node
-    return merged
-
-
-def _render_view_entries(
-    entries: list[Any], participants: dict[str, str], depth: int = 0
-) -> tuple[list[str], int, int]:
-    """Render a /view entry tree with each body fenced.
-
-    Returns ``(lines, posts, deleted)``. Canvas omits ``user_id``,
-    ``user_name`` and ``message`` on deleted entries, so they get no author
-    line; their replies are still rendered.
-    """
-    lines: list[str] = []
-    posts = 0
-    deleted = 0
-    indent = "    " * depth
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        entry_id = entry.get("id")
-        if entry.get("deleted"):
-            deleted += 1
-            lines.append(f"{indent}Entry {entry_id} [deleted]")
-        else:
-            posts += 1
-            user_id = entry.get("user_id")
-            author = participants.get(str(user_id)) if user_id is not None else None
-            author_text = (
-                fence_untrusted_inline(author, "author name") if author
-                else "an unknown participant"
-            )
-            created = format_date(entry.get("created_at"))
-            lines.append(
-                f"{indent}Entry {entry_id} by {author_text} (user ID: {user_id}), {created}"
-            )
-            body = _plain_text(entry.get("message")) or "[No content]"
-            lines.append(
-                fence_untrusted(body, "group discussion entry by a group member")
-            )
-        replies = entry.get("replies")
-        if isinstance(replies, list) and replies:
-            child_lines, child_posts, child_deleted = _render_view_entries(
-                replies, participants, depth + 1
-            )
-            lines.extend(child_lines)
-            posts += child_posts
-            deleted += child_deleted
-    return lines, posts, deleted
-
-
 def register_student_group_tools(mcp: FastMCP) -> None:
     """Register the read-only student group tools."""
 
@@ -280,10 +184,16 @@ def register_student_group_tools(mcp: FastMCP) -> None:
     async def list_my_groups(course_identifier: str | int | None = None) -> str:
         """List the Canvas groups you belong to (project teams, study groups).
 
-        Shows each group's name, ID, course, group category ID and member
-        count. Use the group ID with get_group_members,
-        list_my_group_discussion_topics, list_group_announcements and
+        Shows each group's name, ID, course and course ID, group category ID
+        and member count. Use the group ID with get_group_members and
         list_group_files.
+
+        To read a group's discussions or announcements, use the shared
+        discussion tools with the course ID and group ID printed here:
+        list_discussion_topics(course_identifier, group_id=...,
+        include_announcements=True) lists them, then
+        get_discussion_with_replies(course_identifier, topic_id,
+        include_replies=True, group_id=...) reads one with its replies.
 
         Args:
             course_identifier: Only show your groups in this course
@@ -315,9 +225,13 @@ def register_student_group_tools(mcp: FastMCP) -> None:
             return "You are not in any Canvas groups."
 
         lines = [f"Your groups ({len(groups)}):", ""]
+        has_course_group = False
         for group in groups:
             lines.append(f"Group: {await _group_label(group)}")
             lines.append(f"  ID: {group.get('id')}")
+            if group.get("context_type") == "Course" and group.get("course_id"):
+                has_course_group = True
+                lines.append(f"  Course ID: {group.get('course_id')}")
             category_id = group.get("group_category_id")
             if category_id is not None:
                 lines.append(f"  Group category ID: {category_id}")
@@ -330,6 +244,14 @@ def register_student_group_tools(mcp: FastMCP) -> None:
                 lines.append("  Description:")
                 lines.append(fence_untrusted(description, "group description"))
             lines.append("")
+        if has_course_group:
+            lines.append(
+                "To read a group's discussions or announcements: "
+                "list_discussion_topics(course_identifier=<Course ID>, "
+                "group_id=<ID>, include_announcements=True), then "
+                "get_discussion_with_replies(course_identifier=<Course ID>, "
+                "topic_id=<topic ID>, include_replies=True, group_id=<ID>)."
+            )
         return "\n".join(lines).rstrip()
 
     @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
@@ -375,181 +297,6 @@ def register_student_group_tools(mcp: FastMCP) -> None:
                 "Note: data anonymization is on, so classmates' names are pseudonyms."
             )
         return "\n".join(lines)
-
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
-    @validate_params
-    async def list_my_group_discussion_topics(group_id: str | int) -> str:
-        """List the discussion topics in one of your groups.
-
-        Group discussions are separate from course discussions. Use
-        get_group_discussion with a topic ID to read the posts.
-
-        Args:
-            group_id: Canvas group ID from list_my_groups
-        """
-        group_id, group, error = await _require_membership(group_id)
-        if error or group is None:
-            return error or _INVALID_GROUP_ID
-
-        topics = await fetch_all_paginated_results(
-            f"/groups/{group_id}/discussion_topics", {"per_page": 100}
-        )
-        if _is_error(topics):
-            return _access_error("list discussions", group_id, topics.get("error"))
-        if not isinstance(topics, list) or not topics:
-            return f"No discussion topics in group {group_id}."
-
-        lines = [f"Discussion topics in {await _group_label(group)}:", ""]
-        for topic in topics:
-            if not isinstance(topic, dict):
-                continue
-            title = _scrub(topic.get("title") or "Untitled topic")
-            lines.append(f"ID: {topic.get('id')}")
-            lines.append(f"Title:\n{fence_untrusted(title, 'group discussion topic title')}")
-            lines.append(f"Posted: {format_date(topic.get('posted_at'))}")
-            lines.append(f"Last reply: {format_date(topic.get('last_reply_at'))}")
-            lines.append(f"Replies: {topic.get('discussion_subentry_count', 0)}")
-            if topic.get("locked"):
-                lines.append("Locked: yes")
-            lines.append("")
-        return "\n".join(lines).rstrip()
-
-    @mcp.tool(
-        annotations=ToolAnnotations(read_only_hint=True), meta=FULL_CONTENT_TOOL_META
-    )
-    @validate_params
-    async def get_group_discussion(group_id: str | int, topic_id: str | int) -> str:
-        """Read a group discussion topic (or group announcement) with all its posts.
-
-        Returns the topic title and body, then every entry and reply as a thread.
-
-        Args:
-            group_id: Canvas group ID from list_my_groups
-            topic_id: Discussion topic ID from list_my_group_discussion_topics
-                or list_group_announcements
-        """
-        clean_topic_id = coerce_canvas_id(topic_id)
-        if clean_topic_id is None:
-            return _INVALID_TOPIC_ID
-        group_id, group, error = await _require_membership(group_id)
-        if error or group is None:
-            return error or _INVALID_GROUP_ID
-
-        topic = await make_canvas_request(
-            "get", f"/groups/{group_id}/discussion_topics/{clean_topic_id}"
-        )
-        if _is_error(topic):
-            return _access_error("read that discussion topic", group_id, topic.get("error"))
-        if not isinstance(topic, dict):
-            return f"Error: unexpected response for topic {clean_topic_id}."
-
-        # /view is the documented "full topic" read: all entries with bodies,
-        # plus a participants list. It is anonymized at the client layer. The
-        # view is eventually consistent; include_new_entries=1 returns the
-        # entries not yet reflected in it, which are merged in below.
-        view = await make_canvas_request(
-            "get",
-            f"/groups/{group_id}/discussion_topics/{clean_topic_id}/view",
-            params={"include_new_entries": 1},
-        )
-        view_note: str | None = None
-        participants: dict[str, str] = {}
-        entries: list[Any] = []
-        if _is_error(view):
-            view_error = str(view.get("error"))
-            status = _http_status(view_error)
-            if status == 403 and "require_initial_post" in view_error:
-                view_note = (
-                    "Replies are hidden until you post in this discussion "
-                    "(the topic requires an initial post)."
-                )
-            elif status == 503:
-                view_note = (
-                    "Canvas is still preparing this discussion's posts "
-                    "(HTTP 503). Try again in a moment."
-                )
-            else:
-                view_note = f"Could not load the posts: {view_error}"
-        elif isinstance(view, dict):
-            for person in view.get("participants") or []:
-                if isinstance(person, dict) and person.get("id") is not None:
-                    participants[str(person["id"])] = (
-                        person.get("display_name") or "Unknown user"
-                    )
-            entries = [e for e in view.get("view") or [] if isinstance(e, dict)]
-            entries = _merge_new_entries(entries, view.get("new_entries"))
-
-        kind = "Announcement" if topic.get("is_announcement") else "Discussion"
-        title = _scrub(topic.get("title") or "Untitled topic")
-        author_id = (topic.get("author") or {}).get("id") or topic.get("user_id")
-        author_name = participants.get(str(author_id)) if author_id is not None else None
-
-        lines = [
-            f"{kind} in {await _group_label(group)}",
-            f"Topic ID: {clean_topic_id}",
-            f"Title:\n{fence_untrusted(title, 'group discussion topic title')}",
-            f"Posted: {format_date(topic.get('posted_at'))}",
-        ]
-        if author_id is not None:
-            shown = (
-                fence_untrusted_inline(author_name, "author name") if author_name
-                else "name not shown"
-            )
-            lines.append(f"Author: {shown} (user ID: {author_id})")
-        # The client layer already scrubs this record (group topics are in the
-        # full tier); scrubbing again after HTML stripping is idempotent and
-        # catches addresses split by markup.
-        body = _scrub(_plain_text(topic.get("message")))
-        if body:
-            lines.append(f"Body:\n{fence_untrusted(body, 'group discussion topic body')}")
-        lines.append("")
-
-        if view_note:
-            lines.append(view_note)
-        elif not entries:
-            lines.append("No posts yet.")
-        else:
-            rendered, posts, deleted = _render_view_entries(entries, participants)
-            deleted_note = f", plus {deleted} deleted" if deleted else ""
-            lines.append(f"Posts ({posts}{deleted_note}):")
-            lines.extend(rendered)
-        return "\n".join(lines).rstrip()
-
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
-    @validate_params
-    async def list_group_announcements(group_id: str | int) -> str:
-        """List the announcements posted in one of your groups.
-
-        Canvas's /announcements endpoint only accepts courses, so this reads
-        the group's discussion topics with only_announcements=true. Use
-        get_group_discussion with the ID to read one.
-
-        Args:
-            group_id: Canvas group ID from list_my_groups
-        """
-        group_id, group, error = await _require_membership(group_id)
-        if error or group is None:
-            return error or _INVALID_GROUP_ID
-
-        announcements = await fetch_all_paginated_results(
-            f"/groups/{group_id}/discussion_topics",
-            {"only_announcements": True, "per_page": 100},
-        )
-        if _is_error(announcements):
-            return _access_error("list announcements", group_id, announcements.get("error"))
-        if not isinstance(announcements, list) or not announcements:
-            return f"No announcements in group {group_id}."
-
-        lines = [f"Announcements in {await _group_label(group)}:", ""]
-        for item in announcements:
-            if not isinstance(item, dict):
-                continue
-            title = _scrub(item.get("title") or "Untitled announcement")
-            lines.append(f"ID: {item.get('id')}")
-            lines.append(f"Title:\n{fence_untrusted(title, 'group announcement title')}")
-            lines.append(f"Posted: {format_date(item.get('posted_at'))}")
-            lines.append("")
-        return "\n".join(lines).rstrip()
 
     @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
     @validate_params

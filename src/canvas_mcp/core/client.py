@@ -300,7 +300,8 @@ def _endpoint_anonymization_mode(endpoint: str) -> str:
 
     # Group discussion topics (and group announcements, which are topics) are
     # written by group members: any student in the group can start one, so the
-    # topic record's message, user_name and author block are student data.
+    # topic record's message, user_name and author block are student data. This
+    # is the rule that protects the discussion tools' group_id path.
     if 'discussion_topics' in segments and _has_route_segment(segments, {'groups'}):
         return ANONYMIZE_FULL
 

@@ -172,11 +172,20 @@ Your own planner notes (the personal to-do items in the Canvas planner).
 Read-only tools for the Canvas groups you belong to (project teams, study
 groups). Every tool except `list_my_groups` first checks `/users/self/groups`
 and refuses a group you are not a member of, even if Canvas would let your
-token read it. Group names, descriptions, discussion text and file names are
-fenced as untrusted Canvas content.
+token read it. Group names, descriptions and file names are fenced as untrusted
+Canvas content.
+
+A group's discussions and announcements are read with the shared discussion
+tools, which take the optional `group_id`: `list_discussion_topics(course_identifier,
+group_id=..., include_announcements=True)` lists them, and
+`get_discussion_with_replies(course_identifier, topic_id, include_replies=True,
+group_id=...)` reads one with its replies (see [Discussions](#discussions)).
+`list_my_groups` prints the numeric course ID and group ID those calls need.
 
 #### `list_my_groups`
-List your groups with their course, group category ID and member count.
+List your groups with their course, course ID, group category ID and member
+count, and how to read a group's discussions with the discussion tools above.
+Groups that belong to an account rather than a course have no course ID.
 
 **Parameters:**
 - `course_identifier` (optional): Only show your groups in this course (course
@@ -196,31 +205,6 @@ classmates' names appear as stable pseudonyms.
 
 **Parameters:**
 - `group_id` (required): Canvas group ID from `list_my_groups`
-
-#### `list_my_group_discussion_topics`
-List the discussion topics in one of your groups.
-
-**Parameters:**
-- `group_id` (required): Canvas group ID
-
-#### `get_group_discussion`
-Read a group discussion topic (or group announcement): title, body, and every
-entry and reply as a thread, including recent posts Canvas has not yet added
-to its cached view (`include_new_entries`). Deleted entries are marked
-`[deleted]` with no author. If the topic requires you to post first, the tool
-says so instead of showing the replies.
-
-**Parameters:**
-- `group_id` (required): Canvas group ID
-- `topic_id` (required): Topic ID from `list_my_group_discussion_topics` or `list_group_announcements`
-
-#### `list_group_announcements`
-List a group's announcements (read through the group's discussion topics with
-`only_announcements=true`, because Canvas's `/announcements` endpoint accepts
-only courses).
-
-**Parameters:**
-- `group_id` (required): Canvas group ID
 
 #### `list_group_files`
 List the files stored in one of your groups. A group with files turned off
@@ -2542,7 +2526,7 @@ tokens). Other clients ignore the key. The tools: `read_course_file`,
 `read_course_file_text`, `get_page_content`, `get_syllabus`, `get_front_page`,
 `get_assignment_details`, `get_discussion_topic_details`,
 `get_discussion_entry_details`, `get_discussion_with_replies`,
-`list_discussion_entries`, `get_conversation_details`, `get_group_discussion`,
+`list_discussion_entries`, `get_conversation_details`,
 `get_my_submission`, `get_calendar_event`, `get_quiz_details`, `get_rubric`, and
 `get_rubric_assessment`.
 
