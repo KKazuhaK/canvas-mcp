@@ -48,3 +48,21 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# Self-hosted image: nothing below is needed to build it, and some of it must
+# never reach a build context.
+node_modules/
+verify/
+internal/
+articles/
+skills/
+examples/
+.claude/
+.worktrees/
+data/
+deploy/selfhost/.env
+**/*.sqlite3
+uv-cache/
+.coverage.*
+coverage.xml
+coverage/

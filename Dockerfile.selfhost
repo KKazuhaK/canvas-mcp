@@ -1,0 +1,73 @@
+# Self-hosted multi-user image (ghcr.io/kkazuhak/canvas-mcp).
+#
+# Separate from the root Dockerfile, which is upstream's Azure image and must
+# stay as it is. Build with:  docker build -f Dockerfile.selfhost -t canvas-mcp .
+#
+# Two stages: the build stage installs the locked dependency set and the
+# project (non-editable) into /opt/venv; the runtime stage copies only that
+# venv, so no uv, pip cache or source tree ships. Both stages use the same
+# digest-pinned base, so the venv's interpreter symlink resolves.
+#
+# The image holds NO secrets. Everything sensitive (Entra client secret, JWT
+# signing key, session secret, Canvas token keyring) arrives at runtime from
+# the operator's .env file.
+
+FROM python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6 AS build
+
+RUN pip install --no-cache-dir uv==0.12.22
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
+
+WORKDIR /src
+
+# Dependencies first (cached until the lock file changes), then the project.
+# README.md and LICENSE are read by the build backend for package metadata.
+COPY pyproject.toml uv.lock README.md LICENSE ./
+RUN uv sync --frozen --no-dev --extra documents --no-install-project
+
+COPY src ./src
+RUN uv sync --frozen --no-dev --extra documents --no-editable
+
+
+FROM python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6
+
+# uid/gid 10001, no home directory and no login shell. /data is the only
+# writable location (the compose file mounts a named volume there and keeps the
+# root filesystem read-only).
+RUN groupadd --gid 10001 mcp \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent \
+        --shell /usr/sbin/nologin mcp \
+    && mkdir /data \
+    && chown 10001:10001 /data \
+    && chmod 0700 /data
+
+COPY --from=build /opt/venv /opt/venv
+
+# Non-secret defaults only. Never add a Canvas token, client secret, signing
+# key or keyring here; a test (tests/test_selfhost_dockerfile.py) enforces it.
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    MCP_SERVER_NAME=canvas-mcp \
+    ENABLE_DATA_ANONYMIZATION=true \
+    EXECUTE_TYPESCRIPT_ENABLED=false \
+    FASTMCP_HOME=/data/fastmcp \
+    SELFHOST_DATA_DIR=/data \
+    AUDIT_LOG_DIR=/data/audit \
+    FASTMCP_CHECK_FOR_UPDATES=off \
+    FASTMCP_SHOW_SERVER_BANNER=false
+
+USER 10001:10001
+
+VOLUME ["/data"]
+
+EXPOSE 8819
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD ["python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8819/healthz',timeout=4)"]
+
+# One process, one replica: confirmation tokens, caches and rate limits live in
+# process memory.
+CMD ["canvas-mcp-server", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8819"]
