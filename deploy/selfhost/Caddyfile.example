@@ -1,0 +1,11 @@
+# Caddy 反向代理示例：自动申请并续期 TLS 证书，Host 头默认原样转发。
+canvas.mcp.kazuhahub.com {
+	reverse_proxy 127.0.0.1:8819 {
+		# MCP 使用流式响应（SSE）：立即刷新，不缓冲。
+		flush_interval -1
+		transport http {
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
+}
