@@ -12,7 +12,11 @@ from urllib.parse import urlencode
 import httpx
 
 from .anonymization import anonymize_response_data, scrub_identity
-from .credentials import get_request_credentials, is_http_request_active
+from .credentials import (
+    get_request_credentials,
+    is_http_request_active,
+    missing_credentials_message,
+)
 from .logging import log_debug, log_error, log_warning, sanitize_url
 from .write_outcome import NO_WRITE_STATUSES, RequestFailure, WriteOutcome
 
@@ -432,7 +436,7 @@ async def canvas_authenticated_client() -> AsyncIterator[httpx.AsyncClient]:
         return
 
     if is_http_request_active():
-        raise PermissionError("Canvas token required for HTTP request")
+        raise PermissionError(missing_credentials_message())
 
     yield _get_http_client()
 
@@ -519,7 +523,7 @@ async def make_canvas_request(
             "Blocked Canvas API request without per-request Canvas token",
             endpoint=sanitize_url(endpoint),
         )
-        return {"error": "Canvas token required for HTTP request"}
+        return {"error": missing_credentials_message()}
     else:
         # Shared client is selected immediately before dispatch (stdio mode).
         try:
