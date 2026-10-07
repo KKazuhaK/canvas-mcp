@@ -37,6 +37,11 @@ dependencies = [
     # /account cookies. Already installed transitively through fastmcp; named
     # here because this code imports it directly.
     "cryptography>=44.0.0,<51",
+    # The OAuth state store behind FastMCP's proxy. The self-hosted mode gives
+    # client registrations a lifetime and sweeps expired records, which means
+    # using its file store and TTL wrapper directly. Already installed through
+    # fastmcp; named here because this code imports it directly.
+    "py-key-value-aio[filetree]>=0.4.5,<0.5",
     # Windows ships no IANA time zone database, so zoneinfo cannot resolve
     # TIMEZONE (e.g. America/Los_Angeles) without it and dates fall back to UTC.
     "tzdata>=2025.2; sys_platform == 'win32'",

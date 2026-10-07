@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Result cap for claude.ai (`MCP_MAX_RESULT_CHARS`, default 140000, `0` disables).**
   Tool results are cut at a line boundary with a tool-aware continuation notice, only
   for clients that need it; errors, structured results, stdio and Claude Code are never cut.
+- **Self-hosted mode hardening.** `POST /register` and `/authorize` need no sign-in and
+  each call wrote files to the data volume, so they now have a process-wide rate limit
+  (429 with `Retry-After`), a daily registration budget and a body size cap; dynamic client
+  registrations expire after 30 days and expired OAuth records are swept from disk. The app
+  pins the request scheme to https behind the TLS proxy (trailing-slash redirects no longer
+  downgrade to `http://`), uvicorn's access log (which printed OAuth codes) is off, a corrupt
+  token database is a logged refusal instead of a traceback, and `RequestCredentials` no longer
+  shows the Canvas token in `repr()`. The `deploy/selfhost` template ships read-only (write tools
+  are an opt-in block), blank host settings, a named data volume, per-IP proxy rate limits,
+  an any-HTTP-answer healthcheck and a documented first-release step.
 
 - **Student group tools (read-only, student profile).** `list_my_groups` lists
   the groups you belong to with the course ID and group ID, `get_group_members`

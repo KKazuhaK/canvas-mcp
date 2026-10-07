@@ -139,9 +139,12 @@ def test_the_template_ships_no_host_specific_live_values(env_text):
 
 
 def test_an_unedited_template_is_refused_at_startup(env_text):
-    from canvas_mcp.core.selfhost.settings import SelfhostConfigError, load_selfhost_settings
+    from canvas_mcp.core.selfhost.settings import (
+        SelfhostConfigError,
+        load_selfhost_settings,
+    )
 
-    env = {k: v for k, v in _assignments(env_text).items()}
+    env = dict(_assignments(env_text).items())
     with pytest.raises(SelfhostConfigError) as info:
         load_selfhost_settings(env)
     text = " ".join(info.value.problems)
