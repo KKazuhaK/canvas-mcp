@@ -17,10 +17,36 @@ anonymous in the second.
 
 import hashlib
 import re
+from collections import OrderedDict
 from typing import Any
 
-# Global anonymization mapping cache
-_anonymization_cache: dict[str, str] = {}
+from .credentials import current_principal_key
+
+# Pseudonym cache, one dict per principal (keyed by current_principal_key())
+# and each keyed by (prefix, real_id). Per principal so that one user's count
+# and sample pseudonyms in get_anonymization_stats never describe another
+# user's students; bounded so a long-running multi-user server cannot grow it
+# without limit. Least recently used principal and oldest entry go first.
+MAX_ANONYMIZATION_PRINCIPALS = 256
+MAX_ANONYMIZATION_ENTRIES = 50_000
+_anonymization_cache: OrderedDict[str, dict[tuple[str, str], str]] = OrderedDict()
+
+
+def _principal_cache(*, create: bool) -> dict[tuple[str, str], str] | None:
+    """The current principal's pseudonym map (made on demand when ``create``)."""
+    key = current_principal_key()
+    cache = _anonymization_cache.get(key)
+    if cache is not None:
+        _anonymization_cache.move_to_end(key)
+        return cache
+    if not create:
+        return None
+    cache = {}
+    _anonymization_cache[key] = cache
+    while len(_anonymization_cache) > MAX_ANONYMIZATION_PRINCIPALS:
+        oldest = next(k for k in _anonymization_cache if k != key)
+        del _anonymization_cache[oldest]
+    return cache
 
 # --------------------------------------------------------------------------
 # Field policy for the recursive identity scrubber (issue #166)
@@ -204,6 +230,11 @@ def scrub_free_text(value: Any) -> Any:
     return value
 
 
+def _current_count() -> int:
+    cache = _principal_cache(create=False)
+    return len(cache) if cache is not None else 0
+
+
 def generate_anonymous_id(real_id: str | int, prefix: str = "Student") -> str:
     """Generate a consistent anonymous ID for a given real ID.
 
@@ -215,10 +246,13 @@ def generate_anonymous_id(real_id: str | int, prefix: str = "Student") -> str:
         Consistent anonymous identifier
     """
     real_id_str = str(real_id)
+    cache = _principal_cache(create=True)
+    assert cache is not None
+    cache_key = (prefix, real_id_str)
 
     # Check cache first
-    if real_id_str in _anonymization_cache:
-        return _anonymization_cache[real_id_str]
+    if cache_key in cache:
+        return cache[cache_key]
 
     # Generate consistent hash-based ID
     hash_object = hashlib.sha256(real_id_str.encode())
@@ -228,7 +262,9 @@ def generate_anonymous_id(real_id: str | int, prefix: str = "Student") -> str:
     anonymous_id = f"{prefix}_{hash_hex[:8]}"
 
     # Cache the mapping
-    _anonymization_cache[real_id_str] = anonymous_id
+    cache[cache_key] = anonymous_id
+    while len(cache) > MAX_ANONYMIZATION_ENTRIES:
+        del cache[next(iter(cache))]
 
     return anonymous_id
 
@@ -515,7 +551,7 @@ def create_anonymization_summary(original_count: int, anonymized_count: int, dat
         f"  Original records: {original_count}\n"
         f"  Anonymized records: {anonymized_count}\n"
         f"  Privacy protection: ENABLED\n"
-        f"  Unique anonymous IDs generated: {len(_anonymization_cache)}"
+        f"  Unique anonymous IDs generated: {_current_count()}"
     )
 
 
@@ -525,17 +561,17 @@ def get_anonymization_stats() -> dict[str, Any]:
     Returns:
         Dictionary with anonymization statistics
     """
+    cache = _principal_cache(create=False) or {}
     return {
-        "total_anonymized_ids": len(_anonymization_cache),
+        "total_anonymized_ids": len(cache),
         "sample_mappings": {
             f"real_id_{i}": anon_id
-            for i, anon_id in enumerate(list(_anonymization_cache.values())[:3])
+            for i, anon_id in enumerate(list(cache.values())[:3])
         },
         "privacy_status": "PROTECTED"
     }
 
 
 def clear_anonymization_cache() -> None:
-    """Clear the anonymization cache (use when switching courses/contexts)."""
-    global _anonymization_cache
-    _anonymization_cache.clear()
+    """Clear the current principal's anonymization cache (use when switching courses/contexts)."""
+    _anonymization_cache.pop(current_principal_key(), None)

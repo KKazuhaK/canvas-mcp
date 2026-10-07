@@ -19,6 +19,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
+from .credentials import current_principal_key
+
 # Separate logger for audit events (not the main application logger)
 _audit_logger = logging.getLogger("canvas_mcp.audit")
 _audit_logger.setLevel(logging.INFO)
@@ -105,6 +107,11 @@ def init_audit_logging() -> None:
 def _emit(event: dict[str, Any]) -> None:
     """Emit a structured JSON audit event."""
     event["timestamp"] = datetime.now(UTC).isoformat()
+    # Attribute each event to the verified identity (GUIDs only: no names or
+    # UPNs) in the self-hosted multi-user mode.
+    principal = current_principal_key()
+    if principal.startswith("entra:"):
+        event["principal"] = principal
     _audit_logger.info(json.dumps(event, default=str))
 
 

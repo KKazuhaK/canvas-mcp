@@ -42,6 +42,7 @@ from typing import Any, NamedTuple
 
 from .client import make_canvas_request
 from .config import get_config
+from .credentials import current_principal_key
 from .logging import log_warning
 
 _KEY_AGENT_WRITES = "agent_writes"
@@ -70,8 +71,10 @@ class CoursePolicy(NamedTuple):
     source: str
 
 
-# course_id -> (expires_at_monotonic, policy)
-_policy_cache: dict[str, tuple[float, CoursePolicy]] = {}
+# (principal key, course_id) -> (expires_at_monotonic, policy). Keyed by the
+# caller too: the policy is read with the caller's own token, and its note is
+# instructor-authored text that must not be served to someone not in the course.
+_policy_cache: dict[tuple[str, str], tuple[float, CoursePolicy]] = {}
 
 
 def reset_policy_cache() -> None:
@@ -250,8 +253,9 @@ async def get_course_policy(course_id: str | int) -> CoursePolicy:
     """
     config = get_config()
     key = str(course_id)
+    cache_key = (current_principal_key(), key)
 
-    cached = _policy_cache.get(key)
+    cached = _policy_cache.get(cache_key)
     if cached and cached[0] > time.monotonic():
         return cached[1]
 
@@ -305,7 +309,7 @@ async def get_course_policy(course_id: str | int) -> CoursePolicy:
     # server a stream of made-up ids would otherwise grow this map forever, even
     # though every one of those lookups was denied.
     _evict_expired_policies()
-    _policy_cache[key] = (time.monotonic() + ttl, policy)
+    _policy_cache[cache_key] = (time.monotonic() + ttl, policy)
     return policy
 
 

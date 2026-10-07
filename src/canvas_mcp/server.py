@@ -21,9 +21,10 @@ import json
 import sys
 import time
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastmcp import FastMCP
+from fastmcp.server.auth import AuthProvider
 
 from .core.config import get_config, validate_canvas_url_scheme, validate_config
 from .core.credentials import (
@@ -33,6 +34,13 @@ from .core.credentials import (
     set_request_credentials,
 )
 from .core.logging import log_error, log_info, log_warning
+from .core.selfhost.settings import (
+    AUTH_MODE_ENTRA,
+    SelfhostConfigError,
+    SelfhostSettings,
+    auth_mode,
+    load_selfhost_settings,
+)
 from .core.tool_policy import ToolPolicyError, apply_tool_policy, resolve_tool_policy
 from .core.tool_results import install_tool_result_contract
 from .resources import register_resources_and_prompts
@@ -71,6 +79,11 @@ from .tools import (
     register_student_tools,
     register_student_write_tools,
 )
+
+if TYPE_CHECKING:
+    from starlette.types import ASGIApp
+
+    from .core.config import Config
 
 
 async def _send_json_error(send: Any, status: int, message: str) -> None:
@@ -420,14 +433,15 @@ class CanvasCredentialMiddleware:
             clear_http_request_context()
 
 
-def create_server() -> FastMCP:
+def create_server(auth: AuthProvider | None = None) -> FastMCP:
     """Create and configure the Canvas MCP server.
 
     fastmcp takes host/port at serve time (run()/uvicorn), not on the
-    constructor — see _run_http_server.
+    constructor — see _run_http_server. ``auth`` is the OAuth provider of the
+    self-hosted Entra mode; the default None keeps the legacy behaviour.
     """
     config = get_config()
-    return FastMCP(name=config.mcp_server_name)
+    return FastMCP(name=config.mcp_server_name, auth=auth)
 
 
 def register_all_tools(mcp: FastMCP, role: str = "all") -> None:
@@ -568,6 +582,128 @@ def _cmd_revoke(args: argparse.Namespace) -> int:
     return 1
 
 
+def _selfhost_summary(settings: SelfhostSettings) -> list[str]:
+    """Configuration lines for --config. Never includes a secret."""
+    return [
+        f"  Auth mode: {AUTH_MODE_ENTRA}",
+        f"  Public URL: {settings.public_base_url}",
+        f"  MCP endpoint: {settings.mcp_url}",
+        f"  Account page: {settings.account_url}",
+        f"  Entra tenant: {settings.tenant_id}",
+        f"  Entra client: {settings.client_id}",
+        f"  API scope: {settings.api_scope}",
+        f"  Roles: user={settings.required_role}, owner={settings.owner_role}",
+        f"  Account session lifetime: {settings.account_session_ttl_seconds}s",
+        f"  Token store: {settings.token_db_path}",
+        f"  FastMCP home: {settings.fastmcp_home}",
+        f"  Redirect URIs: {', '.join(settings.allowed_client_redirect_uris)}",
+    ]
+
+
+def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
+    """Start the self-hosted Entra OAuth mode, or exit 1 (fail closed)."""
+    from .core.audit import init_audit_logging
+    from .core.selfhost.app import (
+        build_selfhost_asgi_app,
+        install_selfhost,
+        prepare_selfhost,
+        validate_selfhost_startup,
+    )
+    from .core.selfhost.oauth import build_entra_auth_provider
+
+    admin_hint = "use python -m canvas_mcp.core.selfhost.token_admin instead"
+    if args.transport != "streamable-http":
+        log_error(
+            f"MCP_AUTH_MODE={AUTH_MODE_ENTRA} needs --transport streamable-http "
+            "(stdio has no sign-in)"
+        )
+        sys.exit(1)
+    if args.test:
+        log_error(f"--test is not available in {AUTH_MODE_ENTRA} mode (no server Canvas token)")
+        sys.exit(1)
+    if args.list_grants or args.revoke:
+        log_error(
+            f"--list-grants and --revoke are not available in {AUTH_MODE_ENTRA} mode; "
+            f"{admin_hint}"
+        )
+        sys.exit(1)
+
+    try:
+        settings = load_selfhost_settings()
+    except SelfhostConfigError as exc:
+        for problem in exc.problems:
+            log_error(problem)
+        sys.exit(1)
+
+    if args.config:
+        print("Canvas MCP Server Configuration:", file=sys.stderr)
+        print(f"  Server Name: {config.mcp_server_name}", file=sys.stderr)
+        print(f"  Tool Profile: {args.role or config.canvas_role}", file=sys.stderr)
+        print(f"  Host: {args.host}", file=sys.stderr)
+        print(f"  Port: {args.port}", file=sys.stderr)
+        print(f"  Canvas API URL: {config.canvas_api_url}", file=sys.stderr)
+        for line in _selfhost_summary(settings):
+            print(line, file=sys.stderr)
+        sys.exit(0)
+
+    problems = validate_selfhost_startup(config, settings)
+    if problems:
+        for problem in problems:
+            log_error(problem)
+        sys.exit(1)
+
+    try:
+        runtime = prepare_selfhost(settings)
+    except SelfhostConfigError as exc:
+        for problem in exc.problems:
+            log_error(problem)
+        sys.exit(1)
+
+    init_audit_logging()
+
+    mcp = create_server(auth=build_entra_auth_provider(settings))
+    role = args.role or config.canvas_role
+    if role not in ("student", "educator", "all"):
+        log_warning(f"Unknown role '{role}', defaulting to 'all'")
+        role = "all"
+    config.canvas_role = role
+
+    try:
+        tool_policy = resolve_tool_policy(config.allowed_write_tools, "http")
+    except ToolPolicyError as exc:
+        log_error(str(exc))
+        sys.exit(1)
+
+    register_all_tools(mcp, role=role)
+    removed_tools = asyncio.run(apply_tool_policy(mcp, tool_policy))
+    install_selfhost(mcp, runtime, config)
+
+    log_info(
+        f"Starting Canvas MCP server in {AUTH_MODE_ENTRA} mode on {args.host}:{args.port}",
+        public_url=settings.public_base_url,
+        tenant=settings.tenant_id,
+        client=settings.client_id,
+        roles=f"{settings.required_role},{settings.owner_role}",
+        tool_profile=role,
+        tool_policy=tool_policy.source,
+        removed_tools=len(removed_tools),
+        token_store=str(settings.token_db_path),
+        enrollments=runtime.store.count(),
+    )
+
+    try:
+        _run_selfhost_http_server(
+            build_selfhost_asgi_app(mcp, runtime, config), host=args.host, port=args.port
+        )
+    except KeyboardInterrupt:
+        log_info("\nShutting down server...")
+    except Exception as e:
+        log_error("Server error", exc=e)
+        sys.exit(1)
+    finally:
+        log_info("Server stopped")
+
+
 def main() -> None:
     """Main entry point for the Canvas MCP server."""
     parser = argparse.ArgumentParser(
@@ -621,6 +757,19 @@ def main() -> None:
     is_http = args.transport == "streamable-http"
 
     config = get_config()
+
+    # Explicit opt-in to the self-hosted Entra OAuth mode. Anything but unset or
+    # "legacy" is decided here, before any legacy check can run; the legacy
+    # branches below are untouched.
+    try:
+        mode = auth_mode()
+    except SelfhostConfigError as exc:
+        for problem in exc.problems:
+            log_error(problem)
+        sys.exit(1)
+    if mode == AUTH_MODE_ENTRA:
+        _main_selfhost(args, config)
+        return
 
     # Admin access-approval commands talk only to the overlay store (Azure, via
     # az login) — not Canvas — so dispatch them before the Canvas-credential /
@@ -877,6 +1026,27 @@ def _run_http_server(mcp: FastMCP, host: str, port: int) -> None:
     server = uvicorn.Server(config)
     import anyio
 
+    anyio.run(server.serve)
+
+
+def _run_selfhost_http_server(app: "ASGIApp", host: str, port: int) -> None:
+    """Serve the self-hosted app: one process, no trust in forwarded headers.
+
+    ``proxy_headers=False``: every URL comes from PUBLIC_BASE_URL and the Host
+    guard compares the real Host header, so X-Forwarded-* is never believed.
+    """
+    import anyio
+    import uvicorn
+
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        proxy_headers=False,
+        server_header=False,
+    )
+    server = uvicorn.Server(config)
     anyio.run(server.serve)
 
 

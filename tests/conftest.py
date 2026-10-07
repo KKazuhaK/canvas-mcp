@@ -31,20 +31,17 @@ def reset_config_between_tests(monkeypatch):
 def isolated_course_cache(monkeypatch):
     """Start every test with an empty course cache and restore it afterwards.
 
-    ``refresh_course_cache`` rebinds the module globals, so a test that
+    The course cache is per principal and process-global, so a test that
     refreshes it would otherwise leak its synthetic courses into later tests
-    and change how ``resolve_numeric_course_id`` answers there.
+    and change how ``resolve_numeric_course_id`` answers there. Resetting also
+    drops the refresh-on-miss rate limit and any shared in-flight refresh, so
+    one test's refresh never suppresses the next test's.
     """
     from canvas_mcp.core import cache
 
-    monkeypatch.setattr(cache, "course_code_to_id_cache", {})
-    monkeypatch.setattr(cache, "id_to_course_code_cache", {})
-    monkeypatch.setattr(cache, "course_records_cache", [])
-    # The refresh-on-miss rate limit and its shared in-flight refresh, so one
-    # test's refresh never suppresses the next test's.
-    monkeypatch.setattr(cache, "_last_refresh_at", None)
-    monkeypatch.setattr(cache, "_refresh_task", None)
-    return cache
+    cache.reset_course_cache()
+    yield cache
+    cache.reset_course_cache()
 
 
 @pytest.fixture

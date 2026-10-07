@@ -564,11 +564,10 @@ class TestRealClientBehavior:
 
 @pytest.fixture
 def cold_course_cache(monkeypatch):
-    """Empty course caches; refresh_course_cache rebinds them, monkeypatch restores."""
+    """Empty course caches for the current principal."""
     from canvas_mcp.core import cache
 
-    monkeypatch.setattr(cache, "course_code_to_id_cache", {})
-    monkeypatch.setattr(cache, "id_to_course_code_cache", {})
+    cache.reset_course_cache()
     return cache
 
 
@@ -613,7 +612,7 @@ class TestListMyGroupsCourseResolution:
     ):
         """A warm but stale cache is refreshed once on a miss, and the match
         ignores case and surrounding whitespace."""
-        cold_course_cache.course_code_to_id_cache["OLD 1"] = "999"
+        cold_course_cache.current_cache_state().code_to_id["OLD 1"] = "999"
         seen: list[str] = []
         handler = _course_filter_handler(
             seen, courses=[{"id": 101, "course_code": "COMPSCI 161"}]
@@ -645,7 +644,7 @@ class TestListMyGroupsCourseResolution:
     async def test_underscore_code_found_after_cache_refresh(self, real_client, cold_course_cache):
         # The cache is non-empty but stale, so get_course_id falls back to
         # sis_course_id:<code>, which is not a SIS ID at all.
-        cold_course_cache.course_code_to_id_cache["old_course_1"] = "999"
+        cold_course_cache.current_cache_state().code_to_id["old_course_1"] = "999"
         seen: list[str] = []
         handler = _course_filter_handler(
             seen, courses=[{"id": 202, "course_code": "ics_6b_fall"}]

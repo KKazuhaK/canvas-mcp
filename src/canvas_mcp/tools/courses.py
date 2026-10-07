@@ -8,12 +8,7 @@ from typing import Any
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from ..core.cache import (
-    course_code_to_id_cache,
-    get_course_code,
-    get_course_id,
-    id_to_course_code_cache,
-)
+from ..core.cache import get_course_code, get_course_id, remember_course_code
 from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.config import get_config
 from ..core.dates import format_date
@@ -266,8 +261,7 @@ def register_course_tools(mcp: FastMCP) -> None:
             course_code = course.get("course_code")
 
             if course_code and course_id:
-                course_code_to_id_cache[course_code] = course_id
-                id_to_course_code_cache[course_id] = course_code
+                remember_course_code(course_id, course_code)
 
         courses_info = []
         for course in courses:
@@ -305,8 +299,7 @@ def register_course_tools(mcp: FastMCP) -> None:
 
         # Update our caches with the course data
         if "id" in response and "course_code" in response:
-            course_code_to_id_cache[response["course_code"]] = str(response["id"])
-            id_to_course_code_cache[str(response["id"])] = response["course_code"]
+            remember_course_code(str(response["id"]), response["course_code"])
 
         details = [
             f"Code: {response.get('course_code', 'N/A')}",

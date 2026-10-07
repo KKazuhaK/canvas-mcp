@@ -67,10 +67,11 @@ def canvas(monkeypatch: pytest.MonkeyPatch) -> FakeCanvas:
 
 def warm(courses: list[dict[str, Any]]) -> None:
     """Fill the cache as a previous refresh would have."""
-    cache.course_records_cache[:] = cache.course_records(courses)
+    state = cache.current_cache_state()
+    state.records[:] = cache.course_records(courses)
     for course in courses:
-        cache.course_code_to_id_cache[course["course_code"]] = str(course["id"])
-        cache.id_to_course_code_cache[str(course["id"])] = course["course_code"]
+        state.code_to_id[course["course_code"]] = str(course["id"])
+        state.id_to_code[str(course["id"])] = course["course_code"]
 
 
 class TestNumeric:
@@ -311,9 +312,11 @@ class TestRefreshRateLimit:
     @pytest.mark.asyncio
     async def test_a_miss_after_the_window_reads_it_again(self, canvas, monkeypatch):
         await resolve_numeric_course_id("MATH 2B")
+        state = cache.current_cache_state()
+        assert state.last_refresh_at is not None
         monkeypatch.setattr(
-            cache, "_last_refresh_at",
-            cache._last_refresh_at - cache.REFRESH_ON_MISS_INTERVAL_SECONDS - 1,
+            state, "last_refresh_at",
+            state.last_refresh_at - cache.REFRESH_ON_MISS_INTERVAL_SECONDS - 1,
         )
         canvas.courses = COURSES + [{"id": 8080, "course_code": "MATH 2B"}]
         assert await resolve_numeric_course_id("MATH 2B") == ("8080", None)
