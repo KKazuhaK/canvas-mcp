@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,7 +16,9 @@ from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp
 
 from ..config import Config, validate_canvas_url_scheme
+from .edge_guard import SelfhostEdgeGuard
 from .identity import ClaimsPolicy, authorize_id_token_claims
+from .oauth import cull_expired_oauth_state
 from .request_context import SelfhostRequestContextMiddleware
 from .settings import SelfhostConfigError, SelfhostSettings
 from .tool_gate import SelfhostCredentialGate
@@ -162,14 +166,22 @@ def install_selfhost(mcp: FastMCP, runtime: SelfhostRuntime, config: Config) -> 
         return PlainTextResponse("ok", headers={"Cache-Control": "no-store"})
 
 
-def build_selfhost_asgi_app(mcp: FastMCP, runtime: SelfhostRuntime, config: Config) -> ASGIApp:
+def build_selfhost_asgi_app(
+    mcp: FastMCP,
+    runtime: SelfhostRuntime,
+    config: Config,
+    *,
+    clock: Callable[[], float] | None = None,
+) -> ASGIApp:
     """The HTTP app: stateless MCP behind OAuth, plus host and origin protection.
 
     The request-context middleware runs inside FastMCP's authentication, so it
-    sees the outcome of bearer verification in ``scope['user']``.
+    sees the outcome of bearer verification in ``scope['user']``. Around all of
+    it, :class:`SelfhostEdgeGuard` pins the request scheme to https, rate-limits
+    the unauthenticated OAuth endpoints and cleans expired OAuth records.
     """
     settings = runtime.settings
-    return mcp.http_app(
+    app = mcp.http_app(
         stateless_http=True,
         middleware=[
             Middleware(
@@ -185,3 +197,10 @@ def build_selfhost_asgi_app(mcp: FastMCP, runtime: SelfhostRuntime, config: Conf
         allowed_hosts=[settings.public_host],
         allowed_origins=[settings.public_base_url],
     )
+
+    provider = mcp.auth
+
+    async def cull_oauth_state() -> None:
+        await cull_expired_oauth_state(provider)
+
+    return SelfhostEdgeGuard(app, clock=clock or time.monotonic, maintenance=cull_oauth_state)
