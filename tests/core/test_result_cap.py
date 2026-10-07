@@ -290,6 +290,26 @@ class TestApplyResultCap:
         assert sum(len(b.text) for b in out.content) <= 5000
         assert "never shown" not in "".join(b.text for b in out.content)
 
+    def test_the_notice_of_a_multi_block_result_quotes_the_real_limit_and_totals(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(tool_results, "client_needs_result_cap", lambda: True)
+        _set_limit(monkeypatch, "10000")
+        blocks = [
+            TextContent(type="text", text="a" * 4000),
+            TextContent(type="text", text=_lines(300)),  # overflows
+            TextContent(type="text", text="c" * 5000),  # dropped
+        ]
+        total = sum(len(b.text) for b in blocks)
+        out = apply_result_cap(ToolResult(content=blocks), "t", {})
+        shown = sum(len(b.text) for b in out.content)
+        assert shown <= 10_000
+        last = out.content[-1].text
+        notice = last[last.index(NOTICE_START):]
+        kept_in_last = last[: last.index(NOTICE_START)].rstrip("\n")
+        assert "about 10,000 characters per tool result" in notice
+        assert f"only the first {4000 + len(kept_in_last):,} of {total:,} characters" in notice
+
     def test_blocks_are_dropped_when_too_little_room_is_left_for_the_notice(
         self, capped_client
     ):

@@ -178,10 +178,25 @@ def _unclosed_fence(kept: str) -> bool:
 
 
 def _truncate(
-    text: str, *, limit: int, tool_name: str, arguments: Mapping[str, Any] | None
+    text: str,
+    *,
+    limit: int,
+    tool_name: str,
+    arguments: Mapping[str, Any] | None,
+    client_limit: int | None = None,
+    shown_before: int = 0,
+    total_chars: int | None = None,
 ) -> str:
-    """Cut ``text`` to at most ``limit`` characters, notice included."""
+    """Cut ``text`` to at most ``limit`` characters, notice included.
+
+    For one block of a multi-block result, ``limit`` is only what is left for
+    this block; the notice must still quote the client's real limit
+    (``client_limit``) and count the blocks already kept (``shown_before``) and
+    the whole result (``total_chars``), not just this block.
+    """
     args: Mapping[str, Any] = arguments or {}
+    quoted_limit = limit if client_limit is None else client_limit
+    total = len(text) if total_chars is None else total_chars
     budget = max(limit - NOTICE_RESERVE_CHARS, 0)
     cut = text.rfind("\n", 0, budget)
     if cut < budget // 2:
@@ -191,8 +206,8 @@ def _truncate(
     hint = CONTINUATION_HINTS.get(tool_name, _default_hint)(kept, args)
     head = (
         "\n\n[Result truncated by the Canvas MCP server: this client accepts "
-        f"about {limit:,} characters per tool result, so only the first "
-        f"{len(kept):,} of {len(text):,} characters are shown. "
+        f"about {quoted_limit:,} characters per tool result, so only the first "
+        f"{shown_before + len(kept):,} of {total:,} characters are shown. "
     )
     room = NOTICE_RESERVE_CHARS - len(closing) - len(head) - 1
     if len(hint) > room:
@@ -251,7 +266,13 @@ def apply_result_cap(
     while kept and limit - used <= NOTICE_RESERVE_CHARS:
         used -= len(kept.pop().text)
     capped = _truncate(
-        overflow.text, limit=limit - used, tool_name=tool_name, arguments=arguments
+        overflow.text,
+        limit=limit - used,
+        tool_name=tool_name,
+        arguments=arguments,
+        client_limit=limit,
+        shown_before=used,
+        total_chars=sum(len(b.text) for b in blocks),
     )
     content: list[Any] = [*kept, mt.TextContent(type="text", text=capped)]
     return ToolResult(content=content, meta=result.meta)
