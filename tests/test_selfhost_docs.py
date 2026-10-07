@@ -88,16 +88,73 @@ def test_must_be_unset_variables_appear_only_in_comments(env_text):
     assert assignments.get("EXECUTE_TYPESCRIPT_ENABLED", "false") != "true"
 
 
+def _commented_assignments(text: str) -> dict[str, str]:
+    """``# NAME=value`` lines: settings that ship switched off."""
+    values = {}
+    for line in text.splitlines():
+        match = re.match(r"#\s*([A-Z][A-Z0-9_]*)=(.*)$", line)
+        if match:
+            values[match.group(1)] = match.group(2)
+    return values
+
+
 def test_recommended_student_values(env_text):
     values = _assignments(env_text)
     assert values["MCP_AUTH_MODE"] == "entra-oauth"
-    assert values["CANVAS_API_URL"] == "https://canvas.eee.uci.edu"
     assert values["CANVAS_ROLE"] == "student"
     assert values["TIMEZONE"] == "America/Los_Angeles"
-    assert values["ALLOWED_WRITE_TOOLS"] == "all"
-    assert values["COURSE_AGENT_POLICY_DEFAULT"] == "allow"
     assert values["MCP_MAX_RESULT_CHARS"] == "140000"
-    assert tuple(values["STUDENT_WRITE_TOOLS"].split(",")) == STUDENT_WRITE_TOOLS
+
+
+def test_the_template_is_read_only_until_the_operator_opts_in(env_text):
+    """On a public multi-user server a secure setup must be opt-in, not opt-out:
+    classmates and instructors can write Canvas content that carries prompt
+    injection, and the confirmation tokens can be redeemed by the model itself."""
+    values = _assignments(env_text)
+    assert values.get("ALLOWED_WRITE_TOOLS", "") in ("", "none")
+    assert values.get("COURSE_AGENT_POLICY_DEFAULT", "deny") != "allow"
+    enabled = set(values.get("STUDENT_WRITE_TOOLS", "").split(","))
+    for risky in ("send_message", "reply_to_conversation", "submit_assignment"):
+        assert risky not in enabled, f"{risky} must not be enabled by default"
+    assert not enabled - {""}, "no student write tool should be registered by default"
+
+
+def test_the_opt_in_values_are_shown_commented_out_next_to_the_warning(env_text):
+    commented = _commented_assignments(env_text)
+    assert commented["ALLOWED_WRITE_TOOLS"] == "all"
+    assert commented["COURSE_AGENT_POLICY_DEFAULT"] == "allow"
+    assert tuple(commented["STUDENT_WRITE_TOOLS"].split(",")) == STUDENT_WRITE_TOOLS
+    block = env_text[env_text.index("提示词注入") : env_text.index("# ALLOWED_WRITE_TOOLS=all")]
+    assert "主动开启" in block
+
+
+def test_the_template_ships_no_host_specific_live_values(env_text):
+    """Copying the template and forgetting a value must fail closed, not point the
+    server at somebody else's domain or Canvas."""
+    values = _assignments(env_text)
+    assert values["PUBLIC_BASE_URL"] == ""
+    assert values["CANVAS_API_URL"] == ""
+    assert "kazuhahub" not in env_text
+    assert "uci.edu" not in env_text
+
+
+def test_an_unedited_template_is_refused_at_startup(env_text):
+    from canvas_mcp.core.selfhost.settings import SelfhostConfigError, load_selfhost_settings
+
+    env = {k: v for k, v in _assignments(env_text).items()}
+    with pytest.raises(SelfhostConfigError) as info:
+        load_selfhost_settings(env)
+    text = " ".join(info.value.problems)
+    for name in ("PUBLIC_BASE_URL", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "OAUTH_JWT_SIGNING_KEY"):
+        assert name in text
+
+
+def test_the_audit_log_is_documented_as_opt_in(env_text, readme):
+    block = env_text[env_text.index("审计日志默认是关闭的") :]
+    assert "LOG_ACCESS_EVENTS=true" in block
+    assert "/account" in block and "不写审计日志" in block
+    assert "审计日志**默认是关闭的**" in readme
+    assert "不写审计日志" in readme
 
 
 def test_env_example_ships_no_secret_values(env_text):
@@ -187,7 +244,7 @@ def test_every_variable_the_selfhost_settings_read_is_documented(env_text):
 def test_student_write_tools_match_the_registered_allowlist(env_text):
     from canvas_mcp.core.config import STUDENT_WRITE_TOOL_NAMES
 
-    values = _assignments(env_text)
+    values = _commented_assignments(env_text)
     assert set(values["STUDENT_WRITE_TOOLS"].split(",")) == set(STUDENT_WRITE_TOOL_NAMES)
 
 
@@ -205,7 +262,8 @@ def test_container_port_health_path_and_mcp_path_match_the_code():
     dockerfile = (REPO / "Dockerfile.selfhost").read_text(encoding="utf-8")
     compose = (SELFHOST / "docker-compose.yml").read_text(encoding="utf-8")
     assert "EXPOSE 8819" in dockerfile and '"--port", "8819"' in dockerfile
-    assert f"127.0.0.1:8819{HEALTH_PATH}" in dockerfile
+    healthcheck = next(line for line in dockerfile.splitlines() if line.lstrip().startswith("CMD [\"python\""))
+    assert HEALTH_PATH in healthcheck and "127.0.0.1" in healthcheck and "8819" in healthcheck
     assert "127.0.0.1:8819:8819" in compose
     assert SelfhostSettings.mcp_path == "/mcp"
     readme = (SELFHOST / "README.md").read_text(encoding="utf-8")
@@ -216,5 +274,61 @@ def test_container_port_health_path_and_mcp_path_match_the_code():
 def test_token_admin_commands_in_the_docs_exist():
     readme = (SELFHOST / "README.md").read_text(encoding="utf-8")
     source = (SRC / "core" / "selfhost" / "token_admin.py").read_text(encoding="utf-8")
-    for command in set(re.findall(r"token_admin (check|list|revoke|rotate)", readme)):
+    for command in set(re.findall(r"token_admin (check|list|revoke|rotate)\b", readme)):
         assert f'add_parser("{command}"' in source
+
+
+# --- findings from the integration review ---
+
+
+def test_proxy_examples_rate_limit_the_unauthenticated_oauth_endpoints(readme):
+    nginx = (SELFHOST / "nginx.conf.example").read_text(encoding="utf-8")
+    assert "limit_req_zone $binary_remote_addr zone=canvas_oauth:10m rate=10r/m;" in nginx
+    for path in ("/register", "/authorize"):
+        block = nginx[nginx.index(f"location = {path} {{") :]
+        block = block[: block.index("}")]
+        assert "limit_req zone=canvas_oauth burst=5 nodelay;" in block
+        assert "proxy_set_header Host $host;" in block
+    assert "limit_req_zone" in readme and "location = /register" in readme
+    caddy = (SELFHOST / "Caddyfile.example").read_text(encoding="utf-8")
+    assert "caddy-ratelimit" in caddy
+    assert "磁盘与滥用防护" in readme and "Cloudflare" in readme
+
+
+def test_http2_directive_comes_with_the_nginx_version_note(readme):
+    nginx = (SELFHOST / "nginx.conf.example").read_text(encoding="utf-8")
+    assert "1.25.1" in nginx and "listen 443 ssl http2;" in nginx
+    assert "1.25.1" in readme and "listen 443 ssl http2;" in readme
+
+
+def test_backup_commands_use_the_volume_name_compose_really_creates(readme):
+    yaml = pytest.importorskip("yaml")
+    compose = yaml.safe_load((SELFHOST / "docker-compose.yml").read_text(encoding="utf-8"))
+    volume_name = compose["volumes"]["canvas-mcp-data"]["name"]
+    used = set(re.findall(r"-v ([A-Za-z0-9_.-]+):/data", readme))
+    assert used == {volume_name}, "backup/restore must name the volume compose creates"
+    assert "docker volume inspect canvas-mcp-data" in readme
+
+
+def test_readme_never_tells_the_operator_to_just_restart_after_editing_env(readme):
+    """`docker compose restart` does not re-read env_file."""
+    assert "docker compose restart" in readme  # ...only to warn against it
+    for line in readme.splitlines():
+        if "docker compose restart" in line:
+            assert "不会重新读取" in line or "不要用" in line, line
+    secrets_table = readme[readme.index("### 其他密钥") : readme.index("## 备份与恢复")]
+    for name in ("ENTRA_CLIENT_SECRET", "ACCOUNT_SESSION_SECRET", "OAUTH_JWT_SIGNING_KEY"):
+        row = next(line for line in secrets_table.splitlines() if f"`{name}`" in line)
+        assert "docker compose up -d" in row, row
+    rotation = readme[readme.index("### Canvas token 密钥环") : readme.index("### 其他密钥")]
+    assert rotation.count("docker compose up -d") >= 2
+
+
+def test_readme_explains_the_first_stable_tag_the_default_image_needs(readme):
+    yaml = pytest.importorskip("yaml")
+    compose_text = (SELFHOST / "docker-compose.yml").read_text(encoding="utf-8")
+    compose = yaml.safe_load(compose_text)
+    assert compose["services"]["canvas-mcp"]["image"].endswith(":latest")
+    assert "manifest unknown" in readme and "manifest unknown" in compose_text
+    assert "git tag v1.13.0-uci.1" in readme
+    assert ":edge" in readme

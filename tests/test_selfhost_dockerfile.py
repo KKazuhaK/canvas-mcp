@@ -98,7 +98,34 @@ def test_healthcheck_targets_healthz(instructions):
     checks = [args for name, args in instructions if name == "HEALTHCHECK"]
     assert len(checks) == 1
     assert "/healthz" in checks[0]
-    assert "127.0.0.1:8819" in checks[0]
+    assert "127.0.0.1" in checks[0] and "8819" in checks[0]
+
+
+def test_healthcheck_treats_any_http_answer_below_500_as_alive(instructions):
+    """Legacy access-key mode has no /healthz route and answers 401. urlopen raises
+    on that and would report a working container unhealthy."""
+    (check,) = [args for name, args in instructions if name == "HEALTHCHECK"]
+    assert "urlopen" not in check
+    assert "getresponse().status<500" in check
+
+
+def test_the_oauth_state_directory_exists_in_the_image_so_a_volume_can_be_mounted_there(instructions):
+    run = " ".join(args for name, args in instructions if name == "RUN")
+    assert "/data/fastmcp" in run
+    assert "chown 10001:10001 /data /data/fastmcp" in run
+
+
+def test_dockerignore_keeps_env_and_key_files_out_at_any_depth():
+    patterns = {
+        line.strip()
+        for line in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+    # .env and *.env only match at the context root; a stray src/**/.env would be
+    # copied into the image by the Dockerfile's `COPY src`.
+    for needed in ("**/.env*", "**/*.env", "**/*.pem", "**/*.key"):
+        assert needed in patterns, needed
+    assert "uv.lock" not in patterns and "pyproject.toml" not in patterns and "src/" not in patterns
 
 
 def test_data_volume_port_and_command(instructions):

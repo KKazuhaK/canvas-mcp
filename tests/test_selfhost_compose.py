@@ -56,3 +56,9 @@ def test_container_is_hardened(service):
 def test_not_scaled_beyond_one_replica(service):
     assert "scale" not in service
     assert "replicas" not in service.get("deploy", {})
+
+
+def test_the_data_volume_has_a_fixed_name(document):
+    """Without `name:` Compose creates <project>_canvas-mcp-data, and the documented
+    `docker run -v canvas-mcp-data:/data` backup silently targets a new empty volume."""
+    assert document["volumes"]["canvas-mcp-data"] == {"name": "canvas-mcp-data"}

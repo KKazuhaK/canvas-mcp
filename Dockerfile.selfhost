@@ -35,13 +35,14 @@ FROM python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae
 
 # uid/gid 10001, no home directory and no login shell. /data is the only
 # writable location (the compose file mounts a named volume there and keeps the
-# root filesystem read-only).
+# root filesystem read-only). /data/fastmcp (the OAuth proxy state) exists in the
+# image so a separate volume can be mounted there and still be writable.
 RUN groupadd --gid 10001 mcp \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent \
         --shell /usr/sbin/nologin mcp \
-    && mkdir /data \
-    && chown 10001:10001 /data \
-    && chmod 0700 /data
+    && mkdir /data /data/fastmcp \
+    && chown 10001:10001 /data /data/fastmcp \
+    && chmod 0700 /data /data/fastmcp
 
 COPY --from=build /opt/venv /opt/venv
 
@@ -65,8 +66,12 @@ VOLUME ["/data"]
 
 EXPOSE 8819
 
+# Any HTTP answer below 500 means the server is up. Entra mode answers /healthz
+# with 200; legacy access-key mode has no such route and answers 401, which is
+# still a live server (urlopen would raise on it and report a working container
+# unhealthy).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD ["python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8819/healthz',timeout=4)"]
+  CMD ["python", "-c", "import http.client as h;c=h.HTTPConnection('127.0.0.1',8819,timeout=4);c.request('GET','/healthz');assert c.getresponse().status<500"]
 
 # One process, one replica: confirmation tokens, caches and rate limits live in
 # process memory.

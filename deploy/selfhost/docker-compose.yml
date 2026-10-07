@@ -15,7 +15,9 @@
 services:
   canvas-mcp:
     # 镜像通道：
-    #   :latest   最新稳定版（推荐，默认）
+    #   :latest   最新稳定版（推荐，默认）。只有推送了稳定版标签 v<x.y.z>-uci.<n>
+    #             （例如 v1.13.0-uci.1）之后才存在；在第一个稳定版标签发布之前
+    #             拉取会报 "manifest unknown"，请先改用 :edge。
     #   :beta     最新的任意版本（含预发布）
     #   :edge     uci-student 分支的每次提交（最新、最不稳定）
     #   :<版本>   固定到某个版本，例如 :1.13.0-uci.1
@@ -36,6 +38,10 @@ services:
     # /data 保存加密的 Canvas token 库、OAuth 代理状态和审计日志。
     volumes:
       - canvas-mcp-data:/data
+      # 可选：把 OAuth 代理状态放进单独的卷，让它与 Canvas token 库分开
+      # （见 README「磁盘与滥用防护」）。要用的话取消下面一行的注释，
+      # 并取消文件末尾 canvas-mcp-oauth 卷的注释：
+      #   - canvas-mcp-oauth:/data/fastmcp
 
     # 加固：只读根文件系统，/tmp 用内存盘，无额外权限。
     read_only: true
@@ -58,4 +64,12 @@ services:
     # 不要用 `deploy.replicas`、`docker compose up --scale` 或负载均衡扩成多份。
 
 volumes:
-  canvas-mcp-data: {}
+  # 显式指定卷名。不写 name 时 Compose 会把它建成 <项目名>_canvas-mcp-data
+  # （目录是 /opt/canvas-mcp 时即 canvas-mcp_canvas-mcp-data），README 里的
+  # 备份和恢复命令用的 `canvas-mcp-data` 就会指向一个新建的空卷：备份是空的，
+  # 恢复写进了服务从不使用的卷，而且不会有任何报错。
+  canvas-mcp-data:
+    name: canvas-mcp-data
+  # canvas-mcp-oauth:
+  #   name: canvas-mcp-oauth
+

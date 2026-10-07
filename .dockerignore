@@ -16,9 +16,14 @@ env/
 ENV/
 .venv
 
-# Environment files (users provide their own)
+# Environment files (users provide their own), at any depth: a stray one under
+# src/ would otherwise be copied into the image.
 .env
 *.env
+**/.env*
+**/*.env
+**/*.pem
+**/*.key
 
 # IDE files
 .vscode/

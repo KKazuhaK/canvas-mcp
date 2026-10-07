@@ -1,5 +1,16 @@
 # nginx 反向代理示例：canvas.mcp.kazuhahub.com -> 127.0.0.1:8819
 # 把证书路径换成你自己的（certbot / acme.sh / Cloudflare Origin 证书都可以）。
+# 这个文件放在 conf.d/ 或 sites-enabled/ 里（会被 include 到 http 块中），
+# 所以最上面的 limit_req_zone 可以直接写在文件顶层。
+
+# 限流：/register（动态客户端注册）和 /authorize 不需要登录，任何人都能调用，
+# 每次调用都会往数据卷写文件。服务自己也有一个全进程的限流作为兜底，但它分不清
+# 来源 IP（uvicorn 不信任 X-Forwarded-*），所以按 IP 的限流要在这里做。
+# 如果前面还有 Cloudflare，$binary_remote_addr 是 Cloudflare 的地址：
+# 先用 ngx_http_realip_module（set_real_ip_from + real_ip_header CF-Connecting-IP）
+# 还原真实 IP，或者改在 Cloudflare 里用速率限制规则（见 README）。
+limit_req_zone $binary_remote_addr zone=canvas_oauth:10m rate=10r/m;
+limit_req_status 429;
 
 server {
     listen 80;
@@ -15,6 +26,10 @@ server {
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
+    # nginx 1.25.1 及以上才有独立的 `http2 on;` 指令。较老的 nginx（例如
+    # Ubuntu 22.04 自带的 1.18）会报 unknown directive "http2"：删掉下面这行，
+    # 并把上面两行 listen 改成 `listen 443 ssl http2;` 和 `listen [::]:443 ssl http2;`。
+    # HTTP/2 不是必须的，不想折腾可以直接删掉。
     http2 on;
     server_name canvas.mcp.kazuhahub.com;
 
@@ -26,6 +41,27 @@ server {
 
     # claude.ai 的 MCP 请求体和 /account 表单都很小；10m 绰绰有余。
     client_max_body_size 10m;
+
+    # 不需要登录的两个 OAuth 入口：每个 IP 每分钟 10 次（突发 5 次）。
+    # 正常使用里这两个很少被调用：连接一次连接器才走一遍。
+    location = /register {
+        limit_req zone=canvas_oauth burst=5 nodelay;
+        proxy_pass http://127.0.0.1:8819;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        client_max_body_size 16k;
+    }
+
+    location = /authorize {
+        limit_req zone=canvas_oauth burst=5 nodelay;
+        proxy_pass http://127.0.0.1:8819;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
 
     location / {
         proxy_pass http://127.0.0.1:8819;
