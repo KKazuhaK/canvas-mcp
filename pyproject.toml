@@ -33,6 +33,10 @@ dependencies = [
     "pydantic>=2.13.1,<3",
     "python-dateutil>=2.9.0,<3",
     "uvicorn>=0.50.0,<1",
+    # AES-256-GCM for the self-hosted mode's encrypted Canvas token store and
+    # /account cookies. Already installed transitively through fastmcp; named
+    # here because this code imports it directly.
+    "cryptography>=44.0.0,<51",
     # Windows ships no IANA time zone database, so zoneinfo cannot resolve
     # TIMEZONE (e.g. America/Los_Angeles) without it and dates fall back to UTC.
     "tzdata>=2025.2; sys_platform == 'win32'",

@@ -219,6 +219,7 @@ name = "canvas-mcp"
 version = "1.13.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "mcp" },
@@ -259,6 +260,7 @@ requires-dist = [
     { name = "azure-communication-email", marker = "extra == 'hosted'", specifier = ">=1.0.0" },
     { name = "azure-data-tables", marker = "extra == 'hosted'", specifier = ">=12.5.0" },
     { name = "azure-identity", marker = "extra == 'hosted'", specifier = ">=1.17.0" },
+    { name = "cryptography", specifier = ">=44.0.0,<51" },
     { name = "fastmcp", specifier = ">=4,<5" },
     { name = "httpx", specifier = ">=0.28.1,<1" },
     { name = "mcp", specifier = ">=2,<3" },
