@@ -1,6 +1,6 @@
 """Course codes with spaces work in the file tools and the upstream tools.
 
-UCI course codes contain spaces (``COMPSCI 161``). The file tools a student
+Course codes often contain spaces (``COMPSCI 161``). The file tools a student
 uses (read_course_file, read_course_file_text, download_course_file,
 list_course_files) resolve through ``resolve_numeric_course_id``: the code is
 found in the caller's course list and only the numeric ID reaches a request

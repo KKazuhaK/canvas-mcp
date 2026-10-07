@@ -2050,7 +2050,7 @@ Get a comprehensive overview of course content including pages, modules, and syl
 "Give me an overview of everything in BADM 350"
 ```
 
-**Returns:** Structured overview of the course's pages, modules, and syllabus. The syllabus portion is a ~1000-character preview — use `get_syllabus` for the full body. Module item counts cover the first 10 modules only; the output states how many modules were analyzed out of the total (`Modules Analyzed for Items: 10 of 25`) and notes any module whose items could not be read. Use `list_module_items` for the rest.
+**Returns:** Structured overview of the course's pages, modules, and syllabus. The syllabus portion is a ~1000-character preview — use `get_syllabus` for the full body. Module item counts cover the first 10 modules only; the output states how many modules were analyzed out of the total (`Modules Analyzed for Items: 10 of 25`) and notes any module whose items could not be read. Use `list_module_items` for the rest. When the overview shows only the 5 most recent pages, the first 3 modules, or a cut syllabus preview, it says so and names the tool that lists or reads the rest (`list_pages`, `list_modules`, `list_module_items`, `get_syllabus`).
 
 ---
 
@@ -2776,6 +2776,29 @@ Create a new discussion post.
 - `course_identifier`: Course code or ID
 - `topic_id`: Discussion topic ID
 - `message`: Post content
+
+---
+
+### Complete content (no truncation)
+
+Tools whose job is to return one complete piece of Canvas content never cut it
+(`list_discussion_entries` shows short previews unless you pass
+`include_full_content=true`), and declare `_meta: {"anthropic/maxResultSizeChars": 500000}` in `tools/list`
+(Claude Code's ceiling; without it Claude Code caps a tool result near 25k
+tokens). Other clients ignore the key. The tools: `get_page_content`,
+`get_syllabus`, `get_front_page`, `get_assignment_details`,
+`get_discussion_topic_details`, `get_discussion_entry_details`,
+`get_discussion_with_replies`, `list_discussion_entries`,
+`get_conversation_details`, `get_my_submission`, `get_rubric`, and
+`get_rubric_assessment`. The one exception to "never cut" is `get_syllabus`'s
+optional `max_chars`: without it the syllabus is complete, and with it a cut is
+marked `[truncated at N characters]`.
+
+Listing and overview tools may still preview long text, but only where a
+full-content tool exists, and the output names it when a preview was shortened
+(`get_course_content_overview` -> `get_syllabus`, `list_pages`, `list_modules`;
+`list_rubrics` -> `get_rubric`; `list_discussion_entries` without
+`include_full_content` -> `include_full_content=True`).
 
 ---
 

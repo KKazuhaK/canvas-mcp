@@ -669,7 +669,7 @@ class TestLetterScheme:
 
 
 @pytest.fixture
-def real_client(monkeypatch):
+def real_client(monkeypatch, real_course_list):
     for name in ("http_client", "_http_client_loop_ref", "_request_semaphore", "_semaphore_loop_ref"):
         monkeypatch.setattr(cm, name, None)
     config = SimpleNamespace(canvas_api_url="https://canvas.example/api/v1",

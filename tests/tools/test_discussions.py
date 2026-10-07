@@ -795,6 +795,8 @@ class TestDiscussionTextIsComplete:
         for name in ("get_discussion_topic_details", "get_discussion_entry_details",
                      "get_discussion_with_replies", "list_discussion_entries"):
             assert tools[name].to_mcp_tool().meta["anthropic/maxResultSizeChars"] == 500_000
+
+
 class TestGroupDiscussionReads:
     """Read tools reach discussions inside a group space via group_id."""
 

@@ -706,11 +706,11 @@ class TestDownloadCourseFile:
              patch('canvas_mcp.tools.files.stream_file_download',
                    new_callable=AsyncMock) as mock_stream:
 
-            mock_get_id.return_value = "60366"
+            mock_get_id.return_value = ("60366", None)
             mock_get_code.return_value = "badm_350_120251"
 
             yield {
-                'get_course_id': mock_get_id,
+                'resolve_numeric_course_id': mock_get_id,
                 'get_course_code': mock_get_code,
                 'make_canvas_request': mock_request,
                 'stream_file_download': mock_stream,
@@ -874,11 +874,11 @@ class TestListCourseFiles:
              patch('canvas_mcp.tools.files.get_course_code') as mock_get_code, \
              patch('canvas_mcp.tools.files.fetch_all_paginated_results') as mock_fetch:
 
-            mock_get_id.return_value = "60366"
+            mock_get_id.return_value = ("60366", None)
             mock_get_code.return_value = "badm_350_120251"
 
             yield {
-                'get_course_id': mock_get_id,
+                'resolve_numeric_course_id': mock_get_id,
                 'get_course_code': mock_get_code,
                 'fetch_all_paginated_results': mock_fetch,
             }

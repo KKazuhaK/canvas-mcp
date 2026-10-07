@@ -158,8 +158,8 @@ def _match_cached(identifier: str) -> tuple[str | None, str | None]:
 
     The code map also holds codes that ``get_course_code`` fetched for courses
     outside the caller's list (a past course looked up by ID). Once the list
-    is cached it alone decides, or a foreign course that reuses a code (UCI
-    reuses ``COMPSCI 161`` every quarter) would make the caller's own course
+    is cached it alone decides, or a foreign course that reuses a code (schools
+    often reuse ``COMPSCI 161`` every term) would make the caller's own course
     ambiguous. The code map is used only before the first successful refresh.
     """
     state = current_cache_state()

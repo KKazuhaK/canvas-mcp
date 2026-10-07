@@ -26,7 +26,7 @@ _INSTALL_ATTR = "_canvas_tool_result_contract_installed"
 MAX_RESULT_SIZE_CHARS = 500_000
 
 #: ``tools/list`` metadata for tools whose job is to return a complete piece of
-#: Canvas content (a page, a syllabus, a discussion, a course file). Pass it as
+#: Canvas content (a page, a syllabus, a discussion, a message, a course file). Pass it as
 #: ``@mcp.tool(meta=FULL_CONTENT_TOOL_META)`` so the client does not shorten
 #: what the server deliberately returns whole.
 FULL_CONTENT_TOOL_META: dict[str, Any] = {

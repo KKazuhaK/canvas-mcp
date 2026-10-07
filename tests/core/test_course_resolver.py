@@ -3,8 +3,8 @@
 The requirement (not the implementation) drives every assertion: a course
 identifier is either resolved to the numeric Canvas course ID or refused with a
 ``Could not find course`` error, and an identifier that has not been validated
-as a single plain SIS segment is never put in a request path. UCI course codes
-contain spaces (``COMPSCI 161``, ``I&C SCI 33``), so they must resolve too.
+as a single plain SIS segment is never put in a request path. Course codes
+often contain spaces (``COMPSCI 161``, ``I&C SCI 33``), so they must resolve too.
 """
 
 from __future__ import annotations
@@ -270,7 +270,7 @@ class TestCandidateCourses:
 
 class TestForeignCourseInTheCodeCache:
     """get_course_code caches courses outside the caller's list (a past course
-    looked up by numeric ID). UCI reuses codes every quarter, so such a course
+    looked up by numeric ID). Codes are often reused every term, so such a course
     must not make the caller's own course ambiguous or take it over."""
 
     @pytest.mark.asyncio

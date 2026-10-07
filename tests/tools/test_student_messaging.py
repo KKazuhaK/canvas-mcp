@@ -216,7 +216,7 @@ class FakeCanvas:
 
 
 @pytest.fixture
-def canvas(monkeypatch):
+def canvas(monkeypatch, real_course_list):
     monkeypatch.setenv("CANVAS_API_URL", "https://canvas.example/api/v1")
     monkeypatch.setenv("CANVAS_API_TOKEN", "synthetic")
     monkeypatch.setenv("STUDENT_WRITE_TOOLS", "send_message,reply_to_conversation")

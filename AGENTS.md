@@ -198,7 +198,7 @@ Content access tools available to all authenticated users.
 | `read_course_file` | **See a course file as a person does**: returns the original file (up to 11.5 MB, the most one MCP message carries). In Claude Code, open the saved path it gives with Read: a PDF arrives as page images plus text, like an attachment, and text or code files open as text; Read cannot open PPTX/DOCX/XLSX (use `read_course_file_text`). Images show inline. Claude Desktop chat and claude.ai connectors (also any unnamed client over the hosted HTTP server unless its User-Agent is Claude Code's) get the complete extracted text instead |
 | `read_course_file_text` | ALL the text of lecture slides, PDFs, Word docs, or text and code files, never cut (optional page range), with page/slide markers (PDF/PPTX/DOCX need the `documents` extra). Text too large for one message is refused with a page range to read instead. For figures, layout or scanned pages use `read_course_file` |
 | `list_pages` | Course pages |
-| `get_page_content` | Read page content |
+| `get_page_content` | Read page content, complete |
 | `edit_page_content` | Replace a page body (and optionally title). Optional guards: `expect_updated_at`, `find`/`replace` instead of `new_content`, `require` (see Guarded edits) |
 | `update_page_settings` | Publish/unpublish, set front page, editing roles |
 | `bulk_update_pages` | Update multiple pages at once |
@@ -213,7 +213,7 @@ Content access tools available to all authenticated users.
 | `list_discussion_topics` | Discussion forums (discussions only; set `include_announcements` to also list announcements). Shows `Anonymity:` when Canvas reports an `anonymous_state`. Canvas REST returns 404 for anonymous topics; by default the read tools explain this and link to Canvas. Set `DISCUSSION_GRAPHQL_ENABLED=true` to enable the read-only GraphQL fallback |
 | `list_group_discussion_topics` | Topics inside every group space, including topics students started in a group (pass `group_id` to the other discussion read tools to read them) |
 | `get_discussion_topic_details` | One topic's details; `raw_dates=True` appends the topic's dates and, for a graded discussion, its assignment and checkpoint dates. On a GraphQL fallback, `raw_dates=True` reports unavailable date metadata and unknown grading status. Prints the message's SHA-256 for `update_discussion_topic`'s `expect_body_sha256` |
-| `list_discussion_entries` | Posts in a discussion |
+| `list_discussion_entries` | Posts in a discussion. Previews by default and says so; `include_full_content=True` returns every post (and every reply with `include_replies=True`) complete |
 | `post_discussion_entry` | Add a discussion post |
 | `reply_to_discussion_entry` | Reply to a post |
 
@@ -523,15 +523,17 @@ Canvas MCP accepts multiple identifier formats:
 | Format | Example | Notes |
 |--------|---------|-------|
 | Canvas ID | `12345` | Numeric course ID |
-| Course code | `badm_350_120251_246794` | SIS course code |
-| SIS ID | `sis_course_id:ABC123` | If configured |
+| Course code | `badm_350_120251_246794` or `COMPSCI 161` | Matched against your courses; spaces allowed |
+| Course name | `Design and Analysis of Algorithms` | Matched against your courses |
+| SIS ID | `sis_course_id:ABC123` or `ABC123` | If configured |
 
-The server automatically resolves identifiers to Canvas IDs.
-
-Every tool matches a course code against your own courses, ignoring case and
-surrounding spaces, so codes with spaces work (`COMPSCI 161`, `I&C SCI 33`);
-course names and bare SIS IDs match the same way. On a miss the course list is
-re-read once, at most every 30 seconds.
+The server automatically resolves identifiers to Canvas IDs. Course codes, names
+and SIS IDs are matched against your course list, ignoring case and surrounding
+whitespace; a value that matches more than one of your courses is refused with
+the candidate IDs, so pass the numeric ID then. Tools that put the course in a
+request path (for example `list_course_files`) refuse an identifier that matches
+no course instead of sending it to Canvas. On a miss the course list is re-read
+once, at most every 30 seconds.
 
 The student tools (calendar and planner, groups, student messaging,
 `list_my_announcements`, grades and quizzes) and the student file tools

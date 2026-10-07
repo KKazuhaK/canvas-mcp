@@ -467,7 +467,7 @@ class TestListGroupFiles:
 
 
 @pytest.fixture
-def real_client(monkeypatch):
+def real_client(monkeypatch, real_course_list):
     """Run the real make_canvas_request / fetch_all_paginated_results."""
     from canvas_mcp.core import client as cm
 

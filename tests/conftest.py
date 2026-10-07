@@ -44,12 +44,32 @@ def isolated_course_cache(monkeypatch):
     and change how ``resolve_numeric_course_id`` answers there. Resetting also
     drops the refresh-on-miss rate limit and any shared in-flight refresh, so
     one test's refresh never suppresses the next test's.
+
+    The course-list read that a missed lookup makes is stubbed to return no
+    courses, so a test that does not supply a list never reaches a real Canvas;
+    tests that need one patch ``canvas_mcp.core.cache.fetch_all_paginated_results``.
     """
     from canvas_mcp.core import cache
 
     cache.reset_course_cache()
+    monkeypatch.setattr(cache, "fetch_all_paginated_results", AsyncMock(return_value=[]))
     yield cache
     cache.reset_course_cache()
+
+
+@pytest.fixture
+def real_course_list(isolated_course_cache, monkeypatch):
+    """Let the course resolver read ``/courses`` through the real paginator.
+
+    For tests that serve the course list from a mock HTTP transport under the
+    real client: they patch the transport themselves, so no real Canvas is
+    reached. Without this fixture the autouse stub above answers "no courses".
+    """
+    from canvas_mcp.core import client
+
+    monkeypatch.setattr(
+        isolated_course_cache, "fetch_all_paginated_results", client.fetch_all_paginated_results
+    )
 
 
 @pytest.fixture

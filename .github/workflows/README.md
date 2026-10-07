@@ -81,12 +81,13 @@ gh workflow run create-release.yml -f tag_name=v1.0.7-test
 
 **Triggers**:
 - Pull requests to `main` and `uci-student`
-- Push to `main`, `development`, `uci-student`, `feature/**` and `ci/**`
+- Push to `main`, `development`, `uci-student`, `feature/**`, `fix/**` and `ci/**`
+- Manual runs (`workflow_dispatch`)
 
 **What it does**:
 - Runs Ruff and mypy (`lint`)
 - Runs the full pytest suite on Ubuntu with Python 3.11, 3.12, 3.13 and 3.14 (`test`)
-- Runs the full pytest suite on Windows with Python 3.14 (`test-windows`)
+- Runs the full pytest suite on Windows with Python 3.14, with UTF-8 mode on (`test-windows`)
 - Builds and tests the TypeScript code API, and checks the formal proofs
 - `test-enhancements` is the required check: it passes only when all of the above test jobs pass
 
