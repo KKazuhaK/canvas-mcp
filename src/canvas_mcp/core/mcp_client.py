@@ -31,6 +31,15 @@ always arrives while a blob can fail the whole call there.
 A named client is matched by exact name, and a client not on the list gets
 the spec-compliant file result, as does an unnamed client on a local (stdio)
 server: only clients known to break are special-cased.
+
+The result-size cap (``client_needs_result_cap``) uses the same two signals but
+errs the other way for unnamed HTTP clients. claude.ai accepts only about 150k
+characters per tool result, while Claude Code honours the larger
+``anthropic/maxResultSizeChars``. Stateless HTTP leaves claude.ai unnamed on
+handshake-era protocols, so unnamed non-Claude-Code HTTP clients are treated
+like connectors and capped. A named client is capped only when it is on
+``RESULT_CAPPED_CLIENTS``, and a call with no HTTP request (stdio, in-memory)
+is never capped.
 """
 
 from fastmcp.server.dependencies import get_context, get_http_request
@@ -38,6 +47,10 @@ from fastmcp.server.dependencies import get_context, get_http_request
 #: ``clientInfo.name`` values of clients known to mishandle embedded-resource
 #: blobs in a tool result.
 BLOB_INCAPABLE_CLIENTS = frozenset({"claude-ai"})
+
+#: ``clientInfo.name`` values of clients that reject tool results above about
+#: 150k characters (claude.ai connectors and Claude Desktop chat).
+RESULT_CAPPED_CLIENTS = frozenset({"claude-ai"})
 
 #: Start of the ``User-Agent`` Claude Code's MCP HTTP and SSE transports send.
 CLAUDE_CODE_USER_AGENT_PREFIX = "claude-code/"
@@ -72,6 +85,22 @@ def client_mishandles_file_blobs() -> bool:
     name = current_client_name()
     if name is not None:
         return name in BLOB_INCAPABLE_CLIENTS
+    user_agent = _http_user_agent()
+    if user_agent is None:
+        return False
+    return not user_agent.lower().startswith(CLAUDE_CODE_USER_AGENT_PREFIX)
+
+
+def client_needs_result_cap() -> bool:
+    """True when a tool result's text should be cut to the claude.ai limit.
+
+    A named client is judged by name. An unnamed one is never capped when there
+    is no HTTP request (stdio, in-memory), and over HTTP is capped unless its
+    User-Agent is Claude Code's.
+    """
+    name = current_client_name()
+    if name is not None:
+        return name in RESULT_CAPPED_CLIENTS
     user_agent = _http_user_agent()
     if user_agent is None:
         return False
