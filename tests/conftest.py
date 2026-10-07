@@ -1,11 +1,19 @@
 """Shared pytest fixtures for Canvas MCP tests."""
 
 import io
+import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from canvas_mcp.core.config import reset_config
+# canvas_mcp.core.config calls load_dotenv() at import time, and python-dotenv
+# walks up from the working directory, so a developer's real .env (or one in a
+# parent checkout of a git worktree) would otherwise change test outcomes
+# (write-tool allowlists, policy defaults, role). Must run before the first
+# canvas_mcp import below.
+os.environ["PYTHON_DOTENV_DISABLED"] = "1"
+
+from canvas_mcp.core.config import reset_config  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
