@@ -1,0 +1,61 @@
+# canvas-mcp 自托管多用户部署（Entra ID 登录 + 每个用户各自的 Canvas token）。
+#
+# 无需克隆仓库，三步部署：
+#   mkdir -p /opt/canvas-mcp && cd /opt/canvas-mcp
+#   curl -fsSLO https://raw.githubusercontent.com/KKazuhaK/canvas-mcp/uci-student/deploy/selfhost/docker-compose.yml
+#   curl -fsSL https://raw.githubusercontent.com/KKazuhaK/canvas-mcp/uci-student/deploy/selfhost/env.example -o .env
+#   chmod 600 .env
+#   # 编辑 .env，填好所有标记为「必填」的项（见 README.md）
+#   docker compose up -d
+#   docker compose logs -f
+#
+# 完整步骤（Entra 应用注册、反向代理、Cloudflare、claude.ai 连接器）见
+# deploy/selfhost/README.md。
+
+services:
+  canvas-mcp:
+    # 镜像通道：
+    #   :latest   最新稳定版（推荐，默认）
+    #   :beta     最新的任意版本（含预发布）
+    #   :edge     uci-student 分支的每次提交（最新、最不稳定）
+    #   :<版本>   固定到某个版本，例如 :1.13.0-uci.1
+    image: ghcr.io/kkazuhak/canvas-mcp:latest
+    container_name: canvas-mcp
+    restart: unless-stopped
+    # 每次 `docker compose up -d` 都重新拉取所选标签指向的镜像。
+    pull_policy: always
+
+    # 所有配置和密钥都在 .env 里（chmod 600），不要写进本文件。
+    env_file:
+      - .env
+
+    # 只绑定回环地址：对外必须经过反向代理（nginx / Caddy）做 TLS。
+    ports:
+      - "127.0.0.1:8819:8819"
+
+    # /data 保存加密的 Canvas token 库、OAuth 代理状态和审计日志。
+    volumes:
+      - canvas-mcp-data:/data
+
+    # 加固：只读根文件系统，/tmp 用内存盘，无额外权限。
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    stop_grace_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # 只支持恰好 1 个副本：确认令牌、课程缓存和限流计数都在进程内存里，
+    # 不要用 `deploy.replicas`、`docker compose up --scale` 或负载均衡扩成多份。
+
+volumes:
+  canvas-mcp-data: {}
