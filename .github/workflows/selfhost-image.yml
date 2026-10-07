@@ -3,7 +3,9 @@ name: Self-hosted image
 # Fork-only publishing of ghcr.io/kkazuhak/canvas-mcp from Dockerfile.selfhost.
 # The root Dockerfile (upstream's Azure image) is untouched. There is no
 # pull_request or pull_request_target trigger: nothing here runs for code from
-# a fork, and the only secret used is the job's own GITHUB_TOKEN.
+# a fork, and the only secret used is the job's own GITHUB_TOKEN. Every job
+# also requires the ref to be uci-student or a v* tag, so a manual run from any
+# other branch does nothing instead of pushing untagged digests to the registry.
 #
 # Channels:
 #   :edge     every push to uci-student
@@ -14,6 +16,18 @@ on:
   push:
     branches: [uci-student]
     tags: ['v*-uci.*']
+    # Nothing here goes into the image or gates it. (Path filters are not
+    # evaluated for tag pushes, so a release tag always builds.)
+    paths-ignore:
+      - '*.md'
+      - '**/*.md'
+      - 'docs/**'
+      - 'articles/**'
+      - 'examples/**'
+      - 'skills/**'
+      - 'tests/**'
+      - 'deploy/selfhost/*.example'
+      - 'deploy/selfhost/docker-compose.yml'
   workflow_dispatch:
 
 permissions:
@@ -29,12 +43,13 @@ env:
 jobs:
   meta:
     name: Compute version
-    if: github.repository == 'KKazuhaK/canvas-mcp'
+    if: ${{ github.repository == 'KKazuhaK/canvas-mcp' && (github.ref == 'refs/heads/uci-student' || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     outputs:
       version: ${{ steps.v.outputs.version }}
+      label_version: ${{ steps.v.outputs.label_version }}
       stable: ${{ steps.v.outputs.stable }}
       is_tag: ${{ steps.v.outputs.is_tag }}
     steps:
@@ -62,8 +77,12 @@ jobs:
             stable=false
             is_tag=false
           fi
+          # What the image label and manifest annotation say: the release
+          # version, or edge-<short sha> for a branch build.
+          label_version="${version:-edge-${GITHUB_SHA::7}}"
           {
             echo "version=${version}"
+            echo "label_version=${label_version}"
             echo "stable=${stable}"
             echo "is_tag=${is_tag}"
           } >> "$GITHUB_OUTPUT"
@@ -71,7 +90,7 @@ jobs:
   build:
     name: Build and push (${{ matrix.slug }})
     needs: meta
-    if: github.repository == 'KKazuhaK/canvas-mcp'
+    if: ${{ github.repository == 'KKazuhaK/canvas-mcp' && (github.ref == 'refs/heads/uci-student' || startsWith(github.ref, 'refs/tags/v')) }}
     strategy:
       fail-fast: true
       matrix:
@@ -106,7 +125,7 @@ jobs:
             org.opencontainers.image.title=canvas-mcp
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ needs.meta.outputs.version != '' && needs.meta.outputs.version || format('edge-{0}', substr(github.sha, 0, 7)) }}
+            org.opencontainers.image.version=${{ needs.meta.outputs.label_version }}
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.description=Canvas LMS MCP server, self-hosted multi-user build (Entra ID sign-in, per-user Canvas tokens)
 
@@ -170,7 +189,7 @@ jobs:
   publish:
     name: Publish multi-arch image
     needs: [meta, build]
-    if: github.repository == 'KKazuhaK/canvas-mcp'
+    if: ${{ github.repository == 'KKazuhaK/canvas-mcp' && (github.ref == 'refs/heads/uci-student' || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -212,7 +231,7 @@ jobs:
           TAGS: ${{ steps.meta.outputs.tags }}
           SOURCE: ${{ github.server_url }}/${{ github.repository }}
           REVISION: ${{ github.sha }}
-          VERSION: ${{ needs.meta.outputs.version != '' && needs.meta.outputs.version || format('edge-{0}', substr(github.sha, 0, 7)) }}
+          VERSION: ${{ needs.meta.outputs.label_version }}
         run: |
           set -euo pipefail
           tag_args=()

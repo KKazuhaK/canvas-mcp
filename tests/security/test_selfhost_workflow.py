@@ -51,9 +51,44 @@ def _step_index(job: dict, predicate) -> int:
     raise AssertionError("step not found")
 
 
+def _glob_to_regex(pattern: str) -> re.Pattern[str]:
+    """GitHub path filter semantics: ``*`` stays inside a directory, ``**`` does not."""
+    out = ""
+    i = 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out += "(?:.*/)?"
+            i += 3
+        elif pattern.startswith("**", i):
+            out += ".*"
+            i += 2
+        elif pattern[i] == "*":
+            out += "[^/]*"
+            i += 1
+        else:
+            out += re.escape(pattern[i])
+            i += 1
+    return re.compile(out + "$")
+
+
 def test_triggers_are_the_uci_branch_the_uci_tags_and_manual_runs(workflow):
     triggers = _triggers(workflow)
-    assert triggers["push"] == {"branches": ["uci-student"], "tags": ["v*-uci.*"]}
+    push = dict(triggers["push"])
+    ignored = push.pop("paths-ignore")
+    assert push == {"branches": ["uci-student"], "tags": ["v*-uci.*"]}
+    # Anything that ends up in the image, or gates it, must still trigger a build.
+    for path in (
+        "src/canvas_mcp/server.py",
+        "pyproject.toml",
+        "uv.lock",
+        "Dockerfile.selfhost",
+        ".dockerignore",
+        ".github/workflows/selfhost-image.yml",
+        "deploy/selfhost/smoke-test.sh",
+    ):
+        assert not any(_glob_to_regex(p).match(path) for p in ignored), f"{path} must trigger a build"
+    # ...while a docs-only change does not need a multi-arch build.
+    assert any(_glob_to_regex(p).match("deploy/selfhost/README.md") for p in ignored)
     assert "workflow_dispatch" in triggers
     assert set(triggers) == {"push", "workflow_dispatch"}, (
         "no pull_request or pull_request_target: nothing may run for fork code"
@@ -151,3 +186,80 @@ def test_stable_channels_are_only_moved_by_tags(workflow):
     assert "is_tag == 'true'" in latest and "stable == 'true'" in latest
     beta = next(line for line in tags.splitlines() if "value=beta" in line)
     assert "is_tag == 'true'" in beta
+
+
+# ----------------------------------------------------------------------------
+# Expression syntax. GitHub rejects a workflow that calls an unknown function
+# (for example substr) before any job runs, so nothing would ever be built; a
+# YAML parse cannot see that. These checks stand in for actionlint.
+# ----------------------------------------------------------------------------
+
+EXPRESSION_FUNCTIONS = {
+    "contains", "startswith", "endswith", "format", "join", "tojson", "fromjson",
+    "hashfiles", "success", "always", "cancelled", "failure",
+}
+EXPRESSION_CONTEXTS = {
+    "github", "env", "vars", "job", "jobs", "steps", "runner", "secrets",
+    "strategy", "matrix", "needs", "inputs",
+}
+EXPRESSION_LITERALS = {"true", "false", "null", "nan", "infinity"}
+
+
+def _expressions(text: str) -> list[str]:
+    found = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        found.extend(re.findall(r"\$\{\{(.*?)\}\}", line))
+    return found
+
+
+def _expression_problems(expression: str) -> list[str]:
+    bare = re.sub(r"'(?:[^']|'')*'", "''", expression)  # string literals
+    problems = []
+    for name in re.findall(r"(?<![\w.-])([A-Za-z_][\w-]*)\s*\(", bare):
+        if name.lower() not in EXPRESSION_FUNCTIONS:
+            problems.append(f"unknown function {name}()")
+    for name in re.findall(r"(?<![\w.\-])([A-Za-z_][\w-]*)(?![\w-])(?!\s*\()", bare):
+        if name.lower() not in EXPRESSION_CONTEXTS | EXPRESSION_LITERALS:
+            problems.append(f"unknown name {name}")
+    return problems
+
+
+def test_the_expression_checker_catches_what_github_rejects():
+    assert _expression_problems("format('edge-{0}', substr(github.sha, 0, 7))") == [
+        "unknown function substr()"
+    ]
+    assert _expression_problems("github.ref == 'refs/heads/x' && startsWith(github.ref, 'refs/tags/v')") == []
+    assert _expression_problems("needs.meta.outputs.version != '' && needs.meta.outputs.version") == []
+    assert _expression_problems("nope.thing") == ["unknown name nope"]
+
+
+def test_every_expression_uses_only_functions_and_contexts_github_defines():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    expressions = _expressions(text)
+    assert len(expressions) >= 15, "the expression scan found almost nothing"
+    problems = {e.strip(): _expression_problems(e) for e in expressions if _expression_problems(e)}
+    assert problems == {}
+
+
+def test_every_needs_output_that_is_read_is_declared(workflow):
+    text = WORKFLOW.read_text(encoding="utf-8")
+    for job, output in set(re.findall(r"needs\.([\w-]+)\.outputs\.([\w-]+)", text)):
+        declared = workflow["jobs"][job].get("outputs", {})
+        assert output in declared, f"needs.{job}.outputs.{output} is read but never declared"
+
+
+def test_the_image_version_label_is_computed_in_the_meta_job(workflow):
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "label_version" in workflow["jobs"]["meta"]["outputs"]
+    assert "needs.meta.outputs.label_version" in text
+    assert "substr(" not in text
+
+
+def test_every_job_only_runs_for_the_branch_or_release_tags_it_publishes(workflow):
+    """A manual run from any other ref must not push untagged digests."""
+    for name, job in workflow["jobs"].items():
+        condition = str(job.get("if", ""))
+        assert "refs/heads/uci-student" in condition, name
+        assert "startsWith(github.ref, 'refs/tags/v')" in condition, name
