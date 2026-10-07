@@ -161,6 +161,30 @@ class TestRefusals:
         assert "k1" in caplog.text
         assert other.split(":")[1] not in caplog.text
 
+    def test_a_corrupt_token_database_is_a_logged_refusal_not_a_traceback(self, entra_env, caplog):
+        pytest.importorskip("canvas_mcp.core.selfhost.token_store")
+        db = load_selfhost_settings().token_db_path
+        db.parent.mkdir(parents=True, exist_ok=True)
+        db.write_bytes(b"this is not a database" * 100)
+        # Any escape from main() other than SystemExit(1) fails this call.
+        assert _run_main(entra_env["monkeypatch"], *HTTP).code == 1
+        assert "token database" in caplog.text
+        assert "not a valid database" in caplog.text
+
+    def test_prepare_selfhost_reports_a_corrupt_database_as_a_config_error(self, entra_env):
+        pytest.importorskip("canvas_mcp.core.selfhost.token_store")
+        from canvas_mcp.core.selfhost.app import prepare_selfhost
+        from canvas_mcp.core.selfhost.settings import SelfhostConfigError
+
+        settings = load_selfhost_settings()
+        settings.token_db_path.parent.mkdir(parents=True, exist_ok=True)
+        settings.token_db_path.write_bytes(b"this is not a database" * 100)
+        with pytest.raises(SelfhostConfigError) as info:
+            prepare_selfhost(settings)
+        assert info.value.problems == [
+            "the Canvas token database cannot be opened or is not a valid database"
+        ]
+
     def test_a_malformed_keyring(self, entra_env):
         pytest.importorskip("canvas_mcp.core.selfhost.token_store")
         entra_env["monkeypatch"].setenv("CANVAS_TOKEN_KEYS", "not a keyring")
@@ -256,7 +280,7 @@ class TestRunner:
         server_module._run_selfhost_http_server(sentinel, "127.0.0.1", 8819)  # type: ignore[arg-type]
         assert captured["app"] is sentinel
         assert captured["kwargs"] == {
-            "host": "127.0.0.1", "port": 8819, "log_level": "info",
+            "host": "127.0.0.1", "port": 8819, "log_level": "info", "access_log": False,
             "proxy_headers": False, "server_header": False,
         }
         assert captured["served"] is True

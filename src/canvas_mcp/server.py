@@ -1034,6 +1034,11 @@ def _run_selfhost_http_server(app: "ASGIApp", host: str, port: int) -> None:
 
     ``proxy_headers=False``: every URL comes from PUBLIC_BASE_URL and the Host
     guard compares the real Host header, so X-Forwarded-* is never believed.
+
+    ``access_log=False``: uvicorn's access log prints the full query string, and
+    the Entra callbacks carry their authorization ``code`` and ``state`` there
+    (also ``/consent?txn_id=`` and ``/authorize`` state). Logs stay limited to
+    opaque ids and reason codes.
     """
     import anyio
     import uvicorn
@@ -1043,6 +1048,7 @@ def _run_selfhost_http_server(app: "ASGIApp", host: str, port: int) -> None:
         host=host,
         port=port,
         log_level="info",
+        access_log=False,
         proxy_headers=False,
         server_header=False,
     )

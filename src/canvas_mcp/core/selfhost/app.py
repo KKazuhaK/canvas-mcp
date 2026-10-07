@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -127,6 +128,12 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         store.initialize()
     except (TokenStoreError, KeyringError) as exc:
         raise SelfhostConfigError([str(exc)]) from None
+    except sqlite3.Error:
+        # A corrupt file, not a database, locked, or a failing disk. The driver's
+        # message is left out: it can quote paths.
+        raise SelfhostConfigError(
+            ["the Canvas token database cannot be opened or is not a valid database"]
+        ) from None
     except OSError:
         raise SelfhostConfigError(["the Canvas token database cannot be opened"]) from None
 

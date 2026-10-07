@@ -17,14 +17,18 @@ import hashlib
 import hmac
 import secrets
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
 class RequestCredentials:
-    """Canvas API credentials for a single HTTP request."""
+    """Canvas API credentials for a single HTTP request.
 
-    api_token: str
+    The token is left out of ``repr()`` so a log line, an exception message or
+    a traceback that formats this object cannot leak it.
+    """
+
+    api_token: str = field(repr=False)
     api_url: str
 
 

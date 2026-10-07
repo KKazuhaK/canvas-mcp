@@ -23,6 +23,20 @@ def _use_token(token: str) -> None:
     set_request_credentials(RequestCredentials(api_token=token, api_url="https://canvas.example.test/api/v1"))
 
 
+class TestTokenSecrecy:
+    def test_the_token_is_not_in_repr_or_str(self):
+        creds = RequestCredentials(api_token="secret-xyz", api_url="https://x")
+        assert "secret-xyz" not in repr(creds)
+        assert "secret-xyz" not in str(creds)
+        assert "api_url='https://x'" in repr(creds)
+        assert creds.api_token == "secret-xyz"  # still usable
+
+    def test_the_token_is_not_in_a_formatted_exception_or_log_argument(self):
+        creds = RequestCredentials(api_token="secret-xyz", api_url="https://x")
+        assert "secret-xyz" not in f"{creds!r} {creds}"
+        assert "secret-xyz" not in str(ValueError(creds))
+
+
 class TestPrincipalKey:
     def test_stdio_is_local(self):
         assert current_principal_key() == "local"
