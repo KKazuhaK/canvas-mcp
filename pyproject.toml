@@ -168,6 +168,9 @@ dev = [
     # use importorskip, so relying on a transitive PyYAML would let the gate
     # skip silently — the exact failure mode it exists to prevent.
     "pyyaml>=6.0",
+    # The self-hosted mode's integration and end-to-end tests mock outbound
+    # Canvas calls with respx.
+    "respx>=0.22",
     # Same reasoning for the document-extraction tests: install the optional
     # parsers so they run instead of skipping.
     "pypdf>=6.19.0,<7",

@@ -115,7 +115,7 @@ jobs:
         # importorskip, so omitting it makes them skip silently in the one job
         # branch protection actually requires — passing green while the check
         # they encode is never run.
-        pip install pytest pytest-asyncio pyyaml
+        pip install pytest pytest-asyncio pyyaml respx
 
     - name: Run the test suite
       run: pytest tests/ -q
@@ -150,7 +150,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         python -m pip install -e ".[documents]"
-        python -m pip install pytest pytest-asyncio pyyaml
+        python -m pip install pytest pytest-asyncio pyyaml respx
 
     - name: Run the test suite
       run: python -m pytest tests/ -q
