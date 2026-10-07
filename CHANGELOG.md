@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Self-hosted multi-user mode (`MCP_AUTH_MODE=entra-oauth`).** An explicit opt-in
+  mode where claude.ai, Claude Desktop and Claude Code connect through OAuth against
+  your own Microsoft Entra tenant (FastMCP `AzureProvider`) and each person enrolls
+  their own Canvas token at `/account` (Entra sign-in, CSRF, AES-256-GCM encrypted
+  store, never through chat). Every request carries the verified Entra identity
+  (tenant, app role) and uses only that person's Canvas token; startup fails closed
+  on any missing or contradictory setting. Ships with `Dockerfile.selfhost`, a
+  fork-only multi-arch GHCR workflow, a zero-clone compose file and Chinese docs
+  under `deploy/selfhost/`. Legacy stdio and `X-Canvas-Token` HTTP modes are unchanged.
+- **Result cap for claude.ai (`MCP_MAX_RESULT_CHARS`, default 140000, `0` disables).**
+  Tool results are cut at a line boundary with a tool-aware continuation notice, only
+  for clients that need it; errors, structured results, stdio and Claude Code are never cut.
+
 - **Student group tools (read-only, student profile).** `list_my_groups` lists
   the groups you belong to with the course ID and group ID, `get_group_members`
   lists a group's members (names and user IDs, never emails), and
@@ -216,6 +229,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Per-caller isolation of process-global caches.** The course-code cache, course
+  policy cache, anonymization map and discussion routing hints are now keyed by the
+  caller (a keyed hash of the `X-Canvas-Token` in legacy HTTP mode, `local` on stdio),
+  so callers with different tokens no longer share course data. Confirmation tokens
+  are bound to the verified caller identity in `entra-oauth` mode.
 - `assign_peer_review` no longer creates a placeholder submission. It scanned
   one page (100) of submissions for the reviewee and, on a miss, POSTed a
   placeholder on the student's behalf, so in a large assignment a truncated read

@@ -167,3 +167,54 @@ def test_smoke_test_script_is_wired_for_the_documented_contract():
         "MCP_ACCESS_KEYS",
     ):
         assert needle in script, f"smoke-test.sh is missing {needle!r}"
+
+
+# --- drift guards: the docs and packaging must match what the code really reads/serves ---
+
+SRC = Path(__file__).resolve().parents[1] / "src" / "canvas_mcp"
+REPO = Path(__file__).resolve().parents[1]
+
+
+def test_every_variable_the_selfhost_settings_read_is_documented(env_text):
+    source = (SRC / "core" / "selfhost" / "settings.py").read_text(encoding="utf-8")
+    read = set(re.findall(r'get\("([A-Z][A-Z0-9_]+)"\)', source))
+    read |= {"ACCOUNT_SESSION_TTL_SECONDS", "OAUTH_ALLOWED_REDIRECT_URIS", "MCP_AUTH_MODE"}
+    assert len(read) >= 12  # the regex still finds the settings
+    for name in sorted(read):
+        assert re.search(rf"^#? ?{name}=", env_text, re.MULTILINE), f"{name} is not in env.example"
+
+
+def test_student_write_tools_match_the_registered_allowlist(env_text):
+    from canvas_mcp.core.config import STUDENT_WRITE_TOOL_NAMES
+
+    values = _assignments(env_text)
+    assert set(values["STUDENT_WRITE_TOOLS"].split(",")) == set(STUDENT_WRITE_TOOL_NAMES)
+
+
+def test_documented_redirect_uris_are_the_code_defaults(env_text):
+    from canvas_mcp.core.selfhost.settings import DEFAULT_REDIRECT_URIS
+
+    for uri in DEFAULT_REDIRECT_URIS:
+        assert uri in env_text
+
+
+def test_container_port_health_path_and_mcp_path_match_the_code():
+    from canvas_mcp.core.selfhost.app import HEALTH_PATH
+    from canvas_mcp.core.selfhost.settings import SelfhostSettings
+
+    dockerfile = (REPO / "Dockerfile.selfhost").read_text(encoding="utf-8")
+    compose = (SELFHOST / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "EXPOSE 8819" in dockerfile and '"--port", "8819"' in dockerfile
+    assert f"127.0.0.1:8819{HEALTH_PATH}" in dockerfile
+    assert "127.0.0.1:8819:8819" in compose
+    assert SelfhostSettings.mcp_path == "/mcp"
+    readme = (SELFHOST / "README.md").read_text(encoding="utf-8")
+    for route in ("/mcp", "/account", "/account/admin", "/auth/callback", "/account/callback", HEALTH_PATH):
+        assert route in readme, f"README.md does not mention {route}"
+
+
+def test_token_admin_commands_in_the_docs_exist():
+    readme = (SELFHOST / "README.md").read_text(encoding="utf-8")
+    source = (SRC / "core" / "selfhost" / "token_admin.py").read_text(encoding="utf-8")
+    for command in set(re.findall(r"token_admin (check|list|revoke|rotate)", readme)):
+        assert f'add_parser("{command}"' in source
