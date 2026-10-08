@@ -358,6 +358,7 @@ gap:.5rem 1rem;padding-bottom:.8rem;border-bottom:1px solid var(--line)}
 gap:.4rem .9rem;font-size:.9rem;min-width:0}
 .who{color:var(--muted);max-width:11rem;overflow:hidden;text-overflow:ellipsis;
 white-space:nowrap}
+.acct{margin:-.6rem 0 1rem;overflow-wrap:anywhere}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;
 padding:1.1rem 1.2rem;margin:0 0 1rem}
 .card>:last-child{margin-bottom:0}
@@ -396,6 +397,8 @@ th{color:var(--muted);font-size:.85rem;font-weight:600}
 .act{text-align:right}
 .tablecard{padding:.4rem .7rem}
 @media (max-width:40rem){
+.who{max-width:7rem}
+.tools{flex:1 1 auto}
 .tablecard{background:none;border:0;padding:0}
 table,tbody,tr,td{display:block}
 thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
@@ -422,13 +425,33 @@ def _bi(zh: str, en: str) -> str:
     return zh if _current_lang() == "zh" else en
 
 
+# Chinese renderings of the identity layer's fixed refusal messages, keyed by the
+# exact English text. Anything not listed (a future message) falls back to a generic
+# line, so an unknown refusal is never shown untranslated to a Chinese reader.
+_DENIAL_ZH: dict[str, str] = {
+    "Your Microsoft account belongs to a different directory than this server accepts.": (
+        "你的 Microsoft 账号属于另一个目录，此服务器不接受。"
+    ),
+    "This sign-in was issued to a different application than this server accepts.": (
+        "此次登录签发给了另一个应用，此服务器不接受。"
+    ),
+    "Your sign-in does not carry a valid account identifier.": (
+        "你的登录信息中没有有效的账号标识。"
+    ),
+    (
+        "Your Microsoft account is not allowed to use this server. "
+        "Ask the server owner to add you to the access group."
+    ): "你的 Microsoft 账号没有使用此服务器的权限，请联系服务器所有者把你加入访问组。",
+    "Your sign-in carries malformed role information. Sign in again.": (
+        "你的登录信息中的角色数据格式有误，请重新登录。"
+    ),
+}
+
+
 def _denial_html(message: str) -> str:
-    """The identity layer's refusal text. It is English only, so Chinese gets a fixed line."""
+    """The identity layer's refusal text; Chinese gets a translation or a generic line."""
     if _current_lang() == "zh":
-        return _bi(
-            "此账号没有使用权限，请联系服务器所有者。",
-            "This account is not allowed to use this server.",
-        )
+        return _e(_DENIAL_ZH.get(message, "此账号没有使用权限，请联系服务器所有者。"))
     return _e(message)
 
 
@@ -464,6 +487,13 @@ def _document(title: str, body: str, *, wide: bool = False) -> str:
 
 def _csrf_field(csrf: str) -> str:
     return f'<input type="hidden" name="csrf" value="{_e(csrf)}">'
+
+
+def _identity_line(session: _Session) -> str:
+    """The signed-in Microsoft account as visible muted text (no hover needed)."""
+    if not session.upn:
+        return ""
+    return f'<p class="muted small acct">{_bi("Microsoft 账号", "Microsoft account")}: {_e(session.upn)}</p>'
 
 
 def _header(session: _Session | None = None) -> str:
@@ -725,7 +755,11 @@ class _AccountApp:
         notice: tuple[Literal["error", "ok"], str] | None = None,
         status: int = 200,
     ) -> Response:
-        parts: list[str] = [_header(session), f"<h1>{_bi('Canvas 账户', 'Canvas account')}</h1>"]
+        parts: list[str] = [
+            _header(session),
+            f"<h1>{_bi('Canvas 账户', 'Canvas account')}</h1>",
+            _identity_line(session),
+        ]
         if notice is not None:
             parts.append(f'<div class="notice {notice[0]}" role="alert">{notice[1]}</div>')
 

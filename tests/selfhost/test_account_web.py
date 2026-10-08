@@ -1639,15 +1639,85 @@ class TestLayout:
         assert "<summary>替换令牌</summary>" in text
         assert "删除我的令牌" in text
 
+    @staticmethod
+    def _rules(css: str) -> list[tuple[str, str, str]]:
+        """Flatten the stylesheet into (media, selector, body) in source order."""
+        out: list[tuple[str, str, str]] = []
+        pos, media = 0, ""
+        while pos < len(css):
+            if css[pos].isspace():
+                pos += 1
+                continue
+            if css[pos] == "}":
+                media, pos = "", pos + 1
+                continue
+            brace = css.index("{", pos)
+            head = css[pos:brace].strip()
+            if head.startswith("@media"):
+                media, pos = head, brace + 1
+                continue
+            end = css.index("}", brace)
+            out.append((media, head, css[brace + 1 : end]))
+            pos = end + 1
+        return out
+
+    def _effective(self, selector: str, prop: str, media: str = "") -> str | None:
+        """The last declaration of ``prop`` for exactly ``selector`` that applies."""
+        value = None
+        for m, sel, body in self._rules(account_web._CSS):
+            if m not in ("", media) or selector not in [x.strip() for x in sel.split(",")]:
+                continue
+            for decl in body.split(";"):
+                name, _, val = decl.partition(":")
+                if name.strip() == prop:
+                    value = val.strip()
+        return value
+
     def test_buttons_are_single_line(self) -> None:
-        assert "white-space:nowrap" in account_web._CSS.split(".btn{")[1].split("}")[0]
+        for media in ("", "@media (max-width:40rem)"):
+            assert self._effective(".btn", "white-space", media) == "nowrap"
 
     def test_mobile_layout_rules_exist(self) -> None:
         css = account_web._CSS
+        mobile = "@media (max-width:40rem)"
         assert "max-width:40rem" in css and "padding:.9rem 16px" in css
         assert "@media (prefers-color-scheme:dark)" in css
-        assert "@media (max-width:40rem)" in css
         assert "attr(data-label)" in css
+        # Admin rows stack as cards on a phone and nothing later undoes it.
+        assert self._effective("tr", "display", mobile) == "block"
+        assert self._effective("td", "display", mobile) == "block"
+        # The name shrinks on a phone so the header stays on one or two short lines.
+        assert self._effective(".who", "max-width", mobile) == "7rem"
+        assert self._effective(".who", "overflow") == "hidden"
+
+    def test_upn_is_visible_text_not_only_a_tooltip(self, signed_in: Harness) -> None:
+        en = signed_in.client.get(ACCOUNT_PATH, headers=EN).text
+        assert '<p class="muted small acct">Microsoft account: ada@example.test</p>' in en
+        zh = signed_in.client.get(ACCOUNT_PATH, headers=ZH).text
+        assert "Microsoft 账号: ada@example.test" in zh
+
+    def test_upn_is_escaped(self, h: Harness) -> None:
+        sign_in(h, upn="<i>x</i>@example.test")
+        text = h.client.get(ACCOUNT_PATH).text
+        assert "<i>x</i>" not in text and "&lt;i&gt;x&lt;/i&gt;@example.test" in text
+
+    def test_denial_messages_have_chinese_translations(self) -> None:
+        from canvas_mcp.core.selfhost import identity
+
+        assert set(account_web._DENIAL_ZH) == set(identity._MESSAGES.values())
+        for message, zh in account_web._DENIAL_ZH.items():
+            assert CJK.search(zh) and message not in zh
+
+    def test_denial_zh_maps_known_and_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from canvas_mcp.core.selfhost import identity
+
+        monkeypatch.setattr(account_web, "_current_lang", lambda: "zh")
+        known = identity._MESSAGES["missing_role"]
+        assert account_web._denial_html(known) == account_web._DENIAL_ZH[known]
+        generic = account_web._denial_html("<b>something new</b>")
+        assert CJK.search(generic) and "<b>" not in generic and "something new" not in generic
+        monkeypatch.setattr(account_web, "_current_lang", lambda: "en")
+        assert account_web._denial_html("<b>x</b>") == "&lt;b&gt;x&lt;/b&gt;"
 
     def test_no_script_and_no_external_resources(self, signed_in: Harness) -> None:
         text = signed_in.client.get(ACCOUNT_PATH).text.lower()
