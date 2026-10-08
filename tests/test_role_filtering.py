@@ -292,3 +292,45 @@ class TestRoleFiltering:
         register_all_tools(mcp, role="educator")
         tools = await _get_tool_names(mcp)
         assert 80 <= len(tools) <= 100, f"Expected ~94 educator tools, got {len(tools)}: {sorted(tools)}"
+
+
+class TestStudentCalendarWriteGate:
+    """Calendar/planner writes follow the STUDENT_WRITE_TOOLS ceiling."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_config(self):
+        from canvas_mcp.core.config import reset_config
+
+        reset_config()
+        yield
+        reset_config()
+
+    @pytest.mark.asyncio
+    async def test_absent_by_default(self, monkeypatch):
+        monkeypatch.delenv("STUDENT_WRITE_TOOLS", raising=False)
+        mcp = FastMCP(name="test-student")
+        register_all_tools(mcp, role="student")
+        tools = await _get_tool_names(mcp)
+        assert not tools & STUDENT_CALENDAR_WRITE_TOOLS
+
+    @pytest.mark.asyncio
+    async def test_student_profile_registers_named_tools(self, monkeypatch):
+        from canvas_mcp.core.config import reset_config
+
+        monkeypatch.setenv("STUDENT_WRITE_TOOLS", ",".join(sorted(STUDENT_CALENDAR_WRITE_TOOLS)))
+        reset_config()
+        mcp = FastMCP(name="test-student")
+        register_all_tools(mcp, role="student")
+        assert STUDENT_CALENDAR_WRITE_TOOLS <= await _get_tool_names(mcp)
+
+    @pytest.mark.asyncio
+    async def test_educator_profile_never_registers_them(self, monkeypatch):
+        from canvas_mcp.core.config import reset_config
+
+        monkeypatch.setenv("STUDENT_WRITE_TOOLS", ",".join(sorted(STUDENT_CALENDAR_WRITE_TOOLS)))
+        reset_config()
+        mcp = FastMCP(name="test-educator")
+        register_all_tools(mcp, role="educator")
+        tools = await _get_tool_names(mcp)
+        assert not tools & STUDENT_CALENDAR_WRITE_TOOLS
+        assert "list_calendar_events" not in tools
