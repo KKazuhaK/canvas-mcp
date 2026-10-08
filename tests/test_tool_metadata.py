@@ -126,8 +126,6 @@ ADDITIVE = {
     # Student calendar/planner: a new note or personal event, nothing replaced.
     "create_planner_note",
     "create_personal_calendar_event",
-    # Only ever completes a module requirement; it has no undo.
-    "mark_module_item_done",
 }
 
 # Repeating the call with the same arguments produces a duplicate.
@@ -353,8 +351,9 @@ FULL_CONTENT_TOOLS = {
     "list_discussion_entries",
     "get_conversation_details",
     "get_my_submission",
-    "get_calendar_event",
+    "get_my_assignment_scores",
     "get_quiz_details",
+    "get_calendar_event",
     "get_rubric",
     "get_rubric_assessment",
 }

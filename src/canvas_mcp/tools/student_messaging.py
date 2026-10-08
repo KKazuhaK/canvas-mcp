@@ -176,6 +176,17 @@ def _body_error(body: str) -> str | None:
     return None
 
 
+def _subject_error(subject: str) -> str | None:
+    """Student-side subject check: a blank-looking subject is not a subject.
+
+    The shared outbound validation only rejects an empty string, so a subject
+    of spaces would otherwise pass and produce a message with no visible title.
+    """
+    if not subject or not subject.strip():
+        return "subject is required"
+    return None
+
+
 async def _resolve_course(
     course_identifier: str | int,
 ) -> tuple[str, str] | str:
@@ -374,15 +385,27 @@ def _conversation_course_ids(conversation: dict[str, Any]) -> set[str]:
     Prefers the conversation's own ``context_code``; otherwise falls back to
     the documented ``audience_contexts.courses`` (the courses shared with the
     other participants). Every course found must allow the reply.
+
+    Fails closed: if any course key is not a plain numeric ID, the answer is
+    the empty set ("no course could be identified"), never just the keys that
+    parsed, because a dropped course is a course whose policy was not checked.
+    The same holds for a ``context_code`` that names a course but not by a
+    plain numeric ID: it is not skipped in favour of ``audience_contexts``.
     """
-    match = _COURSE_CONTEXT.match(str(conversation.get("context_code") or ""))
+    context_code = str(conversation.get("context_code") or "")
+    match = _COURSE_CONTEXT.match(context_code)
     if match:
         return {match.group(1)}
+    if context_code.startswith("course_"):
+        return set()
     contexts = conversation.get("audience_contexts")
     courses = contexts.get("courses") if isinstance(contexts, dict) else None
     if not isinstance(courses, dict):
         return set()
-    return {cid for cid in (coerce_canvas_id(key) for key in courses) if cid}
+    course_ids = {coerce_canvas_id(key) for key in courses}
+    if None in course_ids:
+        return set()
+    return {cid for cid in course_ids if cid}
 
 
 async def _check_courses_allowed(
@@ -392,8 +415,9 @@ async def _check_courses_allowed(
     if not course_ids:
         if get_config().course_agent_policy_enabled:
             return False, (
-                "This conversation is not tied to a course, so the course's "
-                "agent policy cannot be checked. Reply in Canvas instead."
+                "This conversation is not tied to a course (or its course could "
+                "not be identified), so the course's agent policy cannot be "
+                "checked. Reply in Canvas instead."
             )
         # Policy disabled: only the operator ceiling applies, and
         # check_student_write_allowed answers that without reading a course.
@@ -444,15 +468,21 @@ async def _load_reply_target(
             f"You are not a participant in conversation {conversation_id}, so "
             "you cannot reply to it."
         )
-    if conversation.get("cannot_reply") is True:
+    # Any truthy value blocks; only an absent or false flag lets a reply
+    # through, so an unexpected shape (a string, a number) is never read as "ok".
+    if conversation.get("cannot_reply"):
         return "Canvas does not allow replies to this conversation."
 
-    # The reply is sent without recipients[], so Canvas delivers it to every
-    # current participant. The previewed (and fingerprinted, and capped)
-    # audience is therefore the union of ``audience`` and ``participants``,
-    # never less than what Canvas will actually reach.
+    # Preview and explicitly address the union of audience and participants.
+    # The reply cannot inherit participants added after this GET.
     audience: list[str] = []
-    raw_ids = list(conversation.get("audience") or []) + [p.get("id") for p in participants]
+    listed_audience = conversation.get("audience")
+    if listed_audience is None:
+        listed_audience = []
+    if not isinstance(listed_audience, list):
+        # Not iterated: a string would be read one character at a time.
+        return f"Conversation {conversation_id} has an unexpected audience."
+    raw_ids = listed_audience + [p.get("id") for p in participants]
     for raw in raw_ids:
         user_id = coerce_canvas_id(raw if raw is not None else "")
         if user_id is None:
@@ -643,8 +673,10 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
             # (subject length, empty body, fence markers), plus the student
             # body rules shared with reply_to_conversation (whitespace-only and
             # over-long bodies).
-            validation_error = _body_error(body) or _validate_outbound_message(
-                parsed, subject, body, "sync"
+            validation_error = (
+                _subject_error(subject)
+                or _body_error(body)
+                or _validate_outbound_message(parsed, subject, body, "sync")
             )
             if validation_error:
                 return {"error": validation_error, "nothing_sent": True}
@@ -867,17 +899,11 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
                 if not allowed:
                     return {"error": f"❌ Reply blocked. {reason}", "nothing_sent": True}
 
-                # No recipients[]: Canvas then delivers to the conversation's
-                # current participants, which is exactly the audience just
-                # re-read, previewed and bound into the token. Sending
-                # recipients[] would add nothing a prompt could exploit (only
-                # a participant can add people, and they already get the
-                # reply) but makes Canvas run its student active-enrollment
-                # check on every listed person (get_invalid_recipients), so a
-                # reply to any thread with a dropped classmate or last term's
-                # TA would be refused with 401. No included_messages, no
-                # attachments.
-                data: dict[str, Any] = {"body": body}
+                # Pin delivery to the token-bound audience: omitting recipients
+                # would include people added after the last conversation GET.
+                # Canvas may reject explicit recipients with inactive enrollment;
+                # fail closed rather than retry with its expanding default.
+                data: dict[str, Any] = {"body": body, "recipients[]": audience}
                 assert_no_identity_override(data)
 
                 outcome = WriteOutcome.MAY_HAVE_WRITTEN

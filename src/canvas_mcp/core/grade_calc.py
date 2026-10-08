@@ -374,7 +374,8 @@ class TargetResult:
     remaining_ids: tuple[str, ...]
     remaining_points: float
     # Lowest uniform percent (0.01 resolution) that reaches the target, or
-    # None when even ``max_percent`` does not.
+    # None when the search finds no solution. With non_monotone=True this
+    # is indeterminate: a narrow passing interval may have been missed.
     required_percent: float | None
     projected_at_zero: float | None
     projected_at_full: float | None
@@ -631,17 +632,12 @@ def _number(value: Any) -> float | None:
 def own_submission(assignment: Mapping[str, Any]) -> Mapping[str, Any] | None:
     """The caller's submission embedded by ``include[]=submission``.
 
-    Canvas embeds one object for a student. A list appears for observers;
-    only an unambiguous single entry is used.
+    Canvas embeds one object for a student. Anything else (absent, null, or a
+    list, which Canvas sends for observer tokens and which would describe the
+    observed students, not the caller) is not the caller's own submission.
     """
     submission = assignment.get("submission")
-    if isinstance(submission, Mapping):
-        return submission
-    if isinstance(submission, list) and len(submission) == 1:
-        only = submission[0]
-        if isinstance(only, Mapping):
-            return only
-    return None
+    return submission if isinstance(submission, Mapping) else None
 
 
 def is_unposted(submission: Mapping[str, Any] | None) -> bool:
@@ -738,43 +734,174 @@ def submission_statuses(
     return labels
 
 
+class MalformedGradeData(ValueError):
+    """Canvas sent assignment-group data the grade model cannot trust.
+
+    Raised instead of skipping the offending entry: a grade computed from a
+    silently shortened list of groups, assignments or rules would look
+    authoritative and be wrong.
+    """
+
+
+def canvas_id(value: Any) -> str | None:
+    """A Canvas object ID as its normalized digit string, else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    text = str(value).strip()
+    return text if text.isascii() and text.isdigit() else None
+
+
+def _checked_number(
+    value: Any, label: str, *, minimum: float | None = None
+) -> float | None:
+    """A numeric field Canvas may leave null, but must not send as anything else.
+
+    None stays None (the field is absent). Any other value that is not a finite
+    number, or is below ``minimum``, is malformed: defaulting it to 0 would let
+    a wrong grade look authoritative.
+    """
+    if value is None:
+        return None
+    number = _number(value)
+    if number is None:
+        raise MalformedGradeData(f"{label} is not a number: {value!r}")
+    if minimum is not None and number < minimum:
+        raise MalformedGradeData(f"{label} is below {minimum:g}: {value!r}")
+    return number
+
+
+def _drop_count(rules: Mapping[str, Any], key: str, group_id: str) -> int:
+    value = rules.get(key)
+    if value is None:
+        return 0
+    number = _number(value)
+    if number is None or number < 0 or number != int(number):
+        raise MalformedGradeData(
+            f"assignment group {group_id} has an unreadable {key} rule: {value!r}"
+        )
+    return int(number)
+
+
+def _check_boolean_fields(payload: Mapping[str, Any], fields: Sequence[str], label: str) -> None:
+    """Reject malformed flags instead of treating text such as 'false' as true."""
+    for field in fields:
+        if field in payload and not isinstance(payload[field], bool):
+            raise MalformedGradeData(f"{label} {field} is not a boolean: {payload[field]!r}")
+
+
 def build_grade_model(
     groups_json: Sequence[Mapping[str, Any]],
 ) -> tuple[list[GroupRules], list[GradedItem]]:
     """Turn ``/assignment_groups?include[]=assignments&include[]=submission``
-    into the calculation model. IDs become strings."""
+    into the calculation model. IDs become strings.
+
+    Raises ``MalformedGradeData`` when the payload is not the shape Canvas
+    documents: a group or assignment that is not an object or has no numeric
+    ID, assignments that are not a list, unreadable drop rules, or a
+    submission that is not the caller's single object. Numeric fields that are
+    present but not numeric (a null stays allowed), a ``never_drop`` entry that
+    is not an assignment ID, and a group or assignment ID that appears twice
+    are rejected the same way.
+    """
     groups: list[GroupRules] = []
     items: list[GradedItem] = []
+    seen_groups: set[str] = set()
+    seen_assignments: set[str] = set()
     for group in groups_json:
-        if not isinstance(group, Mapping) or group.get("id") is None:
-            continue
-        group_id = str(group["id"])
-        rules = group.get("rules") or {}
-        if not isinstance(rules, Mapping):
+        if not isinstance(group, Mapping):
+            raise MalformedGradeData("an assignment group entry is not an object")
+        group_id = canvas_id(group.get("id"))
+        if group_id is None:
+            raise MalformedGradeData(
+                f"an assignment group has no numeric ID (got {group.get('id')!r})"
+            )
+        if group_id in seen_groups:
+            raise MalformedGradeData(f"assignment group {group_id} appears more than once")
+        seen_groups.add(group_id)
+        rules = group.get("rules")
+        if rules is None:
             rules = {}
-        never_drop = rules.get("never_drop") or []
+        if not isinstance(rules, Mapping):
+            raise MalformedGradeData(f"assignment group {group_id} has unreadable drop rules")
+        never_drop = rules.get("never_drop")
+        if never_drop is None:
+            never_drop = []
+        if not isinstance(never_drop, list):
+            raise MalformedGradeData(
+                f"assignment group {group_id} has an unreadable never_drop rule"
+            )
+        never_drop_ids: set[str] = set()
+        for entry in never_drop:
+            entry_id = canvas_id(entry)
+            if entry_id is None:
+                raise MalformedGradeData(
+                    f"assignment group {group_id} has a never_drop entry that is not "
+                    f"an assignment ID: {entry!r}"
+                )
+            never_drop_ids.add(entry_id)
+        weight = _checked_number(
+            group.get("group_weight"), f"assignment group {group_id} group_weight", minimum=0.0
+        )
         groups.append(
             GroupRules(
                 group_id=group_id,
-                weight=_number(group.get("group_weight")) or 0.0,
-                drop_lowest=int(_number(rules.get("drop_lowest")) or 0),
-                drop_highest=int(_number(rules.get("drop_highest")) or 0),
-                never_drop=frozenset(str(a) for a in never_drop if a is not None),
+                weight=weight or 0.0,
+                drop_lowest=_drop_count(rules, "drop_lowest", group_id),
+                drop_highest=_drop_count(rules, "drop_highest", group_id),
+                never_drop=frozenset(never_drop_ids),
             )
         )
-        for assignment in group.get("assignments") or []:
-            if not isinstance(assignment, Mapping) or assignment.get("id") is None:
-                continue
+        assignments = group.get("assignments")
+        if not isinstance(assignments, list):
+            raise MalformedGradeData(f"assignment group {group_id} did not list its assignments")
+        for assignment in assignments:
+            if not isinstance(assignment, Mapping):
+                raise MalformedGradeData(
+                    f"an assignment entry in group {group_id} is not an object"
+                )
+            assignment_id = canvas_id(assignment.get("id"))
+            if assignment_id is None:
+                raise MalformedGradeData(
+                    f"an assignment in group {group_id} has no numeric ID "
+                    f"(got {assignment.get('id')!r})"
+                )
+            if assignment_id in seen_assignments:
+                raise MalformedGradeData(f"assignment {assignment_id} appears more than once")
+            seen_assignments.add(assignment_id)
+            _check_boolean_fields(
+                assignment, ("published", "omit_from_final_grade"), f"assignment {assignment_id}"
+            )
+            points_possible = _checked_number(
+                assignment.get("points_possible"),
+                f"assignment {assignment_id} points_possible",
+                minimum=0.0,
+            )
+            raw_submission = assignment.get("submission")
+            if raw_submission is not None and not isinstance(raw_submission, Mapping):
+                raise MalformedGradeData(
+                    f"assignment {assignment_id} came back with submissions as a list or "
+                    "other non-object, which Canvas does for observer tokens; this tool "
+                    "reports only your own submissions"
+                )
             submission = own_submission(assignment)
+            if submission is not None:
+                _check_boolean_fields(
+                    submission, ("excused", "missing", "late"), f"assignment {assignment_id} submission"
+                )
             # Canvas's student-visible grade treats an unposted submission as
             # never graded: no score and no excusal.
             unposted = is_unposted(submission)
-            score = _number(submission.get("score")) if submission and not unposted else None
+            raw_score = (
+                _checked_number(submission.get("score"), f"assignment {assignment_id} score")
+                if submission
+                else None
+            )
+            score = None if unposted else raw_score
             items.append(
                 GradedItem(
-                    assignment_id=str(assignment["id"]),
+                    assignment_id=assignment_id,
                     group_id=group_id,
-                    points_possible=max(_number(assignment.get("points_possible")) or 0.0, 0.0),
+                    points_possible=points_possible or 0.0,
                     score=score,
                     excused=bool(submission and submission.get("excused")) and not unposted,
                     pending_review=bool(

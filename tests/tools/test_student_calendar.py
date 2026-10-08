@@ -280,7 +280,7 @@ class TestListCalendarEvents:
             "course_100": [
                 {"id": 30, "title": INJECTION, "start_at": "2026-10-04T17:00:00Z",
                  "end_at": "2026-10-04T18:00:00Z", "context_code": "course_100",
-                 "location_name": "ICS 174"},
+                 "location_name": "CS 174"},
                 shared,
             ],
             # Same event surfacing from a second context in another chunk.
@@ -463,7 +463,7 @@ class TestGetCalendarEvent:
             "id": 55, "title": "Midterm", "start_at": "2026-10-20T17:00:00Z",
             "end_at": "2026-10-20T18:20:00Z", "context_code": "course_100",
             "description": f"<b>{INJECTION}</b>", "location_name": "SSL 270",
-            "location_address": "Irvine, CA", "html_url": "https://canvas.eee.uci.edu/x",
+            "location_address": "Springfield, IL", "html_url": "https://canvas.example.edu/x",
         }})
         with canvas(fake):
             result = await tools["get_calendar_event"](event_id="55")
@@ -480,12 +480,12 @@ class TestGetCalendarEvent:
         fake = FakeCanvas(routes={("get", "/calendar_events/55"): {
             "id": 55, "title": "Office hours", "start_at": "2026-10-20T17:00:00Z",
             "context_code": "course_100", "appointment_group_id": 3,
-            "user": {"id": 801, "name": "Jane Classmate", "login_id": "jclass@uci.edu"},
+            "user": {"id": 801, "name": "Jane Classmate", "login_id": "jclass@example.edu"},
             "child_events": [{"id": 56, "user": {"id": 802, "name": "Sam Peer"}}],
         }})
         with canvas(fake):
             result = await tools["get_calendar_event"](event_id=55)
-        for leaked in ("Jane Classmate", "jclass@uci.edu", "Sam Peer", "801", "802"):
+        for leaked in ("Jane Classmate", "jclass@example.edu", "Sam Peer", "801", "802"):
             assert leaked not in result
 
     @pytest.mark.asyncio
@@ -688,6 +688,56 @@ def _note(**overrides: Any) -> dict[str, Any]:
 
 
 class TestUpdatePlannerNote:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("returned_date,confirmed", [
+        ("2026-10-03T07:00:00Z", False),
+        (None, False),
+        ({"date": "2026-10-04"}, False),
+        (123, False),
+        (True, False),
+        ("invalid", False),
+        ("2026-10-04T00:00:00Z", True),
+        ("2026-10-03T19:00:00-05:00", True),
+    ])
+    async def test_date_only_update_verifies_returned_instant(self, returned_date, confirmed):
+        tools = write_tools()
+        fake = FakeCanvas(routes={
+            ("get", "/planner_notes/5"): _note(),
+            ("put", "/planner_notes/5"): _note(todo_date=returned_date),
+        })
+        args = {"note_id": 5, "todo_date": "2026-10-04T00:00:00Z"}
+        with canvas(fake):
+            token = _token(await tools["update_planner_note"](**args))
+            result = await tools["update_planner_note"](**args, confirmation_token=token)
+        assert len(fake.writes()) == 1
+        assert result.startswith("✅ Planner note updated.") == confirmed
+        if not confirmed:
+            assert result.startswith("⚠️  Could not confirm")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("zone,returned_date,confirmed", [
+        ("America/Los_Angeles", "2026-10-04T07:00:00Z", True),
+        ("Asia/Tokyo", "2026-10-03T15:00:00Z", True),
+        ("Asia/Tokyo", "2026-10-04T15:00:00Z", False),
+        (None, "2026-10-04T00:00:00Z", False),
+        ("Unknown/Zone", "2026-10-04T00:00:00Z", False),
+    ])
+    async def test_date_only_update_uses_canvas_user_timezone(self, zone, returned_date, confirmed):
+        tools = write_tools(TIMEZONE="UTC")
+        fake = FakeCanvas(routes={
+            ("get", "/users/self"): {"id": ME, "time_zone": zone},
+            ("get", "/planner_notes/5"): _note(),
+            ("put", "/planner_notes/5"): _note(todo_date=returned_date),
+        })
+        args = {"note_id": 5, "todo_date": "2026-10-04"}
+        with canvas(fake):
+            token = _token(await tools["update_planner_note"](**args))
+            result = await tools["update_planner_note"](**args, confirmation_token=token)
+        assert len(fake.writes()) == 1
+        assert result.startswith("✅ Planner note updated.") == confirmed
+        if not confirmed:
+            assert result.startswith("⚠️  Could not confirm")
+
     @pytest.mark.asyncio
     async def test_preview_then_confirm(self) -> None:
         tools = write_tools()
@@ -1359,7 +1409,7 @@ class TestDateInputs:
         assert fake.writes()[0][2]["data"]["calendar_event[start_at]"] == "2026-10-05T14:00:00Z"
 
 
-UCI_COURSES = [{"id": 4242, "course_code": "COMPSCI 161", "name": "Design and Analysis of Algorithms"}]
+SPACED_CODE_COURSES = [{"id": 4242, "course_code": "CS 161", "name": "Design and Analysis of Algorithms"}]
 
 
 class TestCourseIdentifierPaths:
@@ -1385,7 +1435,7 @@ class TestCourseIdentifierPaths:
         """A non-SIS identifier is looked up in the caller's course list; it
         never reaches a request path, and nothing else is requested."""
         tools = get_tools()
-        fake = FakeCanvas(paginated={"/courses": UCI_COURSES})
+        fake = FakeCanvas(paginated={"/courses": SPACED_CODE_COURSES})
         with canvas(fake):
             result = await tools["list_planner_notes"](course_identifier=bad)
         assert result.startswith("Error: Could not find course")
@@ -1394,16 +1444,16 @@ class TestCourseIdentifierPaths:
 
 
 class TestCourseCodeResolution:
-    """UCI course codes contain spaces (``COMPSCI 161``); every calendar tool
+    """Course codes can contain spaces (``CS 161``); every calendar tool
     that takes a course must resolve them to the numeric ID, on a cold cache,
     without ever putting the code in a request path."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("identifier", ["COMPSCI 161", "  compsci 161 ",
+    @pytest.mark.parametrize("identifier", ["CS 161", "  cs 161 ",
                                             "Design and Analysis of Algorithms"])
     async def test_list_planner_notes(self, identifier: str) -> None:
         tools = get_tools()
-        fake = FakeCanvas(paginated={"/courses": UCI_COURSES, "/planner_notes": []})
+        fake = FakeCanvas(paginated={"/courses": SPACED_CODE_COURSES, "/planner_notes": []})
         with canvas(fake):
             await tools["list_planner_notes"](course_identifier=identifier)
         assert fake.paged[0] == ("/courses", {"per_page": 100})
@@ -1415,9 +1465,9 @@ class TestCourseCodeResolution:
     async def test_list_calendar_events(self) -> None:
         tools = get_tools()
         fake = _calendar_fake(n_courses=0)
-        fake.paginated["/courses"] = UCI_COURSES
+        fake.paginated["/courses"] = SPACED_CODE_COURSES
         with canvas(fake):
-            result = await tools["list_calendar_events"](course_identifier="COMPSCI 161")
+            result = await tools["list_calendar_events"](course_identifier="CS 161")
         assert not result.startswith("Error"), result
         calendar_calls = [p for e, p in fake.paged if e == "/calendar_events"]
         assert calendar_calls
@@ -1429,12 +1479,12 @@ class TestCourseCodeResolution:
         tools = write_tools()
         fake = FakeCanvas(
             routes={("post", "/planner_notes"): {"id": 9, "title": "x"}},
-            paginated={"/courses": UCI_COURSES},
+            paginated={"/courses": SPACED_CODE_COURSES},
         )
         policy = AsyncMock(return_value=(True, ""))
         with canvas(fake), patch(f"{MOD}.check_student_write_allowed", new=policy):
             await tools["create_planner_note"](
-                title="x", todo_date="2026-10-03", course_identifier="COMPSCI 161")
+                title="x", todo_date="2026-10-03", course_identifier="CS 161")
         policy.assert_awaited_once_with("4242", "create_planner_note")
         [(method, endpoint, kwargs)] = fake.writes()
         assert (method, endpoint) == ("post", "/planner_notes")
@@ -1445,13 +1495,13 @@ class TestCourseCodeResolution:
         tools = write_tools()
         fake = FakeCanvas(
             routes={("get", "/planner_notes/5"): _note(course_id=100)},
-            paginated={"/courses": UCI_COURSES},
+            paginated={"/courses": SPACED_CODE_COURSES},
         )
         policy = AsyncMock(return_value=(True, ""))
         with canvas(fake), patch(f"{MOD}.check_student_write_allowed", new=policy):
-            await tools["update_planner_note"](note_id=5, course_identifier="COMPSCI 161")
+            await tools["update_planner_note"](note_id=5, course_identifier="CS 161")
         assert {call.args[0] for call in policy.await_args_list} == {"100", "4242"}
-        assert all("COMPSCI" not in endpoint for _, endpoint, _ in fake.calls)
+        assert all("CS" not in endpoint for _, endpoint, _ in fake.calls)
 
     @pytest.mark.asyncio
     async def test_mark_planner_item_complete(self) -> None:
@@ -1462,20 +1512,20 @@ class TestCourseCodeResolution:
                 ("post", "/planner/overrides"): {"id": 1, "plannable_type": "assignment",
                                                  "plannable_id": 42, "marked_complete": True},
             },
-            paginated={"/courses": UCI_COURSES, "/planner/overrides": []},
+            paginated={"/courses": SPACED_CODE_COURSES, "/planner/overrides": []},
         )
         with canvas(fake), patch(
             f"{MOD}.check_student_write_allowed", new=AsyncMock(return_value=(True, ""))
         ):
             result = await tools["mark_planner_item_complete"](
-                plannable_type="assignment", plannable_id=42, course_identifier="COMPSCI 161")
+                plannable_type="assignment", plannable_id=42, course_identifier="CS 161")
         assert result.startswith("✅"), result
         assert ("get", "/courses/4242/assignments/42") in [(m, e) for m, e, _ in fake.calls]
 
     @pytest.mark.asyncio
     async def test_unknown_code_is_refused_after_one_refresh(self) -> None:
         tools = write_tools()
-        fake = FakeCanvas(paginated={"/courses": UCI_COURSES})
+        fake = FakeCanvas(paginated={"/courses": SPACED_CODE_COURSES})
         with canvas(fake):
             result = await tools["create_planner_note"](
                 title="x", todo_date="2026-10-03", course_identifier="I&C SCI 33")
@@ -1674,3 +1724,129 @@ class TestCalendarEventCoursePolicy:
                 plannable_type="calendar_event", plannable_id=9)
         assert result.startswith("✅")
         policy.assert_not_awaited()
+
+
+class TestFailClosedOnUnknownState:
+    """A policy or ownership check never passes because its input was missing.
+
+    Each case below once read "I could not tell" as "there is nothing to check".
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("event", "extra_routes"),
+        [
+            ({"id": 9, "title": "Mystery"}, {}),
+            ({"id": 9, "context_code": "", "effective_context_code": None}, {}),
+            ({"id": 9, "context_code": "group_5"},
+             {("get", "/groups/5"): {"id": 5, "name": "G"}}),
+            ({"id": 9, "context_code": "group_5"},
+             {("get", "/groups/5"): {"id": 5, "context_type": "Elsewhere"}}),
+        ],
+    )
+    async def test_event_with_no_provable_owner_is_refused(
+        self, event: dict, extra_routes: dict
+    ) -> None:
+        tools = write_tools()
+        fake = FakeCanvas(routes={("get", "/calendar_events/9"): event, **extra_routes},
+                          paginated={"/planner/overrides": []})
+        policy = AsyncMock(return_value=(True, ""))
+        with canvas(fake), patch(f"{MOD}.check_student_write_allowed", new=policy):
+            result = await tools["mark_planner_item_complete"](
+                plannable_type="calendar_event", plannable_id=9)
+        assert result.startswith("❌")
+        assert "cannot be checked" in result
+        assert fake.writes() == [] and fake.paged == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_course", ["abc", "100/assignments/1", "0x10"])
+    @pytest.mark.parametrize("tool", ["update_planner_note", "delete_planner_note",
+                                      "mark_planner_item_complete"])
+    async def test_note_naming_an_unusable_course_skips_no_policy_check(
+        self, tool: str, bad_course: str
+    ) -> None:
+        tools = write_tools()
+        fake = FakeCanvas(
+            routes={("get", "/planner_notes/5"): _note(course_id=bad_course)},
+            paginated={"/planner/overrides": []},
+        )
+        policy = AsyncMock(return_value=(True, ""))
+        args: dict[str, Any] = {"note_id": 5}
+        if tool == "update_planner_note":
+            args["title"] = "New"
+        if tool == "mark_planner_item_complete":
+            args = {"plannable_type": "planner_note", "plannable_id": 5}
+        with canvas(fake), patch(f"{MOD}.check_student_write_allowed", new=policy):
+            result = await tools[tool](**args)
+        assert result.startswith("❌")
+        assert "course policy cannot be checked" in result
+        assert "Confirmation token" not in result
+        assert fake.writes() == [] and fake.paged == []
+        # Nothing was authorised on the strength of an id nobody validated.
+        policy.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("response_context", [None, "course_100", "user_99"])
+    async def test_event_not_confirmed_on_the_personal_calendar(
+        self, response_context: str | None
+    ) -> None:
+        tools = write_tools()
+        created: dict[str, Any] = {"id": 12, "title": "Study"}
+        if response_context is not None:
+            created["context_code"] = response_context
+        fake = FakeCanvas(routes={("post", "/calendar_events"): created})
+        with canvas(fake):
+            result = await tools["create_personal_calendar_event"](
+                title="Study", start_at="2026-10-06T15:00:00-07:00")
+        assert "✅" not in result
+        assert "could not confirm" in result.lower() or "unconfirmed" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_moving_a_note_to_a_course_is_not_reported_done_unless_it_landed(self) -> None:
+        tools = write_tools()
+        # Canvas answers 200 but leaves the note filed under its old course.
+        fake = FakeCanvas(routes={
+            ("get", "/planner_notes/5"): _note(course_id=100),
+            ("put", "/planner_notes/5"): _note(course_id=100),
+        })
+        policy = AsyncMock(return_value=(True, ""))
+        with canvas(fake), patch(f"{MOD}.check_student_write_allowed", new=policy):
+            token = _token(await tools["update_planner_note"](note_id=5, course_identifier=200))
+            result = await tools["update_planner_note"](
+                note_id=5, course_identifier=200, confirmation_token=token)
+        assert "✅" not in result
+        assert len(fake.writes()) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revoked_tool", ["mark_planner_item_complete", "mark_module_item_done"])
+@pytest.mark.parametrize("existing_override", [False, True])
+async def test_planner_completion_rechecks_policy_after_override_pagination(
+    revoked_tool: str, existing_override: bool,
+) -> None:
+    tools = write_tools()
+    revoked = False
+
+    def overrides(_: dict[str, Any]) -> list[dict[str, Any]]:
+        nonlocal revoked
+        revoked = True
+        return [{
+            "id": 9, "plannable_type": "assignment", "plannable_id": 42,
+            "marked_complete": False, "dismissed": False,
+        }] if existing_override else []
+
+    async def policy(course_id: str, tool_name: str) -> tuple[bool, str]:
+        return not (revoked and tool_name == revoked_tool), "Instructor revoked this write"
+
+    fake = FakeCanvas(
+        routes={
+            ("get", "/courses/123/assignments/42"): {"id": 42, "name": "Assignment"},
+            ("post", "/planner/overrides"): {"marked_complete": True},
+            ("put", "/planner/overrides/9"): {"marked_complete": True},
+        },
+        paginated={"/planner/overrides": overrides},
+    )
+    with canvas(fake), patch(f"{MOD}.check_student_write_allowed", policy):
+        result = await tools["mark_planner_item_complete"]("assignment", 42, 123)
+    assert "blocked" in result
+    assert fake.writes() == []

@@ -1,6 +1,7 @@
 """Course caching system for Canvas API."""
 
 import asyncio
+import re
 import time
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
@@ -10,6 +11,7 @@ from typing import Any
 from .client import fetch_all_paginated_results, make_canvas_request
 from .credentials import current_principal_key
 from .logging import log_error, log_info
+from .untrusted_content import fence_untrusted_inline
 from .validation import coerce_canvas_id, validate_params
 
 # Every course from the last refresh as (id, course_code, name, sis_course_id),
@@ -128,6 +130,21 @@ async def refresh_course_cache() -> bool:
     return True
 
 
+def _refresh_in_flight(loop: asyncio.AbstractEventLoop) -> asyncio.Task[bool] | None:
+    """The current caller's refresh that is still running on ``loop``, if any."""
+    task = current_cache_state().refresh_task
+    if task is not None and not task.done() and task.get_loop() is loop:
+        return task
+    return None
+
+
+def _start_refresh(loop: asyncio.AbstractEventLoop) -> asyncio.Task[bool]:
+    """Start a course-cache refresh and record it on the caller's state."""
+    task = loop.create_task(refresh_course_cache())
+    current_cache_state().refresh_task = task
+    return task
+
+
 async def _refresh_after_miss() -> bool:
     """Refresh the course cache because a lookup missed; False if that failed.
 
@@ -138,16 +155,14 @@ async def _refresh_after_miss() -> bool:
     """
     state = current_cache_state()
     loop = asyncio.get_running_loop()
-    task = state.refresh_task
-    if task is not None and not task.done() and task.get_loop() is loop:
-        return await asyncio.shield(task)
-    if (
-        state.last_refresh_at is not None
-        and time.monotonic() - state.last_refresh_at < REFRESH_ON_MISS_INTERVAL_SECONDS
-    ):
-        return True
-    task = loop.create_task(refresh_course_cache())
-    state.refresh_task = task
+    task = _refresh_in_flight(loop)
+    if task is None:
+        if (
+            state.last_refresh_at is not None
+            and time.monotonic() - state.last_refresh_at < REFRESH_ON_MISS_INTERVAL_SECONDS
+        ):
+            return True
+        task = _start_refresh(loop)
     # Shielded so a caller that is cancelled does not cancel the refresh the
     # other callers are waiting on.
     return await asyncio.shield(task)
@@ -349,6 +364,15 @@ def is_safe_sis_course_form(identifier: str) -> bool:
     )
 
 
+def _lookup_failure_reason(error: object) -> str:
+    """Keep untrusted Canvas lookup response bodies out of diagnostics."""
+    text = str(error)
+    status = re.match(r"HTTP error: (\d{3})(?!\d)", text)
+    if status:
+        return f"HTTP {status.group(1)}"
+    return fence_untrusted_inline(text.strip()[:200] or "no detail", "Canvas error")
+
+
 async def resolve_numeric_course_id(
     course_identifier: str | int,
     *,
@@ -407,7 +431,7 @@ async def resolve_numeric_course_id(
         course = await make_canvas_request("get", f"/courses/{raw}")
         if not isinstance(course, dict) or "error" in course:
             detail = course.get("error") if isinstance(course, dict) else course
-            return None, f"{not_found}: {detail}"
+            return None, f"{not_found}: {_lookup_failure_reason(detail)}"
         found = coerce_canvas_id(course.get("id", ""))
         return (found, None) if found is not None else (None, not_found)
 

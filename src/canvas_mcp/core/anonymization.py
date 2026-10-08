@@ -180,8 +180,8 @@ NON_USER_MARKER_FIELDS = frozenset({
 #: sub-objects that hold the caller's addresses and login handles.
 #: ``participants`` is the discussion ``/view`` user-summary list: an entry
 #: without an avatar key carries no other user signal, so without this its
-#: ``display_name`` passed through. (On ``/conversations`` the free_text tier
-#: keeps display names regardless.)
+#: ``display_name`` passed through (this includes group discussions). On
+#: ``/conversations`` the free_text tier keeps display names regardless.
 USER_CONTAINER_KEYS = frozenset({
     'user',
     'author',

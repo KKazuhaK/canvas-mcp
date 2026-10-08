@@ -470,14 +470,14 @@ def register_all_tools(mcp: FastMCP, role: str = "all") -> None:
     # Student-specific tools
     if role in ("student", "all"):
         register_student_tools(mcp)
-        # Read-only quiz awareness; never takes a quiz or reads questions.
-        register_student_quiz_tools(mcp)
-        # Read-only, scoped to groups the caller belongs to (tools/student_groups.py).
-        register_student_group_tools(mcp)
         # Cross-course announcements and activity stream (read-only).
         register_student_feed_tools(mcp)
+        # Read-only, scoped to groups the caller belongs to (tools/student_groups.py).
+        register_student_group_tools(mcp)
         # Caller-scoped grade insight (scores + what-if calculator), read-only.
         register_student_grade_tools(mcp)
+        # Read-only quiz awareness; never takes a quiz or reads questions.
+        register_student_quiz_tools(mcp)
         # Tier 1 writes register only for tools the operator named in
         # STUDENT_WRITE_TOOLS (default: none). See tools/student_write.py.
         register_student_write_tools(mcp)

@@ -56,25 +56,62 @@ CONTEXT_CODE_CHUNK_SIZE = 10
 MAX_LIMIT = 200
 MAX_PREVIEW_CHARS = 2000
 
-_CONTEXT_CODE = re.compile(r"^course_(\d+)$")
+_CONTEXT_CODE = re.compile(r"course_(\d+)")
 # Grade-shaped tokens shown as-is: letter grades ("A-"), numbers and
 # percentages ("92.5", "85%"), and Canvas's fixed pass/fail and excused words.
 # Letter-grade text comes from instructor-named grading-scheme entries, so
 # anything else is rendered through the inline fence.
 _PLAIN_GRADE = re.compile(
-    r"^(?:[A-F][+-]?|\d{1,4}(?:\.\d{1,2})?%?|complete|incomplete|pass|fail|EX)$",
+    r"(?:[A-F][+-]?|\d{1,4}(?:\.\d{1,2})?%?|complete|incomplete|pass|fail|EX)",
     re.IGNORECASE,
 )
 _HTTP_STATUS = re.compile(r"^HTTP error: (\d{3})\b")
 
 #: Statuses for which a failed multi-course /announcements request is retried
-#: one course at a time. Canvas is not known to produce these per course: the
-#: endpoint has no per-course authorization and silently omits courses the
-#: caller cannot read (``api_find_all`` filters rather than raising), so this
-#: fallback is defensive. Server errors, 429 after the client's own retries,
+#: one course at a time. A multi-course permission failure can hide readable
+#: courses in the same chunk, so each failed chunk gets its own fallback.
+#: Server errors, 429 after the client's own retries,
 #: and transport failures concern the whole request and are never fanned out.
 _PER_COURSE_RETRY_STATUSES = frozenset({400, 401, 403, 404})
-_PLAIN_CATEGORY = re.compile(r"^[A-Za-z &/\-]{1,40}$")
+
+#: Notification categories Canvas defines for its notification preferences.
+#: Anything outside this set goes through the inline fence, so free text placed
+#: in the field cannot pass as a plain label.
+_KNOWN_CATEGORIES = frozenset(
+    {
+        "Account Notification",
+        "Added To Conversation",
+        "Administrative",
+        "Alert",
+        "All Submissions",
+        "Announcement",
+        "Announcement Created By You",
+        "Appointment Availability",
+        "Appointment Cancellations",
+        "Appointment Signups",
+        "Blueprint Sync",
+        "Calendar",
+        "Content Link Error",
+        "Conversation Message",
+        "Course Activities",
+        "Course Content",
+        "Discussion",
+        "DiscussionEntry",
+        "Due Date",
+        "Files",
+        "Grading",
+        "Invitation",
+        "Late Grading",
+        "Membership Update",
+        "Migration",
+        "Other",
+        "Recording Ready",
+        "Registration",
+        "ReportedReply",
+        "Student Content",
+        "Summaries",
+    }
+)
 
 #: Activity-stream item ``type`` -> display category, in display order.
 _STREAM_CATEGORIES: list[tuple[str, tuple[str, ...]]] = [
@@ -98,6 +135,46 @@ _TYPE_FILTERS: dict[str, tuple[str, ...]] = {
 ActivityType = Literal[
     "all", "announcements", "discussions", "conversations", "submissions", "notifications"
 ]
+
+
+def _stamp(value: Any) -> datetime | None:
+    """A Canvas timestamp as a datetime; None for anything that is not one."""
+    return parse_date(value) if isinstance(value, str) else None
+
+
+def _when(value: Any) -> str:
+    """A Canvas timestamp for display.
+
+    ``format_date`` hands back a string it cannot parse unchanged, which would
+    put an arbitrary Canvas-supplied value in the output unfenced, so anything
+    that is not a timestamp is reported as unknown instead.
+    """
+    return format_date(value) if _stamp(value) is not None else "unknown date"
+
+
+_PLAIN_URL = re.compile(r"https?://\S+")
+
+
+def _link(value: Any) -> str | None:
+    """A Canvas link for display: as-is when it is one plain URL, else fenced."""
+    if not isinstance(value, str) or not value:
+        return None
+    if _PLAIN_URL.fullmatch(value):
+        return value
+    return fence_untrusted_inline(value, "link")
+
+
+def _count_label(value: Any) -> int | None:
+    """A Canvas count as an int, or None when it is anything else."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+#: Every ``type`` Canvas gives an activity stream item that is printed as it is.
+#: Collaborations and web conferences have no category of their own and are
+#: listed as other activity.
+_KNOWN_STREAM_TYPES = frozenset(
+    {t for _, types in _STREAM_CATEGORIES for t in types} | {"Collaboration", "WebConference"}
+)
 
 
 def _category_for(item_type: Any) -> str:
@@ -223,7 +300,7 @@ def _as_count(value: Any) -> int:
 
 def _grade_label(value: Any) -> str:
     text = str(value)
-    if _PLAIN_GRADE.match(text):
+    if _PLAIN_GRADE.fullmatch(text):
         return text
     return fence_untrusted_inline(text, "grade text")
 
@@ -248,13 +325,22 @@ def _http_status(error: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _failure_reason(error: object) -> str:
+    """Show HTTP status only; fence and bound other untrusted failure details."""
+    text = str(error)
+    status = _http_status(text)
+    if status is not None:
+        return f"HTTP {status}"
+    return fence_untrusted_inline(text.strip()[:200] or "no detail", "Canvas error")
+
+
 async def _fetch_active_courses() -> list[dict] | str:
     """The caller's active-enrollment courses, or an error string."""
     courses = await fetch_all_paginated_results(
         "/courses", params={"enrollment_state": "active", "per_page": 100}
     )
     if isinstance(courses, dict) and "error" in courses:
-        return f"Error fetching your courses: {courses['error']}"
+        return f"Error fetching your courses: {_failure_reason(courses['error'])}"
     if not isinstance(courses, list):
         return "Error fetching your courses: unexpected response from Canvas."
     return [c for c in courses if isinstance(c, dict)]
@@ -284,6 +370,13 @@ async def _course_label(
     return label
 
 
+def _canvas_id(value: Any) -> str | None:
+    """A Canvas object ID as digits, or None when the value is not one."""
+    if value is None or isinstance(value, bool):
+        return None
+    return coerce_canvas_id(value)
+
+
 def _chunks(items: list[str], size: int) -> list[list[str]]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
@@ -301,12 +394,11 @@ async def _fetch_announcements(
     Only a chunk that fails with a status in ``_PER_COURSE_RETRY_STATUSES`` is
     retried course by course (defensive; see that constant). If every
     single-course retry repeats the chunk's status, the failure is treated as
-    request-wide and later chunks are not fanned out.
+    request-wide for that chunk only; later chunks retry independently.
     """
     found: list[dict] = []
     course_failures: list[tuple[str, str]] = []
     request_failures: list[tuple[list[str], str]] = []
-    request_wide = False
 
     async def fetch(codes: list[str]) -> list[dict] | str:
         result = await fetch_all_paginated_results(
@@ -325,7 +417,7 @@ async def _fetch_announcements(
             found.extend(result)
             continue
         status = _http_status(result)
-        if status not in _PER_COURSE_RETRY_STATUSES or request_wide:
+        if status not in _PER_COURSE_RETRY_STATUSES:
             request_failures.append((chunk, result))
             continue
         if len(chunk) == 1:
@@ -333,7 +425,6 @@ async def _fetch_announcements(
             continue
         singles = [(code, await fetch([code])) for code in chunk]
         if all(isinstance(r, str) and _http_status(r) == status for _, r in singles):
-            request_wide = True
             request_failures.append((chunk, result))
             continue
         for code, single in singles:
@@ -354,7 +445,7 @@ def _format_announcement(
         or "Unknown author"
     )
     title = announcement.get("title") or "Untitled announcement"
-    posted = format_date(announcement.get("posted_at") or announcement.get("created_at"))
+    posted = _when(announcement.get("posted_at") or announcement.get("created_at"))
     unread = " [UNREAD]" if announcement.get("read_state") == "unread" else ""
 
     lines = [
@@ -362,9 +453,11 @@ def _format_announcement(
         f"  Title: {fence_untrusted_inline(title, 'announcement title')}",
         f"  Author: {fence_untrusted_inline(author_name, 'announcement author')}",
     ]
-    ref = f"  ID: {announcement.get('id')}"
-    if announcement.get("html_url"):
-        ref += f" | Link: {announcement['html_url']}"
+    announcement_id = _canvas_id(announcement.get("id"))
+    ref = f"  ID: {announcement_id or 'unavailable'}"
+    link = _link(announcement.get("html_url"))
+    if link:
+        ref += f" | Link: {link}"
     lines.append(ref)
     if preview_chars > 0:
         body = _preview(announcement.get("message"), preview_chars)
@@ -388,15 +481,14 @@ def _latest_conversation_message(item: dict) -> Any:
         return None
     ordered = sorted(
         messages,
-        key=lambda m: parse_date(str(m.get("created_at") or ""))
-        or datetime.min.replace(tzinfo=UTC),
+        key=lambda m: _stamp(m.get("created_at")) or datetime.min.replace(tzinfo=UTC),
     )
     return ordered[-1].get("message")
 
 
 def _stream_item_sort_key(item: dict) -> datetime:
     return (
-        parse_date(item.get("updated_at") or item.get("created_at"))
+        _stamp(item.get("updated_at") or item.get("created_at"))
         or datetime.min.replace(tzinfo=UTC)
     )
 
@@ -405,6 +497,13 @@ async def _format_stream_item(
     item: dict, codes: dict[str, str], preview_chars: int
 ) -> str:
     item_type = item.get("type") or "Unknown"
+    # Only Canvas's own type names are printed as they are; anything else is
+    # Canvas-supplied text and is fenced like any other.
+    type_label = (
+        item_type
+        if item_type == "Unknown" or item_type in _KNOWN_STREAM_TYPES
+        else fence_untrusted_inline(str(item_type), "activity item type")
+    )
     if item.get("course_id") is not None:
         # Labelled from the caller's course list only: a per-item lookup would
         # cost a request (or two) per item for any course not in that list.
@@ -416,13 +515,30 @@ async def _format_stream_item(
         where = f"group {group}" if group else "a group"
     else:
         where = "no course"
-    when = format_date(item.get("updated_at") or item.get("created_at"))
+    when = _when(item.get("updated_at") or item.get("created_at"))
     unread = " [UNREAD]" if item.get("read_state") is False else ""
-    lines = [f"• {where} | {item_type} | {when}{unread}"]
+    lines = [f"• {where} | {type_label} | {when}{unread}"]
+
+    course_id = _canvas_id(item.get("course_id"))
+    if course_id:
+        lines.append(f"  Course ID: {course_id}")
+    if item_type in ("DiscussionTopic", "Announcement"):
+        topic_id = _canvas_id(item.get("discussion_topic_id"))
+        if item_type == "Announcement" and topic_id is None:
+            topic_id = _canvas_id(item.get("announcement_id"))
+        if topic_id:
+            lines.append(f"  Topic ID: {topic_id}")
+    elif item_type == "Conversation":
+        conversation_id = _canvas_id(item.get("conversation_id"))
+        if conversation_id:
+            lines.append(f"  Conversation ID: {conversation_id}")
 
     if item_type == "Submission":
         raw_assignment = item.get("assignment")
         assignment: dict[str, Any] = raw_assignment if isinstance(raw_assignment, dict) else {}
+        assignment_id = _canvas_id(assignment.get("id"))
+        if assignment_id:
+            lines.append(f"  Assignment ID: {assignment_id}")
         name = assignment.get("name") or item.get("title") or "Unnamed assignment"
         lines.append(f"  Assignment: {fence_untrusted_inline(name, 'assignment name')}")
         score, grade = item.get("score"), item.get("grade")
@@ -444,13 +560,13 @@ async def _format_stream_item(
         if comments:
             latest = max(
                 comments,
-                key=lambda c: parse_date(c.get("created_at")) or datetime.min.replace(tzinfo=UTC),
+                key=lambda c: _stamp(c.get("created_at")) or datetime.min.replace(tzinfo=UTC),
             )
             author = latest.get("author_name") or "Unknown commenter"
             lines.append(
                 f"  Comments: {len(comments)} (latest by "
                 f"{fence_untrusted_inline(author, 'comment author')}, "
-                f"{format_date(latest.get('created_at'))})"
+                f"{_when(latest.get('created_at'))})"
             )
             if preview_chars > 0:
                 text = _preview(latest.get("comment"), preview_chars)
@@ -461,16 +577,17 @@ async def _format_stream_item(
     else:
         title = item.get("title") or "(no title)"
         lines.append(f"  Title: {fence_untrusted_inline(title, 'activity item title')}")
-        if item_type == "Conversation" and item.get("participant_count") is not None:
-            lines.append(f"  Participants: {item.get('participant_count')}")
+        participants = _count_label(item.get("participant_count"))
+        if item_type == "Conversation" and participants is not None:
+            lines.append(f"  Participants: {participants}")
         if item_type == "Message" and item.get("notification_category"):
             category = str(item["notification_category"])
             # Canvas-defined ("Due Date", "Grading"); fenced if it is ever not.
-            if not _PLAIN_CATEGORY.match(category):
+            if category not in _KNOWN_CATEGORIES:
                 category = fence_untrusted_inline(category, "notification category")
             lines.append(f"  Category: {category}")
         if item_type in ("DiscussionTopic", "Announcement"):
-            replies = item.get("total_root_discussion_entries")
+            replies = _count_label(item.get("total_root_discussion_entries"))
             if replies is not None:
                 lines.append(f"  Replies: {replies}")
             if item.get("require_initial_post") and item.get("user_has_posted") is False:
@@ -487,8 +604,9 @@ async def _format_stream_item(
                 if _preview_was_cut(source, preview_chars):
                     lines.append(_cut_note(_FULL_TEXT_TOOL.get(item_type)))
 
-    if item.get("html_url"):
-        lines.append(f"  Link: {item['html_url']}")
+    link = _link(item.get("html_url"))
+    if link:
+        lines.append(f"  Link: {link}")
     return "\n".join(lines) + "\n"
 
 
@@ -549,7 +667,16 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
             codes[cid] = course.get("course_code") or course.get("name") or f"course {cid}"
             course_ids.append(cid)
 
-        filtered = course_identifier is not None and bool(str(course_identifier).strip())
+        # A blank filter is refused rather than read as "no filter": the caller
+        # asked to narrow the list, and silently widening it to every course
+        # would hide that the value was not understood.
+        if course_identifier is not None and not str(course_identifier).strip():
+            return (
+                "Error: course_identifier is blank. Omit it to list every active "
+                "course, or pass a course code or numeric Canvas ID."
+            )
+        filtered = course_identifier is not None
+        unlisted_target = False
         if filtered:
             wanted = str(course_identifier).strip()
             # A numeric ID is used as given, even for a course that is no
@@ -572,6 +699,10 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
                     "Pass its numeric Canvas course ID instead."
                 )
             course_ids = [target]
+            # Canvas omits courses the caller cannot read instead of refusing
+            # them, so for an ID outside the active list an empty answer is
+            # ambiguous and is reported as such below.
+            unlisted_target = target not in codes
         elif not course_ids:
             return "You have no active courses, so there are no announcements to show."
 
@@ -584,22 +715,36 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
             [f"course_{cid}" for cid in course_ids], window_params
         )
 
+        # Only announcements of the courses that were asked for are shown. The
+        # endpoint should never return others; if it does, they are counted and
+        # reported, not displayed and not silently dropped.
+        requested = {f"course_{cid}" for cid in course_ids}
+        in_scope = [a for a in announcements if a.get("context_code") in requested]
+        out_of_scope = len(announcements) - len(in_scope)
+
         failed_count = len(course_failures) + sum(len(chunk) for chunk, _ in request_failures)
-        if failed_count and failed_count >= len(course_ids) and not announcements:
-            details = [err for _, err in request_failures] + [
-                f"{code}: {err}" for code, err in course_failures
+        if failed_count and failed_count >= len(course_ids) and not in_scope:
+            details = [_failure_reason(err) for _, err in request_failures] + [
+                f"{code}: {_failure_reason(err)}" for code, err in course_failures
             ]
             detail = "; ".join(list(dict.fromkeys(details))[:5])
             return f"Error fetching announcements: {detail}"
 
         # A course listed in two chunks or retried must not show twice.
+        # An announcement without an ID cannot be matched with another, so it
+        # is kept rather than merged into one.
         unique: dict[str, dict] = {}
-        for announcement in announcements:
-            key = f"{announcement.get('context_code')}:{announcement.get('id')}"
+        for position, announcement in enumerate(in_scope):
+            announcement_id = _canvas_id(announcement.get("id"))
+            key = (
+                f"{announcement.get('context_code')}:{announcement_id}"
+                if announcement_id
+                else f"unidentified:{position}"
+            )
             unique.setdefault(key, announcement)
         ordered = sorted(
             unique.values(),
-            key=lambda a: parse_date(a.get("posted_at") or a.get("created_at"))
+            key=lambda a: _stamp(a.get("posted_at") or a.get("created_at"))
             or datetime.min.replace(tzinfo=UTC),
             reverse=True,
         )
@@ -614,7 +759,7 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
         failure_note = ""
         if request_failures:
             missed = sum(len(chunk) for chunk, _ in request_failures)
-            errors = "; ".join(list(dict.fromkeys(err for _, err in request_failures))[:3])
+            errors = "; ".join(list(dict.fromkeys(_failure_reason(err) for _, err in request_failures))[:3])
             failure_note += (
                 f"\n⚠️  Canvas returned an error for the announcements of {missed} of "
                 f"{len(course_ids)} courses ({errors}); results may be incomplete.\n"
@@ -622,17 +767,31 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
         if course_failures:
             failed = []
             for code, err in course_failures:
-                match = _CONTEXT_CODE.match(code)
+                match = _CONTEXT_CODE.fullmatch(code)
                 label = await _course_label(match.group(1), codes) if match else code
-                failed.append(f"  • {label}: {err}\n")
+                failed.append(f"  • {label}: {_failure_reason(err)}\n")
             failure_note += (
                 "\n⚠️  Could not read announcements for:\n" + "".join(failed)
                 + "Those courses may have announcements not shown here.\n"
             )
 
+        if out_of_scope:
+            failure_note += (
+                f"\n⚠️  Ignored {out_of_scope} announcement(s) Canvas returned for "
+                "courses that were not asked for.\n"
+            )
+
         if not ordered:
+            access_note = ""
+            if unlisted_target:
+                access_note = (
+                    f"\n⚠️  {scope} is not among your active courses (it may be "
+                    "concluded), and Canvas leaves out courses you cannot read "
+                    "instead of refusing them, so this may also mean you have no "
+                    "access to it.\n"
+                )
             return (
-                f"No announcements in {scope} from {window_text}." + failure_note
+                f"No announcements in {scope} from {window_text}." + access_note + failure_note
             )
 
         lines = [
@@ -640,7 +799,7 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
             f"{len(ordered)} found\n"
         ]
         for announcement in ordered[:limit]:
-            match = _CONTEXT_CODE.match(str(announcement.get("context_code") or ""))
+            match = _CONTEXT_CODE.fullmatch(str(announcement.get("context_code") or ""))
             course_display = (
                 await _course_label(match.group(1), codes) if match else "Unknown course"
             )
@@ -688,7 +847,7 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
             params={"only_active_courses": True, "per_page": 100},
         )
         if isinstance(items, dict) and "error" in items:
-            return f"Error fetching your activity stream: {items['error']}"
+            return f"Error fetching your activity stream: {_failure_reason(items['error'])}"
         if not isinstance(items, list):
             return "Error fetching your activity stream: unexpected response from Canvas."
         items = [i for i in items if isinstance(i, dict)]
@@ -717,8 +876,12 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
                     output.append("  No recent activity.")
                 output.append("")
             else:
-                detail = summary.get("error") if isinstance(summary, dict) else summary
-                output.append(f"⚠️  Activity summary unavailable: {detail}\n")
+                detail = (
+                    summary["error"]
+                    if isinstance(summary, dict) and "error" in summary
+                    else "unexpected response from Canvas"
+                )
+                output.append(f"⚠️  Activity summary unavailable: {_failure_reason(detail)}\n")
 
         if item_type != "all":
             wanted = _TYPE_FILTERS[item_type]
@@ -740,6 +903,10 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
                 cid = coerce_canvas_id(raw_id) if raw_id is not None else None
                 if cid is not None:
                     codes[cid] = course.get("course_code") or course.get("name") or f"course {cid}"
+
+        if isinstance(courses, str):
+            # Only the labels degrade: say so instead of showing bare IDs unexplained.
+            output.append(f"⚠️  {courses} Courses are shown by ID instead of code.\n")
 
         grouped: dict[str, list[dict]] = {}
         for item in shown:

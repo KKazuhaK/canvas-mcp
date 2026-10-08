@@ -51,6 +51,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -281,15 +282,42 @@ def _resolve_window(
 # --- Identity and course resolution -----------------------------------------
 
 
-async def _my_user_id() -> tuple[str | None, str | None]:
-    """The caller's numeric Canvas user id, or an error message."""
+async def _my_user_profile() -> tuple[dict | None, str | None]:
+    """The caller's profile with a validated numeric id, or an error."""
     me = await make_canvas_request("get", "/users/self")
     if not isinstance(me, dict) or _is_error(me):
         return None, f"Error identifying current user: {_error_detail(me)}"
     user_id = coerce_canvas_id(me.get("id", ""))
     if user_id is None:
         return None, "Error identifying current user: Canvas returned no user id."
-    return user_id, None
+    return me, None
+
+
+async def _my_user_id() -> tuple[str | None, str | None]:
+    """The caller's numeric Canvas user id, or an error message."""
+    me, error = await _my_user_profile()
+    if me is None:
+        return None, error
+    return coerce_canvas_id(me["id"]), None
+
+
+def _planner_date_matches(returned: Any, requested: str, canvas_zone: Any) -> bool:
+    """Confirm an instant, or a date-only request in the caller's Canvas zone."""
+    if not isinstance(returned, str):
+        return False
+    try:
+        if _DATE_ONLY.fullmatch(returned):
+            return _DATE_ONLY.fullmatch(requested) is not None and dt.date.fromisoformat(returned) == dt.date.fromisoformat(requested)
+        actual = dt.datetime.fromisoformat(returned)
+        if actual.tzinfo is None:
+            return False
+        if _DATE_ONLY.fullmatch(requested):
+            if not isinstance(canvas_zone, str):
+                return False
+            return actual.astimezone(ZoneInfo(canvas_zone)).date() == dt.date.fromisoformat(requested)
+        return actual == dt.datetime.fromisoformat(requested)
+    except (ValueError, ZoneInfoNotFoundError):
+        return False
 
 
 async def _resolve_numeric_course_id(
@@ -352,6 +380,13 @@ async def _calendar_event_courses(
     context = str(event.get("context_code") or "").strip()
     if context:
         codes.append(context)
+    if not codes:
+        # An event that names no calendar at all proves nothing about its
+        # course; passing it would skip the policy check entirely.
+        return set(), (
+            "❌ This calendar event does not say which calendar it belongs to, so "
+            "the course policy cannot be checked."
+        )
 
     courses: set[str] = set()
     sections = False
@@ -368,7 +403,8 @@ async def _calendar_event_courses(
                     f"❌ Could not tell which course owns group {group_id}, so the "
                     f"course policy cannot be checked: {_error_detail(group)}"
                 )
-            if group.get("context_type") == "Course":
+            context_type = group.get("context_type")
+            if context_type == "Course":
                 group_course = coerce_canvas_id(group.get("course_id") or "")
                 if group_course is None:
                     return set(), (
@@ -376,6 +412,13 @@ async def _calendar_event_courses(
                         "the course policy cannot be checked."
                     )
                 courses.add(group_course)
+            elif context_type != "Account":
+                # Only a group Canvas says belongs to the institution is exempt;
+                # a missing or unknown owner is not read as "no course".
+                return set(), (
+                    f"❌ Could not tell which course owns group {group_id}, so the "
+                    "course policy cannot be checked."
+                )
         elif match := _USER_CONTEXT.match(code):
             if match.group(1) != my_id:
                 return set(), "❌ This calendar event is on someone else's calendar."
@@ -392,6 +435,25 @@ async def _calendar_event_courses(
             "belongs to, so the course policy cannot be checked."
         )
     return courses, None
+
+
+def _note_course(note: dict) -> tuple[str | None, str | None]:
+    """The course a planner note is filed under, or a refusal.
+
+    A note with no course is personal. A note that names a course which is not
+    a usable id is not personal: it is refused so the course policy is never
+    skipped by reading an unparseable id as "no course".
+    """
+    raw = note.get("course_id")
+    if raw is None or raw == "":
+        return None, None
+    course = coerce_canvas_id(raw)
+    if course is None:
+        return None, (
+            f"❌ Planner note {note.get('id')} names a course Canvas did not "
+            "identify, so the course policy cannot be checked."
+        )
+    return course, None
 
 
 def _has_fence_markers(*values: str | None) -> bool:
@@ -973,9 +1035,11 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
                     return date_error
                 data["todo_date"] = date_wire
 
-            my_id, me_error = await _my_user_id()
+            me, me_error = await _my_user_profile()
             if me_error:
                 return me_error
+            assert me is not None
+            my_id = coerce_canvas_id(me["id"])
             assert my_id is not None
             note, note_error = await _fetch_my_note(validated, my_id)
             if note_error:
@@ -983,7 +1047,9 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
             assert note is not None
 
             courses: set[str] = set()
-            current_course = coerce_canvas_id(note.get("course_id") or "")
+            current_course, course_refusal = _note_course(note)
+            if course_refusal:
+                return course_refusal
             if current_course:
                 courses.add(current_course)
             if course_identifier is not None:
@@ -1058,7 +1124,13 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
                 return f"❌ Could not update planner note {validated}: {_error_detail(updated)}"
             landed = isinstance(updated, dict) and (
                 "title" not in data or updated.get("title") == data["title"]
-            ) and ("details" not in data or updated.get("description") == data["details"])
+            ) and ("details" not in data or updated.get("description") == data["details"]) and (
+                "course_id" not in data or str(updated.get("course_id")) == data["course_id"]
+            ) and (
+                "todo_date" not in data or _planner_date_matches(
+                    updated.get("todo_date"), data["todo_date"], me.get("time_zone")
+                )
+            )
             if not landed:
                 return unconfirmed_write_warning(
                     "the planner note was updated",
@@ -1098,7 +1170,9 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
                 return note_error
             assert note is not None
 
-            course = coerce_canvas_id(note.get("course_id") or "")
+            course, course_refusal = _note_course(note)
+            if course_refusal:
+                return course_refusal
             courses = {course} if course else set()
             policy_error = await _course_policy_error(courses, "delete_planner_note", "Delete")
             if policy_error:
@@ -1182,7 +1256,9 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
                     return target_error
                 assert target is not None
                 label = target.get("title")
-                course = coerce_canvas_id(target.get("course_id") or "")
+                course, course_refusal = _note_course(target)
+                if course_refusal:
+                    return course_refusal
                 if course:
                     courses.add(course)
             elif plannable_type == "calendar_event":
@@ -1259,6 +1335,19 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
             override_id = (
                 coerce_canvas_id(existing.get("id", "")) if existing is not None else None
             )
+            # Pagination may outlast a policy grant. Recheck both permissions
+            # after reading the overrides, immediately before the mutation.
+            policy_error = await _course_policy_error(
+                courses, "mark_planner_item_complete", "Update"
+            )
+            if policy_error:
+                return policy_error
+            module_error = await _course_policy_error(
+                module_courses, "mark_module_item_done", "Update"
+            )
+            if module_error:
+                return module_error
+
             if override_id is not None:
                 assert existing is not None
                 # Canvas's update sets dismissed from the request
@@ -1375,7 +1464,9 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
                     "Canvas returned no event. Check your calendar before "
                     "retrying, or the event may be duplicated.",
                 )
-            if created.get("context_code") not in (None, my_context):
+            if created.get("context_code") != my_context:
+                # A response that does not name the calendar is not proof it
+                # landed on the personal one.
                 return unconfirmed_write_warning(
                     "the event landed on your personal calendar",
                     {"Event ID": created.get("id"), "Calendar": created.get("context_code")},

@@ -507,8 +507,6 @@ class TestStatusesAndModel:
                 "rules": {"drop_lowest": 1, "never_drop": [101]},
                 "assignments": [
                     {"id": 101, "points_possible": 10, "submission": {"score": 9, "workflow_state": "graded"}},
-                    {"id": 102, "points_possible": 10, "submission": [{"score": 4}]},
-                    {"id": 103, "points_possible": 10, "submission": [{"score": 4}, {"score": 5}]},
                     {"id": 104, "points_possible": None, "omit_from_final_grade": True},
                     {"id": 105, "points_possible": 5, "submission": {"excused": True}},
                     {"id": 106, "points_possible": 5, "submission": {"score": 2, "workflow_state": "pending_review"}},
@@ -516,8 +514,7 @@ class TestStatusesAndModel:
                     {"id": 108, "points_possible": 5, "published": False},
                 ],
             },
-            {"id": 8, "name": "Exams", "group_weight": None, "rules": None, "assignments": None},
-            {"name": "no id, skipped"},
+            {"id": 8, "name": "Exams", "group_weight": None, "rules": None, "assignments": []},
         ]
         groups, items = gc.build_grade_model(groups_json)
         assert groups == [
@@ -526,13 +523,101 @@ class TestStatusesAndModel:
         ]
         by_id = {i.assignment_id: i for i in items}
         assert by_id["101"].score == 9 and by_id["101"].group_id == "7"
-        assert by_id["102"].score == 4  # single-entry list is unambiguous
-        assert by_id["103"].score is None  # ambiguous list is not guessed
         assert by_id["104"].points_possible == 0 and not by_id["104"].counts_toward_grade
         assert by_id["105"].excused
         assert by_id["106"].pending_review and not by_id["106"].is_graded
         assert not by_id["107"].counts_toward_grade
         assert not by_id["108"].counts_toward_grade
+
+
+def _group(**overrides):
+    base = {"id": 7, "group_weight": 0, "rules": {}, "assignments": []}
+    base.update(overrides)
+    return base
+
+
+class TestMalformedPayloadsFailClosed:
+    """A payload that is not the documented shape is refused, never trimmed:
+    skipping an entry would yield a grade that looks complete and is wrong."""
+
+    @pytest.mark.parametrize(
+        "groups_json",
+        [
+            ["not an object"],
+            [{"name": "no id", "assignments": []}],
+            [_group(id="12/../users")],
+            [_group(id=True)],
+            [_group(assignments=None)],
+            [{"id": 7, "rules": {}}],  # assignments key missing
+            [_group(assignments="oops")],
+            [_group(assignments=["not an object"])],
+            [_group(assignments=[{"name": "no id"}])],
+            [_group(assignments=[{"id": "x1"}])],
+            [_group(rules="oops")],
+            [_group(rules={"drop_lowest": "two"})],
+            [_group(rules={"drop_lowest": -1})],
+            [_group(rules={"drop_highest": 1.5})],
+            [_group(rules={"never_drop": "101"})],
+            [_group(rules={"never_drop": [None]})],
+            [_group(rules={"never_drop": ["abc"]})],
+            [_group(rules={"never_drop": [True]})],
+            [_group(group_weight="heavy")],
+            [_group(group_weight=True)],
+            [_group(group_weight=float("nan"))],
+            [_group(group_weight=-1)],
+            [_group(assignments=[{"id": 1, "points_possible": "ten"}])],
+            [_group(assignments=[{"id": 1, "points_possible": -5}])],
+            [_group(assignments=[{"id": 1, "points_possible": 5, "submission": {"score": "A"}}])],
+            [_group(assignments=[{"id": 1, "points_possible": 5, "submission": {"score": True}}])],
+            [_group(id=7), _group(id=" 7")],  # duplicate group ID
+            [_group(assignments=[{"id": 1}, {"id": 1}])],  # duplicate assignment ID
+            [_group(id=7, assignments=[{"id": 1}]), _group(id=8, assignments=[{"id": "1"}])],
+        ],
+    )
+    def test_malformed_group_data_raises(self, groups_json):
+        with pytest.raises(gc.MalformedGradeData):
+            gc.build_grade_model(groups_json)
+
+    @pytest.mark.parametrize(
+        "submission", [[{"score": 4}], [{"score": 4}, {"score": 5}], [], "graded", 7]
+    )
+    def test_submission_that_is_not_the_callers_single_object_raises(self, submission):
+        # Observer tokens get a list describing the observed students; even a
+        # one-entry list is somebody else's grade, not "yours".
+        groups_json = [_group(assignments=[{"id": 102, "points_possible": 10, "submission": submission}])]
+        with pytest.raises(gc.MalformedGradeData, match="observer"):
+            gc.build_grade_model(groups_json)
+
+    def test_absent_or_null_submission_is_ungraded_not_an_error(self):
+        groups_json = [_group(assignments=[
+            {"id": 1, "points_possible": 10},
+            {"id": 2, "points_possible": 10, "submission": None},
+        ])]
+        _, items = gc.build_grade_model(groups_json)
+        assert [i.score for i in items] == [None, None]
+
+    def test_own_submission_never_unwraps_a_list(self):
+        assert gc.own_submission({"submission": [{"score": 4}]}) is None
+        assert gc.own_submission({"submission": {"score": 4}}) == {"score": 4}
+
+    def test_null_numeric_fields_stay_allowed(self):
+        # Canvas sends null for an unweighted group's weight, an assignment
+        # without points and an ungraded submission; those are not malformed.
+        groups, items = gc.build_grade_model([
+            _group(group_weight=None, assignments=[
+                {"id": 1, "points_possible": None, "submission": {"score": None}},
+            ]),
+        ])
+        assert groups[0].weight == 0.0
+        assert (items[0].points_possible, items[0].score) == (0.0, None)
+
+    def test_never_drop_ids_are_normalized_like_assignment_ids(self):
+        groups, _ = gc.build_grade_model([_group(rules={"never_drop": [101, " 102\n", "103"]})])
+        assert groups[0].never_drop == frozenset({"101", "102", "103"})
+
+    def test_integer_valued_float_drop_counts_are_accepted(self):
+        groups, _ = gc.build_grade_model([_group(rules={"drop_lowest": 2.0, "drop_highest": None})])
+        assert (groups[0].drop_lowest, groups[0].drop_highest) == (2, 0)
 
 
 class TestCanvasRounding:
@@ -668,3 +753,17 @@ class TestUnposted:
     )
     def test_statuses(self, sub, expected):
         assert gc.submission_statuses({}, sub) == expected
+
+
+@pytest.mark.parametrize("field", ["excused", "missing", "late"])
+def test_malformed_submission_booleans_are_refused(field):
+    assignment = {"id": 101, "points_possible": 10, "submission": {"score": 0, field: "false"}}
+    with pytest.raises(gc.MalformedGradeData, match="boolean"):
+        gc.build_grade_model([_group(assignments=[assignment])])
+
+
+@pytest.mark.parametrize("field", ["published", "omit_from_final_grade"])
+def test_malformed_assignment_booleans_are_refused(field):
+    assignment = {"id": 101, "points_possible": 10, field: "false"}
+    with pytest.raises(gc.MalformedGradeData, match="boolean"):
+        gc.build_grade_model([_group(assignments=[assignment])])

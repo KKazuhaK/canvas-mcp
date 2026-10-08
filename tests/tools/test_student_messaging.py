@@ -39,6 +39,7 @@ import httpx
 import pytest
 from fastmcp import FastMCP
 
+from canvas_mcp.core import cache as cache_module
 from canvas_mcp.core import client as client_module
 from canvas_mcp.core.anonymization import generate_anonymous_id
 from canvas_mcp.core.config import reset_config
@@ -90,7 +91,7 @@ def _conversation(**overrides: Any) -> dict[str, Any]:
     conversation = {
         "id": 77,
         "subject": "Midterm regrade",
-        "context_name": "ICS 33",
+        "context_name": "CS 101",
         "context_code": f"course_{COURSE}",
         "audience": [501],
         "participants": [
@@ -150,8 +151,8 @@ class FakeCanvas:
             return httpx.Response(200, json=self.courses)
         if request.method == "GET" and path == f"/courses/{COURSE}":
             return httpx.Response(200, json={"id": int(COURSE), "syllabus_body": self.syllabus})
-        if request.method == "GET" and path == "/courses/sis_course_id:ICS33":
-            return httpx.Response(200, json={"id": int(COURSE), "course_code": "ICS33"})
+        if request.method == "GET" and path == "/courses/sis_course_id:CS101":
+            return httpx.Response(200, json={"id": int(COURSE), "course_code": "CS101"})
         if request.method == "GET" and path == f"/courses/{COURSE}/users":
             return httpx.Response(200, json=[
                 {"id": 503, "name": "Alan Turing", "sortable_name": "Turing, Alan"},
@@ -216,7 +217,7 @@ class FakeCanvas:
 
 
 @pytest.fixture
-def canvas(monkeypatch, real_course_list):
+def canvas(monkeypatch):
     monkeypatch.setenv("CANVAS_API_URL", "https://canvas.example/api/v1")
     monkeypatch.setenv("CANVAS_API_TOKEN", "synthetic")
     monkeypatch.setenv("STUDENT_WRITE_TOOLS", "send_message,reply_to_conversation")
@@ -226,10 +227,15 @@ def canvas(monkeypatch, real_course_list):
     reset_config()
     reset_policy_cache()
     reset_pending_confirmations()
+    # conftest stubs the course-list read a missed lookup makes; these tests
+    # serve /courses from the fake Canvas below, so give the cache the real one.
+    monkeypatch.setattr(
+        cache_module, "fetch_all_paginated_results", client_module.fetch_all_paginated_results
+    )
     fake = FakeCanvas()
     client = httpx.AsyncClient(transport=httpx.MockTransport(fake))
     with patch.object(client_module, "_get_http_client", return_value=client), patch.object(
-        student_messaging, "get_course_code", AsyncMock(return_value="ICS33")
+        student_messaging, "get_course_code", AsyncMock(return_value="CS101")
     ):
         yield fake
     reset_policy_cache()
@@ -294,7 +300,7 @@ class TestFindMessageRecipients:
         assert not canvas.posts()
 
         assert result["success"] is True
-        assert result["course"] == "ICS33"
+        assert result["course"] == "CS101"
         # Anonymization is on by default, and Canvas matched ``search`` against
         # real names, so the classmate it returned is dropped entirely rather
         # than pseudonymised (tests/security/test_recipient_search_privacy.py).
@@ -342,7 +348,7 @@ class TestFindMessageRecipients:
 
     @pytest.mark.asyncio
     async def test_contexts_and_people_outside_the_course_are_dropped(self, canvas):
-        course_context = {"id": "course_123", "name": "ICS 33", "type": "context", "user_count": 300}
+        course_context = {"id": "course_123", "name": "CS 101", "type": "context", "user_count": 300}
         canvas.search_pages = [[course_context, OTHER_COURSE_ONLY, PROF]]
         tools = await _tools()
         result = await tools["find_message_recipients"](COURSE)
@@ -423,8 +429,8 @@ class TestFindMessageRecipients:
     @pytest.mark.asyncio
     async def test_sis_course_form_is_resolved_to_a_numeric_context(self, canvas):
         tools = await _tools()
-        await tools["find_message_recipients"]("sis_course_id:ICS33")
-        assert len(canvas.calls("GET", "/courses/sis_course_id:ICS33")) == 1
+        await tools["find_message_recipients"]("sis_course_id:CS101")
+        assert len(canvas.calls("GET", "/courses/sis_course_id:CS101")) == 1
         [request] = canvas.calls("GET", "/search/recipients")
         assert request.url.params["context"] == f"course_{COURSE}"
 
@@ -509,7 +515,7 @@ class TestSendMessage:
 
         assert not canvas.posts()
         assert preview["preview"] is True and preview["nothing_sent"] is True
-        assert preview["course"] == "ICS33"
+        assert preview["course"] == "CS101"
         assert preview["subject"] == "Regrade"
         assert preview["body"] == "Hello Professor"
         assert [r["user_id"] for r in preview["recipients"]] == ["501", "502"]
@@ -670,6 +676,8 @@ class TestSendMessage:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("subject,body", [
         ("", "Body"), ("x" * 256, "Body"), ("Hi", ""), ("Hi", "   "), ("Hi", " \n\t "),
+        pytest.param("   ", "Body", id="whitespace-only-subject"),
+        pytest.param(" \n\t ", "Body", id="whitespace-only-subject-with-newline"),
         pytest.param("Hi", "x" * (MAX_BODY_CHARS + 1), id="over-length-body"),
     ])
     async def test_subject_and_body_validation(self, canvas, subject, body):
@@ -698,7 +706,7 @@ class TestSendMessage:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("syllabus", [
         "<p>agent_writes: deny</p><p>note: Email me directly.</p>",
-        "<p>Welcome to ICS 33</p>",  # no policy stated -> default deny
+        "<p>Welcome to CS 101</p>",  # no policy stated -> default deny
         "<p>agent_writes: allow</p><p>allow_tools: submit_assignment</p>",
     ])
     async def test_course_policy_blocks_preview(self, canvas, syllabus):
@@ -818,15 +826,39 @@ class TestReplyToConversation:
         assert result["recipient_ids"] == ["501", "502"]
         [post] = canvas.posts()
         assert post.url.path == f"{API}/conversations/77/add_message"
-        # No recipients[]: Canvas delivers to the current participants, which
-        # are exactly the previewed audience bound into the token.
-        assert canvas.form(post) == {"body": ["Thanks"]}
+        assert canvas.form(post) == {"body": ["Thanks"], "recipients[]": ["501", "502"]}
 
     @pytest.mark.asyncio
-    async def test_reply_reaches_a_thread_with_someone_no_longer_enrolled(self, canvas):
-        """Last term's TA (601) is still a participant but not a current user of
-        the course. Canvas refuses a student's add_message with 401 only when
-        recipients[] lists them; the default audience is delivered."""
+    async def test_reply_does_not_expand_during_final_policy_check(self, canvas: FakeCanvas) -> None:
+        tools = await _tools()
+        preview = await tools["reply_to_conversation"]("77", "Private medical detail")
+        original_check = student_messaging.check_student_write_allowed
+        checks = 0
+
+        async def check(course_id: str, tool_name: str) -> tuple[bool, str]:
+            nonlocal checks
+            checks += 1
+            if checks == 2:
+                canvas.conversations["77"]["audience"].append(503)
+                canvas.conversations["77"]["participants"].append({"id": 503})
+            return await original_check(course_id, tool_name)
+
+        with patch.object(student_messaging, "check_student_write_allowed", check):
+            result = await tools["reply_to_conversation"](
+                "77", "Private medical detail", preview["confirmation_token"]
+            )
+        assert result["success"] is True
+        [post] = canvas.posts()
+        # Explicit recipients pin delivery even if the thread grows after GET.
+        assert canvas.form(post) == {
+            "body": ["Private medical detail"], "recipients[]": ["501"],
+        }
+        assert result["recipient_ids"] == ["501"]
+
+    @pytest.mark.asyncio
+    async def test_reply_to_inactive_participant_fails_closed_without_default_retry(self, canvas):
+        """Canvas may refuse explicit recipients with inactive enrollment.
+        Never retry without the bound recipients to bypass that rejection."""
         canvas.conversations["77"] = _conversation(
             audience=[501, 601],
             participants=[{"id": ME}, {"id": 501, "name": "Ada"}, {"id": 601, "name": "Old TA"}],
@@ -837,8 +869,10 @@ class TestReplyToConversation:
         result = await tools["reply_to_conversation"](
             "77", "Thanks", confirmation_token=preview["confirmation_token"]
         )
-        assert result["success"] is True
-        assert len(canvas.posts()) == 1
+        assert result["nothing_sent"] is True
+        assert "error" in result
+        [post] = canvas.posts()
+        assert canvas.form(post)["recipients[]"] == ["501", "601"]
 
     @pytest.mark.asyncio
     async def test_participants_missing_from_audience_are_still_previewed_and_counted(self, canvas):
@@ -943,6 +977,74 @@ class TestReplyToConversation:
         tools = await _tools()
         result = await tools["reply_to_conversation"]("77", "Thanks")
         assert "does not allow replies" in result["error"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("flag", [True, "true", "false", 1, "yes", ["x"]])
+    async def test_any_truthy_cannot_reply_value_blocks(self, canvas, flag):
+        """Only an absent or false flag lets a reply through, never an odd shape."""
+        canvas.conversations["77"] = _conversation(cannot_reply=flag)
+        tools = await _tools()
+        result = await tools["reply_to_conversation"]("77", "Thanks")
+        assert "does not allow replies" in result["error"]
+        assert "confirmation_token" not in result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("flag", [False, None, 0])
+    async def test_falsy_cannot_reply_value_still_previews(self, canvas, flag):
+        canvas.conversations["77"] = _conversation(cannot_reply=flag)
+        tools = await _tools()
+        preview = await tools["reply_to_conversation"]("77", "Thanks")
+        assert preview["preview"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_key", ["abc", "12/users", "", "course_123"])
+    async def test_unparseable_audience_course_key_fails_closed(self, canvas, bad_key):
+        """A course key that cannot be read must not be skipped while the rest pass.
+
+        COURSE allows agent writes here, so before this was fixed the one
+        parseable key alone decided the policy and the unreadable one was
+        silently dropped.
+        """
+        canvas.conversations["77"] = _conversation(
+            context_code=None,
+            audience_contexts={
+                "courses": {
+                    COURSE: ["StudentEnrollment"],
+                    bad_key: ["StudentEnrollment"],
+                },
+                "groups": {},
+            },
+        )
+        tools = await _tools()
+        result = await tools["reply_to_conversation"]("77", "Thanks")
+        assert "not tied to a course" in result["error"]
+        assert result["nothing_sent"] is True
+        assert "confirmation_token" not in result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("context_code", ["course_abc", "course_", "course_12/users"])
+    async def test_unreadable_course_context_code_is_not_skipped(self, canvas, context_code):
+        """A context_code that names a course badly must not fall back to the
+        audience_contexts courses, whose (allowing) policy would then decide."""
+        canvas.conversations["77"] = _conversation(
+            context_code=context_code,
+            audience_contexts={"courses": {COURSE: ["StudentEnrollment"]}, "groups": {}},
+        )
+        tools = await _tools()
+        result = await tools["reply_to_conversation"]("77", "Thanks")
+        assert "not tied to a course" in result["error"]
+        assert result["nothing_sent"] is True
+        assert "confirmation_token" not in result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("audience", ["501", {"501": True}, 501])
+    async def test_non_list_audience_is_refused(self, canvas, audience):
+        canvas.conversations["77"] = _conversation(audience=audience)
+        tools = await _tools()
+        result = await tools["reply_to_conversation"]("77", "Thanks")
+        assert "unexpected audience" in result["error"]
+        assert result["nothing_sent"] is True
+        assert "confirmation_token" not in result
 
     @pytest.mark.asyncio
     async def test_monologue_has_no_one_to_reply_to(self, canvas):

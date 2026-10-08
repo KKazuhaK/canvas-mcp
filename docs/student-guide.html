@@ -218,18 +218,34 @@ ENABLE_DATA_ANONYMIZATION=false</code></pre>
                             <li><code>get_my_upcoming_assignments</code> - View assignments due soon</li>
                             <li><code>get_my_todo_items</code> - Your Canvas TODO list</li>
                             <li><code>get_my_submission_status</code> - Check what you've submitted</li>
+                            <li><code>list_calendar_events</code> - Your calendar in date order: course events, personal events, group events and assignment due dates</li>
+                            <li><code>get_calendar_event</code> - One calendar event in full, including its description</li>
+                            <li><code>list_planner_notes</code> - Your own planner notes (personal to-do items) in a date window</li>
                         </ul>
 
                         <h3>Academic Performance</h3>
                         <ul class="tool-list">
                             <li><code>get_my_course_grades</code> - Current grades across all courses</li>
                             <li><code>get_my_submission</code> - What you turned in for a specific assignment, and its grade</li>
+                            <li><code>get_my_assignment_scores</code> - Every assignment's score and status in a course, grouped by assignment group with weights and drop rules</li>
+                            <li><code>calculate_grade_scenarios</code> - What-if grades computed the way Canvas does, and the score you need on remaining work to reach a target</li>
+                            <li><code>list_quizzes</code> - A course's quizzes with dates, limits and your submission state (never starts an attempt)</li>
+                            <li><code>get_quiz_details</code> - One quiz's settings plus your attempts used and remaining</li>
                         </ul>
 
                         <h3>Your Canvas Identity</h3>
                         <ul class="tool-list">
                             <li><code>get_my_profile</code> - Confirm which Canvas account your token belongs to</li>
                             <li><code>get_my_enrollments</code> - Every course you're enrolled in, and your role in each</li>
+                        </ul>
+
+                        <h3>What's New and Your Groups</h3>
+                        <ul class="tool-list">
+                            <li><code>list_my_announcements</code> - Announcements across all your courses in one list</li>
+                            <li><code>get_my_activity_stream</code> - Recent activity summarized by kind: announcements, discussions, messages, grades and comments</li>
+                            <li><code>list_my_groups</code> - The groups you belong to, with course and group IDs</li>
+                            <li><code>get_group_members</code> - Who is in one of your groups</li>
+                            <li><code>list_group_files</code> - Files shared in one of your groups</li>
                         </ul>
 
                         <h3>Peer Review Management</h3>
@@ -247,12 +263,27 @@ ENABLE_DATA_ANONYMIZATION=false</code></pre>
                             <li><code>list_discussion_topics</code> - View discussion forums</li>
                         </ul>
 
-                        <h3>Turning Work In (off by default)</h3>
-                        <p>Everything above is read-only. Canvas MCP can also submit on your behalf, but those tools stay unregistered unless whoever set up the server names them in <code>STUDENT_WRITE_TOOLS</code> &mdash; and your instructor can restrict them further per course.</p>
+                        <h3>Inbox (Shared Tools)</h3>
+                        <ul class="tool-list">
+                            <li><code>list_conversations</code> - Read your Canvas Inbox</li>
+                            <li><code>get_conversation_details</code> - Read one conversation</li>
+                            <li><code>find_message_recipients</code> - Look up the people you can message in a course, with their user IDs (while anonymization is on, only course staff are named)</li>
+                        </ul>
+
+                        <h3>Turning Work In and Messaging (off by default)</h3>
+                        <p>Everything above is read-only. Canvas MCP can also submit and message on your behalf, but those tools stay unregistered unless whoever set up the server names them in <code>STUDENT_WRITE_TOOLS</code> &mdash; and your instructor can restrict them further per course.</p>
                         <ul class="tool-list">
                             <li><code>submit_assignment</code> - Submit a file, URL, or text entry (always previews first, then asks you to confirm)</li>
                             <li><code>comment_on_my_submission</code> - Add a comment to your own submission</li>
                             <li><code>mark_module_item_done</code> - Mark a module item complete</li>
+                            <li><code>create_planner_note</code> - Add a note to your Canvas planner</li>
+                            <li><code>update_planner_note</code> - Change one of your planner notes (previews first, then asks you to confirm)</li>
+                            <li><code>delete_planner_note</code> - Delete one of your planner notes (previews first, then asks you to confirm)</li>
+                            <li><code>mark_planner_item_complete</code> - Tick or untick a planner item</li>
+                            <li><code>create_personal_calendar_event</code> - Add an event to your personal calendar</li>
+                            <li><code>delete_personal_calendar_event</code> - Delete an event from your personal calendar (previews first, then asks you to confirm)</li>
+                            <li><code>send_message</code> - Send a new Inbox message to 1-5 people in a course (always previews first, then asks you to confirm)</li>
+                            <li><code>reply_to_conversation</code> - Reply to an Inbox conversation you are already in (always previews first, then asks you to confirm)</li>
                         </ul>
                     </section>
 

@@ -14,10 +14,10 @@ Canvas has two quiz engines, and they surface differently to a student token:
   /courses/:id/quizzes/:id/submission`` returns the caller's live quiz record
   (including the ``settings_only`` record that holds extra attempts granted
   before a first attempt), and ``GET /courses/:id/quizzes/:id/submissions``
-  returns the caller's attempt history when the caller can only submit.
-  The plural route is never called with grading rights: for a grader it pages
-  through every student's records and queues Canvas's job that grades their
-  overdue in-progress attempts (QuizSubmissionsApiController#index).
+  can return attempt history but also trigger grading.
+  The plural route is never called: it queues Canvas's job that grades
+  overdue in-progress attempts for both students and graders
+  (QuizSubmissionsApiController#index). Only the latest attempt is available.
 - **New Quizzes** live in a separate LTI service. To Canvas they are assignments
   whose external tool is the Quizzes LTI tool, which the assignment serializer
   marks with ``is_quiz_lti_assignment: true`` (canvas-lms
@@ -66,7 +66,65 @@ def _label(labels: dict[str, str], raw: Any, default: str) -> str:
 
 
 def _quiz_type_label(raw: Any) -> str:
-    return _label(_QUIZ_TYPE_LABELS, raw, raw if isinstance(raw, str) and raw else "unknown type")
+    """A quiz type's label; an unrecognised value is fenced, never echoed raw."""
+    if isinstance(raw, str) and raw and raw not in _QUIZ_TYPE_LABELS:
+        return fence_untrusted_inline(raw, "quiz type")
+    return _label(_QUIZ_TYPE_LABELS, raw, "unknown type")
+
+
+_PLAIN_NUMBER = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+
+
+def _plain(value: object) -> str:
+    """Render a Canvas ID, count or limit that is expected to be a plain number.
+
+    Numbers and digit strings pass through. Anything else (a field Canvas
+    should never fill with text) is fenced inline instead of being echoed raw,
+    so a free-text value in a numeric field cannot reach the model unmarked.
+    """
+    if value is None:
+        return "unknown"
+    if isinstance(value, int | float):
+        return str(value)
+    if isinstance(value, str) and _PLAIN_NUMBER.fullmatch(value):
+        return value
+    return fence_untrusted_inline(value, "unexpected value from Canvas")
+
+
+def _whole_number(value: object) -> int | None:
+    """A non-negative whole number from an int or a digit string; None for anything else.
+
+    Used for attempt numbers and counts, which are compared and subtracted.
+    Booleans, negative numbers, floats and free text are not accepted, so a
+    malformed value is treated as unknown rather than as a number.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        return int(value)
+    return None
+
+
+def _flag(value: object) -> bool:
+    """A Canvas boolean that is really ``true``; the string "false" is not a yes."""
+    return value is True
+
+
+def _when(value: object) -> str:
+    """Format a Canvas timestamp; one that does not parse is fenced, not echoed raw."""
+    if isinstance(value, str) and parse_date(value) is not None:
+        return format_date(value)
+    return fence_untrusted_inline(value, "unparseable date from Canvas")
+
+
+def _link(value: object) -> str | None:
+    """A Canvas link safe to print on one line, or None to leave it out."""
+    if isinstance(value, str) and re.fullmatch(r"https?://\S+", value):
+        return value
+    return None
+
 
 # QuizSubmission states that represent a finished attempt. "untaken" is an
 # attempt in progress; "settings_only" is a placeholder Canvas creates when an
@@ -143,31 +201,68 @@ _ATTEMPTS_UNAUTHORIZED = (
     "the course has concluded for you or you are excused from this quiz."
 )
 
-# Canvas permission names that put the quiz-submissions index on its grader
-# branch (QuizSubmissionsApiController#index).
+# Canvas permission names taken to put the quiz-submissions index on its grader
+# branch (QuizSubmissionsApiController#index): grading a course's quizzes is
+# governed by manage_grades, and viewing every student's grades by
+# view_all_grades (canvas-lms controller source checked 2026-10-07). A student must have
+# both explicitly denied, so a missing or unclear answer fails closed.
 _GRADING_PERMISSIONS = ("manage_grades", "view_all_grades")
+
+# Extra, stricter-only signal. Staff roles hold read_as_admin, so if any other
+# permission were to select the grader branch for a staff caller, this still
+# stops the call. It can only add a refusal: a student's answer is not
+# required to include it.
+_STAFF_PERMISSIONS = ("read_as_admin",)
 
 
 def _grading_rights(response: object) -> bool | None:
     """Whether a /courses/:id/permissions answer grants grading rights.
 
-    True if any grading permission is granted, False if all are explicitly
-    denied, None when the answer is an error or incomplete (callers fail
-    closed). Canvas renders booleans; its docs show "true"/"false" strings, so
-    both are accepted.
+    True if any grading or staff permission is granted, False if every grading
+    permission is explicitly denied and no staff permission is granted, None
+    when the answer is an error or incomplete (callers fail closed). Canvas
+    renders booleans; its docs show "true"/"false" strings, so both are
+    accepted.
     """
     if not isinstance(response, dict) or _is_error(response):
         return None
-    values = [response.get(name) for name in _GRADING_PERMISSIONS]
-    if any(v is True or v == "true" for v in values):
+    names = _GRADING_PERMISSIONS + _STAFF_PERMISSIONS
+    if any(response.get(name) is True or response.get(name) == "true" for name in names):
         return True
-    if all(v is False or v == "false" for v in values):
+    graded = [response.get(name) for name in _GRADING_PERMISSIONS]
+    if all(v is False or v == "false" for v in graded):
         return False
     return None
 
 
 def _is_error(response: object) -> bool:
     return isinstance(response, dict) and "error" in response
+
+
+# Submission types Canvas documents for assignments. Any other string is fenced
+# when shown, and a non-string is dropped.
+_KNOWN_SUBMISSION_TYPES = frozenset({
+    "discussion_topic", "online_quiz", "on_paper", "none", "external_tool",
+    "online_text_entry", "online_url", "online_upload", "media_recording",
+    "student_annotation", "wiki_page",
+})
+
+
+def _submission_types(assignment: dict[str, Any]) -> list[str]:
+    """The assignment's submission types as strings; anything but a list of strings is empty."""
+    raw = assignment.get("submission_types")
+    if not isinstance(raw, list):
+        return []
+    return [t for t in raw if isinstance(t, str)]
+
+
+def _describe_submission_types(assignment: dict[str, Any]) -> str:
+    """Submission types for a message: known names as-is, anything else fenced."""
+    types = [
+        t if t in _KNOWN_SUBMISSION_TYPES else fence_untrusted_inline(t, "submission type")
+        for t in _submission_types(assignment)
+    ]
+    return ", ".join(types) or "none"
 
 
 def _is_new_quiz(assignment: dict[str, Any]) -> bool:
@@ -181,7 +276,7 @@ def _is_new_quiz(assignment: dict[str, Any]) -> bool:
     """
     if assignment.get("is_quiz_lti_assignment") is True:
         return True
-    if "external_tool" not in (assignment.get("submission_types") or []):
+    if "external_tool" not in _submission_types(assignment):
         return False
     tag = assignment.get("external_tool_tag_attributes") or {}
     url = tag.get("url") if isinstance(tag, dict) else None
@@ -194,14 +289,15 @@ def _is_new_quiz(assignment: dict[str, Any]) -> bool:
 def _is_classic_quiz_assignment(assignment: dict[str, Any]) -> bool:
     """A graded Classic quiz's assignment shell (carries its ``quiz_id``)."""
     return (
-        "online_quiz" in (assignment.get("submission_types") or [])
+        "online_quiz" in _submission_types(assignment)
         and assignment.get("quiz_id") is not None
     )
 
 
 def _due_sort_key(record: dict[str, Any]) -> tuple[int, datetime]:
     """Earliest due date first; undated items last."""
-    due = parse_date(record.get("due_at"))
+    raw = record.get("due_at")
+    due = parse_date(raw) if isinstance(raw, str) else None
     if due is None:
         return (1, datetime.max.replace(tzinfo=UTC))
     return (0, due)
@@ -210,21 +306,25 @@ def _due_sort_key(record: dict[str, Any]) -> tuple[int, datetime]:
 def _fmt_points(value: object) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
-    return str(value)
+    return _plain(value)
 
 
 def _date_line(record: dict[str, Any]) -> str:
-    due = format_date(record["due_at"]) if record.get("due_at") else "no due date"
+    due = _when(record["due_at"]) if record.get("due_at") else "no due date"
     parts = [f"Due: {due}"]
     if record.get("unlock_at"):
-        parts.append(f"Opens: {format_date(record['unlock_at'])}")
+        parts.append(f"Opens: {_when(record['unlock_at'])}")
     if record.get("lock_at"):
-        parts.append(f"Closes: {format_date(record['lock_at'])}")
+        parts.append(f"Closes: {_when(record['lock_at'])}")
     return " | ".join(parts)
 
 
 def _yes_no(value: object) -> str:
-    return "yes" if value else "no"
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    return "unknown"
 
 
 def _attempts_allowed(value: object) -> str:
@@ -232,7 +332,7 @@ def _attempts_allowed(value: object) -> str:
         return "not reported"
     if isinstance(value, int) and value < 0:
         return "unlimited"
-    return str(value)
+    return _plain(value)
 
 
 def _lock_line(record: dict[str, Any]) -> str | None:
@@ -258,11 +358,11 @@ def _describe_assignment_submission(
     """The caller's own gradebook submission for a quiz's assignment shell."""
     if not isinstance(submission, dict) or not submission:
         return "no submission record returned"
-    if submission.get("excused"):
+    if _flag(submission.get("excused")):
         return "excused"
     parts = []
     if submission.get("submitted_at"):
-        parts.append(f"submitted {format_date(submission['submitted_at'])}")
+        parts.append(f"submitted {_when(submission['submitted_at'])}")
     else:
         parts.append("not submitted")
     if submission.get("workflow_state") == "pending_review":
@@ -271,9 +371,9 @@ def _describe_assignment_submission(
     if score is not None:
         total = f"/{_fmt_points(points_possible)}" if points_possible is not None else ""
         parts.append(f"score {_fmt_points(score)}{total}")
-    if submission.get("late"):
+    if _flag(submission.get("late")):
         parts.append("late")
-    if submission.get("missing"):
+    if _flag(submission.get("missing")):
         parts.append("marked missing")
     return ", ".join(parts)
 
@@ -283,12 +383,12 @@ def _classic_quiz_block(
 ) -> list[str]:
     title = fence_untrusted_inline(quiz.get("title") or "Untitled quiz", "quiz title")
     quiz_type = _quiz_type_label(quiz.get("quiz_type"))
-    head = f"  Quiz ID: {quiz.get('id')} | Type: {quiz_type}"
+    head = f"  Quiz ID: {_plain(quiz.get('id'))} | Type: {quiz_type}"
     if quiz.get("published") is not None:
         head += f" | Published: {_yes_no(quiz.get('published'))}"
     time_limit = quiz.get("time_limit")
     details = [
-        f"Time limit: {time_limit} min" if time_limit else "Time limit: none",
+        f"Time limit: {_plain(time_limit)} min" if time_limit else "Time limit: none",
         f"Attempts allowed: {_attempts_allowed(quiz.get('allowed_attempts'))}",
     ]
     if quiz.get("points_possible") is not None:
@@ -309,7 +409,7 @@ def _classic_quiz_block(
 
 def _new_quiz_block(assignment: dict[str, Any]) -> list[str]:
     name = fence_untrusted_inline(assignment.get("name") or "Untitled quiz", "quiz title")
-    head = f"  Assignment ID: {assignment.get('id')}"
+    head = f"  Assignment ID: {_plain(assignment.get('id'))}"
     if assignment.get("points_possible") is not None:
         head += f" | Points: {_fmt_points(assignment['points_possible'])}"
     if assignment.get("published") is not None:
@@ -327,8 +427,44 @@ def _new_quiz_block(assignment: dict[str, Any]) -> list[str]:
     return lines
 
 
+_UNREADABLE_ATTEMPTS = (
+    "Canvas returned attempt data in a shape this tool could not read, so "
+    "nothing is claimed about how many attempts you have used or have left."
+)
+
+
+def _quiz_submission_records(response: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """The ``quiz_submissions`` list of an attempts answer, or None when unreadable.
+
+    Both attempt routes answer ``{"quiz_submissions": [...]}``. A missing key, a
+    value that is not a list, or a list holding anything but objects is unknown
+    state, not "no attempts", and the caller must not report usage from it.
+    """
+    records = response.get("quiz_submissions")
+    if not isinstance(records, list) or not all(isinstance(r, dict) for r in records):
+        return None
+    return records
+
+
 def _attempt_number(record: dict[str, Any]) -> int:
-    return record.get("attempt") or 0
+    """A record's attempt number, 0 when it has none; callers check readability first."""
+    return _whole_number(record.get("attempt")) or 0
+
+
+def _attempts_readable(records: list[dict[str, Any]]) -> bool:
+    """Whether every record that stands for an attempt has a plain attempt number.
+
+    ``settings_only`` and ``preview`` records are not attempts and may carry no
+    number. Any other record must have a whole number of at least 1, otherwise
+    the used/remaining arithmetic would be a guess.
+    """
+    for record in records:
+        if record.get("workflow_state") in _NON_ATTEMPT_STATES:
+            continue
+        number = _whole_number(record.get("attempt"))
+        if number is None or number < 1:
+            return False
+    return True
 
 
 def _attempt_summary(
@@ -338,11 +474,10 @@ def _attempt_summary(
 ) -> list[str]:
     """Attempts used/remaining, kept score, in-progress state and history.
 
-    ``history`` is what the plural submissions route returns to a student:
-    every submitted attempt, or ONLY the in-progress record while an attempt is
-    running (``QuizSubmissionsApiController#index``). ``live`` is the caller's
-    current record from the singular route, the only one that returns a
-    ``settings_only`` record (extra attempts granted before a first attempt).
+    Both inputs contain only the caller's current record from the singular
+    route, including a ``settings_only`` record when extra attempts were
+    granted before the first attempt. No prior history is requested: the
+    plural submissions GET queues grading even for a student's own attempt.
 
     ``attempts_left`` is Canvas's own figure (``allowed_attempts - attempt +
     extra_attempts``, or -1 for unlimited) and is preferred over recomputing it,
@@ -350,6 +485,8 @@ def _attempt_summary(
     """
     # The live record first, so it wins ties with its own history version.
     records = ([live] if live else []) + list(history)
+    if not _attempts_readable(records):
+        return [_UNREADABLE_ATTEMPTS]
     attempts = [s for s in records if s.get("workflow_state") not in _NON_ATTEMPT_STATES]
     latest = max(attempts, key=_attempt_number) if attempts else {}
     source = live if live else (max(records, key=_attempt_number) if records else {})
@@ -370,17 +507,22 @@ def _attempt_summary(
         s.get("workflow_state") in _FINISHED_STATES for s in attempts
     ) or any(n > 1 for n in in_progress)
 
-    left = source.get("attempts_left") if source else None
-    extra = source.get("extra_attempts") if source else None
-    if left is None and isinstance(allowed, int):
-        left = -1 if allowed < 0 else max(0, allowed - used + (extra or 0))
+    raw_left = source.get("attempts_left") if source else None
+    raw_extra = source.get("extra_attempts") if source else None
+    # Canvas uses -1 for "unlimited", so a left count may be negative; the
+    # other counts are whole numbers or unknown (never echoed raw).
+    left = raw_left if isinstance(raw_left, int) and not isinstance(raw_left, bool) else None
+    extra = _whole_number(raw_extra)
+    allowed_count = allowed if isinstance(allowed, int) and not isinstance(allowed, bool) else None
+    if raw_left is None and allowed_count is not None and (raw_extra is None or extra is not None):
+        left = -1 if allowed_count < 0 else max(0, allowed_count - used + (extra or 0))
 
-    if isinstance(left, int) and left < 0:
+    if left is not None and left < 0:
         usage = f"Attempts used: {used} (unlimited attempts allowed)"
-    elif isinstance(left, int):
+    elif left is not None:
         usage = f"Attempts used: {used}, remaining: {left}"
-        if isinstance(allowed, int) and allowed >= 0:
-            usage = f"Attempts used: {used} of {allowed}, remaining: {left}"
+        if allowed_count is not None and allowed_count >= 0:
+            usage = f"Attempts used: {used} of {allowed_count}, remaining: {left}"
         if extra:
             usage += f" (includes {extra} extra granted by your instructor)"
     else:
@@ -403,12 +545,12 @@ def _attempt_summary(
 
     for number in sorted(in_progress):
         current = in_progress[number]
-        line = f"In progress: attempt {current.get('attempt')}"
+        line = f"In progress: attempt {number}"
         if current.get("started_at"):
-            line += f", started {format_date(current['started_at'])}"
+            line += f", started {_when(current['started_at'])}"
         if current.get("end_at"):
-            line += f", must be submitted by {format_date(current['end_at'])}"
-        if current.get("overdue_and_needs_submission"):
+            line += f", must be submitted by {_when(current['end_at'])}"
+        if _flag(current.get("overdue_and_needs_submission")):
             line += " (past its end time; Canvas will submit it automatically)"
         lines.append(line)
     running = max(in_progress, default=0)
@@ -426,11 +568,11 @@ def _attempt_summary(
             score_text = (
                 f"score {_fmt_points(score)}{total}" if score is not None else "score not available"
             )
-            entry = f"  • Attempt {record.get('attempt')}: {score_text}"
+            entry = f"  • Attempt {_attempt_number(record)}: {score_text}"
             if record.get("workflow_state") == "pending_review":
                 entry += ", pending review"
             if record.get("finished_at"):
-                entry += f", finished {format_date(record['finished_at'])}"
+                entry += f", finished {_when(record['finished_at'])}"
             spent = record.get("time_spent")
             if isinstance(spent, int | float):
                 entry += (
@@ -528,7 +670,8 @@ def register_student_quiz_tools(mcp: FastMCP) -> None:
                 for shell in shells:
                     name = fence_untrusted_inline(shell.get("name") or "Untitled quiz", "quiz title")
                     lines.append(f"• {name}")
-                    lines.append(f"  Quiz ID: {shell.get('quiz_id')} | Assignment ID: {shell.get('id')}")
+                    lines.append(f"  Quiz ID: {_plain(shell.get('quiz_id'))} | "
+                        f"Assignment ID: {_plain(shell.get('id'))}")
                     lines.append(f"  {_date_line(shell)}")
                     lines.append(
                         "  Your submission: "
@@ -574,7 +717,7 @@ def register_student_quiz_tools(mcp: FastMCP) -> None:
         quiz_id: str | int | None = None,
         assignment_id: str | int | None = None,
     ) -> str:
-        """Get one quiz's settings and YOUR OWN attempts (used, remaining, kept score).
+        """Get one quiz's settings and YOUR OWN latest attempt (used, remaining, kept score).
 
         Read-only. It never starts an attempt and never reads questions or
         answers. Pass exactly one of quiz_id (a Classic quiz, as listed by
@@ -627,21 +770,23 @@ def register_student_quiz_tools(mcp: FastMCP) -> None:
                 if description:
                     lines.append("Description:")
                     lines.append(fence_untrusted(description, "quiz description"))
-                attempt = (assignment.get("submission") or {}).get("attempt")
+                own_submission = assignment.get("submission")
+                attempt = own_submission.get("attempt") if isinstance(own_submission, dict) else None
                 if attempt:
                     lines.append(
-                        f"Canvas submission attempt number: {attempt} (as recorded "
+                        f"Canvas submission attempt number: {_plain(attempt)} (as recorded "
                         "in the Canvas gradebook; it may not match the New Quizzes "
                         "attempt count)"
                     )
-                if assignment.get("html_url"):
-                    lines.append(f"Open in Canvas: {assignment['html_url']}")
+                link = _link(assignment.get("html_url"))
+                if link:
+                    lines.append(f"Open in Canvas: {link}")
                 lines.append("")
                 lines.append(_NEW_QUIZZES_NOTE)
                 return "\n".join(lines)
 
             if not _is_classic_quiz_assignment(assignment):
-                types = ", ".join(assignment.get("submission_types") or []) or "none"
+                types = _describe_submission_types(assignment)
                 return (
                     f"Error: assignment {checked_id} is not a quiz (submission "
                     f"types: {types}). Use get_my_submission for ordinary assignments."
@@ -666,24 +811,31 @@ def register_student_quiz_tools(mcp: FastMCP) -> None:
         lines = [
             f"Classic quiz in {course_display}: "
             f"{fence_untrusted_inline(quiz.get('title') or 'Untitled quiz', 'quiz title')}",
-            f"Quiz ID: {quiz.get('id')} | Type: {quiz_type}"
-            + (f" | Assignment ID: {quiz['assignment_id']}" if quiz.get("assignment_id") else ""),
+            f"Quiz ID: {_plain(quiz.get('id'))} | Type: {quiz_type}"
+            + (
+                f" | Assignment ID: {_plain(quiz['assignment_id'])}"
+                if quiz.get("assignment_id") else ""
+            ),
             _date_line(quiz),
         ]
         time_limit = quiz.get("time_limit")
         settings = [
-            f"Time limit: {time_limit} min" if time_limit else "Time limit: none",
+            f"Time limit: {_plain(time_limit)} min" if time_limit else "Time limit: none",
             f"Attempts allowed: {_attempts_allowed(quiz.get('allowed_attempts'))}",
         ]
         if quiz.get("points_possible") is not None:
             settings.append(f"Points: {_fmt_points(quiz['points_possible'])}")
         if quiz.get("question_count") is not None:
-            settings.append(f"Questions: {quiz['question_count']}")
+            settings.append(f"Questions: {_plain(quiz['question_count'])}")
         lines.append(" | ".join(settings))
         if quiz.get("allowed_attempts") not in (None, 1) and quiz.get("scoring_policy"):
             lines.append(
                 "Scoring: "
-                + _label(_SCORING_POLICY_LABELS, quiz["scoring_policy"], str(quiz["scoring_policy"]))
+                + _label(
+                    _SCORING_POLICY_LABELS,
+                    quiz["scoring_policy"],
+                    fence_untrusted_inline(quiz["scoring_policy"], "scoring policy"),
+                )
             )
         if quiz.get("published") is not None:
             lines.append(f"Published: {_yes_no(quiz.get('published'))}")
@@ -711,22 +863,20 @@ def register_student_quiz_tools(mcp: FastMCP) -> None:
         if description:
             lines.append("Description:")
             lines.append(fence_untrusted(description, "quiz description"))
-        if quiz.get("html_url"):
-            lines.append(f"Open in Canvas: {quiz['html_url']}")
+        quiz_link = _link(quiz.get("html_url"))
+        if quiz_link:
+            lines.append(f"Open in Canvas: {quiz_link}")
 
         lines.append("")
         lines.append("Your attempts:")
 
-        # Grading rights put the plural submissions route on its grader branch:
-        # it pages through every visible student's records and queues
-        # Quizzes::OutstandingQuizSubmissionManager#grade_by_ids on them, which
-        # finalizes other students' overdue in-progress attempts. A read-only
-        # tool must not trigger that, so the caller's rights are checked first
-        # and anything but a clear "no" stops here.
+        # Keep this student-only tool conservative for staff and ambiguous
+        # permissions. The singular route is caller-scoped; the plural route
+        # is never used because it queues grading even for student callers.
         permissions = await make_canvas_request(
             "get",
             f"/courses/{course_id}/permissions",
-            params={"permissions[]": list(_GRADING_PERMISSIONS)},
+            params={"permissions[]": list(_GRADING_PERMISSIONS + _STAFF_PERMISSIONS)},
         )
         grader = _grading_rights(permissions)
         if grader is None:
@@ -764,36 +914,30 @@ def register_student_quiz_tools(mcp: FastMCP) -> None:
                 )
             )
             return "\n".join(lines)
+        current_records = _quiz_submission_records(current)
+        if current_records is None:
+            lines.append(_UNREADABLE_ATTEMPTS)
+            return "\n".join(lines)
         live = next(
-            (
-                r for r in current.get("quiz_submissions") or []
-                if isinstance(r, dict) and str(r.get("user_id")) == my_id
-            ),
+            (r for r in current_records if str(r.get("user_id")) == my_id),
             None,
         )
-
-        # For a caller who can only submit, Canvas returns that caller's own
-        # attempts as one unpaginated list: the in-progress attempt alone, or
-        # every submitted attempt (QuizSubmissionsApiController#index).
-        # Records are still filtered to the caller's id as a safety net.
-        response = await make_canvas_request(
-            "get", f"/courses/{course_id}/quizzes/{checked_id}/submissions"
-        )
-        if _is_error(response) or not isinstance(response, dict):
-            detail = response.get("error") if isinstance(response, dict) else response
-            lines.append(
-                _explain_error(
-                    detail, "your quiz attempts", unauthorized=_ATTEMPTS_UNAUTHORIZED
-                )
-            )
+        if current_records and live is None:
+            # A live record that cannot be tied to the caller is unknown,
+            # even when the separate history route would return no records.
+            lines.append(_UNREADABLE_ATTEMPTS)
             return "\n".join(lines)
 
-        records = [r for r in response.get("quiz_submissions") or [] if isinstance(r, dict)]
-        own = [r for r in records if str(r.get("user_id")) == my_id]
+        # The plural submissions GET queues grading even for a student's own
+        # overdue attempt. Read only the singular live record; prior attempts
+        # cannot be fetched safely through that route.
+        own = [live] if live is not None else []
         lines.extend(_attempt_summary(own, quiz, live))
-        if len(own) < len(records):
-            lines.append(
-                "Canvas also returned quiz submission records belonging to "
-                "other users; they are not shown."
-            )
+        if len(current_records) > len(own):
+            lines.append("Canvas also returned quiz submission records belonging to other users; they are not shown.")
+        lines.append(
+            "Only your current/latest attempt is shown. Earlier attempt history "
+            "is unavailable here: Canvas's history endpoint can automatically "
+            "submit and grade overdue attempts, so this read-only tool does not call it."
+        )
         return "\n".join(lines)

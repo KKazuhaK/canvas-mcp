@@ -142,7 +142,7 @@ def address_book(monkeypatch):
     fake = AddressBook()
     client = httpx.AsyncClient(transport=httpx.MockTransport(fake))
     with patch.object(client_module, "_get_http_client", return_value=client), patch.object(
-        student_messaging, "get_course_code", AsyncMock(return_value="ICS33")
+        student_messaging, "get_course_code", AsyncMock(return_value="CS101")
     ):
         yield fake
     reset_policy_cache()

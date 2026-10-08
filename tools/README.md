@@ -120,6 +120,60 @@ grade if any, and submission comments.
 
 ---
 
+### What's New (cross-course feed)
+
+#### `list_my_announcements`
+List announcements across **all** your active courses in one call, newest first.
+Cross-course by design: for one course's full announcement history use the shared
+[`list_announcements`](#list_announcements) tool instead.
+
+**Parameters:**
+- `course_identifier` (optional): Course code or Canvas ID to show only that course (omit it for every course; a blank value is refused rather than treated as "all")
+- `start_date` (optional): Earliest post date, `YYYY-MM-DD`, `MM/DD/YYYY` or ISO 8601 (default: 14 days before `end_date`)
+- `end_date` (optional): Latest post date (default: now). Date-only values are whole days in your Canvas
+  account's time zone (Canvas applies the day boundaries); ISO timestamps are exact
+- `limit` (optional): Maximum announcements to show, 1-200 (default 50)
+- `preview_chars` (optional): Body preview length, 0-2000 (default 400; `0` = titles only). A shortened preview says so and names `get_discussion_topic_details`, which reads the whole announcement
+
+**Example:**
+```
+"What did my professors announce this week?"
+"Show announcements from BADM 350 since September 1"
+```
+
+**Returns:** Course code, post date, unread flag, author, title and a plain-text body
+preview (all Canvas-authored text fenced as untrusted). Canvas silently omits courses
+you cannot read, so an empty answer for a numeric course ID that is not among your
+active courses says it may also mean you have no access. Announcements Canvas returns
+for courses that were not asked for are not shown (a warning counts them). If a request
+fails (for example a Canvas server error), the announcements that did load are shown
+with a warning that results may be incomplete. Timestamps, IDs, counts and links that
+are not in the expected form are reported as unknown or fenced, never printed as they came.
+
+---
+
+#### `get_my_activity_stream`
+Your recent Canvas activity across all active courses: the dashboard "Recent Activity"
+feed, grouped by kind. Reading it does not mark anything read. Group activity and inbox
+messages not tied to a course are not included (Canvas limits the feed to active courses).
+
+**Parameters:**
+- `item_type` (optional): `all` (default), `announcements`, `discussions`, `conversations`,
+  `submissions` (grades and submission comments) or `notifications`
+- `limit` (optional): Maximum items to show, 1-200 (default 30)
+- `include_summary` (optional): Also show per-kind total and unread counts (default `true`)
+- `preview_chars` (optional): Preview length per item, 0-2000 (default 300)
+
+**Example:**
+```
+"What's new in Canvas?"
+"Did I get any new grades or feedback?"
+```
+
+**Returns:** Per-kind counts with unread totals, then the newest items grouped as
+announcements, discussions, inbox conversations, grades & submission comments,
+notifications and other activity. With data anonymization on (the default), names and
+contact details inside this feed are pseudonymised like any other `/users/...` response.
 #### `list_calendar_events`
 Your Canvas calendar in date order: course events, events on your personal
 calendar, group events, and assignment due dates.
@@ -164,60 +218,6 @@ Your own planner notes (the personal to-do items in the Canvas planner).
 **Parameters:**
 - `start_date` / `end_date` / `days` (optional): Date window, as above
 - `course_identifier` (optional): Only notes filed under this course
-
----
-
-### Groups
-
-Read-only tools for the Canvas groups you belong to (project teams, study
-groups). Every tool except `list_my_groups` first checks `/users/self/groups`
-and refuses a group you are not a member of, even if Canvas would let your
-token read it. Group names, descriptions and file names are fenced as untrusted
-Canvas content.
-
-A group's discussions and announcements are read with the shared discussion
-tools, which take the optional `group_id`: `list_discussion_topics(course_identifier,
-group_id=..., include_announcements=True)` lists them, and
-`get_discussion_with_replies(course_identifier, topic_id, include_replies=True,
-group_id=...)` reads one with its replies (see [Discussions](#discussions)).
-`list_my_groups` prints the numeric course ID and group ID those calls need.
-
-#### `list_my_groups`
-List your groups with their course, course ID, group category ID and member
-count, and how to read a group's discussions with the discussion tools above.
-Groups that belong to an account rather than a course have no course ID.
-
-**Parameters:**
-- `course_identifier` (optional): Only show your groups in this course (course
-  code, `sis_course_id:...` or numeric ID). A course that cannot be found is
-  reported as an error, not as "no groups".
-
-**Example:**
-```
-"Which project team am I on in ICS 33?"
-```
-
-#### `get_group_members`
-List the members of one of your groups: name and Canvas user ID. Emails, login
-IDs and SIS IDs are never shown. Students whose enrollment is inactive are left
-out (`exclude_inactive`). With `ENABLE_DATA_ANONYMIZATION` on (the default),
-classmates' names appear as stable pseudonyms.
-
-**Parameters:**
-- `group_id` (required): Canvas group ID from `list_my_groups`
-
-#### `list_group_files`
-List the files stored in one of your groups. A group with files turned off
-returns a clear permission message.
-
-**Parameters:**
-- `group_id` (required): Canvas group ID
-- `search_term` (optional): Part of a file name (2+ characters)
-- `sort` (optional): `name`, `size`, `created_at`, `updated_at` (default) or `content_type`
-- `order` (optional): `asc` or `desc` (default)
-
----
-
 ### Inbox
 
 #### `find_message_recipients`
@@ -233,7 +233,7 @@ group addresses.
 
 **Example:**
 ```
-"What's my ICS 33 professor's Canvas user ID?"
+"What's my CS 101 professor's Canvas user ID?"
 "Who are the TAs in this course?"
 ```
 
@@ -254,59 +254,6 @@ every course. A person who is staff in one course you share with them (named
 here with their user ID) and a student in another is not anonymous in the
 second. Your own inbox (`list_conversations`, `get_conversation_details`) also
 shows correspondents' real names beside their user IDs.
-
----
-
-### What's New (cross-course feed)
-
-#### `list_my_announcements`
-List announcements across **all** your active courses in one call, newest first.
-Cross-course by design: for one course's full announcement history use the shared
-[`list_announcements`](#list_announcements) tool instead.
-
-**Parameters:**
-- `course_identifier` (optional): Course code or Canvas ID to show only that course
-- `start_date` (optional): Earliest post date, `YYYY-MM-DD`, `MM/DD/YYYY` or ISO 8601 (default: 14 days before `end_date`)
-- `end_date` (optional): Latest post date (default: now). Date-only values are whole days in your Canvas
-  account's time zone (Canvas applies the day boundaries); ISO timestamps are exact
-- `limit` (optional): Maximum announcements to show, 1-200 (default 50)
-- `preview_chars` (optional): Body preview length, 0-2000 (default 400; `0` = titles only). A shortened preview says so and names `get_discussion_topic_details`, which reads the whole announcement
-
-**Example:**
-```
-"What did my professors announce this week?"
-"Show announcements from ICS 33 since September 1"
-```
-
-**Returns:** Course code, post date, unread flag, author, title and a plain-text body
-preview (all Canvas-authored text fenced as untrusted). Canvas silently omits courses
-you cannot read. If a request fails (for example a Canvas server error), the
-announcements that did load are shown with a warning that results may be incomplete.
-
----
-
-#### `get_my_activity_stream`
-Your recent Canvas activity across all active courses: the dashboard "Recent Activity"
-feed, grouped by kind. Reading it does not mark anything read. Group activity and inbox
-messages not tied to a course are not included (Canvas limits the feed to active courses).
-
-**Parameters:**
-- `item_type` (optional): `all` (default), `announcements`, `discussions`, `conversations`,
-  `submissions` (grades and submission comments) or `notifications`
-- `limit` (optional): Maximum items to show, 1-200 (default 30)
-- `include_summary` (optional): Also show per-kind total and unread counts (default `true`)
-- `preview_chars` (optional): Preview length per item, 0-2000 (default 300)
-
-**Example:**
-```
-"What's new in Canvas?"
-"Did I get any new grades or feedback?"
-```
-
-**Returns:** Per-kind counts with unread totals, then the newest items grouped as
-announcements, discussions, inbox conversations, grades & submission comments,
-notifications and other activity. With data anonymization on (the default), names and
-contact details inside this feed are pseudonymised like any other `/users/...` response.
 
 ---
 
@@ -410,9 +357,6 @@ needs `mark_module_item_done` enabled in `STUDENT_WRITE_TOOLS` and allowed by th
 course policy. `delete_personal_calendar_event` refuses course
 and group events and appointment reservations (deleting a reservation would
 cancel a booking with an instructor).
-
----
-
 #### `send_message`
 Send a new Canvas Inbox message from you to specific people in a course, such as
 your instructor or TA. **Two calls:** the first previews and sends nothing, the
@@ -427,7 +371,7 @@ second (with the token from the preview) sends.
 
 **Example:**
 ```
-"Message my ICS 33 professor asking whether the midterm regrade is open"  → preview
+"Message my CS 101 professor asking whether the midterm regrade is open"  → preview
 "Yes, send it"                                                           → sends
 ```
 
@@ -466,7 +410,12 @@ On the second, the new message ID. Previewing never marks the conversation read.
 people, so a reply cannot go to a whole class. The course policy of the
 conversation's course applies; a conversation tied to no course is refused while
 course policies are enabled. The token is void if the conversation's audience
-changes before you confirm.
+changes before you confirm. The request explicitly addresses the approved
+people, so participants added during confirmation do not receive this reply.
+Canvas may reject a reply that includes someone without an active enrollment;
+reply in Canvas instead. The tool never retries with an unrestricted audience.
+Canvas still controls access to the thread and its history; this recipient list
+bounds delivery of this message, not later forwarding or thread access.
 
 ---
 
@@ -511,6 +460,9 @@ STUDENT_WRITE_TOOLS=submit_assignment,comment_on_my_submission
 ```
 
 Valid names: `submit_assignment`, `comment_on_my_submission`,
+`mark_module_item_done`, `create_planner_note`, `update_planner_note`,
+`delete_planner_note`, `mark_planner_item_complete`,
+`create_personal_calendar_event`, `delete_personal_calendar_event`.
 `mark_module_item_done`, `send_message`, `reply_to_conversation`.
 
 **2. Per-course instructor policy**
@@ -543,6 +495,57 @@ breath. Authorship cannot be established from a student's own token.
 Anything ambiguous denies: a malformed policy, contradictory directives (an
 `agent_writes: deny` appended under an earlier `allow`), a failed read, or a
 course this caller cannot see.
+
+---
+
+### Groups
+
+Read-only tools for the Canvas groups you belong to (project teams, study
+groups). Every tool except `list_my_groups` first checks `/users/self/groups`
+and refuses a group you are not a member of, even if Canvas would let your
+token read it. Group names, descriptions and file names are fenced as untrusted
+Canvas content.
+
+A group's discussions and announcements are read with the shared discussion
+tools, which take the optional `group_id`: `list_discussion_topics(course_identifier,
+group_id=..., include_announcements=True)` lists them, and
+`get_discussion_with_replies(course_identifier, topic_id, include_replies=True,
+group_id=...)` reads one with its replies (see [Discussions](#discussions)).
+`list_my_groups` prints the numeric course ID and group ID those calls need.
+
+#### `list_my_groups`
+List your groups with their course, course ID, group category ID and member
+count, and how to read a group's discussions with the discussion tools above.
+Groups that belong to an account rather than a course have no course ID.
+
+**Parameters:**
+- `course_identifier` (optional): Only show your groups in this course (course
+  code, `sis_course_id:...` or numeric ID). A course that cannot be found is
+  reported as an error, not as "no groups".
+
+**Example:**
+```
+"Which project team am I on in BADM 350?"
+```
+
+#### `get_group_members`
+List the members of one of your groups: name and Canvas user ID. Emails, login
+IDs and SIS IDs are never shown. Students whose enrollment is inactive are left
+out (`exclude_inactive`). With `ENABLE_DATA_ANONYMIZATION` on (the default),
+classmates' names appear as stable pseudonyms.
+
+**Parameters:**
+- `group_id` (required): Canvas group ID from `list_my_groups`
+
+#### `list_group_files`
+List the files stored in one of your groups. A group with files turned off
+returns a clear permission message.
+
+**Parameters:**
+- `group_id` (required): Canvas group ID
+- `search_term` (optional): Part of a file name (2+ characters)
+- `sort` (optional): `name`, `size`, `created_at`, `updated_at` (default) or `content_type`
+- `order` (optional): `asc` or `desc` (default)
 
 ---
 
@@ -617,7 +620,18 @@ institution default), then the grading standards API, falling back to
 Canvas's default scheme when neither is readable. A suspected final grade
 override is pointed out. Not reproduced: grading-period weighting, override
 scores, unposted scores and assignments Canvas does not show you. When a group
-drops both lowest and highest scores the target search is approximate.
+drops both lowest and highest scores the target search is approximate. A result
+is a checked solution rather than a proven minimum; a search miss is indeterminate,
+because narrow passing intervals between grid points may have been missed.
+
+**Refuses instead of guessing (both tools):** a course that restricts
+quantitative data for students (Canvas withholds the numbers); assignment-group
+data that is not the documented shape (an entry without a numeric ID,
+unreadable drop rules, assignments not listed), which is never trimmed to fit;
+and submissions that arrive as a list, which Canvas sends for observer tokens
+and which describe other people. `calculate_grade_scenarios` also refuses
+`target_letter` when the course's real letter scheme is unknown (Canvas's
+default scheme is only a stand-in then); use `target_percent`.
 
 ---
 
@@ -666,15 +680,14 @@ Pass exactly one of `quiz_id` or `assignment_id`.
 **Returns:** For a Classic quiz: settings (time limit, allowed attempts, points,
 question count, scoring policy, access-code and LockDown Browser requirements),
 then your attempts used and remaining, kept score, any attempt in progress, and
-each finished attempt's score (Canvas lists earlier attempts only when no
-attempt is in progress, and the result says so). Extra attempts your instructor
+the latest finished attempt's score. Earlier attempt history is unavailable:
+the plural submissions GET queues grading of overdue attempts even for a
+student, so the read-only tool never calls it. Extra attempts your instructor
 granted are included. For a New Quiz: the Canvas assignment record and your
 gradebook submission, with a note that the rest lives in the New Quizzes
 service. If the token has grading rights in the course, attempts are not
 requested: Canvas's attempt list would then cover every student and grade their
 overdue attempts.
-
----
 
 ### Peer Review Management
 
@@ -2518,31 +2531,6 @@ longer result as a file the model reads rather than cutting it.
 
 ---
 
-### Complete content (no truncation)
-
-Tools whose job is to return one complete piece of Canvas content never cut it,
-and declare `_meta: {"anthropic/maxResultSizeChars": 500000}` in `tools/list`
-(Claude Code's ceiling; without it Claude Code caps a tool result near 25k
-tokens). Other clients ignore the key. The tools: `read_course_file`,
-`read_course_file_text`, `get_page_content`, `get_syllabus`, `get_front_page`,
-`get_assignment_details`, `get_discussion_topic_details`,
-`get_discussion_entry_details`, `get_discussion_with_replies`,
-`list_discussion_entries`, `get_conversation_details`,
-`get_my_submission`, `get_calendar_event`, `get_quiz_details`, `get_rubric`, and
-`get_rubric_assessment`. The one exception to "never cut" is `get_syllabus`'s
-optional `max_chars`: without it the syllabus is complete, and with it a cut is
-marked `[truncated at N characters]`.
-
-Listing and overview tools may still preview long text, but only where a
-full-content tool exists, and the output names it when a preview was shortened
-(`get_course_content_overview` → `get_syllabus`, `list_pages`, `list_modules`;
-`list_my_announcements` and `get_my_activity_stream` → the item's own tool;
-`list_rubrics` → `get_rubric`; `list_discussion_entries` without
-`include_full_content` → `include_full_content=True`; `get_page_details` →
-`get_page_content`).
-
----
-
 ### Conversations (Inbox)
 
 #### `list_conversations`
@@ -2776,6 +2764,32 @@ Create a new discussion post.
 - `course_identifier`: Course code or ID
 - `topic_id`: Discussion topic ID
 - `message`: Post content
+
+---
+
+### Complete content (no truncation)
+
+Tools whose job is to return one complete piece of Canvas content never cut it
+(`list_discussion_entries` shows short previews unless you pass
+`include_full_content=true`), and declare `_meta: {"anthropic/maxResultSizeChars": 500000}` in `tools/list`
+(Claude Code's ceiling; without it Claude Code caps a tool result near 25k
+tokens). Other clients ignore the key. The tools: `read_course_file`,
+`read_course_file_text`, `get_page_content`, `get_syllabus`, `get_front_page`,
+`get_assignment_details`, `get_discussion_topic_details`,
+`get_discussion_entry_details`, `get_discussion_with_replies`,
+`list_discussion_entries`, `get_conversation_details`, `get_my_submission`,
+`get_my_assignment_scores`, `get_quiz_details`, `get_calendar_event`,
+`get_rubric`, and `get_rubric_assessment`. The one exception to "never cut" is
+`get_syllabus`'s optional `max_chars`: without it the syllabus is complete, and
+with it a cut is marked `[truncated at N characters]`.
+
+Listing and overview tools may still preview long text, but only where a
+full-content tool exists, and the output names it when a preview was shortened
+(`get_course_content_overview` -> `get_syllabus`, `list_pages`, `list_modules`;
+`list_my_announcements` and `get_my_activity_stream` -> the item's own tool;
+`list_rubrics` -> `get_rubric`; `list_discussion_entries` without
+`include_full_content` -> `include_full_content=True`; `get_page_details` ->
+`get_page_content`).
 
 ---
 

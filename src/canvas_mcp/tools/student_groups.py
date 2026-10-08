@@ -20,7 +20,7 @@ groups) and refuses a group that is not on it. That costs one extra request
 per call and fails closed: if the membership list cannot be read, nothing else
 is requested.
 
-Privacy (CLAUDE.md "Privacy")
+Privacy
 -----------------------------
 - ``/groups/{id}/users`` is a roster of classmates. It stays at the client
   layer's ``full`` anonymization tier (``core/client.py``, the ``users``
@@ -70,12 +70,33 @@ _VALID_FILE_SORTS = frozenset(
     {"name", "size", "created_at", "updated_at", "content_type"}
 )
 
-_HTTP_STATUS = re.compile(r"HTTP error: (\d{3})")
+# make_canvas_request starts an HTTP failure with this prefix, then appends the
+# response body. Anchored so a status-looking string inside that body (or inside
+# another kind of failure text) can never be mistaken for the real status.
+_HTTP_STATUS = re.compile(r"HTTP error: (\d{3})(?!\d)")
 _TAG = re.compile(r"<[^>]+>")
 # A bare MIME type (type/subtype). Group files are uploaded by classmates and
 # Canvas's upload preflight takes a client-supplied content_type, so anything
-# that is not a plain MIME token is not printed.
-_MIME_TYPE = re.compile(r"^[\w.+-]+/[\w.+-]+$")
+# that is not a plain MIME token is not printed: ASCII only (``\w`` would admit
+# Unicode), no whitespace, a registered top-level type, and a hard length cap.
+_MIME_TOP_LEVEL = (
+    "application|audio|chemical|font|haptics|image|message|model|multipart|text|video"
+)
+_MIME_TYPE = re.compile(
+    rf"(?:{_MIME_TOP_LEVEL})/[A-Za-z0-9][A-Za-z0-9.+-]*", re.IGNORECASE
+)
+_MAX_MIME_LENGTH = 100
+
+
+def _safe_content_type(raw: object) -> str:
+    """The content type if it is a plain, short MIME token, else a placeholder."""
+    if (
+        isinstance(raw, str)
+        and len(raw) <= _MAX_MIME_LENGTH
+        and _MIME_TYPE.fullmatch(raw)
+    ):
+        return raw
+    return "unknown type"
 
 
 def _scrub(text: str) -> str:
@@ -92,7 +113,7 @@ def _scrub(text: str) -> str:
 
 def _http_status(error: object) -> int | None:
     """The HTTP status embedded in a make_canvas_request error, if any."""
-    match = _HTTP_STATUS.search(str(error))
+    match = _HTTP_STATUS.match(str(error))
     return int(match.group(1)) if match else None
 
 
@@ -107,6 +128,25 @@ def _plain_text(markup: object) -> str:
     return html.unescape(_TAG.sub("", markup)).strip()
 
 
+_MAX_ERROR_DETAIL = 200
+
+
+def _failure_reason(error: object) -> str:
+    """A short, safe reason for a failed Canvas request.
+
+    ``make_canvas_request`` embeds the response body in its error string
+    (``HTTP error: 500, Text: ...``). That body is not ours to trust, and a
+    proxy or gateway page can carry text aimed at the model, so only the HTTP
+    status is surfaced for an HTTP failure. Any other failure text (a timeout,
+    a connection error) is truncated and fenced as untrusted.
+    """
+    status = _http_status(error)
+    if status is not None:
+        return f"HTTP {status}"
+    detail = str(error).strip()[:_MAX_ERROR_DETAIL] or "no detail"
+    return fence_untrusted_inline(detail, "Canvas error")
+
+
 def _access_error(action: str, group_id: str, error: object) -> str:
     """A clear message for a failed group-scoped read."""
     status = _http_status(error)
@@ -118,7 +158,7 @@ def _access_error(action: str, group_id: str, error: object) -> str:
         )
     if status == 404:
         return f"Error: Canvas could not find that resource in group {group_id} (HTTP 404)."
-    return f"Error: could not {action} for group {group_id}: {error}"
+    return f"Error: could not {action} for group {group_id}: {_failure_reason(error)}"
 
 
 async def _fetch_my_groups(params: dict[str, Any] | None = None) -> list[dict] | dict:
@@ -150,7 +190,7 @@ async def _require_membership(raw_group_id: str | int) -> tuple[str, dict | None
     if isinstance(groups, dict):
         return group_id, None, (
             "Error: could not confirm your membership in group "
-            f"{group_id}, so nothing was read: {groups.get('error')}"
+            f"{group_id}, so nothing was read: {_failure_reason(groups.get('error'))}"
         )
 
     for group in groups:
@@ -201,7 +241,15 @@ def register_student_group_tools(mcp: FastMCP) -> None:
         """
         params: dict[str, Any] = {}
         course_id: str | None = None
-        if course_identifier is not None and str(course_identifier).strip():
+        if course_identifier is not None:
+            if not str(course_identifier).strip():
+                # A filter that was given but is unusable must not quietly
+                # widen the answer to every course.
+                return (
+                    "Error: course_identifier is blank. Leave it out to list "
+                    "your groups in every course, or give a course code or "
+                    "numeric Canvas course ID."
+                )
             # The filter below compares numeric IDs, so an unresolved code or
             # SIS ID would silently match nothing; fail loudly instead.
             course_id, course_error = await resolve_numeric_course_id(course_identifier)
@@ -213,7 +261,7 @@ def register_student_group_tools(mcp: FastMCP) -> None:
 
         groups = await _fetch_my_groups(params)
         if isinstance(groups, dict):
-            return f"Error fetching your groups: {groups.get('error')}"
+            return f"Error fetching your groups: {_failure_reason(groups.get('error'))}"
 
         if course_id is not None:
             groups = [g for g in groups if str(g.get("course_id")) == course_id]
@@ -277,13 +325,14 @@ def register_student_group_tools(mcp: FastMCP) -> None:
         )
         if _is_error(members):
             return _access_error("list members", group_id, members.get("error"))
-        if not isinstance(members, list) or not members:
+        # Count only what is printed, so the header never promises more members
+        # than the list shows.
+        members = [m for m in members if isinstance(m, dict)] if isinstance(members, list) else []
+        if not members:
             return f"No members are listed for group {group_id}."
 
         lines = [f"Members of {await _group_label(group)} ({len(members)}):", ""]
         for member in members:
-            if not isinstance(member, dict):
-                continue
             # Explicit allowlist: id and display name only. Email, login_id
             # and SIS identifiers are never printed, whatever Canvas returns
             # and whether or not anonymization is enabled.
@@ -337,22 +386,17 @@ def register_student_group_tools(mcp: FastMCP) -> None:
         files = await fetch_all_paginated_results(f"/groups/{group_id}/files", params)
         if _is_error(files):
             return _access_error("list files", group_id, files.get("error"))
-        if not isinstance(files, list) or not files:
+        files = [f for f in files if isinstance(f, dict)] if isinstance(files, list) else []
+        if not files:
             if search_term:
                 return f"No files in group {group_id} match that search."
             return f"No files in group {group_id}."
 
         lines = [f"Files in {await _group_label(group)}:", ""]
         for item in files:
-            if not isinstance(item, dict):
-                continue
             name = item.get("display_name") or item.get("filename") or "unknown"
             size = format_file_size(item.get("size") or 0)
-            raw_type = item.get("content-type")
-            content_type = (
-                raw_type if isinstance(raw_type, str) and _MIME_TYPE.fullmatch(raw_type)
-                else "unknown type"
-            )
+            content_type = _safe_content_type(item.get("content-type"))
             updated = format_date(item.get("updated_at"))
             lines.append(
                 f"  ID: {item.get('id')} | {fence_untrusted_inline(name, 'file name')} "

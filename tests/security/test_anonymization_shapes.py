@@ -302,7 +302,7 @@ class TestNonUserObjectsPreserved:
         group = {
             "id": 77,
             "name": "Team Rocket",
-            "description": "ICS 33 project team",
+            "description": "Course project team",
             "avatar_url": None,
             "group_category_id": 12,
             "members_count": 4,
