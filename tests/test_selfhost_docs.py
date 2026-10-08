@@ -335,3 +335,23 @@ def test_readme_explains_the_first_stable_tag_the_default_image_needs(readme):
     assert "manifest unknown" in readme and "manifest unknown" in compose_text
     assert "git tag v1.13.0-uci.1" in readme
     assert ":edge" in readme
+
+
+def test_setup_script_is_documented_generic_and_secret_safe(readme):
+    script = (SELFHOST / "setup-env.sh").read_text(encoding="utf-8")
+    assert "\r" not in script, "setup-env.sh must use LF line endings"
+    assert script.startswith("#!/usr/bin/env bash\n")
+    assert "set -euo pipefail" in script
+    # Generic: the operator's host and Canvas come from prompts or the environment.
+    assert "kazuhahub" not in script
+    assert "uci.edu" not in script
+    # The client secret is only read from the terminal, never from argv or env.
+    assert 'read -r -s -p' in script
+    assert "ENTRA_CLIENT_SECRET=\"\"" in script
+    assert "set -o noclobber" in script and "umask 077" in script
+    # The README points operators at it, with both opt-in flags.
+    assert "setup-env.sh" in readme
+    for flag in ("--enable-writes", "--real-names"):
+        assert flag in readme and flag in script
+    smoke = (SELFHOST / "smoke-test.sh").read_text(encoding="utf-8")
+    assert "setup-env.sh" in smoke and "--env-file" in smoke

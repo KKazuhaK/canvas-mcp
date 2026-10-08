@@ -19,11 +19,12 @@ SUFFIX="$$"
 MAIN="canvas-mcp-smoke-${SUFFIX}"
 LEGACY="canvas-mcp-smoke-legacy-${SUFFIX}"
 FAILCLOSED="canvas-mcp-smoke-fc-${SUFFIX}"
+GENERATED="canvas-mcp-smoke-gen-${SUFFIX}"
 VOLUMES=()
 WORKDIR="$(mktemp -d)"
 
 cleanup() {
-  docker rm -f "$MAIN" "$LEGACY" "$FAILCLOSED" >/dev/null 2>&1 || true
+  docker rm -f "$MAIN" "$LEGACY" "$FAILCLOSED" "$GENERATED" >/dev/null 2>&1 || true
   local v
   for v in "${VOLUMES[@]:-}"; do
     [ -n "$v" ] && docker volume rm -f "$v" >/dev/null 2>&1 || true
@@ -34,7 +35,7 @@ trap cleanup EXIT
 
 dump_logs() {
   local c
-  for c in "$MAIN" "$LEGACY" "$FAILCLOSED"; do
+  for c in "$MAIN" "$LEGACY" "$FAILCLOSED" "$GENERATED"; do
     if docker inspect "$c" >/dev/null 2>&1; then
       echo "----- docker logs ${c} -----" >&2
       docker logs "$c" 2>&1 | tail -n 80 >&2 || true
@@ -200,7 +201,36 @@ expect_refusal "entra-oauth together with MCP_ACCESS_KEYS" \
   docker run --name "$FAILCLOSED" --read-only --tmpfs /tmp -v "${FC_VOL2}:/data" \
   "${ENTRA_ENV[@]}" -e CANVAS_TOKEN_KEYS="$TOKEN_KEYS" -e MCP_ACCESS_KEYS=x "$IMAGE"
 
-# -------------------------------------------------- (i) legacy mode still boots
+# ------------------------------- (i) a .env written by setup-env.sh boots
+# The operator path in README step 3: generate the file with the real script
+# (dummy IDs, a throwaway secret on stdin, both opt-in flags) and start the
+# image from it exactly as compose would, via --env-file.
+SETUP_SCRIPT="$(cd "$(dirname "$0")" && pwd)/setup-env.sh"
+GENERATED_ENV="$WORKDIR/generated.env"
+# setup-env.sh prints only a summary without secrets, so its log is safe to show.
+printf '%s\n' 'smoke-secret-not-real-0000' \
+  | PUBLIC_BASE_URL="$PUBLIC" \
+    ENTRA_TENANT_ID=11111111-1111-1111-1111-111111111111 \
+    ENTRA_CLIENT_ID=22222222-2222-2222-2222-222222222222 \
+    CANVAS_API_URL="$PUBLIC" \
+    bash "$SETUP_SCRIPT" --enable-writes --real-names --output "$GENERATED_ENV" \
+    >"$WORKDIR/setup.log" 2>&1 \
+  || { cat "$WORKDIR/setup.log" >&2; fail "setup-env.sh did not write a .env"; }
+new_volume gen
+GEN_VOL="$NEW_VOLUME"
+docker run -d --name "$GENERATED" \
+  --read-only --tmpfs /tmp \
+  -v "${GEN_VOL}:/data" \
+  --env-file "$GENERATED_ENV" \
+  -p "127.0.0.1:${PORT}:8819" \
+  "$IMAGE" >/dev/null
+wait_for "$GENERATED" 60 "${BASE}/healthz"
+code="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}/account")"
+[ "$code" = "200" ] || fail "GET /account from the generated .env returned ${code}, expected 200"
+docker rm -f "$GENERATED" >/dev/null
+ok "a .env written by setup-env.sh boots (healthz, /account)"
+
+# -------------------------------------------------- (j) legacy mode still boots
 new_volume legacy
 LEGACY_VOL="$NEW_VOLUME"
 docker run -d --name "$LEGACY" \

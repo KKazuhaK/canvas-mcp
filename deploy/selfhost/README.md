@@ -149,6 +149,39 @@
 
 ## 第 3 步：密钥与 .env
 
+### 推荐：用 setup-env.sh 生成
+
+[`setup-env.sh`](setup-env.sh) 会做这些事：
+
+- 在服务器本机生成三个随机密钥；
+- 逐项校验输入，任何一项不合法就退出；
+- 从终端读取 Entra 客户端密码，输入不回显，也不进 shell 历史；
+- 以 600 权限写出 `.env`，已有 `.env` 时拒绝覆盖。
+
+```bash
+mkdir -p /opt/canvas-mcp && cd /opt/canvas-mcp
+curl -fsSLO https://raw.githubusercontent.com/KKazuhaK/canvas-mcp/uci-student/deploy/selfhost/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/KKazuhaK/canvas-mcp/uci-student/deploy/selfhost/setup-env.sh
+bash setup-env.sh
+```
+
+默认生成只读、开启匿名化的配置。两个可选开关：
+
+- `--enable-writes`：开启全部学生写入工具，先读[写入工具的提示词注入风险](#写入工具的提示词注入风险)；
+- `--real-names`：显示真实姓名。
+
+公网地址、租户 ID、客户端 ID、Canvas 地址这四个不是机密。可以用同名环境变量预先给出，脚本就不再逐项询问，在手机上用 SSH 时更方便：
+
+```bash
+PUBLIC_BASE_URL=https://canvas.mcp.kazuhahub.com ENTRA_TENANT_ID=<租户ID> ENTRA_CLIENT_ID=<客户端ID> CANVAS_API_URL=https://canvas.school.edu bash setup-env.sh
+```
+
+客户端密码故意只从终端读取，所以要先把脚本下载成文件再运行，不能用 `curl ... | bash`。
+
+**脚本只运行一次。** 以后要改设置（例如开启写入工具），直接编辑 `.env` 再 `docker compose up -d`；只读模式生成的 `.env` 里已经带着注释掉的写入配置，删掉行首的 `# ` 即可。不要重新运行脚本：重新生成会换掉 `CANVAS_TOKEN_KEYS`，已登记的 Canvas token 将无法解密，服务会拒绝启动。
+
+### 手动方式
+
 ```bash
 mkdir -p /opt/canvas-mcp && cd /opt/canvas-mcp
 curl -fsSLO https://raw.githubusercontent.com/KKazuhaK/canvas-mcp/uci-student/deploy/selfhost/docker-compose.yml
