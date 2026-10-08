@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import ast
+import asyncio
 import base64
 import hashlib
 import pathlib
 import re
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -98,6 +103,12 @@ def make_cfg(**kw: Any) -> AccountConfig:
     }
     args.update(kw)
     return AccountConfig(**args)
+
+
+@pytest.fixture(autouse=True)
+def _display_in_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Timestamps render in TIMEZONE; pin it so the suite does not depend on the machine."""
+    monkeypatch.setattr(account_web, "output_timezone", lambda: UTC)
 
 
 @pytest.fixture
@@ -811,7 +822,7 @@ class TestSaveToken:
         assert stored.entra_upn == "ada@example.test"
         page = signed_in.client.get(ACCOUNT_PATH)
         assert "Ada Canvas" in page.text and "id 42" in page.text
-        assert "2027-01-15T08:00:00Z" in page.text  # created, ISO 8601 UTC
+        assert "2027-01-15 08:00 UTC" in page.text  # enrolled, no seconds, no T/Z
         assert CANVAS_TOKEN not in page.text
         for call in signed_in.client.cookies.jar:
             assert CANVAS_TOKEN not in (call.value or "")
@@ -954,7 +965,7 @@ class TestAdmin:
         assert secret not in text and "S" * 40 not in text
         assert "bob@example.test" in text
         assert "Bob &lt;img src=x&gt;" in text and "<img src=x>" not in text
-        assert "2027-01-15T08:00:00Z" in text
+        assert "2027-01-15 08:00 UTC" in text
         assert f'name="object_id" value="{OID_2}"' in text
         assert f'name="tenant_id" value="{TID}"' in text
         assert 'action="/account/admin/revoke"' in text
@@ -1151,6 +1162,603 @@ class TestDataclasses:
     def test_canvas_check_error_kind(self) -> None:
         assert CanvasCheckError("invalid").kind == "invalid"
         assert CanvasCheckError("unavailable").kind == "unavailable"
+
+
+# -- language, layout and timestamps -------------------------------------------
+
+ZH = {"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"}
+EN = {"Accept-Language": "en-US,en;q=0.9"}
+CJK = re.compile("[\u4e00-\u9fff]")
+LANG_COOKIE_NAME = "canvas_mcp_lang"
+SOURCE = pathlib.Path(account_web.__file__)
+
+
+def strip_chrome(text: str) -> str:
+    """Page body without <style> and the header (the toggle names the other language)."""
+    text = re.sub(r"<style>.*?</style>", "", text, flags=re.S)
+    return re.sub(r"<header.*?</header>", "", text, flags=re.S)
+
+
+def use_lang(h: Harness, lang: str) -> None:
+    """Remember a language in the client's cookie jar the way a browser would."""
+    response = h.client.get(ACCOUNT_PATH, params={"lang": lang})
+    assert response.status_code == 200
+
+
+def bi_calls() -> list[tuple[int, ast.expr, ast.expr]]:
+    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_bi":
+            assert len(node.args) == 2 and not node.keywords, f"line {node.lineno}"
+            found.append((node.lineno, node.args[0], node.args[1]))
+    return found
+
+
+def static_text(node: ast.expr) -> str | None:
+    """The literal text of a str constant or the literal parts of an f-string."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            v.value for v in node.values if isinstance(v, ast.Constant) and isinstance(v.value, str)
+        )
+    return None
+
+
+class TestLanguageChoice:
+    def test_default_is_english(self, h: Harness) -> None:
+        response = h.client.get(ACCOUNT_PATH)
+        assert '<html lang="en">' in response.text
+        assert "Sign in with Microsoft" in response.text
+        assert not CJK.search(strip_chrome(response.text))
+        assert LANG_COOKIE_NAME not in "".join(set_cookie_headers(response))
+
+    def test_query_param_selects_chinese_and_html_lang(self, h: Harness) -> None:
+        response = h.client.get(ACCOUNT_PATH, params={"lang": "zh"})
+        assert '<html lang="zh-CN">' in response.text
+        assert "使用 Microsoft 登录" in response.text
+        assert "Sign in with Microsoft" not in response.text
+        assert_security_headers(response)
+
+    def test_query_param_beats_cookie_and_header(self, h: Harness) -> None:
+        h.client.headers.update(ZH)
+        use_lang(h, "zh")
+        response = h.client.get(ACCOUNT_PATH, params={"lang": "en"})
+        assert '<html lang="en">' in response.text
+        assert "Sign in with Microsoft" in response.text
+
+    def test_cookie_is_remembered_on_later_pages(self, h: Harness) -> None:
+        use_lang(h, "zh")
+        assert h.client.cookies.get(LANG_COOKIE_NAME) == "zh"
+        later = h.client.get(ACCOUNT_PATH)
+        assert '<html lang="zh-CN">' in later.text
+        assert "使用 Microsoft 登录" in later.text
+        use_lang(h, "en")
+        assert "Sign in with Microsoft" in h.client.get(ACCOUNT_PATH).text
+
+    def test_cookie_beats_accept_language(self, h: Harness) -> None:
+        response = h.client.get(
+            ACCOUNT_PATH, headers={**ZH, "Cookie": f"{LANG_COOKIE_NAME}=en"}
+        )
+        assert '<html lang="en">' in response.text
+        response = h.client.get(
+            ACCOUNT_PATH, headers={**EN, "Cookie": f"{LANG_COOKIE_NAME}=zh"}
+        )
+        assert '<html lang="zh-CN">' in response.text
+
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [
+            ("zh-CN,zh;q=0.9,en;q=0.8", "zh"),
+            ("zh", "zh"),
+            ("zh-TW", "zh"),
+            ("ZH-hans", "zh"),
+            ("en-US,en;q=0.9", "en"),
+            ("en-US,en;q=0.9,zh;q=0.8", "en"),
+            ("fr-FR,fr;q=0.9", "en"),
+            ("fr, zh;q=0.5", "zh"),
+            ("en;q=0.5, zh;q=0.9", "zh"),
+            ("zh;q=0, en", "en"),
+            ("zh;q=0", "en"),
+            ("zh;q=abc", "en"),
+            ("zh;q=nan", "en"),
+            ("*", "en"),
+            (";;;,,,", "en"),
+            ("", "en"),
+        ],
+    )
+    def test_accept_language(self, h: Harness, header: str, expected: str) -> None:
+        response = h.client.get(ACCOUNT_PATH, headers={"Accept-Language": header})
+        want = "zh-CN" if expected == "zh" else "en"
+        assert f'<html lang="{want}">' in response.text
+        assert LANG_COOKIE_NAME not in "".join(set_cookie_headers(response))
+
+    @pytest.mark.parametrize(
+        "value",
+        ["fr", "ZH", "zh-CN", "", "zh,en", " zh", "zh ", "<script>x</script>", "zh%00", "1", "null"],
+    )
+    def test_invalid_query_values_are_ignored(self, h: Harness, value: str) -> None:
+        response = h.client.get(ACCOUNT_PATH, params={"lang": value}, headers=EN)
+        assert '<html lang="en">' in response.text
+        assert LANG_COOKIE_NAME not in "".join(set_cookie_headers(response))
+        assert "<script>x" not in response.text
+        # An invalid value does not cancel a valid cookie either.
+        response = h.client.get(
+            ACCOUNT_PATH,
+            params={"lang": value},
+            headers={**EN, "Cookie": f"{LANG_COOKIE_NAME}=zh"},
+        )
+        assert '<html lang="zh-CN">' in response.text
+
+    @pytest.mark.parametrize("value", ["fr", "ZH", "", "zh,en", "<b>x</b>", "z" * 500])
+    def test_invalid_cookie_values_are_ignored_and_not_echoed(
+        self, h: Harness, value: str
+    ) -> None:
+        response = h.client.get(
+            ACCOUNT_PATH, headers={**EN, "Cookie": f"{LANG_COOKIE_NAME}={value}"}
+        )
+        assert '<html lang="en">' in response.text
+        assert "<b>x</b>" not in response.text and "zzzzzz" not in response.text
+
+    def test_lang_query_is_ignored_on_post(self, h: Harness) -> None:
+        sign_in(h)
+        csrf = csrf_of(h)
+        response = h.client.post(
+            "/account/token?lang=zh",
+            data={"csrf": csrf, "canvas_token": "short"},
+            headers={"Origin": BASE, "Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert response.status_code == 400
+        assert '<html lang="en">' in response.text
+        assert LANG_COOKIE_NAME not in "".join(set_cookie_headers(response))
+
+    def test_lang_query_works_on_any_get_page(self, h: Harness) -> None:
+        sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
+        response = h.client.get("/account/admin", params={"lang": "zh"})
+        assert response.status_code == 200
+        assert '<html lang="zh-CN">' in response.text
+        assert LANG_COOKIE_NAME in "".join(set_cookie_headers(response))
+        denied = h.client.get(ACCOUNT_CALLBACK_PATH, params={"lang": "zh"})
+        assert denied.status_code == 400 and "登录请求已失效" in denied.text
+
+    def test_language_survives_a_post_redirect(self, h: Harness) -> None:
+        use_lang(h, "zh")
+        sign_in(h)
+        csrf = csrf_of(h)
+        response = post_form(
+            h, "/account/token", {"csrf": csrf, "canvas_token": CANVAS_TOKEN}
+        )
+        assert response.status_code == 303 and response.headers["location"] == "/account"
+        page = h.client.get(response.headers["location"])
+        assert '<html lang="zh-CN">' in page.text
+        assert "Canvas 令牌已绑定" in page.text
+
+    def test_cookie_attributes(self, h: Harness) -> None:
+        response = h.client.get(ACCOUNT_PATH, params={"lang": "zh"})
+        line = cookie_line(response, LANG_COOKIE_NAME)
+        lowered = line.lower()
+        assert line.startswith(f"{LANG_COOKIE_NAME}=zh;")
+        assert "path=/account" in lowered and "path=/account/" not in lowered
+        assert "samesite=lax" in lowered
+        assert "secure" in lowered and "httponly" in lowered
+        assert "max-age=31536000" in lowered
+        assert "domain" not in lowered
+        english = cookie_line(h.client.get(ACCOUNT_PATH, params={"lang": "en"}), LANG_COOKIE_NAME)
+        assert english.startswith(f"{LANG_COOKIE_NAME}=en;")
+
+    def test_cookie_is_not_an_auth_input_or_redirect_target(self, h: Harness) -> None:
+        # A language cookie alone signs nobody in and never steers a redirect.
+        response = h.client.get(
+            "/account/admin", headers={"Cookie": f"{LANG_COOKIE_NAME}=zh"}
+        )
+        assert response.status_code == 403 and "location" not in response.headers
+        sign_in(h)
+        csrf = csrf_of(h)
+        out = post_form(h, "/account/logout", {"csrf": csrf})
+        assert out.headers["location"] == "/account"
+
+    def test_other_status_pages_follow_the_language_too(self, h: Harness) -> None:
+        response = h.client.put(ACCOUNT_PATH, headers=ZH)
+        assert response.status_code == 405 and "不支持该请求方法" in response.text
+        response = h.client.put(ACCOUNT_PATH, headers=EN)
+        assert "Method not allowed" in response.text and not CJK.search(
+            strip_chrome(response.text)
+        )
+
+    def test_languages_never_cross_between_concurrent_requests(self, h: Harness) -> None:
+        sign_in(h)
+        session_cookie = h.client.cookies.get(SESSION_COOKIE)
+        assert session_cookie
+        real_info = h.store.info
+
+        def slow_info(tenant_id: str, object_id: str) -> Any:
+            time.sleep(0.05)  # keep many requests in flight at once
+            return real_info(tenant_id, object_id)
+
+        h.store.info = slow_info  # type: ignore[method-assign]
+        routes = build_account_routes(
+            make_cfg(),
+            h.store,
+            fake_authorize,
+            clock=h.clock,
+        )
+        app = Starlette(routes=routes)
+
+        async def fetch(client: httpx.AsyncClient, lang: str) -> tuple[str, str]:
+            response = await client.get(
+                ACCOUNT_PATH,
+                headers={
+                    "Accept-Language": lang,
+                    "Cookie": f"{SESSION_COOKIE}={session_cookie}",
+                },
+            )
+            return lang, response.text
+
+        async def run() -> list[tuple[str, str]]:
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url=BASE) as client:
+                jobs = [fetch(client, "zh" if i % 2 else "en") for i in range(24)]
+                return await asyncio.gather(*jobs)
+
+        results = asyncio.run(run())
+        assert len(results) == 24
+        for lang, text in results:
+            if lang == "zh":
+                assert '<html lang="zh-CN">' in text and "绑定你的 Canvas 令牌" in text
+                assert "Add your Canvas token" not in text
+            else:
+                assert '<html lang="en">' in text and "Add your Canvas token" in text
+                assert not CJK.search(strip_chrome(text))
+        # Nothing is left behind on the calling context.
+        assert account_web._current_lang() == "en"
+
+
+class TestSingleLanguageRendering:
+    def test_every_bi_call_has_both_languages(self) -> None:
+        calls = bi_calls()
+        assert len(calls) > 40
+        for lineno, zh, en in calls:
+            zh_text, en_text = static_text(zh), static_text(en)
+            assert zh_text is not None and en_text is not None, f"line {lineno}: not literal"
+            assert zh_text.strip() and en_text.strip(), f"line {lineno}: empty text"
+            assert CJK.search(zh_text), f"line {lineno}: zh string has no Chinese"
+            assert not CJK.search(en_text), f"line {lineno}: en string has Chinese"
+
+    def test_no_bi_call_runs_at_import_time(self) -> None:
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                continue
+            for inner in ast.walk(node):
+                assert not (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "_bi"
+                ), f"line {inner.lineno}: _bi evaluated at import time freezes the language"
+
+    def test_bi_returns_only_the_chosen_text(self) -> None:
+        assert account_web._bi("中", "en") == "en"  # no request context: default English
+        token = account_web._RENDER.set(account_web._RenderContext(lang="zh"))
+        try:
+            assert account_web._bi("中", "en") == "中"
+        finally:
+            account_web._RENDER.reset(token)
+
+    @pytest.mark.parametrize("lang", ["zh", "en"])
+    def test_pages_render_one_language_only(self, h: Harness, lang: str) -> None:
+        pairs = [
+            (static_text(zh), static_text(en))
+            for _, zh, en in bi_calls()
+        ]
+        use_lang(h, lang)
+        pages = [
+            h.client.get(ACCOUNT_PATH),
+            h.client.get(ACCOUNT_CALLBACK_PATH),
+            h.client.put(ACCOUNT_PATH),
+        ]
+        h.store.put(
+            tenant_id=TID, object_id=OID_2, api_token="x" * 30, canvas_user_id="9",
+            canvas_user_name="Bob", entra_display_name="Bob", entra_upn="bob@example.test",
+        )
+        sign_in(h)
+        csrf = csrf_of(h)
+        pages.append(h.client.get(ACCOUNT_PATH))  # not enrolled
+        pages.append(post_form(h, "/account/token", {"csrf": csrf, "canvas_token": "bad"}))
+        post_form(h, "/account/token", {"csrf": csrf, "canvas_token": CANVAS_TOKEN})
+        pages.append(h.client.get(ACCOUNT_PATH))  # enrolled
+        pages.append(h.client.get("/account/admin"))  # forbidden for a non-owner
+        sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
+        pages.append(h.client.get("/account/admin"))  # table with rows
+        assert len(pages) == 8
+        for page in pages:
+            text = page.text
+            assert 'class="en"' not in text and '<br><span class="en"' not in text
+            assert_security_headers(page)
+            body = strip_chrome(text)
+            if lang == "en":
+                assert not CJK.search(body)
+            for zh_text, en_text in pairs:
+                if zh_text is None or en_text is None or zh_text == en_text:
+                    continue
+                if lang == "zh" and len(en_text) >= 10:
+                    assert en_text not in body, en_text
+                if lang == "en":
+                    assert zh_text not in body, zh_text
+        if lang == "zh":
+            assert "技术信息" in pages[-1].text and "Technical details" not in pages[-1].text
+
+    def test_html_lang_matches_on_every_kind_of_page(self, h: Harness) -> None:
+        for lang, attr in (("zh", "zh-CN"), ("en", "en")):
+            use_lang(h, lang)
+            for response in (
+                h.client.get(ACCOUNT_PATH),
+                h.client.get(ACCOUNT_CALLBACK_PATH),
+                h.client.get("/account/admin"),
+                h.client.put(ACCOUNT_PATH),
+            ):
+                assert f'<html lang="{attr}">' in response.text
+
+
+class TestLanguageToggle:
+    def toggles(self, text: str) -> list[str]:
+        return re.findall(r'href="([^"]*\?lang=[^"]*)"', text)
+
+    def test_toggle_is_a_same_path_link_to_the_other_language(self, h: Harness) -> None:
+        text = h.client.get(ACCOUNT_PATH, headers=EN).text
+        assert self.toggles(text) == ["/account?lang=zh"]
+        assert ">中文</a>" in text
+        text = h.client.get(ACCOUNT_PATH, headers=ZH).text
+        assert self.toggles(text) == ["/account?lang=en"]
+        assert ">English</a>" in text
+
+    def test_toggle_on_the_admin_page_and_on_other_routes(self, h: Harness) -> None:
+        sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
+        assert self.toggles(h.client.get("/account/admin").text) == ["/account/admin?lang=zh"]
+        # Pages produced by POST or redirect routes link back to the GET page.
+        bad = post_form(
+            h, "/account/token", {"csrf": csrf_of(h), "canvas_token": "bad"}
+        )
+        assert bad.status_code == 400
+        assert self.toggles(bad.text) == ["/account?lang=zh"]
+        callback = h.client.get(ACCOUNT_CALLBACK_PATH)
+        assert self.toggles(callback.text) == ["/account?lang=zh"]
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            {"lang": "zh", "next": "https://evil.example/", "x": "<script>alert(1)</script>"},
+            {"lang": "<img src=x onerror=alert(1)>"},
+            {"redirect": "//evil.example", "return": "javascript:alert(1)"},
+        ],
+    )
+    def test_nothing_from_the_request_is_reflected(
+        self, h: Harness, query: dict[str, str]
+    ) -> None:
+        sign_in(h)
+        for path in (ACCOUNT_PATH, "/account/admin", ACCOUNT_CALLBACK_PATH):
+            text = h.client.get(path, params=query).text
+            assert "evil.example" not in text
+            assert "alert(1)" not in text and "onerror" not in text
+            assert "javascript:" not in text
+            for href in re.findall(r'href="([^"]*)"', text):
+                assert href in {
+                    "/account",
+                    "/account?lang=zh",
+                    "/account?lang=en",
+                    "/account/admin",
+                    "/account/admin?lang=zh",
+                    "/account/admin?lang=en",
+                    "/account/login",
+                }, href
+
+    def test_header_for_signed_in_users(self, h: Harness) -> None:
+        sign_in(h, name="Ada Lovelace")
+        text = h.client.get(ACCOUNT_PATH, headers=EN).text
+        header = re.search(r"<header.*?</header>", text, flags=re.S)
+        assert header is not None
+        head = header.group(0)
+        assert "Canvas MCP" in head and "Ada Lovelace" in head
+        assert 'action="/account/logout"' in head and 'name="csrf"' in head
+        assert "Sign out" in head and "Admin" not in head  # not an owner
+        sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
+        owner_text = h.client.get(ACCOUNT_PATH, headers=ZH).text
+        found = re.search(r"<header.*?</header>", owner_text, flags=re.S)
+        assert found is not None
+        owner_head = found.group(0)
+        assert 'href="/account/admin"' in owner_head and ">管理</a>" in owner_head
+        assert "退出登录" in owner_head
+
+    def test_signed_out_header_has_no_user_controls(self, h: Harness) -> None:
+        head = re.search(r"<header.*?</header>", h.client.get(ACCOUNT_PATH).text, flags=re.S)
+        assert head is not None
+        assert "csrf" not in head.group(0) and "logout" not in head.group(0)
+
+
+class TestLayout:
+    @pytest.fixture
+    def signed_in(self, h: Harness) -> Harness:
+        assert sign_in(h).status_code == 303
+        return h
+
+    def test_not_enrolled_is_one_card_with_numbered_steps(self, signed_in: Harness) -> None:
+        text = signed_in.client.get(ACCOUNT_PATH).text
+        assert text.count("<ol>") == 1 and text.count("<li>") == 3
+        assert "Account → Settings → + New Access Token" in text
+        assert "Never paste the token into Claude" in text
+        assert 'type="password"' in text
+        assert "<details" not in text  # nothing collapsed before enrolling
+        assert "Delete my token" not in text
+        assert f"{BASE}/mcp" in text
+
+    def test_enrolled_page_has_status_delete_and_collapsed_replace_form(
+        self, signed_in: Harness
+    ) -> None:
+        post_form(
+            signed_in,
+            "/account/token",
+            {"csrf": csrf_of(signed_in), "canvas_token": CANVAS_TOKEN},
+        )
+        text = signed_in.client.get(ACCOUNT_PATH).text
+        assert "<ol>" not in text
+        status = text[: text.index("<details")]
+        for label in ("Canvas user", "Last used", "Enrolled", "Updated"):
+            assert f"<dt>{label}</dt>" in status
+        assert "<dt>Last used</dt><dd>-</dd>" in status  # never used yet
+        assert 'action="/account/token/delete"' in status and "Delete my token" in status
+        assert 'name="canvas_token"' not in status
+        details = re.search(r"<details class=\"card\">(.*?)</details>", text, flags=re.S)
+        assert details is not None, "replace form must be collapsed by default"
+        assert "<summary>Replace token</summary>" in details.group(1)
+        assert 'name="canvas_token"' in details.group(1)
+        assert 'action="/account/token"' in details.group(1)
+
+    def test_replace_form_opens_when_the_attempt_failed(self, signed_in: Harness) -> None:
+        post_form(
+            signed_in,
+            "/account/token",
+            {"csrf": csrf_of(signed_in), "canvas_token": CANVAS_TOKEN},
+        )
+        signed_in.whoami_result = CanvasCheckError("invalid")
+        failed = post_form(
+            signed_in,
+            "/account/token",
+            {"csrf": csrf_of(signed_in), "canvas_token": "9~" + "Z" * 62},
+        )
+        assert failed.status_code == 400
+        assert '<details class="card" open>' in failed.text
+        assert "Canvas rejected this token" in failed.text
+
+    def test_chinese_enrolled_summary(self, signed_in: Harness) -> None:
+        post_form(
+            signed_in,
+            "/account/token",
+            {"csrf": csrf_of(signed_in), "canvas_token": CANVAS_TOKEN},
+        )
+        text = signed_in.client.get(ACCOUNT_PATH, headers=ZH).text
+        assert "<summary>替换令牌</summary>" in text
+        assert "删除我的令牌" in text
+
+    def test_buttons_are_single_line(self) -> None:
+        assert "white-space:nowrap" in account_web._CSS.split(".btn{")[1].split("}")[0]
+
+    def test_mobile_layout_rules_exist(self) -> None:
+        css = account_web._CSS
+        assert "max-width:40rem" in css and "padding:.9rem 16px" in css
+        assert "@media (prefers-color-scheme:dark)" in css
+        assert "@media (max-width:40rem)" in css
+        assert "attr(data-label)" in css
+
+    def test_no_script_and_no_external_resources(self, signed_in: Harness) -> None:
+        text = signed_in.client.get(ACCOUNT_PATH).text.lower()
+        assert "<script" not in text and "http://" not in text
+        assert "src=" not in text and "<link" not in text and "@import" not in text
+
+
+class TestAdminLayout:
+    def _enroll(self, h: Harness) -> None:
+        h.store.put(
+            tenant_id=TID, object_id=OID_2, api_token="9~" + "S" * 60, canvas_user_id="77",
+            canvas_user_name="Bob C", entra_display_name="Bob E", entra_upn="bob@example.test",
+        )
+
+    def test_rows_keep_ids_and_timestamps_inside_technical_details(self, h: Harness) -> None:
+        self._enroll(h)
+        sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
+        text = h.client.get("/account/admin").text
+        for header in ("Entra user", "Canvas user", "Last used"):
+            assert f"<th>{header}</th>" in text
+        assert "<th>IDs</th>" not in text and "<th>Created</th>" not in text
+        row = re.search(r"<tr><td data-label.*?</tr>", text, flags=re.S)
+        assert row is not None
+        cells = row.group(0)
+        outside, _, rest = cells.partition('<details class="tech">')
+        inside, _, after = rest.partition("</details>")
+        assert "<summary>Technical details</summary>" in inside
+        assert TID in inside and OID_2 in inside
+        assert "2027-01-15 08:00 UTC" in inside  # created and updated
+        # Visible part: names and the last-used value only, no GUIDs.
+        assert TID not in outside and OID_2 not in outside
+        assert "Bob E" in outside and "bob@example.test" in outside
+        assert "Bob C" in after and "id 77" in after
+        # The Revoke form (POST + CSRF + the two ids) is outside the details.
+        assert 'method="post" action="/account/admin/revoke"' in after
+        assert 'name="csrf"' in after and f'name="object_id" value="{OID_2}"' in after
+        assert f'name="tenant_id" value="{TID}"' in after
+        assert "Revoke" in after
+
+    def test_stacked_card_labels_come_from_the_page_language(self, h: Harness) -> None:
+        self._enroll(h)
+        sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
+        text = h.client.get("/account/admin", headers=ZH).text
+        assert 'data-label="Entra 用户"' in text and 'data-label="Canvas 用户"' in text
+        assert 'data-label="最近使用"' in text and "<summary>技术信息</summary>" in text
+
+    def test_one_details_block_per_row(self, h: Harness) -> None:
+        self._enroll(h)
+        h.store.put(
+            tenant_id=TID, object_id=OID, api_token="8~" + "R" * 60, canvas_user_id="78",
+            canvas_user_name="Ada", entra_display_name="Ada", entra_upn="ada@example.test",
+        )
+        sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
+        text = h.client.get("/account/admin").text
+        assert text.count("<tr><td") == 2 and text.count('<details class="tech">') == 2
+
+    def test_empty_list_has_no_table(self, h: Harness) -> None:
+        sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
+        text = h.client.get("/account/admin").text
+        assert "No enrollments yet." in text and "<table" not in text
+
+
+class TestTimestamps:
+    def test_utc_format_without_seconds_t_or_z(self) -> None:
+        assert account_web._fmt_ts(1_800_000_000) == "2027-01-15 08:00 UTC"
+        assert account_web._fmt_ts(None) == "-"
+        assert account_web._fmt_ts(10**30) == "-"
+
+    def test_configured_timezone_is_used(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        la = ZoneInfo("America/Los_Angeles")
+        monkeypatch.setattr(account_web, "output_timezone", lambda: la)
+        summer = int(datetime(2026, 9, 1, 21, 12, 40, tzinfo=UTC).timestamp())
+        assert account_web._fmt_ts(summer) == "2026-09-01 14:12 PDT"
+        assert account_web._fmt_ts(1_800_000_000) == "2027-01-15 00:00 PST"
+        text = account_web._fmt_ts(summer)
+        assert re.fullmatch(r"\d{4}-\d\d-\d\d \d\d:\d\d [A-Z]{3,5}", text)
+
+    def test_timezone_comes_from_the_timezone_setting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from canvas_mcp.core import dates
+        from canvas_mcp.core.config import reset_config
+
+        monkeypatch.setattr(account_web, "output_timezone", dates.output_timezone)
+        monkeypatch.setenv("TIMEZONE", "Asia/Tokyo")
+        reset_config()
+        try:
+            assert account_web._fmt_ts(1_800_000_000) == "2027-01-15 17:00 JST"
+            monkeypatch.setenv("TIMEZONE", "Not/AZone")
+            reset_config()
+            assert account_web._fmt_ts(1_800_000_000) == "2027-01-15 08:00 UTC"
+        finally:
+            monkeypatch.undo()
+            reset_config()
+
+    def test_unusable_timezone_falls_back_to_utc(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def boom() -> Any:
+            raise RuntimeError("config exploded")
+
+        monkeypatch.setattr(account_web, "output_timezone", boom)
+        assert account_web._fmt_ts(1_800_000_000) == "2027-01-15 08:00 UTC"
+
+    def test_pages_show_the_configured_timezone(
+        self, h: Harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(account_web, "output_timezone", lambda: ZoneInfo("America/Los_Angeles"))
+        sign_in(h)
+        post_form(h, "/account/token", {"csrf": csrf_of(h), "canvas_token": CANVAS_TOKEN})
+        text = h.client.get(ACCOUNT_PATH).text
+        assert "2027-01-15 00:00 PST" in text and "T00:00:00" not in text
+        assert "Z</dd>" not in text
 
 
 # -- FastMCP registration ----------------------------------------------------

@@ -36,8 +36,9 @@ import time
 import urllib.parse
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import anyio.to_thread
@@ -49,6 +50,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
+from canvas_mcp.core.dates import output_timezone
 from canvas_mcp.core.selfhost.token_store import EnrollmentInfo, TokenStore
 
 if TYPE_CHECKING:
@@ -67,6 +69,13 @@ _ADMIN_REVOKE_PATH = "/account/admin/revoke"
 
 LOGIN_COOKIE = "__Host-cmcp_login"
 SESSION_COOKIE = "__Host-cmcp_session"
+# Display-language preference only: no authentication meaning. Scoped to
+# /account (so it cannot be a ``__Host-`` cookie) and limited to "zh" / "en".
+LANG_COOKIE = "canvas_mcp_lang"
+_LANG_COOKIE_PATH = ACCOUNT_PATH
+_LANG_COOKIE_MAX_AGE = 365 * 24 * 3600
+_LANGS = ("zh", "en")
+_DEFAULT_LANG = "en"
 _LOGIN_TTL_SECONDS = 600
 _IAT_SKEW_SECONDS = 600
 _MAX_BODY_BYTES = 8192
@@ -251,6 +260,80 @@ class _RateLimiter:
             del self._hits[key]
 
 
+# -- language ----------------------------------------------------------------
+
+
+@dataclass
+class _RenderContext:
+    """Per-request rendering state (language, toggle target, signed-in user)."""
+
+    lang: str = _DEFAULT_LANG
+    path: str = ACCOUNT_PATH
+    session: _Session | None = None
+
+
+# A ContextVar (not a module global): each request runs in its own task, so
+# concurrent requests can never see each other's language.
+_RENDER: ContextVar[_RenderContext | None] = ContextVar(
+    "canvas_mcp_account_render", default=None
+)
+
+
+def _render_context() -> _RenderContext:
+    return _RENDER.get() or _RenderContext()
+
+
+def _current_lang() -> str:
+    return _render_context().lang
+
+
+def _accept_language(header: str | None) -> str | None:
+    """Best supported language from an Accept-Language header, or None.
+
+    Entries are ranked by q-value (ties keep header order); the first ranked
+    entry whose primary tag is ``zh`` or ``en`` wins, so ``fr, zh;q=0.5`` gives
+    ``zh`` while ``en-US, zh;q=0.8`` gives ``en``.
+    """
+    if not header:
+        return None
+    ranked: list[tuple[float, int, str]] = []
+    for index, part in enumerate(header[:1024].split(",")[:32]):
+        tag, *params = (piece.strip() for piece in part.split(";"))
+        quality = 1.0
+        for param in params:
+            key, _, value = param.partition("=")
+            if key.strip().lower() == "q":
+                try:
+                    quality = float(value.strip())
+                except ValueError:
+                    quality = 0.0
+        if not quality > 0:  # also rejects NaN
+            continue
+        primary = tag.split("-", 1)[0].strip().lower()
+        if primary in _LANGS:
+            ranked.append((-min(quality, 1.0), index, primary))
+    return min(ranked)[2] if ranked else None
+
+
+def _query_lang(request: Request) -> str | None:
+    """A valid ``?lang=`` value on a GET request, else None (anything else is ignored)."""
+    if request.method != "GET":
+        return None
+    value = request.query_params.get("lang")
+    return value if value in _LANGS else None
+
+
+def _choose_lang(request: Request) -> str:
+    """?lang= (GET only), then the preference cookie, then Accept-Language, then 'en'."""
+    chosen = _query_lang(request)
+    if chosen is not None:
+        return chosen
+    cookie = request.cookies.get(LANG_COOKIE)
+    if cookie in _LANGS:
+        return cookie
+    return _accept_language(request.headers.get("accept-language")) or _DEFAULT_LANG
+
+
 # -- HTML --------------------------------------------------------------------
 
 _CSS = """
@@ -262,32 +345,67 @@ _CSS = """
 --bad-bg:#3a1f1d;--ok:#8fd5a6;--ok-bg:#1c3324;--warn-bg:#3a3118}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);
-font:16px/1.55 system-ui,-apple-system,"Segoe UI","Noto Sans SC","PingFang SC",sans-serif}
-main{max-width:46rem;margin:0 auto;padding:1.5rem 16px 3rem}
-h1{font-size:1.5rem;margin:.2rem 0 1rem}h2{font-size:1.1rem;margin:0 0 .5rem}
-section{background:var(--card);border:1px solid var(--line);border-radius:10px;
-padding:1rem 1.1rem;margin:0 0 1rem}
-.en{color:var(--muted);font-size:.92em}.muted{color:var(--muted)}
+font:16px/1.5 system-ui,-apple-system,"Segoe UI","Noto Sans SC","PingFang SC",sans-serif}
+main{max-width:40rem;margin:0 auto;padding:.9rem 16px 3rem}
+main.wide{max-width:56rem}
+a{color:var(--accent)}
+h1{font-size:1.3rem;line-height:1.3;margin:1.4rem 0 1rem}
+h2{font-size:1.05rem;line-height:1.35;margin:0 0 .8rem}
+.top{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;
+gap:.5rem 1rem;padding-bottom:.8rem;border-bottom:1px solid var(--line)}
+.brand{font-weight:700;color:var(--fg);text-decoration:none}
+.tools{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;
+gap:.4rem .9rem;font-size:.9rem;min-width:0}
+.who{color:var(--muted);max-width:11rem;overflow:hidden;text-overflow:ellipsis;
+white-space:nowrap}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+padding:1.1rem 1.2rem;margin:0 0 1rem}
+.card>:last-child{margin-bottom:0}
+p{margin:0 0 .8rem}
+.muted{color:var(--muted)}.small{font-size:.9rem}
 code{background:var(--bg);border:1px solid var(--line);border-radius:4px;
 padding:.05rem .3rem;word-break:break-all}
 .btn{display:inline-block;background:var(--accent);color:var(--accent-fg);
-border:0;border-radius:8px;padding:.55rem 1rem;font:inherit;cursor:pointer;
-text-decoration:none}
-.btn.secondary{background:transparent;color:var(--accent);border:1px solid var(--line)}
-.btn.danger{background:transparent;color:var(--bad);border:1px solid var(--bad)}
-input[type=password]{width:100%;padding:.55rem;border:1px solid var(--line);
-border-radius:8px;background:var(--bg);color:var(--fg);font:inherit;margin:.4rem 0 .7rem}
-.notice{border-radius:8px;padding:.6rem .8rem;margin:0 0 1rem}
+border:1px solid var(--accent);border-radius:8px;padding:.6rem 1.1rem;font:inherit;
+line-height:1.3;cursor:pointer;text-decoration:none;white-space:nowrap}
+.btn.secondary{background:transparent;color:var(--accent);border-color:var(--line)}
+.btn.danger{background:transparent;color:var(--bad);border-color:var(--bad)}
+.btn.sm{padding:.3rem .75rem;font-size:.9rem}
+label{display:block;font-weight:600;font-size:.92rem}
+input[type=password]{width:100%;padding:.6rem;border:1px solid var(--line);
+border-radius:8px;background:var(--bg);color:var(--fg);font:inherit;margin:.4rem 0 .9rem}
+.notice{border-radius:8px;padding:.6rem .8rem;margin:1rem 0 0}
 .notice.error{background:var(--bad-bg);color:var(--bad)}
 .notice.ok{background:var(--ok-bg);color:var(--ok)}
-.warn{background:var(--warn-bg);border-radius:8px;padding:.6rem .8rem}
-dl{display:grid;grid-template-columns:max-content 1fr;gap:.2rem 1rem;margin:.3rem 0}
+.warn{background:var(--warn-bg);border-radius:8px;padding:.5rem .8rem}
+ol{margin:0 0 1rem;padding-left:1.3rem}li{margin:0 0 .3rem}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:.25rem 1rem;margin:0 0 1rem}
 dt{color:var(--muted)}dd{margin:0;word-break:break-word}
-.row{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}
-form{margin:0}table{width:100%;border-collapse:collapse;font-size:.88rem}
-th,td{text-align:left;border-bottom:1px solid var(--line);padding:.35rem .4rem;
+form{margin:0}.inline{display:inline}
+details>summary{cursor:pointer;color:var(--accent);font-weight:600}
+details[open]>summary{margin-bottom:.9rem}
+details.card{padding:.8rem 1.2rem}
+details.tech{margin-top:.4rem;font-size:.9rem}
+details.tech>summary{font-weight:400}
+details.tech[open]>summary{margin-bottom:.4rem}
+details.tech dl{margin:0}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:.65rem .5rem;border-bottom:1px solid var(--line);
 vertical-align:top;word-break:break-word}
-.scroll{overflow-x:auto}
+th{color:var(--muted);font-size:.85rem;font-weight:600}
+.act{text-align:right}
+.tablecard{padding:.4rem .7rem}
+@media (max-width:40rem){
+.tablecard{background:none;border:0;padding:0}
+table,tbody,tr,td{display:block}
+thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+tr{background:var(--card);border:1px solid var(--line);border-radius:12px;
+padding:.7rem .9rem;margin:0 0 .8rem}
+td{border:0;padding:.25rem 0}
+td[data-label]::before{content:attr(data-label);display:block;color:var(--muted);
+font-size:.8rem}
+.act{text-align:left;padding-top:.6rem}
+}
 """.strip()
 
 
@@ -296,31 +414,84 @@ def _e(value: object) -> str:
 
 
 def _bi(zh: str, en: str) -> str:
-    """Short Chinese text with an English line below it. Inputs are trusted."""
-    return f'{zh}<br><span class="en">{en}</span>'
+    """The Chinese or the English text, per the current request. Inputs are trusted.
+
+    Both strings stay in the source so each language is complete; only the one
+    chosen for this request is rendered.
+    """
+    return zh if _current_lang() == "zh" else en
+
+
+def _denial_html(message: str) -> str:
+    """The identity layer's refusal text. It is English only, so Chinese gets a fixed line."""
+    if _current_lang() == "zh":
+        return _bi(
+            "此账号没有使用权限，请联系服务器所有者。",
+            "This account is not allowed to use this server.",
+        )
+    return _e(message)
+
+
+def _display_tz() -> tzinfo:
+    try:
+        return output_timezone()
+    except Exception:  # noqa: BLE001 - never fail a page over a timezone
+        return UTC
 
 
 def _fmt_ts(value: int | None) -> str:
+    """e.g. ``2026-09-01 14:12 PDT`` in the configured TIMEZONE (UTC fallback)."""
     if value is None:
         return "-"
     try:
-        return datetime.fromtimestamp(value, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        moment = datetime.fromtimestamp(value, tz=UTC).astimezone(_display_tz())
+        return moment.strftime("%Y-%m-%d %H:%M %Z").strip()
     except (OverflowError, OSError, ValueError):
         return "-"
 
 
-def _document(title: str, body: str) -> str:
+def _document(title: str, body: str, *, wide: bool = False) -> str:
+    lang = "zh-CN" if _current_lang() == "zh" else "en"
+    main_class = ' class="wide"' if wide else ""
     return (
-        '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
+        f'<!doctype html><html lang="{lang}"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         '<meta name="robots" content="noindex, nofollow">'
         f"<title>{_e(title)}</title><style>{_CSS}</style></head>"
-        f"<body><main>{body}</main></body></html>"
+        f"<body><main{main_class}>{body}</main></body></html>"
     )
 
 
 def _csrf_field(csrf: str) -> str:
     return f'<input type="hidden" name="csrf" value="{_e(csrf)}">'
+
+
+def _header(session: _Session | None = None) -> str:
+    """Slim header row: product title left; name, Admin, language toggle, Sign out right."""
+    ctx = _render_context()
+    session = session or ctx.session
+    tools: list[str] = []
+    if session is not None:
+        full = f"{session.name} ({session.upn})" if session.upn else session.name
+        tools.append(f'<span class="who" title="{_e(full)}">{_e(session.name)}</span>')
+        if session.owner:
+            tools.append(f'<a href="{_ADMIN_PATH}">{_bi("管理", "Admin")}</a>')
+    # Same-path link with a fixed value: nothing from the request is reflected.
+    if ctx.lang == "zh":
+        tools.append(f'<a href="{_e(ctx.path)}?lang=en" hreflang="en" lang="en">English</a>')
+    else:
+        tools.append(f'<a href="{_e(ctx.path)}?lang=zh" hreflang="zh" lang="zh">中文</a>')
+    if session is not None:
+        tools.append(
+            f'<form method="post" action="{_LOGOUT_PATH}" class="inline">'
+            f"{_csrf_field(session.csrf)}"
+            f'<button class="btn secondary sm" type="submit">{_bi("退出登录", "Sign out")}</button>'
+            "</form>"
+        )
+    return (
+        f'<header class="top"><a class="brand" href="{ACCOUNT_PATH}">Canvas MCP</a>'
+        f'<nav class="tools">{"".join(tools)}</nav></header>'
+    )
 
 
 # -- the app -----------------------------------------------------------------
@@ -378,23 +549,61 @@ class _AccountApp:
 
     def _endpoint(self, handlers: dict[str, Handler]) -> Handler:
         async def endpoint(request: Request) -> Response:
-            handler = handlers.get(request.method)
-            if handler is None:
-                response = self.message_page(
-                    405,
-                    _bi("不支持该请求方法。", "Method not allowed."),
-                )
-                response.headers["Allow"] = ", ".join(sorted(handlers))
-                return response
+            ctx = _RenderContext(
+                lang=_choose_lang(request),
+                path=self._toggle_path(request),
+                session=self.session_from(request),
+            )
+            token = _RENDER.set(ctx)
             try:
-                return await handler(request)
-            except Exception as exc:  # noqa: BLE001 - never leak details
-                logger.error("account request failed: %s", type(exc).__name__)
-                return self.message_page(
-                    500, _bi("服务器出错了，请稍后再试。", "Something went wrong.")
-                )
+                response = await self._dispatch(handlers, request)
+            finally:
+                _RENDER.reset(token)
+            chosen = _query_lang(request)
+            if chosen is not None:
+                self._remember_lang(response, chosen)
+            return response
 
         return endpoint
+
+    async def _dispatch(self, handlers: dict[str, Handler], request: Request) -> Response:
+        handler = handlers.get(request.method)
+        if handler is None:
+            response = self.message_page(
+                405,
+                _bi("不支持该请求方法。", "Method not allowed."),
+            )
+            response.headers["Allow"] = ", ".join(sorted(handlers))
+            return response
+        try:
+            return await handler(request)
+        except Exception as exc:  # noqa: BLE001 - never leak details
+            logger.error("account request failed: %s", type(exc).__name__)
+            return self.message_page(
+                500, _bi("服务器出错了，请稍后再试。", "Something went wrong.")
+            )
+
+    @staticmethod
+    def _toggle_path(request: Request) -> str:
+        """Target of the language toggle: this page if it is a GET page, else /account.
+
+        Always one of the fixed route constants, never request input.
+        """
+        path = request.url.path
+        return path if path in (ACCOUNT_PATH, _ADMIN_PATH) else ACCOUNT_PATH
+
+    @staticmethod
+    def _remember_lang(response: Response, lang: str) -> None:
+        """Store the display-language preference (not an authentication cookie)."""
+        response.set_cookie(
+            LANG_COOKIE,
+            lang,
+            max_age=_LANG_COOKIE_MAX_AGE,
+            path=_LANG_COOKIE_PATH,
+            secure=True,
+            httponly=True,
+            samesite="lax",
+        )
 
     # -- response helpers ----------------------------------------------------
 
@@ -403,15 +612,15 @@ class _AccountApp:
             response.headers[name] = value
         return response
 
-    def html_page(self, status: int, title: str, body: str) -> Response:
-        return self.finish(Response(_document(title, body), status_code=status))
+    def html_page(self, status: int, title: str, body: str, *, wide: bool = False) -> Response:
+        return self.finish(Response(_document(title, body, wide=wide), status_code=status))
 
     def message_page(self, status: int, message_html: str) -> Response:
         body = (
-            "<h1>Canvas MCP</h1>"
-            f'<section><p>{message_html}</p><p><a class="btn secondary" '
-            f'href="{ACCOUNT_PATH}">{_bi("返回账户页", "Back to account")}</a></p>'
-            "</section>"
+            _header()
+            + f'<section class="card"><p>{message_html}</p>'
+            f'<p><a class="btn secondary" href="{ACCOUNT_PATH}">'
+            f'{_bi("返回账户页", "Back to account")}</a></p></section>'
         )
         return self.html_page(status, "Canvas MCP", body)
 
@@ -478,22 +687,36 @@ class _AccountApp:
 
     def _mcp_url_section(self) -> str:
         return (
-            f"<section><h2>{_bi('MCP 连接地址', 'MCP connector URL')}</h2>"
+            f'<section class="card"><h2>{_bi("MCP 连接地址", "MCP connector URL")}</h2>'
             f"<p><code>{_e(self.base)}/mcp</code></p>"
-            f'<p class="muted">{_bi("在 Claude 中添加自定义连接器时填写此地址。", "Use this URL when adding a custom connector in Claude.")}</p>'
+            f'<p class="muted small">{_bi("在 Claude 中添加自定义连接器时填写此地址。", "Use this URL when adding a custom connector in Claude.")}</p>'
             "</section>"
         )
 
     def signed_out_page(self) -> Response:
         body = (
-            f"<h1>{_bi('Canvas 账户', 'Canvas account')}</h1>"
-            "<section>"
-            f"<p>{_bi('先用 Microsoft 账号登录，再在这里绑定你自己的 Canvas 令牌。', 'Sign in with Microsoft, then enroll your own Canvas access token here.')}</p>"
+            _header()
+            + f"<h1>{_bi('Canvas 账户', 'Canvas account')}</h1>"
+            '<section class="card">'
+            f"<p>{_bi('先用 Microsoft 账号登录，再绑定你自己的 Canvas 令牌。', 'Sign in with Microsoft, then add your own Canvas access token.')}</p>"
             f'<p><a class="btn" href="{_LOGIN_PATH}">'
             f"{_bi('使用 Microsoft 登录', 'Sign in with Microsoft')}</a></p>"
             "</section>" + self._mcp_url_section()
         )
-        return self.html_page(200, "Canvas account", body)
+        return self.html_page(200, _bi("Canvas 账户", "Canvas account"), body)
+
+    def _token_form(self, session: _Session) -> str:
+        return (
+            f'<p class="warn"><strong>{_bi("绝不要把令牌粘贴到 Claude 对话里。", "Never paste the token into Claude.")}</strong></p>'
+            f'<form method="post" action="{_TOKEN_PATH}">'
+            f"{_csrf_field(session.csrf)}"
+            f'<label for="canvas_token">{_bi("Canvas 访问令牌", "Canvas access token")}</label>'
+            '<input id="canvas_token" name="canvas_token" type="password" '
+            'autocomplete="off" spellcheck="false" autocapitalize="off" '
+            'required minlength="20" maxlength="512">'
+            f'<button class="btn" type="submit">{_bi("验证并保存", "Verify and save")}</button>'
+            "</form>"
+        )
 
     def account_page(
         self,
@@ -502,68 +725,46 @@ class _AccountApp:
         notice: tuple[Literal["error", "ok"], str] | None = None,
         status: int = 200,
     ) -> Response:
-        parts: list[str] = [f"<h1>{_bi('Canvas 账户', 'Canvas account')}</h1>"]
+        parts: list[str] = [_header(session), f"<h1>{_bi('Canvas 账户', 'Canvas account')}</h1>"]
         if notice is not None:
             parts.append(f'<div class="notice {notice[0]}" role="alert">{notice[1]}</div>')
 
-        owner_badge = " (owner)" if session.owner else ""
-        parts.append(
-            "<section>"
-            f"<h2>{_bi('已登录', 'Signed in')}</h2>"
-            "<dl>"
-            f"<dt>{_bi('姓名', 'Name')}</dt><dd>{_e(session.name)}{_e(owner_badge)}</dd>"
-            f"<dt>{_bi('账号', 'Account')}</dt><dd>{_e(session.upn)}</dd>"
-            "</dl>"
-            f'<form method="post" action="{_LOGOUT_PATH}" class="row">'
-            f"{_csrf_field(session.csrf)}"
-            f'<button class="btn secondary" type="submit">{_bi("退出登录", "Sign out")}</button>'
-            "</form>"
-        )
-        if session.owner:
-            parts.append(
-                f'<p><a href="{_ADMIN_PATH}">'
-                f"{_bi('管理已绑定的用户', 'Manage enrollments')}</a></p>"
-            )
-        parts.append("</section>")
-
         if info is None:
-            status_html = f"<p>{_bi('尚未绑定 Canvas 令牌。', 'No Canvas token enrolled yet.')}</p>"
+            parts.append(
+                '<section class="card">'
+                f"<h2>{_bi('绑定你的 Canvas 令牌', 'Add your Canvas token')}</h2>"
+                "<ol>"
+                f"<li>{_bi('在 Canvas 中打开 <strong>Account → Settings → + New Access Token</strong>。', 'In Canvas, open <strong>Account → Settings → + New Access Token</strong>.')}</li>"
+                f"<li>{_bi('用途填 <code>Claude MCP</code>，并设置到期时间。', 'Purpose: <code>Claude MCP</code>. Set an expiry date.')}</li>"
+                f"<li>{_bi('复制令牌，粘贴到下方。', 'Copy the token and paste it below.')}</li>"
+                "</ol>" + self._token_form(session) + "</section>"
+            )
         else:
-            status_html = (
-                f"<p>{_bi('已绑定 Canvas 令牌。', 'Canvas token enrolled.')}</p><dl>"
+            parts.append(
+                '<section class="card">'
+                f"<h2>{_bi('Canvas 令牌已绑定', 'Canvas token enrolled')}</h2><dl>"
                 f"<dt>{_bi('Canvas 用户', 'Canvas user')}</dt>"
-                f"<dd>{_e(info.canvas_user_name)} (id {_e(info.canvas_user_id)})</dd>"
-                f"<dt>{_bi('创建时间', 'Created')}</dt><dd>{_e(_fmt_ts(info.created_at))}</dd>"
-                f"<dt>{_bi('更新时间', 'Updated')}</dt><dd>{_e(_fmt_ts(info.updated_at))}</dd>"
+                f"<dd>{_e(info.canvas_user_name)} "
+                f'<span class="muted">(id {_e(info.canvas_user_id)})</span></dd>'
                 f"<dt>{_bi('最近使用', 'Last used')}</dt><dd>{_e(_fmt_ts(info.last_used_at))}</dd>"
+                f"<dt>{_bi('绑定时间', 'Enrolled')}</dt><dd>{_e(_fmt_ts(info.created_at))}</dd>"
+                f"<dt>{_bi('更新时间', 'Updated')}</dt><dd>{_e(_fmt_ts(info.updated_at))}</dd>"
                 "</dl>"
                 f'<form method="post" action="{_TOKEN_DELETE_PATH}">'
                 f"{_csrf_field(session.csrf)}"
-                f'<button class="btn danger" type="submit">{_bi("删除我的令牌", "Delete my token")}</button>'
-                "</form>"
+                f'<button class="btn danger sm" type="submit">{_bi("删除我的令牌", "Delete my token")}</button>'
+                "</form></section>"
             )
-        parts.append(f"<section><h2>{_bi('绑定状态', 'Enrollment status')}</h2>{status_html}</section>")
-
-        parts.append(
-            "<section>"
-            f"<h2>{_bi('添加或替换 Canvas 令牌', 'Add or replace your Canvas token')}</h2>"
-            "<ol>"
-            f"<li>{_bi('在 Canvas 中打开：Account &gt; Settings &gt; + New Access Token。', 'In Canvas open Account &gt; Settings &gt; + New Access Token.')}</li>"
-            f"<li>{_bi('用途填 “Claude MCP”，并设置一个到期时间。', 'Set the purpose to &quot;Claude MCP&quot; and choose an expiry date.')}</li>"
-            f"<li>{_bi('复制生成的令牌，粘贴到下面的输入框。', 'Copy the generated token and paste it into the box below.')}</li>"
-            "</ol>"
-            f'<p class="warn"><strong>{_bi("绝不要把令牌粘贴到 Claude 对话里。", "Never paste the token into Claude.")}</strong></p>'
-            f'<form method="post" action="{_TOKEN_PATH}">'
-            f"{_csrf_field(session.csrf)}"
-            '<label for="canvas_token">Canvas access token</label>'
-            '<input id="canvas_token" name="canvas_token" type="password" '
-            'autocomplete="off" spellcheck="false" autocapitalize="off" '
-            'required minlength="20" maxlength="512">'
-            f'<button class="btn" type="submit">{_bi("验证并保存", "Verify and save")}</button>'
-            "</form></section>"
-        )
+            # Collapsed unless the last attempt failed, so the error and the form meet.
+            is_open = " open" if notice is not None and notice[0] == "error" else ""
+            parts.append(
+                f'<details class="card"{is_open}>'
+                f"<summary>{_bi('替换令牌', 'Replace token')}</summary>"
+                + self._token_form(session)
+                + "</details>"
+            )
         parts.append(self._mcp_url_section())
-        return self.html_page(status, "Canvas account", "".join(parts))
+        return self.html_page(status, _bi("Canvas 账户", "Canvas account"), "".join(parts))
 
     # -- sign-in -------------------------------------------------------------
 
@@ -709,7 +910,7 @@ class _AccountApp:
 
         principal, message = self.authorize_claims(claims)
         if principal is None:
-            return self.message_page(403, _e(message))
+            return self.message_page(403, _denial_html(message))
         if principal.tenant_id.lower() != self.tenant or not _GUID_RE.fullmatch(
             principal.object_id
         ):
@@ -1007,35 +1208,49 @@ class _AccountApp:
         for row in rows:
             lines.append(
                 "<tr>"
-                f"<td>{_e(row.entra_display_name)}<br>{_e(row.entra_upn)}</td>"
-                f"<td>{_e(row.canvas_user_name)}<br>id {_e(row.canvas_user_id)}</td>"
-                f"<td>{_e(_fmt_ts(row.created_at))}</td>"
-                f"<td>{_e(_fmt_ts(row.updated_at))}</td>"
-                f"<td>{_e(_fmt_ts(row.last_used_at))}</td>"
-                f"<td><code>{_e(row.tenant_id)}</code><br><code>{_e(row.object_id)}</code></td>"
-                f'<td><form method="post" action="{_ADMIN_REVOKE_PATH}">'
+                f'<td data-label="{_e(_bi("Entra 用户", "Entra user"))}">'
+                f"{_e(row.entra_display_name)}<br>"
+                f'<span class="muted">{_e(row.entra_upn)}</span>'
+                '<details class="tech">'
+                f"<summary>{_bi('技术信息', 'Technical details')}</summary><dl>"
+                f"<dt>{_bi('租户', 'Tenant')}</dt><dd><code>{_e(row.tenant_id)}</code></dd>"
+                f"<dt>{_bi('对象 ID', 'Object')}</dt><dd><code>{_e(row.object_id)}</code></dd>"
+                f"<dt>{_bi('绑定时间', 'Enrolled')}</dt><dd>{_e(_fmt_ts(row.created_at))}</dd>"
+                f"<dt>{_bi('更新时间', 'Updated')}</dt><dd>{_e(_fmt_ts(row.updated_at))}</dd>"
+                "</dl></details></td>"
+                f'<td data-label="{_e(_bi("Canvas 用户", "Canvas user"))}">'
+                f'{_e(row.canvas_user_name)}<br><span class="muted">id {_e(row.canvas_user_id)}</span></td>'
+                f'<td data-label="{_e(_bi("最近使用", "Last used"))}">{_e(_fmt_ts(row.last_used_at))}</td>'
+                f'<td class="act"><form method="post" action="{_ADMIN_REVOKE_PATH}">'
                 f"{_csrf_field(session.csrf)}"
                 f'<input type="hidden" name="tenant_id" value="{_e(row.tenant_id)}">'
                 f'<input type="hidden" name="object_id" value="{_e(row.object_id)}">'
-                f'<button class="btn danger" type="submit">{_bi("撤销", "Revoke")}</button>'
+                f'<button class="btn danger sm" type="submit">{_bi("撤销", "Revoke")}</button>'
                 "</form></td></tr>"
             )
         if lines:
             table = (
-                '<div class="scroll"><table><thead><tr>'
-                "<th>Entra</th><th>Canvas</th><th>Created</th><th>Updated</th>"
-                "<th>Last used</th><th>IDs</th><th></th></tr></thead><tbody>"
-                + "".join(lines)
-                + "</tbody></table></div>"
+                '<section class="card tablecard"><table><thead><tr>'
+                f"<th>{_bi('Entra 用户', 'Entra user')}</th>"
+                f"<th>{_bi('Canvas 用户', 'Canvas user')}</th>"
+                f"<th>{_bi('最近使用', 'Last used')}</th>"
+                f'<th class="act"><span class="muted">{_bi("操作", "Actions")}</span></th>'
+                "</tr></thead><tbody>" + "".join(lines) + "</tbody></table></section>"
             )
         else:
-            table = f"<p>{_bi('还没有用户绑定令牌。', 'No enrollments yet.')}</p>"
+            table = (
+                '<section class="card">'
+                f"<p>{_bi('还没有用户绑定令牌。', 'No enrollments yet.')}</p></section>"
+            )
         body = (
-            f"<h1>{_bi('已绑定的用户', 'Enrollments')}</h1>"
-            f"<section>{table}</section>"
-            f'<p><a href="{ACCOUNT_PATH}">{_bi("返回账户页", "Back to account")}</a></p>'
+            _header(session)
+            + f"<h1>{_bi('已绑定的用户', 'Enrollments')}</h1>"
+            + table
+            + f'<p><a href="{ACCOUNT_PATH}">{_bi("返回账户页", "Back to account")}</a></p>'
         )
-        return self.html_page(200, "Canvas enrollments", body)
+        return self.html_page(
+            200, _bi("Canvas 绑定管理", "Canvas enrollments"), body, wide=True
+        )
 
     async def admin_revoke(self, request: Request) -> Response:
         guarded = await self._guard_post(request, owner_only=True)
