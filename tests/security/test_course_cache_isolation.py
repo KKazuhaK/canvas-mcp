@@ -153,8 +153,8 @@ async def test_http_listed_sis_with_spaces_is_matched_without_path_lookup(monkey
 async def test_http_course_tools_never_publish_shared_aliases(monkeypatch, tool_name):
     codes, labels = {}, {}
     for module in (cache, course_tools):
-        monkeypatch.setattr(module, "course_code_to_id_cache", codes, raising=False)
-        monkeypatch.setattr(module, "id_to_course_code_cache", labels, raising=False)
+        monkeypatch.setattr(module, "course_code_to_id_cache", codes)
+        monkeypatch.setattr(module, "id_to_course_code_cache", labels)
     course = {"id": 202, "course_code": "B ONLY", "name": "Private B Course"}
     monkeypatch.setattr(course_tools, "fetch_all_paginated_results", AsyncMock(return_value=[course]))
     monkeypatch.setattr(course_tools, "make_canvas_request", AsyncMock(return_value=course))

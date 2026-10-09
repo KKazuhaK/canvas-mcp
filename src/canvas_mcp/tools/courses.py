@@ -2,12 +2,15 @@
 
 import html
 import re
+import sys
+import types
 from html.parser import HTMLParser
 from typing import Any
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from ..core import cache as _course_cache
 from ..core.cache import get_course_code, get_course_id, remember_course_code
 from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.config import get_config
@@ -50,6 +53,35 @@ MODULE_ITEM_ANALYSIS_LIMIT = 10
 _UPDATE_SYLLABUS_GUARD = ConfirmationGuard(
     nothing_done="The syllabus was not changed."
 )
+
+
+class _LegacyCacheNames(types.ModuleType):
+    """Keep the pre-state ``course_code_to_id_cache`` names importable here.
+
+    The course tools no longer own alias dicts; they write through
+    ``remember_course_code``. These names forward to ``core.cache`` so code and
+    tests that still seed or restore them through this module keep working and
+    never create a second, shared copy.
+    """
+
+    @property
+    def course_code_to_id_cache(self) -> dict[str, str]:
+        return _course_cache.course_code_to_id_cache  # type: ignore[attr-defined,no-any-return]
+
+    @course_code_to_id_cache.setter
+    def course_code_to_id_cache(self, value: dict[str, str]) -> None:
+        _course_cache.course_code_to_id_cache = value  # type: ignore[attr-defined]
+
+    @property
+    def id_to_course_code_cache(self) -> dict[str, str]:
+        return _course_cache.id_to_course_code_cache  # type: ignore[attr-defined,no-any-return]
+
+    @id_to_course_code_cache.setter
+    def id_to_course_code_cache(self, value: dict[str, str]) -> None:
+        _course_cache.id_to_course_code_cache = value  # type: ignore[attr-defined]
+
+
+sys.modules[__name__].__class__ = _LegacyCacheNames
 
 
 def _syllabus_text(body: str) -> str:

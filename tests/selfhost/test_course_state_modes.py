@@ -141,6 +141,37 @@ class TestUpstreamHttpIsRequestLocal:
         await fresh_request(call_both, token="tok-a")
         assert list(cache._STATES) == []
 
+    async def test_courses_module_legacy_names_are_the_cache_objects(self, monkeypatch):
+        """#480's tests seed these names on tools.courses; they must be the cache's own."""
+        seeded: dict[str, str] = {"SEED": "9"}
+        monkeypatch.setattr(course_tools, "course_code_to_id_cache", seeded)
+        monkeypatch.setattr(course_tools, "id_to_course_code_cache", {"9": "SEED"})
+        assert cache.course_code_to_id_cache is seeded
+        assert course_tools.course_code_to_id_cache is seeded
+        assert course_tools.id_to_course_code_cache == {"9": "SEED"}
+
+    async def test_seeded_legacy_names_never_register_a_request_state(self, monkeypatch):
+        """Pins the boundary the #480 tests cannot see: legacy-name seeding is stdio's state."""
+        codes: dict[str, str] = {}
+        labels: dict[str, str] = {}
+        for module in (cache, course_tools):
+            monkeypatch.setattr(module, "course_code_to_id_cache", codes)
+            monkeypatch.setattr(module, "id_to_course_code_cache", labels)
+        course = {"id": 202, "course_code": "B ONLY", "name": "Private B Course"}
+        monkeypatch.setattr(course_tools, "fetch_all_paginated_results", AsyncMock(return_value=[course]))
+        monkeypatch.setattr(course_tools, "make_canvas_request", AsyncMock(return_value=course))
+        mcp = FastMCP("course-state-modes")
+        course_tools.register_course_tools(mcp)
+        tools = {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
+
+        async def call_both() -> None:
+            await tools["list_courses"].fn()
+            await tools["get_course_details"].fn(course_identifier="202")
+
+        await fresh_request(call_both, token="tok-a")
+        assert codes == {} and labels == {}
+        assert set(cache._STATES) <= {"local"}
+
     async def test_ambiguous_alias_is_refused(self, canvas):
         canvas.return_value = [
             {"id": 1, "course_code": "BADM_554"},
