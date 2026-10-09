@@ -280,7 +280,7 @@ def test_container_port_health_path_and_mcp_path_match_the_code():
 def test_token_admin_commands_in_the_docs_exist():
     readme = (SELFHOST / "README.md").read_text(encoding="utf-8")
     source = (SRC / "core" / "selfhost" / "token_admin.py").read_text(encoding="utf-8")
-    for command in set(re.findall(r"token_admin (check|list|revoke|remove|disable|enable|access|history|rotate)\b", readme)):
+    for command in set(re.findall(r"token_admin (check|list|revoke|remove|disable|enable|access|history|rotate|db)\b", readme)):
         assert f'add_parser("{command}"' in source
 
 
@@ -436,7 +436,6 @@ def test_every_operator_facing_write_tool_text_mentions_the_per_user_opt_in(read
         assert needle in flat, f"README.md is missing {needle!r}"
     assert "Once enabled, the AI can do these things" not in flat
     assert flat.count("#write-tools-each-user-opts-in") >= 3
-
 
 
 def test_readme_documents_the_credential_lifecycle(readme):
@@ -627,3 +626,35 @@ def test_the_ssrf_proxy_refusal_lists_exactly_the_words_the_code_accepts_as_fals
     assert listed, "README no longer lists the accepted false values"
     words = set(re.findall(r"`([^`]*)`", listed.group(1)))
     assert words == _FALSE_WORDS - {""}
+
+
+def test_the_database_section_documents_every_database_setting_and_command(readme):
+    section = readme[readme.index("\n## Database\n") :]
+    section = section[: section.index("\n## Secret rotation\n")]
+    for needle in (
+        "DATABASE_URL",
+        "DATABASE_AUTO_MIGRATE",
+        "DATABASE_ALLOW_SQLITE_OUTSIDE_DATA_DIR",
+        "SELFHOST_STATE_BACKEND",
+        "postgresql+psycopg://",
+        "docker-compose.postgres.yml",
+        "token_admin db current",
+        "token_admin db upgrade",
+        "db import-sqlite",
+        "pg_advisory_xact_lock",
+        "READ COMMITTED",
+        "FASTMCP_HOME",
+        "Alembic",
+        "reserved",
+        "No downgrade",
+        "sslmode=verify-full",
+        "pgbouncer",
+    ):
+        assert needle in section, f"the Database section is missing {needle!r}"
+    assert "[Database](#database)" in readme
+
+
+def test_the_database_commands_in_the_docs_exist_in_the_cli():
+    source = (SRC / "core" / "selfhost" / "token_admin.py").read_text(encoding="utf-8")
+    for command in ("current", "upgrade", "import-sqlite"):
+        assert re.search(rf'add_parser\(\s*"{command}"', source), command

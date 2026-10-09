@@ -89,6 +89,7 @@ gh workflow run create-release.yml -f tag_name=v1.0.7-test
 - Runs the full pytest suite on Ubuntu with Python 3.11, 3.12, 3.13 and 3.14 (`test`)
 - Runs the full pytest suite on Windows with Python 3.14, with UTF-8 mode on (`test-windows`)
 - Runs the full pytest suite on Ubuntu with Python 3.14 against the exact dependency versions in `uv.lock`, installed with `uv sync --locked` (`test-locked`)
+- Runs the self-hosted tests against a PostgreSQL 18 service container (`test-postgres`): every store-backed test, the whole-server stacks and the two-connection race tests; the job fails, never skips, if the server is unreachable
 - Builds and tests the TypeScript code API, and checks the formal proofs
 - `test-enhancements` is the required check: it passes only when all of the above test jobs pass
 

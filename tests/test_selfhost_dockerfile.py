@@ -137,6 +137,9 @@ def test_dependencies_come_from_the_lock_file(instructions):
     for args in syncs:
         assert "--frozen" in args
         assert "--no-dev" in args
+        # The data layer (SQLAlchemy, Alembic) and the PostgreSQL driver (psycopg's
+        # binary wheel bundles libpq, so no system packages are needed).
+        assert "--extra selfhost" in args and "--extra postgres" in args
     assert "uv pip install" not in DOCKERFILE.read_text(encoding="utf-8")
 
 

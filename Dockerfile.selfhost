@@ -49,10 +49,10 @@ WORKDIR /src
 # Dependencies first (cached until the lock file changes), then the project.
 # README.md and LICENSE are read by the build backend for package metadata.
 COPY pyproject.toml uv.lock README.md LICENSE ./
-RUN uv sync --frozen --no-dev --extra documents --no-install-project
+RUN uv sync --frozen --no-dev --extra documents --extra selfhost --extra postgres --no-install-project
 
 COPY src ./src
-RUN uv sync --frozen --no-dev --extra documents --no-editable
+RUN uv sync --frozen --no-dev --extra documents --extra selfhost --extra postgres --no-editable
 
 
 FROM python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6

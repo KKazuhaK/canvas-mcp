@@ -1,0 +1,92 @@
+# Optional PostgreSQL for the self-hosted server. OFF by default: the plain
+# docker-compose.yml keeps the token database in a SQLite file on the data volume.
+#
+# Use it as an override on top of docker-compose.yml:
+#
+#   curl -fsSLO https://raw.githubusercontent.com/KKazuhaK/canvas-mcp/uci-student/deploy/selfhost/docker-compose.postgres.yml
+#   # In .env, add (see env.example, "Database"):
+#   #   POSTGRES_PASSWORD=<a long random value; openssl rand -hex 32>
+#   #   DATABASE_URL=postgresql+psycopg://canvas:<the same password>@postgres:5432/canvas_mcp
+#   docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
+#
+# Already running on SQLite? Do not just add DATABASE_URL: the server refuses to
+# start on an empty PostgreSQL database while the old SQLite file still holds data
+# (disablements would be lost). Stop the server, start only the database, run
+# `token_admin db import-sqlite`, then start everything. See "Database" in README.md.
+#
+# The database is reachable only from the canvas-mcp container: it publishes no
+# port and sits on an internal network (no route to the internet either). Keep it
+# that way; if you use a managed PostgreSQL instead, leave this file out and point
+# DATABASE_URL at it with sslmode=verify-full.
+
+services:
+  postgres:
+    # Pinned by exact tag AND digest (the digest is what is pulled). CI tests
+    # against this same image (tests/test_selfhost_compose_postgres.py checks both
+    # stay identical). Update both together.
+    image: postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    container_name: canvas-mcp-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: canvas_mcp
+      POSTGRES_USER: canvas
+      # Read from .env (or the shell) when Compose parses this file; never written here.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # C locale: byte-order sorting, the same order SQLite uses.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+
+    volumes:
+      # PostgreSQL 18 images keep the cluster in a versioned directory below
+      # /var/lib/postgresql, so mount the parent.
+      - canvas-mcp-postgres:/var/lib/postgresql
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U canvas -d canvas_mcp"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+    networks:
+      - canvas-mcp-db
+
+    security_opt:
+      - no-new-privileges:true
+    # The entrypoint starts as root, fixes the data directory and drops to the
+    # postgres user; it needs exactly these capabilities for that.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+
+    stop_grace_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  canvas-mcp:
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The default network keeps the published loopback port and outbound access
+    # (Entra, Canvas); the database network is private to the two containers.
+    networks:
+      - default
+      - canvas-mcp-db
+
+networks:
+  canvas-mcp-db:
+    internal: true
+
+volumes:
+  # Fixed name for the same reason as canvas-mcp-data: backup commands refer to it.
+  canvas-mcp-postgres:
+    name: canvas-mcp-postgres

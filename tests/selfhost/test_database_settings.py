@@ -16,7 +16,7 @@ from canvas_mcp.core.selfhost.settings import (
 )
 
 DATA = Path("/data")
-PASSWORD = "p@ss/w0rd-must-never-show"
+PASSWORD = "pw0rd-must-never-show"
 GOOD_PG = "postgresql+psycopg://canvas:s3cr3tpw@db.internal:5432/canvas_mcp"
 
 
@@ -120,6 +120,7 @@ class TestPostgresUrls:
             "postgresql+psycopg://u:p@h",
             "postgresql+psycopg://u:p@h/",
             "postgresql+psycopg://u:p@h1,h2/db",
+            "postgresql+psycopg://u:p@ss@h/db",
             "postgresql+psycopg://u:p@h:notaport/db",
             "postgresql+psycopg://u:p@h/db#frag",
             "postgresql+psycopg://u:p@h/db/extra",
@@ -136,7 +137,7 @@ class TestPostgresUrls:
     def test_a_password_never_appears_in_any_message(self) -> None:
         url = f"postgresql+psycopg://canvas:{PASSWORD}@h/db?bogus=1"
         text = " ".join(_problems(DATABASE_URL=url))
-        assert PASSWORD not in text and "p@ss" not in text
+        assert PASSWORD not in text and "pw0rd" not in text
 
     def test_redis_is_reserved_not_implemented(self) -> None:
         for url in ("redis://cache:6379/0", "rediss://cache:6380/0"):
@@ -264,11 +265,11 @@ class TestStartup:
     ) -> None:
         from canvas_mcp.core.selfhost.app import prepare_selfhost
 
-        url = f"postgresql+psycopg://canvas:{PASSWORD.replace('/', '')}@127.0.0.1:1/db?connect_timeout=1"
+        url = f"postgresql+psycopg://canvas:{PASSWORD}@127.0.0.1:1/db?connect_timeout=1"
         settings = load_selfhost_settings(_env(SELFHOST_DATA_DIR=str(tmp_path), DATABASE_URL=url))
         caplog.set_level(logging.DEBUG)
         with pytest.raises(SelfhostConfigError) as refused:
             prepare_selfhost(settings)
         text = " ".join(refused.value.problems) + caplog.text
-        assert PASSWORD.replace("/", "") not in text
+        assert PASSWORD not in text
         assert "127.0.0.1" not in text  # not even the host leaks through an error

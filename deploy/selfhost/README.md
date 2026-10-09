@@ -20,6 +20,7 @@ Image: `ghcr.io/kkazuhak/canvas-mcp` (linux/amd64 + linux/arm64, non-root, data 
 - [Prompt-injection risk of write tools](#prompt-injection-risk-of-write-tools)
 - [Custody and privacy boundary](#custody-and-privacy-boundary)
 - [Upgrading](#upgrading)
+- [Database](#database)
 - [Secret rotation](#secret-rotation)
 - [Backup and restore](#backup-and-restore)
 - [Revoking a user](#revoking-a-user)
@@ -58,6 +59,7 @@ Image: `ghcr.io/kkazuhak/canvas-mcp` (linux/amd64 + linux/arm64, non-root, data 
 Key points:
 
 - Who can use it: accounts assigned to the Entra app role `Canvas.User` (or your own `Canvas.Owner`).
+- The Canvas tokens, access decisions and per-user switches live in one database: a SQLite file on the data volume by default, or PostgreSQL if you ask for it (see [Database](#database)). Either way this is a single-instance service.
 - Each person enrolls their own Canvas token at `/account`. From then on the AI always uses the **caller's own** token; there is no server-level Canvas credential at all.
 - Canvas tokens are stored encrypted in `/data` and the keys live only in `.env`, so a leaked database or backup **on its own** does not leak the tokens. That is the whole claim: the running server decrypts every token, so a compromised runtime, or an operator who holds both `.env` and the data, can use every enrolled token. See [Custody and privacy boundary](#custody-and-privacy-boundary).
 - The audit log is **off by default**: events are written, and the `audit/` directory is created, only if you set `LOG_ACCESS_EVENTS=true` in `.env`. Even when it is on, enrolling or replacing a Canvas token at `/account` does not write an audit log entry (to find out who enrolled and when, look at the created and updated times in `token_admin list`). What it does write about tokens are health events (`event_type` `canvas_token`): a token marked invalid with its reason, the outcome of a re-check, an administrator marking a token invalid, and a Canvas user change that was detected or confirmed. They carry the principal key and a short code, never a token, a name or an e-mail address. Access decisions write `principal_status` events: a user disabled or enabled (with the acting owner's key, or `operator`), an owner gained or lost, a disabled user refused at sign-in or enrollment, a refused disable, an owner removing an enrollment, and a user deleting their own token (`self_disconnected`); the same transitions are always kept in the token database (`token_admin history`). A user switching write tools on or off at `/account` writes a `write_tools` event (`changed`, `cleared`, or `refused` when the sign-in was too old), with the principal key and the tool names only.
@@ -473,7 +475,7 @@ How it behaves:
 - **No `CANVAS_API_URL`**: you must set at least one featured school or `CANVAS_SCHOOL_SEARCH=true`, or the server refuses to start.
 - **Enrolling**: the form sends the chosen host together with the token. The server accepts the host only if it is featured, or if search is on and the directory lists that exact domain (it re-queries the directory with the host itself and requires a case-insensitive exact match, never a partial one). It then checks the host name (a lowercase DNS name: no IP address, port, `localhost` or `.local`/`.internal`-style names), resolves it, and refuses it if any address is private, loopback, link-local, multicast, reserved or a cloud metadata address. Only after all of that is the token verified with `GET https://<host>/api/v1/users/self` and stored together with the host. The default school is trusted as configured and skips the DNS and address checks, so private or on-premises Canvas installs keep working.
 - **Every request** goes to the user's own school, and cached Canvas data is never shared across schools. If the stored school is no longer allowed by the current settings (removed from the featured list while search is off, or search turned off for a searched school), the user is treated as not enrolled and has to enroll again at `/account`. Turning search off therefore signs out everyone whose school came from a search.
-- **Integrity**: the Canvas host is part of the associated data of the AES-GCM encryption, so editing the host in the database makes the token undecryptable instead of sending it to another school. The first start after the upgrade migrates the token database in place (schema version 2 at that point, version 3 today, see [Upgrading](#upgrading)); an older image refuses a newer database, so a rollback needs the backup you took before upgrading.
+- **Integrity**: the Canvas host is part of the associated data of the AES-GCM encryption, so editing the host in the database makes the token undecryptable instead of sending it to another school. The first start after the upgrade migrates the token database in place (schema version 2 at that point, version 4 today, see [Upgrading](#upgrading)); an older image refuses a newer database, so a rollback needs the backup you took before upgrading.
 - **Where to see it**: the status card on `/account`, the School column on `/account/admin`, and the last column of `python -m canvas_mcp.core.selfhost.token_admin list` (`-` means a legacy row on the default school).
 
 Privacy and reachability: with `CANVAS_SCHOOL_SEARCH=true`, what a user types into the school search is sent to Instructure (`canvas.instructure.com`), and enrolling at a searched school needs the server to reach `canvas.instructure.com` over HTTPS as well as the school itself. If the directory is unreachable, searching and enrolling at searched schools fail closed (featured schools still work). Addresses are checked only when a user enrolls. Later requests re-resolve the school's host without re-checking it, so a school whose DNS later points to a private address is not blocked at that point. Only list or accept schools you are comfortable sending your users' tokens to.
@@ -578,6 +580,78 @@ The OAuth state store is now built by this project and passed to FastMCP through
 
 `/account/admin` no longer has a **Revoke** button: it was a deletion of the enrollment row, which is not an access decision (the user could simply enroll again). It is now **Remove enrollment** (same effect, honest name) next to the new **Disable user**; the form posts to `/account/admin/remove`. The CLI command `token_admin revoke` still works as an alias of `remove`.
 
+Schema changes are now managed with Alembic. A database from any earlier release (schema versions 1 to 4) is adopted in place on first start, in one transaction, without touching a single stored token; see [Database](#database) for what is automatic, what is not, and how to check.
+
+## Database
+
+The self-hosted server keeps everything it must not lose in **one database**: the encrypted Canvas tokens, the access decisions (disabled users, owners and the history of every change), the per-user write-tool switches and the credential generations. Two backends are supported. It is still **one server process**: do not run two instances against one database.
+
+| | SQLite (default) | PostgreSQL (optional) |
+| --- | --- | --- |
+| Setting | nothing; `DATABASE_URL` unset | `DATABASE_URL=postgresql+psycopg://...` |
+| Where | `/data/canvas-mcp/tokens.sqlite3` on the data volume | the `postgres` service of `docker-compose.postgres.yml`, or a server you run |
+| Backup | stop the service and archive `/data` (see [Backup and restore](#backup-and-restore)) | `pg_dump -Fc`, plus `.env` kept apart |
+| Extra moving parts | none | one more container (or server) to patch, back up and keep private |
+
+Use SQLite unless you have a reason not to: for a small group it is simpler and has nothing to expose. Choose PostgreSQL when you already run it, want its backup and monitoring tooling, or keep the data volume on storage where SQLite's file locking is unreliable (some network file systems).
+
+What stays **outside** the database, on purpose, until a later release replaces it: FastMCP's OAuth proxy state (the upstream Entra tokens and client registrations, encrypted files under `FASTMCP_HOME`), the optional audit log, and the `/account` sign-in state (sealed cookies in the browser). Rate-limit counters and pending write confirmations live in the server's memory, which is correct for one process. `SELFHOST_STATE_BACKEND=redis` is **reserved** for a future multi-instance mode and is not implemented: setting it makes the server refuse to start.
+
+### Using PostgreSQL
+
+1. Add two lines to `.env` (see `env.example`, "Database"): `POSTGRES_PASSWORD` (a long random value; `openssl rand -hex 32` avoids characters that need escaping) and `DATABASE_URL=postgresql+psycopg://canvas:<the same password>@postgres:5432/canvas_mcp`.
+2. Start with the override file next to `docker-compose.yml`:
+
+   ```bash
+   curl -fsSLO https://raw.githubusercontent.com/KKazuhaK/canvas-mcp/uci-student/deploy/selfhost/docker-compose.postgres.yml
+   docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
+   ```
+
+   The override adds a `postgres` service pinned by exact tag and digest, with a health check, a named volume `canvas-mcp-postgres`, **no published port** and a private network that has no route to the internet. `canvas-mcp` waits until it is healthy. Without the override file nothing changes: no database container exists.
+3. The server creates the schema itself on first start (see below).
+
+Rules for `DATABASE_URL` (the server refuses to start on any violation; messages name the setting and never show the URL):
+
+- Scheme `postgresql+psycopg://` (psycopg 3). Plain `postgresql://` and `postgres://` are refused because they would select a different driver. `redis://` is refused as reserved. A `sqlite:////absolute/path` URL must point inside `SELFHOST_DATA_DIR` unless `DATABASE_ALLOW_SQLITE_OUTSIDE_DATA_DIR=true`; memory databases and URL options such as `uri=true` are refused.
+- A host and a database name are required. The query may only contain `sslmode`, `sslrootcert`, `sslcert`, `sslkey`, `connect_timeout` and `application_name`. In particular `options` is not allowed, so the server-side timeouts below cannot be overridden from the URL.
+- The URL (user, password, query) is never logged, printed by `--config`, or included in an error. Logs and `token_admin db current` show only `postgresql+psycopg://host:port/dbname`.
+- **TLS**: inside the compose network the database is private and plain connections are acceptable. For a database on another host use `?sslmode=verify-full` (add `sslrootcert=` if its CA is not in the system store). `require` encrypts but does not check who answers.
+- Use a **direct** connection. A pooler in transaction mode (pgbouncer) is untested and breaks the session-level lock that serialises migrations.
+
+Connections are sized for one instance: a pool of 5 plus up to 5 more, a 10 second wait for a free connection, 5 seconds to connect, and `statement_timeout` 15 s, `lock_timeout` 5 s and `idle_in_transaction_session_timeout` 30 s on every session. A database that is down, slow or locked makes the affected request fail closed (an MCP call is refused with an error, `/account` shows its generic error page); nothing waits forever and no stale decision is served.
+
+Every write to the access state takes one global lock inside PostgreSQL (`pg_advisory_xact_lock`, held to the end of the transaction, at `READ COMMITTED`). That is deliberate: it is what keeps "enroll while disabling", "two owners disabling each other" and "a late Canvas verdict about a token that was just replaced" impossible, the same way SQLite's single writer does. The write rate of a small group makes it free.
+
+### Schema changes (migrations)
+
+- Alembic manages the schema. `meta.schema_version` (currently **4**) is still the marker that stops an older server from opening a newer database; Alembic keeps its own table, `canvas_mcp_alembic_version`, so it cannot collide with anything else in a shared PostgreSQL database.
+- **Automatic by default** (`DATABASE_AUTO_MIGRATE=true`): the server applies pending revisions when it starts, inside one transaction. This is safe because the server is one process; if two starts overlap (a restart racing a CLI command), a lock makes one migrate and the other wait, then find nothing to do. With `DATABASE_AUTO_MIGRATE=false` the server instead **refuses** to start on a database that is not current and tells you to run the command below, so you can take a backup first.
+- **Existing SQLite files are adopted in place**, whatever their version (1 to 4, including the three different shapes version 2 had): missing tables and columns are added, `principal_key` is filled in, the baseline revision is recorded, all in one transaction, so a crash leaves the file as it was. No token, nonce, key id, status, session epoch, owner flag, history entry or generation is changed, and every token stays readable. Starting again is a no-op.
+- **A database written by a newer server is refused and left untouched** (`... schema version N is newer than this server supports`, or an unknown Alembic revision). Do not edit the marker to get around it.
+- **No downgrade.** Take a backup first and restore it to go back. A database that has only been adopted to the first Alembic revision still has marker 4 and is readable by the previous release; any later revision that an older server would misread will raise the marker, so rolling back past it needs the backup, as before.
+
+```bash
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin db current
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin db upgrade --backup /data/before-upgrade.sqlite3   # SQLite
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin db upgrade                                          # PostgreSQL: pg_dump first
+```
+
+`db current` needs no keys and changes nothing. It prints the backend (without credentials), the Alembic revision, the marker, the head revision and a state: `current`, `legacy` (a file from before Alembic), `uninitialized`, `behind`, `newer` or `unreadable`. Exit code 0 means current, 4 means the schema is behind this build (run `db upgrade`), 2 means newer or unusable. `db upgrade --backup PATH` (SQLite only) first copies the file to a new private (mode 0600) file with SQLite's backup API; it refuses to overwrite an existing file. Stop the server before running `db upgrade` yourself.
+
+### Moving from SQLite to PostgreSQL
+
+Do **not** just set `DATABASE_URL`. An empty PostgreSQL database has no `principal_status`, so every user you disabled would be active again and could enroll. The server therefore **refuses to start** when `DATABASE_URL` names an empty PostgreSQL database while the SQLite file in the data directory still holds enrollments or access state. Import the file instead:
+
+```bash
+docker compose stop canvas-mcp
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d postgres      # database only
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml run --rm --no-deps canvas-mcp \
+  python -m canvas_mcp.core.selfhost.token_admin db import-sqlite /data/canvas-mcp/tokens.sqlite3
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
+```
+
+The import copies every table in one transaction into an empty database (it refuses a database that already holds data), copies ciphertexts unchanged, then checks the row counts and that **every stored token decrypts with `CANVAS_TOKEN_KEYS`**; any problem rolls everything back. The SQLite file is never modified (a pre-Alembic file is adopted in a temporary copy). Afterwards keep it as a backup, or move it away: once the PostgreSQL database holds data the server no longer looks at it. Going back the other way is a restore of the SQLite backup you took, not an export.
+
 ## Secret rotation
 
 ### Canvas token key ring (`CANVAS_TOKEN_KEYS`)
@@ -628,7 +702,19 @@ A restore brings back the **access decisions as they were in the backup**: a use
 
 A restore also rewinds the **credential generations** (see [Canvas credential lifecycle](#canvas-credential-lifecycle)). Always restart the server after a restore, and never restore underneath a running one: a running process remembers the highest generation it has seen, so it would treat requests that read the older, lower numbers as superseded and refuse their tool calls until it is restarted.
 
-If you do not want to stop the service, you can back up just the token store: `sqlite3 /data/canvas-mcp/tokens.sqlite3 '.backup /backup/tokens.sqlite3'` (run it in an environment that can reach that volume).
+**With PostgreSQL** the token store is not in `/data`, so archiving `/data` does not back it up. Back it up with `pg_dump` (the custom format is compact and restores selectively), and keep `.env` apart as above:
+
+```bash
+docker compose exec postgres pg_dump -U canvas -Fc canvas_mcp > canvas-mcp-db-$(date +%F).dump
+# restore into the database, with the server stopped:
+docker compose stop canvas-mcp
+docker compose exec -T postgres pg_restore -U canvas -d canvas_mcp --clean --if-exists < canvas-mcp-db-<date>.dump
+docker compose start canvas-mcp
+```
+
+The same warnings apply as for SQLite: a restore rewinds disablements and credential generations, so run `token_admin access` afterwards and restart the server. The `/data` archive still matters for the OAuth proxy state and the audit log.
+
+If you do not want to stop the service, you can back up just the token store (SQLite): `sqlite3 /data/canvas-mcp/tokens.sqlite3 '.backup /backup/tokens.sqlite3'` (run it in an environment that can reach that volume).
 
 Restore: first run `docker volume inspect canvas-mcp-data` (the volume must be the one the service is using; on a fresh deployment, create it first with `docker compose up --no-start`), stop the service, extract the archive into that volume (`docker run --rm -v canvas-mcp-data:/data -v "$PWD":/backup alpine tar xzf /backup/<file>.tgz -C /data`), then confirm the directory owner is uid 10001 (`chown -R 10001:10001 /data`, run in the same temporary container), and then `docker compose up -d`.
 

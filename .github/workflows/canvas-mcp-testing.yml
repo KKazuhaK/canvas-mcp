@@ -34,7 +34,8 @@ jobs:
       # would have kept type-checking on mypy 1.x forever while contributors
       # running `uv sync` got 2.x — the gate asserting a version nobody uses.
       run: |
-        python -m pip install -e .
+        # The data layer and its PostgreSQL driver are optional extras; mypy has to see them.
+        python -m pip install -e ".[selfhost,postgres]"
         CONSTRAINT=$(python - <<'PY'
         import tomllib
         with open("pyproject.toml", "rb") as fh:
@@ -141,7 +142,9 @@ jobs:
         python -m pip install --upgrade pip
         # The documents extra (pypdf, python-pptx, python-docx) lets the
         # read_course_file_text extraction tests run instead of skipping.
-        pip install -e ".[documents]"
+        # The selfhost and postgres extras (SQLAlchemy, Alembic, psycopg) are what the
+        # self-hosted data-layer tests import; the upstream modes never need them.
+        pip install -e ".[documents,selfhost,postgres]"
         # pyyaml is needed by the workflow-permission policy tests. They use
         # importorskip, so omitting it makes them skip silently in the one job
         # branch protection actually requires — passing green while the check
@@ -180,7 +183,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        python -m pip install -e ".[documents]"
+        python -m pip install -e ".[documents,selfhost,postgres]"
         python -m pip install pytest pytest-asyncio pyyaml respx
 
     - name: Run the test suite
@@ -232,10 +235,70 @@ jobs:
       # The documents extra and the dev group (pytest, pytest-asyncio, pyyaml,
       # respx, and the document parsers) match what the other test jobs install,
       # so the extraction tests run instead of skipping.
-      run: uv sync --locked --extra documents --group dev
+      run: uv sync --locked --extra documents --extra selfhost --extra postgres --group dev
 
     - name: Run the test suite
       run: uv run --locked pytest tests/ -q
+
+  # The self-hosted tests against a real PostgreSQL server. The default jobs above run
+  # them on SQLite; this one runs EVERY store-backed test, the whole-server stacks and
+  # the two-connection race tests on PostgreSQL (CANVAS_MCP_TEST_BACKEND=postgres).
+  # tests/conftest.py aborts the run, it does not skip, when the server is unreachable,
+  # so this job cannot pass without exercising PostgreSQL. The image is pinned by tag
+  # and digest and is the one deploy/selfhost/docker-compose.postgres.yml deploys
+  # (tests/test_selfhost_compose_postgres.py keeps the two identical). The password is
+  # a throwaway that only exists inside this job's private service container.
+  test-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
+      UV_PYTHON: "3.14"
+      UV_PYTHON_DOWNLOADS: never
+      CANVAS_MCP_TEST_BACKEND: postgres
+      CANVAS_MCP_TEST_DATABASE_URL: postgresql+psycopg://canvas:ci-only-not-a-secret@127.0.0.1:5432/canvas_mcp_test
+    services:
+      postgres:
+        image: postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+        env:
+          POSTGRES_USER: canvas
+          POSTGRES_PASSWORD: ci-only-not-a-secret
+          POSTGRES_DB: canvas_mcp_test
+          POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U canvas -d canvas_mcp_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Python ${{ env.UV_PYTHON }}
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: ${{ env.UV_PYTHON }}
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      with:
+        version: '0.12.22'
+        enable-cache: false
+
+    - name: Install from uv.lock
+      run: uv sync --locked --extra documents --extra selfhost --extra postgres --group dev
+
+    - name: Run the self-hosted tests on PostgreSQL
+      run: >-
+        uv run --locked pytest
+        tests/selfhost tests/test_multiuser_e2e.py tests/test_fastmcp_compat.py
+        -q -p no:cacheprovider
 
   # Aggregator. Branch protection requires a check literally named
   # "test-enhancements", and a matrix job publishes per-version names
@@ -246,20 +309,21 @@ jobs:
   # and passed its checks".
   test-enhancements:
     runs-on: ubuntu-latest
-    needs: [test, test-windows, test-locked, test-code-api, verify-confirmation, web]
+    needs: [test, test-windows, test-locked, test-postgres, test-code-api, verify-confirmation, web]
     if: always()
 
     steps:
-    - name: Require Python (Linux, Windows and locked), code API, web UI, and confirmation proofs to have succeeded
+    - name: Require Python (Linux, Windows, locked and PostgreSQL), code API, web UI, and confirmation proofs to have succeeded
       run: |
         echo "matrix result: ${{ needs.test.result }}"
         echo "windows result: ${{ needs.test-windows.result }}"
         echo "locked result: ${{ needs.test-locked.result }}"
+        echo "postgres result: ${{ needs.test-postgres.result }}"
         echo "web result: ${{ needs.web.result }}"
-        if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.test-windows.result }}" != "success" ] || [ "${{ needs.test-locked.result }}" != "success" ] || [ "${{ needs.test-code-api.result }}" != "success" ] || [ "${{ needs.verify-confirmation.result }}" != "success" ] || [ "${{ needs.web.result }}" != "success" ]; then
-          echo "::error::Python (Linux, Windows or locked), code API, web UI, or confirmation verification did not succeed."
+        if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.test-windows.result }}" != "success" ] || [ "${{ needs.test-locked.result }}" != "success" ] || [ "${{ needs.test-postgres.result }}" != "success" ] || [ "${{ needs.test-code-api.result }}" != "success" ] || [ "${{ needs.verify-confirmation.result }}" != "success" ] || [ "${{ needs.web.result }}" != "success" ]; then
+          echo "::error::Python (Linux, Windows, locked or PostgreSQL), code API, web UI, or confirmation verification did not succeed."
           exit 1
         fi
         echo "## Canvas MCP test results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "Full suite passed on Ubuntu with Python 3.11, 3.12, 3.13 and 3.14, on Windows with Python 3.14, and on Ubuntu with Python 3.14 against the exact dependency versions in uv.lock. The web UI (web/) passed lint, typecheck, tests, build and the dist checks." >> $GITHUB_STEP_SUMMARY
+        echo "Full suite passed on Ubuntu with Python 3.11, 3.12, 3.13 and 3.14, on Windows with Python 3.14, on Ubuntu with Python 3.14 against the exact dependency versions in uv.lock, and the self-hosted tests also passed against PostgreSQL 18 (the `test-postgres` job). The web UI (web/) passed lint, typecheck, tests, build and the dist checks." >> $GITHUB_STEP_SUMMARY

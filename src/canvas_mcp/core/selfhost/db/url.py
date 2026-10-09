@@ -197,8 +197,16 @@ def _parse_postgres(raw: str, problems: list[str], default: DatabaseTarget) -> D
     if not host:
         problems.append(f"{name} must include a host name")
         return default
-    if "," in parts.netloc.rpartition("@")[2]:
+    userinfo, _, hostport = parts.netloc.rpartition("@")
+    if "," in hostport:
         problems.append(f"{name} must name exactly one host")
+        return default
+    if "@" in userinfo:
+        # SQLAlchemy would split at the first "@" and misread the host.
+        problems.append(
+            f"{name} has a user name or password with a raw '@'; percent-encode special "
+            "characters (or use only letters and digits)"
+        )
         return default
     dbname = parts.path[1:] if parts.path.startswith("/") else parts.path
     if not _DBNAME_RE.fullmatch(dbname):
