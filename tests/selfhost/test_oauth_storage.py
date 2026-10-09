@@ -270,3 +270,25 @@ class TestSupportedDependencyRange:
         guide = (REPO / "deploy" / "selfhost" / "README.md").read_text(encoding="utf-8")
         assert "`>=0.4.6,<0.5`" in guide
         assert "`>=4.0.3,<5`" in guide
+
+
+class TestInstalledFastmcpSurface:
+    """The floor in ``pyproject.toml`` only means something if the installed release
+    (CI runs ``uv sync --locked``, so the locked one) really has what the code calls."""
+
+    def test_azure_provider_accepts_the_public_client_storage_parameter(self):
+        params = inspect.signature(AzureProvider.__init__).parameters
+        assert "client_storage" in params
+        assert "jwt_signing_key" in params
+
+    def test_derive_jwt_key_takes_the_salt_and_both_key_materials(self):
+        from fastmcp.server.auth.jwt_issuer import derive_jwt_key
+
+        params = inspect.signature(derive_jwt_key).parameters
+        assert {"low_entropy_material", "high_entropy_material", "salt"} <= set(params)
+        key = derive_jwt_key(low_entropy_material="x" * 32, salt="canvas-mcp-test")
+        assert isinstance(key, bytes) and len(key) == 44  # url-safe base64 of 32 bytes
+
+    def test_the_installed_fastmcp_satisfies_the_declared_range(self):
+        spec = _requirement("fastmcp").specifier
+        assert Version(metadata.version("fastmcp")) in spec

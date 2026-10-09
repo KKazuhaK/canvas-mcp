@@ -533,3 +533,20 @@ def test_readme_documents_the_proxy_log_redaction(readme):
     assert "### Keep OAuth codes out of proxy logs" in readme
     assert "canvas_safe" in readme
     assert "replace code REDACTED" in readme
+
+
+def test_env_example_no_longer_offers_revoking_enrollments():
+    text = (SELFHOST / "env.example").read_text(encoding="utf-8")
+    assert "revoke enrollments" not in text
+    owner_line = next(line for line in text.splitlines() if "Operator role" in line)
+    assert "disable" in owner_line and "remove" in owner_line
+
+
+def test_readme_states_what_the_scrub_and_the_guards_do_not_cover(readme):
+    # Third-party (FastMCP) log lines are scrubbed by shape only.
+    assert "bare OAuth transaction id" in readme
+    # The last-owner guard counts stored owner flags, which can be stale.
+    assert "never comes back therefore still counts" in readme
+    assert "owner_seen_at" in readme
+    # Audit endpoints mask names, not only numbers.
+    assert "page slugs" in readme

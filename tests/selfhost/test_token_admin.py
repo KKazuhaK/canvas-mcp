@@ -381,3 +381,21 @@ def test_remove_and_revoke_only_delete_the_token_and_say_so(env, capsys) -> None
     assert not store.get_principal_status(KEY_A).disabled
     assert token_admin.main(["revoke", TID, OID_B]) == 0
     assert "revoked 1 enrollment" in capsys.readouterr().out
+
+
+def test_a_stale_owner_flag_is_visible_to_the_operator(env, capsys) -> None:
+    """A former owner who never signs in again still counts; the CLI says so and shows when."""
+    store = _seed(env)
+    store.record_sign_in(KEY_A, is_owner=True)
+    store.record_sign_in(KEY_B, is_owner=True)  # B's Entra role is removed later; B never returns
+    assert token_admin.main(["disable", TID, OID_A]) == 0  # the guard counts the stale B
+    capsys.readouterr()
+    assert token_admin.main(["check"]) == 0
+    assert "owner_seen_at" in capsys.readouterr().out
+    assert token_admin.main(["access"]) == 0
+    rows = [line.split("	") for line in capsys.readouterr().out.splitlines()]
+    by_key = {r[0]: r for r in rows}
+    assert len(by_key[KEY_B]) == 8 and by_key[KEY_B][7].endswith("Z")  # owner_seen_at, ISO
+    assert token_admin.main(["disable", TID, OID_B]) == 3
+    err = capsys.readouterr().err
+    assert "owner_seen_at" in err and "--allow-last-owner" in err

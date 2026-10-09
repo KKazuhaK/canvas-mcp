@@ -144,3 +144,74 @@ class TestAuditEvents:
     def test_an_unexpected_field_is_scrubbed_too(self, lines):
         audit._emit({"event_type": "x", "note": f"Bearer {JWT}"})  # noqa: SLF001
         assert JWT not in lines[0]
+
+
+class TestNamedPathSegments:
+    @pytest.mark.parametrize(
+        ("endpoint", "expected"),
+        [
+            ("/courses/123/pages/midterm-grades-for-jane-doe", "/courses/***/pages/***"),
+            ("/courses/123/pages/midterm-grades-for-jane-doe/revisions", "/courses/***/pages/***/revisions"),
+            ("/courses/123/wiki_pages/jane-doe-notes?x=1", "/courses/***/wiki_pages/***"),
+            ("/users/sis_user_id:jdoe123/profile", "/users/***/profile"),
+            ("/courses/sis_course_id:ICS-45C/enrollments", "/courses/***/enrollments"),
+            ("/courses/123/folders/by_path/Jane Doe/essays", "/courses/***/folders/by_path/***"),
+            ("/courses/123/pages", "/courses/***/pages"),
+            ("/courses/123/pages/front_page", "/courses/***/pages/front_page"),
+            ("/courses/123/pages/456", "/courses/***/pages/***"),
+        ],
+    )
+    def test_the_audit_endpoint_masks_names_as_well_as_numbers(self, endpoint, expected):
+        assert audit._sanitize_endpoint(endpoint) == expected  # noqa: SLF001
+
+    def test_the_log_url_sanitizer_masks_the_same_names(self):
+        from canvas_mcp.core.logging import sanitize_url
+
+        assert sanitize_url("/courses/1/pages/jane-doe-midterm") == "/courses/***/pages/***"
+        assert (
+            sanitize_url("https://canvas.example.test/api/v1/users/sis_user_id:jdoe?x=1")
+            == "https://canvas.example.test/api/v1/users/***"
+        )
+
+
+class TestThirdPartyLoggers:
+    @pytest.fixture
+    def fastmcp_stream(self):
+        import io
+
+        stream = io.StringIO()
+        target = logging.getLogger("fastmcp")
+        probe = logging.StreamHandler(stream)
+        target.addHandler(probe)
+        yield stream
+        target.removeHandler(probe)
+
+    def test_fastmcp_oauth_proxy_lines_pass_the_scrub(self, fastmcp_stream):
+        from fastmcp.server.auth.oauth_proxy import proxy as oauth_proxy
+
+        from canvas_mcp.core.logging import scrub_third_party_logs
+
+        assert scrub_third_party_logs() >= 1
+        oauth_proxy.logger.error(
+            "Transaction %s missing consent_token", "state=SECRETVALUE1234567 code=abcdefghijk1234"
+        )
+        text = fastmcp_stream.getvalue()
+        assert "abcdefghijk1234" not in text and "SECRETVALUE1234567" not in text
+        assert "missing consent_token" in text
+
+    def test_installing_twice_adds_nothing(self, fastmcp_stream):
+        from canvas_mcp.core.logging import scrub_third_party_logs
+
+        scrub_third_party_logs()
+        assert scrub_third_party_logs() == 0
+        for handler in logging.getLogger("fastmcp").handlers:
+            assert sum(isinstance(f, SecretScrubFilter) for f in handler.filters) <= 1
+
+    def test_the_selfhost_server_start_installs_it(self):
+        import inspect
+
+        from canvas_mcp import server
+
+        source = inspect.getsource(server._run_selfhost_http_server)  # noqa: SLF001
+        assert "scrub_third_party_logs()" in source
+        assert source.index("uvicorn.Config(") < source.index("scrub_third_party_logs()")

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .credentials import get_request_principal
-from .redact import scrub_event, scrub_secrets, strip_query
+from .redact import mask_named_segments, scrub_event, scrub_secrets, strip_query
 
 # Separate logger for audit events (not the main application logger)
 _audit_logger = logging.getLogger("canvas_mcp.audit")
@@ -45,11 +45,15 @@ _MAX_ERROR_CHARS = 300
 
 
 def _sanitize_endpoint(endpoint: str) -> str:
-    """Replace numeric IDs in endpoint paths with '***' and drop the query string.
+    """Replace numeric IDs and named segments with '***' and drop the query string.
 
-    Example: /courses/12345/users/678?access_token=x → /courses/***/users/***
+    Named segments (a page slug, a ``sis_user_id:`` value, a ``by_path`` folder
+    path) can carry a person's name, so they are masked like numeric ids.
+
+    Example: /courses/12345/pages/midterm-for-jane?access_token=x → /courses/***/pages/***
     """
-    return _NUMERIC_PATH_RE.sub("/***", strip_query(scrub_secrets(endpoint)))
+    path = mask_named_segments(strip_query(scrub_secrets(endpoint)))
+    return _NUMERIC_PATH_RE.sub("/***", path)
 
 
 def init_audit_logging() -> None:

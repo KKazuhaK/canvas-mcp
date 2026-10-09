@@ -178,3 +178,57 @@ class TestNotGated:
         assert [t.name for t in tools] == ["get_my_profile"]
         assert prompt.messages
         assert Body.runs == 0
+
+
+class _StaleCache:
+    """An access cache that still reports the generation from before the change."""
+
+    def __init__(self, generation: int) -> None:
+        from canvas_mcp.core.selfhost.token_store import PrincipalStatus
+
+        self._status = PrincipalStatus(principal_key=make_principal(OID_A).key, credential_generation=generation)
+
+    def status(self, principal_key: str):
+        return self._status
+
+
+class TestSupersededCredentialInProcess:
+    """A change this process made is known at once, without waiting for the cache."""
+
+    @staticmethod
+    def _server(access) -> FastMCP:
+        Body.runs = 0
+        mcp = FastMCP("gate-stale")
+        mcp.add_middleware(SelfhostCredentialGate(access=access))
+
+        @mcp.tool()
+        def get_my_profile() -> str:
+            """Dummy tool."""
+            Body.runs += 1
+            return "ran"
+
+        return mcp
+
+    @pytest.mark.parametrize("with_cache", [True, False])
+    async def test_a_lagging_cache_does_not_let_the_old_generation_through(self, verified_oid, with_cache):
+        from canvas_mcp.core.credentials import (
+            note_credential_generation,
+            set_request_credential_generation,
+        )
+
+        verified_oid(OID_A)
+        _enrol(OID_A)
+        key = make_principal(OID_A).key
+        note_credential_generation(key, 1)
+        set_request_credential_generation(1)
+        server = self._server(_StaleCache(1) if with_cache else None)
+
+        result = await _call(server)
+        assert not result.is_error and Body.runs == 1  # nothing changed yet
+
+        # /account saved another token in this process; the cache still says 1.
+        note_credential_generation(key, 2)
+        result = await _call(server)
+        assert result.is_error
+        assert "changed while this request was running" in _text(result)
+        assert Body.runs == 1  # the tool body did not run again

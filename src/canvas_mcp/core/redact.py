@@ -67,6 +67,27 @@ def scrub_secrets(text: str, *, emails: bool = False) -> str:
     return text
 
 
+# Canvas addresses some resources by a name instead of a number: a page by a slug
+# generated from its title, a user or course by "sis_user_id:<value>", a folder or
+# file by its path. Those can carry a person's name, so they never reach a log or
+# the audit trail.
+_NAMED_SEGMENT_RE = re.compile(r"(?i)(/(?:wiki_)?pages)/(?!\d+(?:/|$)|front_page(?:/|$))[^/?#]+")
+_BY_PATH_RE = re.compile(r"(?i)(/by_path)(?:/[^?#]*)?")
+_SIS_SEGMENT_RE = re.compile(r"(?i)/(?:sis_[a-z_]+|hex-sis_[a-z_]+):[^/?#]*")
+
+
+def mask_named_segments(path: str) -> str:
+    """Mask the path segments that identify a resource by name rather than number.
+
+    ``/courses/1/pages/midterm-grades-for-jane`` becomes ``/courses/1/pages/***``,
+    ``/users/sis_user_id:jdoe`` becomes ``/users/***`` and a ``by_path`` folder
+    lookup loses its path. Numeric ids are left for the callers' own masking.
+    """
+    path = _NAMED_SEGMENT_RE.sub(lambda m: f"{m.group(1)}/***", path)
+    path = _BY_PATH_RE.sub(lambda m: f"{m.group(1)}/***", path)
+    return _SIS_SEGMENT_RE.sub("/***", path)
+
+
 def strip_query(target: str) -> str:
     """Drop the query string and fragment of a path or URL (``?code=...``)."""
     return target.split("?", 1)[0].split("#", 1)[0]

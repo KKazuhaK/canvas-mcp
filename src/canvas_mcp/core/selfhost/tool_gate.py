@@ -19,7 +19,9 @@ cancelled.
 
 The same check refuses a call from a request whose Canvas credential was replaced,
 removed, found dead or restored after the request began (the credential generation
-the store reports is newer than the one the request was authorized under). Such a
+the store reports, or this process has already heard of, is newer than the one the
+request was authorized under). A change made in this process is seen at once; one
+made by another process is seen within the access cache's bound. Such a
 request holds the old token; it is told to retry rather than start a further tool
 call, which matters most for a write that was previewed under the old credential.
 """
@@ -44,6 +46,7 @@ from ..credentials import (
     get_request_token_state,
     get_request_tool_prefs,
     missing_credentials_message,
+    request_credential_is_stale,
 )
 from ..logging import log_error
 from .principal_access import access_disabled_message, access_unavailable_message
@@ -68,6 +71,19 @@ class AccessChecker(Protocol):
     """The slice of the access cache the gate uses (synchronous)."""
 
     def status(self, principal_key: str) -> PrincipalStatus: ...
+
+
+def _check_generation_in_process(error_type: type[Exception]) -> None:
+    """Raise ``error_type`` if this process already knows a newer credential generation.
+
+    The access cache can lag by its TTL; this process's own registry does not, so a
+    change made here (a token saved at ``/account``, removed, found dead) is seen at
+    once. It runs after the credential check so a request that carries no usable
+    credential keeps the more specific message (for example the re-enroll one that
+    follows from the request itself marking the token invalid).
+    """
+    if request_credential_is_stale():
+        raise error_type(_CREDENTIAL_CHANGED)
 
 
 async def _check_access(access: AccessChecker | None, error_type: type[Exception]) -> None:
@@ -165,6 +181,7 @@ class SelfhostCredentialGate(Middleware):
         _check_identity(ToolError)
         await _check_access(self._access, ToolError)
         _check_credentials(ToolError)
+        _check_generation_in_process(ToolError)
         self._check_write_tool(context.message.name)
         return await call_next(context)
 
@@ -190,4 +207,5 @@ class SelfhostCredentialGate(Middleware):
         _check_identity(ResourceError)
         await _check_access(self._access, ResourceError)
         _check_credentials(ResourceError)
+        _check_generation_in_process(ResourceError)
         return await call_next(context)

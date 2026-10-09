@@ -7,7 +7,7 @@ import sys
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from .redact import SecretScrubFilter
+from .redact import SecretScrubFilter, mask_named_segments
 
 # Configure logger for Canvas MCP
 logger = logging.getLogger("canvas_mcp")
@@ -28,6 +28,28 @@ handler.addFilter(SecretScrubFilter())
 
 # Add handler to logger
 logger.addHandler(handler)
+
+# Loggers of the libraries that serve the self-hosted OAuth flow. They keep their
+# own handlers (``propagate`` is off for FastMCP and uvicorn), so records that name
+# an OAuth transaction or quote an upstream error never pass the filter above.
+_THIRD_PARTY_LOGGERS = ("fastmcp", "mcp", "uvicorn", "uvicorn.error", "uvicorn.access")
+
+
+def scrub_third_party_logs() -> int:
+    """Put :class:`SecretScrubFilter` on the handlers FastMCP, mcp and uvicorn log through.
+
+    Returns how many handlers were changed. Idempotent. Call it after uvicorn has
+    built its config (that is when it installs its handlers). A filter on a logger
+    would not see records of its child loggers, so the filter goes on the handlers.
+    """
+    changed = 0
+    for name in _THIRD_PARTY_LOGGERS:
+        for third_party_handler in logging.getLogger(name).handlers:
+            if not any(isinstance(f, SecretScrubFilter) for f in third_party_handler.filters):
+                third_party_handler.addFilter(SecretScrubFilter())
+                changed += 1
+    return changed
+
 
 # PII keys that should be fully redacted in log context
 _PII_KEYS = frozenset({
@@ -75,7 +97,7 @@ def _sanitize_context(context: dict[str, Any]) -> dict[str, Any]:
 
 
 def sanitize_url(url: str) -> str:
-    """Remove URL credentials/query data and replace numeric path segments.
+    """Remove URL credentials/query data and replace numeric and named path segments.
 
     Example: /courses/12345/users/678 → /courses/***/users/***
     """
@@ -85,7 +107,7 @@ def sanitize_url(url: str) -> str:
         url = urlunsplit((parsed.scheme, safe_netloc, parsed.path, "", ""))
     else:
         url = url.split("?", 1)[0].split("#", 1)[0]
-    return _NUMERIC_PATH_RE.sub("/***", url)
+    return _NUMERIC_PATH_RE.sub("/***", mask_named_segments(url))
 
 
 def log_error(message: str, exc: Exception | None = None, **context: Any) -> None:

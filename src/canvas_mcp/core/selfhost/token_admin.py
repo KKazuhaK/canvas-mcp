@@ -138,7 +138,10 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
         print(f"schools in use: {len(schools)}" + (f" (+{legacy} legacy row(s))" if legacy else ""))
         statuses = store.list_principal_statuses()
         print(f"disabled users: {sum(1 for st in statuses if st.disabled)}")
-        print(f"active owners seen: {store.count_active_owners()}")
+        print(
+            f"active owners seen: {store.count_active_owners()}"
+            " (as of each owner's last sign-in; see 'access' for owner_seen_at)"
+        )
         return EXIT_OK
     if command == "list":
         for row in store.list_enrollments():
@@ -186,8 +189,10 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
         except AccessActionRefused as exc:
             if exc.code == AccessActionRefused.LAST_OWNER:
                 print(
-                    "refused: that user is the last active owner "
-                    "(add another owner first, or pass --allow-last-owner)",
+                    "refused: that user is the last active owner as far as the stored "
+                    "owner flags show (a former owner who never signed in again still "
+                    "counts; check 'access' for the owner_seen_at column). "
+                    "Add another owner first, or pass --allow-last-owner",
                     file=sys.stderr,
                 )
             else:
@@ -218,6 +223,7 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
                         _cell(st.disabled_by or "") or "-",
                         _cell(st.disabled_reason or "") or "-",
                         str(st.session_epoch),
+                        _iso(st.owner_seen_at) if st.is_owner else "-",
                     ]
                 )
             )

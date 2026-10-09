@@ -33,7 +33,7 @@ from .core.credentials import (
     set_http_request_active,
     set_request_credentials,
 )
-from .core.logging import log_error, log_info, log_warning
+from .core.logging import log_error, log_info, log_warning, scrub_third_party_logs
 from .core.selfhost.settings import (
     AUTH_MODE_ENTRA,
     SelfhostConfigError,
@@ -665,6 +665,7 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
     init_audit_logging()
 
     mcp = create_server(auth=build_entra_auth_provider(settings))
+    scrub_third_party_logs()
     role = args.role or config.canvas_role
     if role not in ("student", "educator", "all"):
         log_warning(f"Unknown role '{role}', defaulting to 'all'")
@@ -1055,6 +1056,9 @@ def _run_selfhost_http_server(app: "ASGIApp", host: str, port: int) -> None:
         proxy_headers=False,
         server_header=False,
     )
+    # uvicorn installs its handlers when the config is built; FastMCP's OAuth proxy
+    # logs transaction ids and upstream error text through its own handlers.
+    scrub_third_party_logs()
     server = uvicorn.Server(config)
     anyio.run(server.serve)
 
