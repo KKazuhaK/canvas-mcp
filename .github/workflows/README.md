@@ -88,6 +88,7 @@ gh workflow run create-release.yml -f tag_name=v1.0.7-test
 - Runs Ruff and mypy (`lint`)
 - Runs the full pytest suite on Ubuntu with Python 3.11, 3.12, 3.13 and 3.14 (`test`)
 - Runs the full pytest suite on Windows with Python 3.14, with UTF-8 mode on (`test-windows`)
+- Runs the full pytest suite on Ubuntu with Python 3.14 against the exact dependency versions in `uv.lock`, installed with `uv sync --locked` (`test-locked`)
 - Builds and tests the TypeScript code API, and checks the formal proofs
 - `test-enhancements` is the required check: it passes only when all of the above test jobs pass
 

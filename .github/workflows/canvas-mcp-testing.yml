@@ -186,27 +186,80 @@ jobs:
     - name: Run the test suite
       run: python -m pytest tests/ -q
 
+  # The same full suite on Linux, installed strictly from uv.lock instead of the
+  # newest versions pyproject.toml allows. The matrix above answers "does the
+  # code work with whatever pip resolves today"; this answers "does it work with
+  # the exact dependency set that ships". Dockerfile.selfhost installs from the
+  # same lock, with the same uv and Python, so a locked version that differs from
+  # the latest resolvable one (fastmcp 4.0.3 and py-key-value-aio 0.4.6 when this
+  # job was added) is otherwise never exercised. --locked fails the job when
+  # uv.lock is stale against pyproject.toml instead of quietly re-resolving.
+  test-locked:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
+      # One source of truth for the interpreter: setup-python installs it and uv
+      # is told to use exactly it. With downloads off, uv fails rather than
+      # fetching (or falling back to the runner's system Python) and running the
+      # suite on an interpreter nobody asked for. 3.14 is what the self-hosted
+      # image ships.
+      UV_PYTHON: "3.14"
+      UV_PYTHON_DOWNLOADS: never
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        # Full history, for the same closing-keyword replay as the other test
+        # jobs (test_acceptance_replay_real_history skips on a shallow clone).
+        fetch-depth: 0
+
+    - name: Set up Python ${{ env.UV_PYTHON }}
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: ${{ env.UV_PYTHON }}
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      with:
+        # Same uv as Dockerfile.selfhost, so lock handling is identical.
+        version: '0.12.22'
+        # No cache: nothing may stand between uv.lock and what gets installed.
+        enable-cache: false
+
+    - name: Install from uv.lock
+      # The documents extra and the dev group (pytest, pytest-asyncio, pyyaml,
+      # respx, and the document parsers) match what the other test jobs install,
+      # so the extraction tests run instead of skipping.
+      run: uv sync --locked --extra documents --group dev
+
+    - name: Run the test suite
+      run: uv run --locked pytest tests/ -q
+
   # Aggregator. Branch protection requires a check literally named
   # "test-enhancements", and a matrix job publishes per-version names
   # ("test (3.11)"), which would leave the required check permanently pending
   # and block every PR. This gate keeps the required name while making it mean
-  # "the full suite passed on every supported Python, on Linux and Windows, the
-  # code API passed, and the web UI built and passed its checks".
+  # "the full suite passed on every supported Python, on Linux and Windows, and
+  # on the exact versions in uv.lock, the code API passed, and the web UI built
+  # and passed its checks".
   test-enhancements:
     runs-on: ubuntu-latest
-    needs: [test, test-windows, test-code-api, verify-confirmation, web]
+    needs: [test, test-windows, test-locked, test-code-api, verify-confirmation, web]
     if: always()
 
     steps:
-    - name: Require Python (Linux and Windows), code API, web UI, and confirmation proofs to have succeeded
+    - name: Require Python (Linux, Windows and locked), code API, web UI, and confirmation proofs to have succeeded
       run: |
         echo "matrix result: ${{ needs.test.result }}"
         echo "windows result: ${{ needs.test-windows.result }}"
+        echo "locked result: ${{ needs.test-locked.result }}"
         echo "web result: ${{ needs.web.result }}"
-        if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.test-windows.result }}" != "success" ] || [ "${{ needs.test-code-api.result }}" != "success" ] || [ "${{ needs.verify-confirmation.result }}" != "success" ] || [ "${{ needs.web.result }}" != "success" ]; then
-          echo "::error::Python (Linux or Windows), code API, web UI, or confirmation verification did not succeed."
+        if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.test-windows.result }}" != "success" ] || [ "${{ needs.test-locked.result }}" != "success" ] || [ "${{ needs.test-code-api.result }}" != "success" ] || [ "${{ needs.verify-confirmation.result }}" != "success" ] || [ "${{ needs.web.result }}" != "success" ]; then
+          echo "::error::Python (Linux, Windows or locked), code API, web UI, or confirmation verification did not succeed."
           exit 1
         fi
         echo "## Canvas MCP test results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "Full suite passed on Ubuntu with Python 3.11, 3.12, 3.13 and 3.14, and on Windows with Python 3.14. The web UI (web/) passed lint, typecheck, tests, build and the dist checks." >> $GITHUB_STEP_SUMMARY
+        echo "Full suite passed on Ubuntu with Python 3.11, 3.12, 3.13 and 3.14, on Windows with Python 3.14, and on Ubuntu with Python 3.14 against the exact dependency versions in uv.lock. The web UI (web/) passed lint, typecheck, tests, build and the dist checks." >> $GITHUB_STEP_SUMMARY
