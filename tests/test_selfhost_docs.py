@@ -577,3 +577,12 @@ def test_the_course_state_setting_ships_at_its_default_and_is_documented(env_tex
     for value in COURSE_STATES:
         assert f"`{value}`" in section, f"README does not explain {value}"
     assert "default" in section.lower() and "opt-in" in section.lower()
+
+
+def test_readme_records_what_the_oauth_proxy_does_with_replayed_codes_and_refresh_tokens(readme):
+    heading = "### How the OAuth proxy treats replayed codes and refresh tokens"
+    assert heading in readme
+    section = readme[readme.index(heading) :]
+    section = section[: section.index("\n## ", 5)]
+    for text in ("invalid_grant", "code_challenge", "S256", "family", "not** revoked", "Revoking a user"):
+        assert text in section, f"the OAuth notes no longer mention {text!r}"

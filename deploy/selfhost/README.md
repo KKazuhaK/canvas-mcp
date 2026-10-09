@@ -537,6 +537,23 @@ Back up `/data` and `.env` **separately**, in places that different people (or d
 
 The reverse proxy sees the OAuth query strings (`code`, `state`) of `/authorize` and `/auth/callback`, and the `Authorization` header of every MCP request. Configure it as described in [Keep OAuth codes out of proxy logs](#keep-oauth-codes-out-of-proxy-logs). Application logs (including the lines FastMCP, the `mcp` library and uvicorn write through their own handlers, which get the same filter at startup) and audit events are scrubbed of bearer tokens, JWTs, Canvas tokens, Entra refresh tokens, `code=`/`state=`-style parameters and URL credentials before they are written. The scrub recognises shapes, so a bare OAuth transaction id that FastMCP logs without a `state=` label (for example in "Transaction ... missing consent_token") is an opaque, short-lived server-side id and is not redacted; treat container logs as sensitive and not as a place for secrets.
 
+### How the OAuth proxy treats replayed codes and refresh tokens
+
+The MCP sign-in is FastMCP's OAuth proxy. What follows was observed by running the real proxy and MCP SDK in `tests/test_multiuser_e2e.py::TestOAuthProxyHardening` against FastMCP 4.0.3 (the version `uv.lock` pins) and 4.0.10; read it again after any FastMCP upgrade.
+
+| Request | What happens | What does not happen |
+|---|---|---|
+| `/token` with an authorization code that was already redeemed | Refused with `invalid_grant`. FastMCP answers HTTP 401 for it (the MCP convention that tells a client to sign in again), not the 400 of RFC 6749. Nothing is sent to Entra. | The tokens the first redemption issued are **not** revoked, although RFC 6749 4.1.2 allows a server to. They stay valid until they expire or the user is disabled. |
+| `/token` with another client's id, a wrong `code_verifier`, or no `code_verifier` | Refused (`invalid_grant`, or `invalid_request` for a missing field). | A wrong verifier does not burn the code; the real client can still redeem it. Guessing a verifier is not feasible, because the challenge is a SHA-256 hash. |
+| `/authorize` without `code_challenge`, or with any `code_challenge_method` except `S256` (including `plain`) | Refused as an OAuth `invalid_request`, delivered to the client's registered redirect URI (or as a 400 when the client or redirect URI is unknown). No consent page, no hand-off to Entra, no code. | There is no downgrade to a weaker challenge. |
+| `/token` with a refresh token that was already rotated | Refused with `invalid_grant` (HTTP 401) **before** Entra is contacted. | **FastMCP does not treat reuse as a sign of theft.** The newer refresh token and the access tokens issued before and after keep working. There is no token-family revocation. |
+
+Consequences for the operator:
+
+- A leaked MCP refresh token can be used until its owner refreshes first. After that the leaked copy is refused, but the owner's newer tokens are not cancelled, and neither is anything the thief already obtained.
+- **To cut a user off, use [Revoking a user](#revoking-a-user) (disable first), not the token family.** The access decision looks up the user's identity on every request, so every token a disabled user holds, old or freshly refreshed, is refused (tested with a refresh after the disablement).
+- Not tested: two refreshes of the same token at the same moment. Reading FastMCP 4.0.3, the old token is looked up first and deleted only at the end, with no lock, so both could succeed and produce two valid refresh tokens.
+
 ## Upgrading
 
 ```bash
