@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = ROOT / "Dockerfile.selfhost"
 ROOT_DOCKERFILE = ROOT / "Dockerfile"
 DIGEST = "sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6"
+WEB_PACKAGE = ROOT / "web" / "package.json"
 
 
 def _instructions(path: Path) -> list[tuple[str, str]]:
@@ -51,9 +52,58 @@ def _env_names(instructions: list[tuple[str, str]]) -> list[str]:
 
 def test_every_stage_is_pinned_by_digest(instructions):
     froms = [args for name, args in instructions if name == "FROM"]
-    assert len(froms) == 2
-    for args in froms:
+    assert len(froms) == 3
+    python = [args for args in froms if args.startswith("python:")]
+    node = [args for args in froms if args.startswith("node:")]
+    assert len(python) == 2 and len(node) == 1
+    for args in python:
         assert f"@{DIGEST}" in args, args
+    # Node: exact version tag (for humans and Dependabot) AND a digest (what is pulled).
+    assert re.fullmatch(r"node:\d+\.\d+\.\d+-alpine@sha256:[0-9a-f]{64} AS web", node[0]), node[0]
+
+
+def test_the_runtime_stage_is_python_not_node(instructions):
+    froms = [args for name, args in instructions if name == "FROM"]
+    assert froms[-1].startswith("python:")
+
+
+def test_the_node_image_satisfies_the_web_projects_engines():
+    import json
+
+    engines = json.loads(WEB_PACKAGE.read_text(encoding="utf-8"))["engines"]["node"]
+    assert engines.startswith(">="), engines
+    minimum = int(engines[2:].split(".")[0])
+    tag = re.search(r"node:(\d+)\.", DOCKERFILE.read_text(encoding="utf-8"))
+    assert tag is not None and int(tag.group(1)) >= minimum
+
+
+def test_the_web_stage_builds_from_the_lock_file_without_running_package_scripts(instructions):
+    runs = [args for name, args in instructions if name == "RUN"]
+    assert "npm ci --ignore-scripts" in runs
+    assert "npm run build" in runs
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    assert "npm install" not in text
+    copies = [args for name, args in instructions if name == "COPY"]
+    # The manifest and the lock file are copied before the sources, so the install
+    # layer is cached until a dependency changes.
+    assert "web/package.json web/package-lock.json ./" in copies
+    assert copies.index("web/package.json web/package-lock.json ./") < copies.index("web/ ./")
+
+
+def test_the_built_web_assets_land_in_app_web_dist(instructions):
+    copies = [args for name, args in instructions if name == "COPY" and "--from=web" in args]
+    assert copies == ["--from=web /web/dist /app/web-dist"]
+
+
+def test_the_web_build_output_and_node_modules_stay_out_of_the_build_context():
+    patterns = {
+        line.strip()
+        for line in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+    # `node_modules/` and `dist/` only match at the context root; a local `npm ci`
+    # or build inside web/ would be copied over the image's own install.
+    assert {"web/node_modules/", "web/dist/"} <= patterns
 
 
 def test_digest_matches_the_root_dockerfile():

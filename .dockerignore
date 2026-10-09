@@ -57,6 +57,10 @@ build/
 # Self-hosted image: nothing below is needed to build it, and some of it must
 # never reach a build context.
 node_modules/
+# The React UI builds inside the image from its lock file; a local install or build
+# in the context would otherwise be copied over it.
+web/node_modules/
+web/dist/
 verify/
 internal/
 articles/

@@ -3,14 +3,36 @@
 # Separate from the root Dockerfile, which is upstream's Azure image and must
 # stay as it is. Build with:  docker build -f Dockerfile.selfhost -t canvas-mcp .
 #
-# Two stages: the build stage installs the locked dependency set and the
-# project (non-editable) into /opt/venv; the runtime stage copies only that
-# venv, so no uv, pip cache or source tree ships. Both stages use the same
-# digest-pinned base, so the venv's interpreter symlink resolves.
+# Three stages: the web stage builds the React account UI (web/) with Node; the
+# build stage installs the locked dependency set and the project (non-editable)
+# into /opt/venv; the runtime stage copies only that venv and the built web
+# assets, so no uv, pip cache, Node, node_modules or source tree ships. The two
+# Python stages use the same digest-pinned base, so the venv's interpreter
+# symlink resolves.
+#
+# The built UI lands in /app/web-dist. Nothing serves it yet: the server still
+# renders the legacy /account pages, so runtime behaviour is unchanged.
 #
 # The image holds NO secrets. Everything sensitive (Entra client secret, JWT
 # signing key, session secret, Canvas token keyring) arrives at runtime from
 # the operator's .env file.
+
+# Node 24.19.0 on Alpine, pinned by exact tag AND digest (the digest is what is
+# pulled; the tag is for humans and for Dependabot). Matches web/package.json
+# "engines". Only the build output leaves this stage.
+FROM node:24.19.0-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43 AS web
+
+WORKDIR /web
+
+# Locked dependencies first (cached until the lock file changes). `npm ci` installs
+# exactly what package-lock.json says and fails if it disagrees with package.json;
+# --ignore-scripts keeps third-party install scripts from running at all.
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --ignore-scripts
+
+COPY web/ ./
+RUN npm run build
+
 
 FROM python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6 AS build
 
@@ -45,6 +67,10 @@ RUN groupadd --gid 10001 mcp \
     && chmod 0700 /data /data/fastmcp
 
 COPY --from=build /opt/venv /opt/venv
+
+# The React account UI (not served yet): static files, root-owned and read-only to
+# the service user. See web/README.md.
+COPY --from=web /web/dist /app/web-dist
 
 # Non-secret defaults only. Never add a Canvas token, client secret, signing
 # key or keyring here; a test (tests/test_selfhost_dockerfile.py) enforces it.
