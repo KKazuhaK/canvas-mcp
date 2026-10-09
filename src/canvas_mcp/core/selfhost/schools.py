@@ -143,6 +143,7 @@ def is_public_address(addr: str) -> bool:
         or ip.is_multicast
         or ip.is_reserved
         or ip.is_unspecified
+        or (isinstance(ip, ipaddress.IPv6Address) and ip.is_site_local)
         or str(ip) in _METADATA_ADDRS
     )
 
@@ -154,7 +155,12 @@ async def system_resolve(host: str) -> Sequence[str]:
     """Resolve ``host`` with the system resolver (in a thread, bounded in time)."""
     with anyio.fail_after(RESOLVE_TIMEOUT_SECONDS):
         infos = await anyio.to_thread.run_sync(
-            socket.getaddrinfo, host, 443, 0, socket.SOCK_STREAM
+            socket.getaddrinfo,
+            host,
+            443,
+            0,
+            socket.SOCK_STREAM,
+            abandon_on_cancel=True,
         )
     return sorted({str(info[4][0]) for info in infos})
 

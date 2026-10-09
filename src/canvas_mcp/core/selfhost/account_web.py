@@ -741,13 +741,31 @@ class _AccountApp:
             return self.message_page(
                 503, _bi("暂时无法读取令牌库。", "The token store is unavailable.")
             )
-        return self.account_page(session, info, selected=self._selection(request.query_params.get("school")))
+        selected = self._selection(
+            request.query_params.get("school"), session, request.query_params.get("sig")
+        )
+        return self.account_page(session, info, selected=selected)
 
-    def _selection(self, raw: str | None) -> str | None:
+    def _pick_signature(self, session: _Session, host: str) -> str:
+        """Proof that ``host`` came from this session's own school search results."""
+        message = b"school-pick|" + session.csrf.encode("utf-8") + b"|" + host.encode("ascii")
+        return _b64url(hmac.new(self.cfg.session_secret, message, hashlib.sha256).digest())
+
+    def _selection(
+        self,
+        raw: str | None,
+        session: _Session,
+        sig: str | None = None,
+        *,
+        posted: bool = False,
+    ) -> str | None:
         """A school host from ``?school=`` / a failed form that may be pre-selected.
 
-        Only a featured school, or (with search on) a syntactically valid and
-        not-local host name, is ever echoed back; anything else is ignored.
+        A featured school is always accepted. A directory host (search on, valid
+        and not local) is accepted only when it carries this session's signature
+        from the search results page, or when it comes back from our own CSRF
+        protected form (``posted``). An unsigned ``?school=`` link is ignored, so
+        a crafted link cannot change where the next pasted token is sent.
         """
         if not raw:
             return None
@@ -758,6 +776,12 @@ class _AccountApp:
             return None
         host = parse_hostname(candidate)
         if host is None or is_blocked_hostname(host):
+            return None
+        if posted:
+            return host
+        if not sig or not hmac.compare_digest(
+            sig.encode("utf-8"), self._pick_signature(session, host).encode("utf-8")
+        ):
             return None
         return host
 
@@ -788,7 +812,7 @@ class _AccountApp:
             choices.append((school.host, school.name, ""))
         listed = {host for host, _name, _note in choices}
         if selected is not None and selected not in listed:
-            note = _bi("（来自学校目录，保存时验证）", "(from the school directory, verified when you save)")
+            note = _bi("（来自你的学校搜索，保存时验证）", "(from your school search, verified when you save)")
             choices.append((selected, selected, note))
             listed.add(selected)
         enrolled = info.canvas_host if info is not None else None
@@ -988,7 +1012,7 @@ class _AccountApp:
         if results is not None:
             if results:
                 items = "".join(
-                    f'<li><a href="{_e(ACCOUNT_PATH + "?" + urllib.parse.urlencode({"school": domain}))}">'
+                    f'<li><a href="{_e(ACCOUNT_PATH + "?" + urllib.parse.urlencode({"school": domain, "sig": self._pick_signature(session, domain)}))}">'
                     f'{_e(name)}</a> <span class="muted">{_e(domain)}</span></li>'
                     for domain, name in results
                 )
@@ -1429,7 +1453,7 @@ class _AccountApp:
             )
         raw_school = form.get("school", "")
         chosen = await self._choose_school(raw_school)
-        selected = self._selection(raw_school)
+        selected = self._selection(raw_school, session, posted=True)
         if not isinstance(chosen, School):
             status, message = chosen
             return await self._token_error(session, status, message, selected=selected)

@@ -401,3 +401,19 @@ def test_the_setup_script_has_the_school_search_flag_and_the_readme_names_it(rea
     script = (SELFHOST / "setup-env.sh").read_text(encoding="utf-8")
     assert "--school-search" in script and "--school-search" in readme
     assert "CANVAS_SCHOOL_SEARCH=true" in script and "CANVAS_FEATURED_SCHOOLS=" in script
+
+
+def test_the_dns_recheck_limit_is_described_accurately() -> None:
+    text = (SELFHOST / "README.md").read_text(encoding="utf-8")
+    assert "does not re-resolve the school on every request" not in text
+    assert "Addresses are checked only when a user enrolls" in text
+
+
+def test_the_root_readme_does_not_call_the_selfhost_guide_chinese() -> None:
+    text = (SELFHOST.parents[1] / "README.md").read_text(encoding="utf-8")
+    assert "written in Chinese" not in text
+
+
+def test_the_canvas_api_url_comment_does_not_contradict_itself() -> None:
+    text = (SELFHOST / "env.example").read_text(encoding="utf-8")
+    assert "All users can reach only this one Canvas" not in text

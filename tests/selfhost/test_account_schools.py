@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import html
 import pathlib
 import re
 import sqlite3
+import urllib.parse
 from collections.abc import Sequence
 from typing import Any
 
@@ -479,14 +481,49 @@ class TestSearchedSchools:
 # -- ?school= preselection ---------------------------------------------------------------
 
 
+def picked_link_params(r: Rig, host: str = FOUND) -> dict[str, str]:
+    """The query of the link a search result offers for ``host`` in this session."""
+    response = search(r, "found")
+    match = re.search(r'href="(/account\?[^"]*)"', response.text)
+    assert match, response.text
+    href = html.unescape(match.group(1))
+    return dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(href).query))
+
+
 class TestPreselection:
-    def test_a_directory_host_gets_an_extra_checked_radio(self, tmp_path: pathlib.Path) -> None:
-        r = rig(tmp_path, search=True)
+    def test_a_search_result_link_gets_an_extra_checked_radio(self, tmp_path: pathlib.Path) -> None:
+        r = rig(tmp_path, search=True, entries=[DirectoryEntry("Found U", FOUND)])
         sign_in(r.h)
-        text = r.h.client.get(ACCOUNT_PATH, params={"school": FOUND}).text
+        params = picked_link_params(r)
+        assert params["school"] == FOUND and params["sig"]
+        text = r.h.client.get(ACCOUNT_PATH, params=params).text
         assert re.search(rf'value="{FOUND}" checked', text)
         assert not re.search(rf'value="{DEFAULT_HOST}" checked', text)
         assert "verified when you save" in text
+
+    def test_an_unsigned_directory_host_is_ignored(self, tmp_path: pathlib.Path) -> None:
+        # A crafted link must not change where the next pasted token is sent.
+        r = rig(tmp_path, search=True)
+        sign_in(r.h)
+        text = r.h.client.get(ACCOUNT_PATH, params={"school": FOUND}).text
+        assert FOUND not in text and text.count('type="radio"') == 3
+        assert re.search(rf'value="{DEFAULT_HOST}" checked', text)
+        assert '<details class="card" open>' not in text
+
+    def test_a_forged_or_foreign_signature_is_ignored(self, tmp_path: pathlib.Path) -> None:
+        r = rig(tmp_path, search=True, entries=[DirectoryEntry("Found U", FOUND)])
+        sign_in(r.h)
+        params = picked_link_params(r)
+        forged = {"school": "canvas.other.edu", "sig": params["sig"]}
+        text = r.h.client.get(ACCOUNT_PATH, params=forged).text
+        assert "canvas.other.edu" not in text and text.count('type="radio"') == 3
+        text = r.h.client.get(ACCOUNT_PATH, params={"school": FOUND, "sig": "AAAA"}).text
+        assert FOUND not in text
+        # The same signature from another sign-in (another CSRF secret) is rejected.
+        r.h.client.cookies.clear()
+        sign_in(r.h, oid=OID_2)
+        text = r.h.client.get(ACCOUNT_PATH, params=params).text
+        assert FOUND not in text and text.count('type="radio"') == 3
 
     def test_a_featured_host_is_preselected(self, tmp_path: pathlib.Path) -> None:
         r = rig(tmp_path, search=True)
@@ -519,7 +556,7 @@ class TestPreselection:
         sign_in(r.h)
         enroll(r, HOST_A)
         closed = r.h.client.get(ACCOUNT_PATH).text
-        opened = r.h.client.get(ACCOUNT_PATH, params={"school": FOUND}).text
+        opened = r.h.client.get(ACCOUNT_PATH, params={"school": HOST_B}).text
         assert '<details class="card">' in closed and '<details class="card" open>' not in closed
         assert '<details class="card" open>' in opened
 
@@ -569,7 +606,9 @@ class TestSchoolsPage:
         response = search(r, "found")
         assert response.status_code == 200
         assert r.directory.searches == ["found"]
-        assert f'href="/account?school={FOUND}"' in response.text
+        params = picked_link_params(r)
+        assert params["school"] == FOUND and params["sig"]
+        assert f'href="/account?school={FOUND}&amp;sig=' in response.text
         assert "Found University" in response.text and "canvas.other.edu" in response.text
 
     def test_results_and_query_are_escaped(self, tmp_path: pathlib.Path) -> None:

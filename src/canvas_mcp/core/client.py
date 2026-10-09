@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import Any, Final, Literal, cast
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 
@@ -675,6 +675,38 @@ async def make_canvas_request(
             await client.aclose()
 
 
+async def _upload_destination_refusal(upload_url: str) -> str | None:
+    """Why ``upload_url`` may not receive an upload, or None when it may.
+
+    Only applies while an HTTP request is active, where the URL was chosen by a
+    Canvas that may belong to any school. The caller's own Canvas origin is
+    accepted as is. Anything else must be an https URL on a plain public DNS
+    name (no IP literal, user information, or local/internal name) whose
+    addresses are all public, so a hostile school cannot aim the upload at
+    cloud metadata, loopback or internal services.
+    """
+    if not is_http_request_active():
+        return None
+    from .course_files import is_canvas_origin
+    from .selfhost import schools
+
+    if is_canvas_origin(upload_url):
+        return None
+    try:
+        parts = urlsplit(upload_url)
+        hostname = parts.hostname
+    except ValueError:
+        return "the upload URL is not valid"
+    if parts.scheme != "https" or parts.username is not None or parts.password is not None:
+        return "the upload URL must be an https URL without credentials"
+    host = schools.parse_hostname(hostname) if hostname else None
+    if host is None or schools.is_blocked_hostname(host):
+        return "the upload host is not a public DNS name"
+    if await schools.check_public_host(host, schools.system_resolve) != "ok":
+        return "the upload host does not resolve to a public address"
+    return None
+
+
 async def upload_file_to_storage(
     upload_url: str,
     upload_params: dict[str, Any],
@@ -705,6 +737,10 @@ async def upload_file_to_storage(
     from .config import get_config
 
     config = get_config()
+
+    refusal = await _upload_destination_refusal(upload_url)
+    if refusal is not None:
+        return {"error": f"Upload refused: {refusal}. Nothing was sent."}
 
     # Create a separate client for external uploads (no auth header needed)
     async with httpx.AsyncClient(timeout=config.api_timeout) as client:

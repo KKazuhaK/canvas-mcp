@@ -146,6 +146,8 @@ def test_is_blocked_hostname(host: str, blocked: bool) -> None:
         "fe80::1",
         "fe80::1%eth0",
         "fc00::1",
+        "fec0::1",
+        "fec0:0:0:ffff::1",
         "fd12:3456::1",
         "fd00:ec2::254",
         "ff02::1",
@@ -218,18 +220,22 @@ async def test_system_resolve_uses_getaddrinfo(monkeypatch: pytest.MonkeyPatch) 
 
 
 async def test_system_resolve_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    import time
+
     from canvas_mcp.core.selfhost import schools
 
     monkeypatch.setattr(schools, "RESOLVE_TIMEOUT_SECONDS", 0.05)
 
     def slow(*_a: Any) -> list[Any]:
-        import time
-
-        time.sleep(0.3)
-        return []
+        # A late answer with a public address: only a real timeout makes the
+        # host unresolvable, so this fails if the wait is not bounded.
+        time.sleep(0.6)
+        return [(2, 1, 6, "", ("8.8.8.8", 443))]
 
     monkeypatch.setattr(schools.socket, "getaddrinfo", slow)
+    started = time.monotonic()
     assert await check_public_host("x.edu", schools.system_resolve) == "unresolvable"
+    assert time.monotonic() - started < 0.4
 
 
 # -- SchoolDirectory ------------------------------------------------------------------

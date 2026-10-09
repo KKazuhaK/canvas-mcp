@@ -21,10 +21,10 @@ REPO = Path(__file__).resolve().parents[1]
 
 # CJK ideographs and extensions A, CJK symbols and punctuation, full-width forms.
 # Written as escapes so this file itself contains no CJK characters.
-CJK = re.compile("[㐀-鿿　-〿＀-￯]")
+CJK = re.compile(r"[\u3400-\u9fff\u3000-\u303f\uff00-\uffef]")
 
 # The one place an English locale file may name Chinese: the language's own name.
-ZH_ENDONYM = "中文"
+ZH_ENDONYM = "\u4e2d\u6587"
 
 # (1) The server-rendered account pages carry both languages in one module.
 ACCOUNT_WEB = "src/canvas_mcp/core/selfhost/account_web.py"
@@ -194,7 +194,7 @@ def test_account_web_keeps_chinese_only_in_translation_spots():
 
 
 def test_the_checker_flags_chinese_in_account_web_comments_code_and_plain_strings():
-    zh = "你好"
+    zh = "\u4f60\u597d"
     source = (
         f"# comment {zh}\n"
         f'_DENIAL_ZH = {{"a": "{zh}"}}\n'

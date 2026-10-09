@@ -27,7 +27,7 @@ npx skills add vishalsachdev/canvas-mcp
 
 See [Agent Skills](#-agent-skills) for the list. If your agent is Claude Code, the same recipes are also available as slash commands.
 
-**Self-hosting for a small trusted group:** [`deploy/selfhost/README.md`](deploy/selfhost/README.md) (Docker, Microsoft Entra sign-in, one Canvas token per user; written in Chinese).
+**Self-hosting for a small trusted group:** [`deploy/selfhost/README.md`](deploy/selfhost/README.md) (Docker, Microsoft Entra sign-in, one Canvas token per user).
 
 ## For AI Agents
 
