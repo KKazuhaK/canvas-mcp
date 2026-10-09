@@ -69,11 +69,18 @@ def current_cache_state() -> CourseCacheState:
 
 
 def reset_course_cache(principal_key: str | None = None) -> None:
-    """Forget one principal's course cache, or every principal's when ``None``."""
+    """Forget one principal's course caches, or every principal's when ``None``.
+
+    A principal has one cache per Canvas school (``<key>|<api url>``); all of
+    them are dropped.
+    """
     if principal_key is None:
         _STATES.clear()
-    else:
-        _STATES.pop(principal_key, None)
+        return
+    _STATES.pop(principal_key, None)
+    prefix = principal_key + "|"
+    for key in [k for k in _STATES if k.startswith(prefix)]:
+        del _STATES[key]
 
 
 def remember_course_code(course_id: str, course_code: str) -> None:

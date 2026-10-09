@@ -344,6 +344,41 @@ class TestIsCanvasOrigin:
         assert not cf.is_canvas_origin(f"{CANVAS}/api/v1/files/1")
 
 
+class TestNoServerDefaultDuringHttpRequests:
+    """In the self-hosted multi-school mode each caller has their own Canvas; an HTTP
+    request without request credentials has no Canvas origin and must not fall back
+    to the server's CANVAS_API_URL."""
+
+    def test_no_origin_without_credentials_in_an_http_request(self, transport_env, monkeypatch):
+        transport_env({})
+        monkeypatch.setattr(cf, "is_http_request_active", lambda: True)
+        assert cf._canvas_origin() is None
+        assert cf.is_canvas_origin(f"{CANVAS}/api/v1/files/1") is False
+
+    def test_stdio_keeps_the_configured_origin(self, transport_env, monkeypatch):
+        transport_env({})
+        monkeypatch.setattr(cf, "is_http_request_active", lambda: False)
+        assert cf.is_canvas_origin(f"{CANVAS}/api/v1/files/1") is True
+
+    @pytest.mark.asyncio
+    async def test_download_never_sends_a_token_to_the_server_default(self, transport_env, monkeypatch):
+        recorder = transport_env({DOWNLOAD_URL: body(b"x")})
+        monkeypatch.setattr(cf, "is_http_request_active", lambda: True)
+        await cf.download_file_bytes(DOWNLOAD_URL, 1024)
+        assert recorder.auth_by_host() == [("canvas.example.edu", None)]
+
+    def test_another_schools_origin_is_judged_by_its_own_credentials(self, transport_env, monkeypatch):
+        transport_env({})
+        monkeypatch.setattr(cf, "is_http_request_active", lambda: True)
+        monkeypatch.setattr(
+            cf,
+            "get_request_credentials",
+            lambda: RequestCredentials(api_token=TOKEN, api_url="https://canvas.school-b.edu/api/v1"),
+        )
+        assert cf.is_canvas_origin("https://canvas.school-b.edu/files/1/download")
+        assert not cf.is_canvas_origin(f"{CANVAS}/files/1/download")
+
+
 class TestErrorStatus:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("status", "denied"), [(401, True), (403, True), (404, False), (500, False)])

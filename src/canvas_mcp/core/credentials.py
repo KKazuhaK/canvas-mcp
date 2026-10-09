@@ -120,14 +120,20 @@ def missing_credentials_message() -> str:
 def current_principal_key() -> str:
     """An opaque key for whoever is making the current request.
 
-    The verified principal key when there is one; otherwise, for a legacy HTTP
-    request, a keyed hash of the caller's Canvas token (stable within this
-    process, never containing the token); otherwise ``"local"`` (stdio).
-    Every process-global cache that holds user-derived data is keyed by this.
+    With a verified principal (the self-hosted mode) this is the principal key
+    plus the Canvas API URL the request is routed to, so one user's cached
+    Canvas data can never be served after a switch to another school. For a
+    legacy HTTP request it is a keyed hash of the caller's Canvas token (stable
+    within this process, never containing the token); otherwise ``"local"``
+    (stdio). Every process-global cache that holds user-derived data is keyed
+    by this. Audit events use the identity-only ``principal.key`` instead.
     """
     principal = _request_principal.get()
     if principal is not None:
-        return principal.key
+        creds = _request_credentials.get()
+        if creds is None:
+            return principal.key
+        return f"{principal.key}|{creds.api_url.rstrip('/').lower()}"
     creds = _request_credentials.get()
     if creds is not None:
         digest = hmac.new(_PROCESS_KEY, creds.api_token.encode(), hashlib.sha256)

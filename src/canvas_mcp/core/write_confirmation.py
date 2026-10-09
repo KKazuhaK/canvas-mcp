@@ -33,7 +33,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .credentials import get_request_credentials, get_request_principal
+from .credentials import current_principal_key, get_request_credentials, get_request_principal
 from .write_outcome import WriteOutcome
 
 
@@ -116,14 +116,18 @@ class ConfirmationGuard:
         Hosted deployments pass a per-user Canvas token on every request; in
         stdio mode there is a single user and the constant is fine. With a
         verified identity (the self-hosted Entra mode) the handle is bound to
-        that identity instead of the token, so re-enrolling a Canvas token does
-        not void a pending preview and one user's preview cannot be redeemed
-        by another.
+        that identity and the Canvas school instead of the token, so
+        re-enrolling a Canvas token at the same school does not void a pending
+        preview, one user's preview cannot be redeemed by another, and a
+        preview made at one school cannot be redeemed after switching to
+        another.
         """
         principal = get_request_principal()
         if principal is not None:
             return hmac.new(
-                self._secret, ("principal|" + principal.key).encode(), hashlib.sha256
+                self._secret,
+                ("principal|" + current_principal_key()).encode(),
+                hashlib.sha256,
             ).hexdigest()
         credentials = get_request_credentials()
         if credentials is None:

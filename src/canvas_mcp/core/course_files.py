@@ -35,7 +35,7 @@ from .client import (
     make_canvas_request,
 )
 from .config import get_config
-from .credentials import get_request_credentials
+from .credentials import get_request_credentials, is_http_request_active
 from .validation import coerce_canvas_id
 
 #: Canvas statuses that mean "you may not list/see this through this route".
@@ -164,9 +164,19 @@ def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
 
 
 def _canvas_origin() -> tuple[str, str, int | None] | None:
-    """Origin of the Canvas instance the current caller's token belongs to."""
+    """Origin of the Canvas instance the current caller's token belongs to.
+
+    During an HTTP request there is no server-wide Canvas instance to fall back
+    to (each caller has their own school): without request credentials the
+    answer is None, so nothing is treated as the caller's Canvas origin.
+    """
     creds = get_request_credentials()
-    base = creds.api_url if creds else get_config().canvas_api_url
+    if creds is not None:
+        base = creds.api_url
+    elif is_http_request_active():
+        return None
+    else:
+        base = get_config().canvas_api_url
     try:
         return _origin(httpx.URL(base))
     except (httpx.InvalidURL, TypeError):

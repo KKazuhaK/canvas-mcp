@@ -51,6 +51,34 @@ class TestPrincipalKey:
         principal = make_principal(OID_A)
         set_request_principal(principal)
         _use_token("some-canvas-token-1234567890")
+        key = current_principal_key()
+        assert key.startswith(principal.key)
+        assert not key.startswith("token:")
+
+    def test_the_key_names_the_school_and_never_the_token(self):
+        principal = make_principal(OID_A)
+        set_request_principal(principal)
+        _use_token("some-canvas-token-1234567890")
+        assert current_principal_key() == principal.key + "|https://canvas.example.test/api/v1"
+        assert "some-canvas-token" not in current_principal_key()
+
+    def test_the_same_principal_at_two_schools_has_two_keys(self):
+        set_request_principal(make_principal(OID_A))
+        set_request_credentials(RequestCredentials(api_token="t" * 30, api_url="https://canvas.a.edu/api/v1"))
+        key_a = current_principal_key()
+        set_request_credentials(RequestCredentials(api_token="t" * 30, api_url="https://canvas.b.edu/api/v1"))
+        assert current_principal_key() != key_a
+
+    def test_the_url_is_normalised(self):
+        set_request_principal(make_principal(OID_A))
+        set_request_credentials(RequestCredentials(api_token="t" * 30, api_url="https://Canvas.A.edu/api/v1/"))
+        upper = current_principal_key()
+        set_request_credentials(RequestCredentials(api_token="t" * 30, api_url="https://canvas.a.edu/api/v1"))
+        assert current_principal_key() == upper
+
+    def test_without_credentials_the_key_is_the_bare_principal_key(self):
+        principal = make_principal(OID_A)
+        set_request_principal(principal)
         assert current_principal_key() == principal.key
 
     def test_legacy_token_key_is_stable_distinct_and_opaque(self):

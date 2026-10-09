@@ -7,6 +7,10 @@ Usage::
     python -m canvas_mcp.core.selfhost.token_admin revoke TENANT_ID OBJECT_ID
     python -m canvas_mcp.core.selfhost.token_admin rotate
 
+``list`` prints one tab-separated line per user: tenant id, object id, Canvas
+name, created, last used and the Canvas host (``-`` for a legacy row, which
+belongs to the default school ``CANVAS_API_URL``).
+
 Reads ``CANVAS_TOKEN_KEYS`` and ``SELFHOST_DATA_DIR`` (default ``/data``) from
 the environment. Never prints a token, a key or any other secret.
 
@@ -63,11 +67,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check", help="open the store, print the row count and key ids")
-    sub.add_parser(
-        "list",
-        help="list enrollments (tab-separated: tenant, object, name, created, "
-        "last used, Canvas host; no tokens)",
-    )
+    sub.add_parser("list", help="list enrollments with their Canvas host (tab-separated, no tokens)")
     revoke = sub.add_parser("revoke", help="delete one user's enrollment")
     revoke.add_argument("tenant_id")
     revoke.add_argument("object_id")

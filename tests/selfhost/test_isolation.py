@@ -38,6 +38,11 @@ async def as_user(oid: str, fn: Callable[[], Awaitable[Any]]) -> Any:
     return await fn()
 
 
+def school_key(oid: str, api_url: str = CANVAS_URL) -> str:
+    """The cache key of a principal at a school (the principal key plus the API URL)."""
+    return f"{make_principal(oid).key}|{api_url.rstrip('/').lower()}"
+
+
 def as_user_sync(oid: str) -> None:
     set_request_principal(make_principal(oid))
     set_request_credentials(RequestCredentials(api_token=f"canvas-token-of-{oid}", api_url=CANVAS_URL))
@@ -207,8 +212,8 @@ class TestCourseCache:
         as_user_sync(oids[3])
         cache.current_cache_state()
         assert len(cache._STATES) == 3
-        assert make_principal(oids[1]).key not in cache._STATES  # least recently used went
-        assert make_principal(oids[0]).key in cache._STATES
+        assert school_key(oids[1]) not in cache._STATES  # least recently used went
+        assert school_key(oids[0]) in cache._STATES
         for oid in oids[4:]:
             as_user_sync(oid)
             cache.current_cache_state()
@@ -244,7 +249,7 @@ class TestPolicyCache:
         assert (again_a, again_b) == (policy_a, policy_b)
         assert len(seen_tokens) == 2
         assert set(course_policy._policy_cache) == {
-            (make_principal(OID_A).key, "555"), (make_principal(OID_B).key, "555"),
+            (school_key(OID_A), "555"), (school_key(OID_B), "555"),
         }
 
 
@@ -300,14 +305,14 @@ class TestAnonymization:
             as_user_sync(oid)
             anonymization.generate_anonymous_id(1)
             assert len(anonymization._anonymization_cache) <= 3
-        assert list(anonymization._anonymization_cache) == [make_principal(o).key for o in oids[2:]]
+        assert list(anonymization._anonymization_cache) == [school_key(o) for o in oids[2:]]
 
     def test_entry_bound_per_principal_drops_the_oldest(self, monkeypatch):
         monkeypatch.setattr(anonymization, "MAX_ANONYMIZATION_ENTRIES", 5)
         as_user_sync(OID_A)
         for real_id in range(8):
             anonymization.generate_anonymous_id(real_id)
-        cache_a = anonymization._anonymization_cache[make_principal(OID_A).key]
+        cache_a = anonymization._anonymization_cache[school_key(OID_A)]
         assert len(cache_a) == 5
         assert ("Student", "0") not in cache_a and ("Student", "7") in cache_a
         assert anonymization.get_anonymization_stats()["total_anonymized_ids"] == 5
@@ -408,3 +413,140 @@ class TestUnservableTopics:
         assert discussions._is_known_unservable("/courses/1", 5)
         as_user_sync(OID_B)
         assert not discussions._is_known_unservable("/courses/1", 5)
+
+
+SCHOOL_X = "https://canvas.school-x.edu/api/v1"
+SCHOOL_Y = "https://canvas.school-y.edu/api/v1"
+
+
+def at_school(oid: str, api_url: str, token: str = "one-and-the-same-token-1234567890") -> None:
+    """The same principal (same Canvas token string even) routed to a school."""
+    set_request_principal(make_principal(oid))
+    set_request_credentials(RequestCredentials(api_token=token, api_url=api_url))
+
+
+class TestSchoolChange:
+    """One principal who moves from school X to school Y must see nothing of X."""
+
+    def test_keys_differ_per_school(self):
+        at_school(OID_A, SCHOOL_X)
+        key_x = current_principal_key()
+        at_school(OID_A, SCHOOL_Y)
+        assert current_principal_key() != key_x
+
+    async def test_course_cache_is_not_served_across_schools(self, monkeypatch):
+        courses = {
+            SCHOOL_X: [{"id": 101, "course_code": "ICS 33", "name": "At school X"}],
+            SCHOOL_Y: [{"id": 909, "course_code": "BIO 1", "name": "At school Y"}],
+        }
+        reads: list[str] = []
+
+        async def paginate(endpoint: str, params: dict[str, Any] | None = None) -> Any:
+            creds = get_request_credentials()
+            assert creds is not None
+            reads.append(creds.api_url)
+            return [dict(c) for c in courses[creds.api_url]]
+
+        async def request(method: str, endpoint: str, **kwargs: Any) -> Any:
+            return {"error": "HTTP error: 404"}
+
+        monkeypatch.setattr(cache, "fetch_all_paginated_results", paginate)
+        monkeypatch.setattr(cache, "make_canvas_request", request)
+
+        at_school(OID_A, SCHOOL_X)
+        assert (await cache.resolve_numeric_course_id("ICS 33"))[0] == "101"
+        cache.remember_course_code("555", "OLD 7")
+
+        at_school(OID_A, SCHOOL_Y)
+        resolved, message = await cache.resolve_numeric_course_id("ICS 33")
+        assert resolved is None and message is not None  # school X's course is gone
+        assert (await cache.resolve_numeric_course_id("BIO 1"))[0] == "909"
+        assert (await cache.resolve_numeric_course_id("OLD 7"))[0] is None  # the code map too
+        assert reads == [SCHOOL_X, SCHOOL_Y]
+
+        at_school(OID_A, SCHOOL_X)  # and back: X's own cache is still X's
+        assert (await cache.resolve_numeric_course_id("ICS 33"))[0] == "101"
+        assert reads == [SCHOOL_X, SCHOOL_Y]
+
+    async def test_policy_cache_is_not_served_across_schools(self, monkeypatch):
+        urls: list[str] = []
+
+        async def fake_request(method: str, endpoint: str, **kwargs: Any) -> dict[str, Any]:
+            creds = get_request_credentials()
+            assert creds is not None
+            urls.append(creds.api_url)
+            note = "note: Only school X" if creds.api_url == SCHOOL_X else "note: Only school Y"
+            return {"syllabus_body": f"agent_writes: allow\n{note}"}
+
+        monkeypatch.setattr(course_policy, "make_canvas_request", fake_request)
+
+        at_school(OID_A, SCHOOL_X)
+        assert (await course_policy.get_course_policy(555)).note == "Only school X"
+        at_school(OID_A, SCHOOL_Y)
+        assert (await course_policy.get_course_policy(555)).note == "Only school Y"
+        assert urls == [SCHOOL_X, SCHOOL_Y]
+
+    def test_pseudonym_map_and_stats_do_not_cross(self):
+        at_school(OID_A, SCHOOL_X)
+        anonymization.generate_anonymous_id(1)
+        anonymization.generate_anonymous_id(2)
+        assert anonymization.get_anonymization_stats()["total_anonymized_ids"] == 2
+        at_school(OID_A, SCHOOL_Y)
+        assert anonymization.get_anonymization_stats()["total_anonymized_ids"] == 0
+        anonymization.generate_anonymous_id(3)
+        anonymization.clear_anonymization_cache()  # clearing at Y leaves X alone
+        at_school(OID_A, SCHOOL_X)
+        assert anonymization.get_anonymization_stats()["total_anonymized_ids"] == 2
+
+    def test_unservable_topic_hint_does_not_cross(self):
+        at_school(OID_A, SCHOOL_X)
+        discussions._unservable_topics[(current_principal_key(), "/courses/1", "5")] = float("inf")
+        assert discussions._is_known_unservable("/courses/1", 5)
+        at_school(OID_A, SCHOOL_Y)
+        assert not discussions._is_known_unservable("/courses/1", 5)
+
+    def test_a_preview_made_at_one_school_cannot_be_redeemed_at_another(self):
+        guard = ConfirmationGuard()
+        at_school(OID_A, SCHOOL_X)
+        fp_x = guard.fingerprint("delete_page", "course-1", "page-9")
+        token = guard.issue(fp_x)
+        at_school(OID_A, SCHOOL_Y)
+        fp_y = guard.fingerprint("delete_page", "course-1", "page-9")
+        assert fp_y != fp_x
+        refusal = guard.check(token, fp_y)
+        assert refusal is not None and "does not match" in refusal
+
+    def test_a_preview_survives_re_enrolling_at_the_same_school(self):
+        guard = ConfirmationGuard()
+        at_school(OID_A, SCHOOL_X, token="the-first-canvas-token-1234567890")
+        fp = guard.fingerprint("delete_page", "course-1", "page-9")
+        token = guard.issue(fp)
+        at_school(OID_A, SCHOOL_X, token="a-different-canvas-token-1234567")
+        assert guard.fingerprint("delete_page", "course-1", "page-9") == fp
+        assert guard.check(token, fp) is None
+
+    def test_reset_for_a_principal_clears_every_school(self):
+        at_school(OID_A, SCHOOL_X)
+        state_x = cache.current_cache_state()
+        at_school(OID_A, SCHOOL_Y)
+        state_y = cache.current_cache_state()
+        as_user_sync(OID_B)
+        state_b = cache.current_cache_state()
+        cache.reset_course_cache(make_principal(OID_A).key)
+        assert cache.current_cache_state() is state_b
+        at_school(OID_A, SCHOOL_X)
+        assert cache.current_cache_state() is not state_x
+        at_school(OID_A, SCHOOL_Y)
+        assert cache.current_cache_state() is not state_y
+
+    def test_reset_does_not_touch_a_principal_with_a_longer_key(self):
+        """Prefix matching uses the '|' separator, so it cannot hit another principal."""
+        at_school(OID_A, SCHOOL_X)
+        state_a = cache.current_cache_state()
+        other = make_principal(OID_A).key + "extra|https://x/api/v1"
+        cache._STATES[other] = cache.CourseCacheState()
+        cache.reset_course_cache(make_principal(OID_B).key)
+        assert cache.current_cache_state() is state_a
+        assert other in cache._STATES
+        cache.reset_course_cache(make_principal(OID_A).key)
+        assert other in cache._STATES
