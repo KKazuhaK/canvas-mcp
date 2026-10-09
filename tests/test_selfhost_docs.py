@@ -586,3 +586,41 @@ def test_readme_records_what_the_oauth_proxy_does_with_replayed_codes_and_refres
     section = section[: section.index("\n## ", 5)]
     for text in ("invalid_grant", "code_challenge", "S256", "family", "not** revoked", "Revoking a user"):
         assert text in section, f"the OAuth notes no longer mention {text!r}"
+
+
+def test_the_docs_do_not_claim_request_local_equals_upstream_for_every_kind_of_state(env_text, readme):
+    # Upstream HTTP modes cache policy decisions, pseudonyms and discussion hints
+    # process-wide by token hash; only the course list and aliases are request-local
+    # there. request_local is stricter, and the text may be quoted upstream.
+    root = Path(__file__).resolve().parents[1]
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    settings_py = (root / "src" / "canvas_mcp" / "core" / "selfhost" / "settings.py").read_text(encoding="utf-8")
+    assert "This is how the upstream HTTP modes work." not in env_text
+    assert "already work" not in readme[readme.index("`request_local` (default)") :][:1500]
+    assert "like the upstream HTTP modes; tools" not in changelog
+    assert "the default, like the upstream HTTP modes" not in settings_py
+    for text in (env_text, readme, settings_py):
+        flat = " ".join(text.replace("#", " ").split())
+        assert "stricter than" in flat and ("token hash" in flat or "hash of the token" in flat)
+    assert "stricter than upstream" in changelog
+
+
+def test_the_credential_lifecycle_names_the_rows_that_follow_the_course_state_setting(readme):
+    heading = "What is bound to the generation"
+    sentence = readme[readme.index(heading) :].split("\n", 1)[0]
+    assert "first three rows" in sentence and "first four rows" not in sentence
+    table = readme[readme.index(heading) :].split("\n\n", 2)[1].splitlines()
+    rows = [line for line in table if line.startswith("| ") and not line.startswith(("| State", "|---"))]
+    # Rows 1-3 are course state; row 4 is the pending write confirmations, which
+    # stay process-wide in every mode.
+    assert rows[3].startswith("| Pending write confirmations")
+
+
+def test_the_ssrf_proxy_refusal_lists_exactly_the_words_the_code_accepts_as_false(readme):
+    from canvas_mcp.core.selfhost.app import _FALSE_WORDS
+
+    paragraph = readme[readme.index("**Settings that must stay unset.**") :].split("\n", 1)[0]
+    listed = re.search(r"explicit false \(([^)]*)\)", paragraph)
+    assert listed, "README no longer lists the accepted false values"
+    words = set(re.findall(r"`([^`]*)`", listed.group(1)))
+    assert words == _FALSE_WORDS - {""}

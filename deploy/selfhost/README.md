@@ -222,7 +222,7 @@ Recommended student configuration (already in `env.example`): `CANVAS_ROLE=stude
 
 At startup the service validates all settings; if any is missing or invalid it lists the problems and exits instead of running with a broken configuration.
 
-**Settings that must stay unset.** The service also refuses to start when any of these is set (the template lists them in comments only): `CANVAS_API_TOKEN`, `MCP_ACCESS_KEYS`, `ENTRA_AUTH_ENABLED`, `MCP_ALLOW_UNAUTHENTICATED`, `ACCESS_REQUEST_ENABLED`, `EXECUTE_TYPESCRIPT_ENABLED=true` (and `execute_typescript` in `ALLOWED_WRITE_TOOLS`), and `FASTMCP_SSRF_TRUST_PROXY`. The last one is a FastMCP switch that makes it trust an outbound HTTP proxy instead of resolving host names itself: FastMCP then stops refusing private, loopback and link-local addresses when it fetches OAuth client metadata (a client can send any `client_id` URL at `/authorize` without signing in) and signing keys, and leaves that protection to a proxy this server cannot check. Any value except an explicit false (`false`, `0`, `no`, `off`) or an empty value stops the start; so does the setting being on inside FastMCP by any other route. If your host forces all egress through a proxy, enforce the address rules there and keep this variable unset.
+**Settings that must stay unset.** The service also refuses to start when any of these is set (the template lists them in comments only): `CANVAS_API_TOKEN`, `MCP_ACCESS_KEYS`, `ENTRA_AUTH_ENABLED`, `MCP_ALLOW_UNAUTHENTICATED`, `ACCESS_REQUEST_ENABLED`, `EXECUTE_TYPESCRIPT_ENABLED=true` (and `execute_typescript` in `ALLOWED_WRITE_TOOLS`), and `FASTMCP_SSRF_TRUST_PROXY`. The last one is a FastMCP switch that makes it trust an outbound HTTP proxy instead of resolving host names itself: FastMCP then stops refusing private, loopback and link-local addresses when it fetches OAuth client metadata (a client can send any `client_id` URL at `/authorize` without signing in) and signing keys, and leaves that protection to a proxy this server cannot check. Any value except an explicit false (`false`, `f`, `0`, `no`, `n`, `off`) or an empty value stops the start; so does the setting being on inside FastMCP by any other route. If your host forces all egress through a proxy, enforce the address rules there and keep this variable unset.
 
 ## Step 4: Reverse proxy (nginx / Caddy)
 
@@ -687,7 +687,7 @@ Each user has a **credential generation**, a number that only goes up. The token
 
 and when the user is **disabled** or **enabled**. Deleting a token does not reset the number, so a token enrolled later is never mistaken for an earlier one.
 
-What is bound to the generation (the key of each of these contains it, so a value learned under one generation is never read under another). The first four rows are kept between requests only with `SELFHOST_COURSE_STATE=per_principal`; by default (`request_local`) nothing about the courses outlives the request that learned it (see [Course state](#course-state-request-local-or-per-user)):
+What is bound to the generation (the key of each of these contains it, so a value learned under one generation is never read under another). The first three rows are kept between requests only with `SELFHOST_COURSE_STATE=per_principal`; by default (`request_local`) nothing about the courses outlives the request that learned it (see [Course state](#course-state-request-local-or-per-user)):
 
 | State | What happens when the generation changes |
 |---|---|
@@ -703,7 +703,7 @@ How the server notices: every MCP request reads the user's token **and** its gen
 What this does and does not promise:
 
 - A Canvas call that was **already dispatched** is never cancelled; it may complete at Canvas with the token it was sent with, and a request that is mid-way keeps the token it started with until its next tool call. State that such a request learns is kept apart from the new generation or thrown away.
-- The upstream HTTP modes (`X-Canvas-Token`, access keys, Easy Auth) are unchanged: each request resolves everything under its own credential and keeps nothing between requests, so there is nothing to invalidate.
+- The upstream HTTP modes (`X-Canvas-Token`, access keys, Easy Auth) are unchanged: each request resolves its own credential, and there is no stored token or credential generation to invalidate (upstream may keep some derived caches process-wide, keyed by a hash of the token).
 - The generation is not a secret and appears in no token. It is only part of in-memory cache keys and of the token database.
 - Per-user write-tool switches are the user's own choice and are keyed by user, not by credential: replacing a token keeps them. If you want a replacement to start from "everything off", the user clears them with **Disable all** at `/account`.
 
@@ -713,7 +713,7 @@ What this does and does not promise:
 
 | Value | Behaviour |
 |---|---|
-| `request_local` (default) | Nothing about a user's courses outlives the request. Each request reads the course list with the user's own token when a tool names a course by code or title, keeps course labels, course-policy decisions, anonymization pseudonyms and discussion hints only inside that request, and drops them when it ends. The in-memory course cache, the policy cache, the pseudonym maps and the discussion-hint map are never written to. This is how the upstream HTTP modes (`X-Canvas-Token`, access keys, Easy Auth) already work. |
+| `request_local` (default) | Nothing about a user's courses outlives the request. Each request reads the course list with the user's own token when a tool names a course by code or title, keeps course labels, course-policy decisions, anonymization pseudonyms and discussion hints only inside that request, and drops them when it ends. The in-memory course cache, the policy cache, the pseudonym maps and the discussion-hint map are never written to. For the course list and course-code aliases this matches the upstream HTTP modes (`X-Canvas-Token`, access keys, Easy Auth). For course-policy decisions, pseudonyms and discussion hints it is stricter than upstream, which caches those in process-wide maps keyed by a hash of the token. |
 | `per_principal` (explicit opt-in) | The previous behaviour. The same four kinds of data are kept in memory across requests, per user, school and credential generation, and are dropped when the user's token changes (see [Canvas credential lifecycle](#canvas-credential-lifecycle)). Fewer Canvas calls, more per-user data in the process, and a larger surface for a cross-user mistake. Choose it only after you have measured that the extra requests of the default matter. |
 
 Any other value stops the server from starting.

@@ -90,8 +90,9 @@ class SelfhostSettings:
     featured_schools: tuple[FeaturedSchool, ...] = ()
     school_search: bool = False
     # Whether course metadata, policy decisions, pseudonyms and discussion hints
-    # live only inside one request (the default, like the upstream HTTP modes) or
-    # are cached per principal across requests (explicit opt-in).
+    # live only inside one request (the default; stricter than the upstream HTTP
+    # modes, which cache policies, pseudonyms and hints process-wide by token hash)
+    # or are cached per principal across requests (explicit opt-in).
     course_state: Literal["request_local", "per_principal"] = "request_local"
 
     mcp_path: ClassVar[str] = "/mcp"
