@@ -858,6 +858,77 @@ class TestMcpAsTwoUsers:
         refused_sign_in = browser.account_sign_in(USER_A)
         assert refused_sign_in.status_code == 403 and "disabled by an administrator" in refused_sign_in.text
 
+    def test_an_administrative_disable_survives_a_process_restart(self, enrolled):
+        """A fresh process over the same database refuses the old session and the old MCP token.
+
+        The restarted process is built from nothing but the settings and the files on
+        disk: a new token store, new access and preference caches, a new FastMCP
+        server and a new ASGI app. Nothing in memory is carried over, so only the
+        persisted decision can be what refuses user A.
+        """
+        user_a_key = f"entra:{TENANT}:{USER_A.oid}"
+        browser, client, store = enrolled.browser, enrolled.client, enrolled.runtime.store
+
+        # User A holds an MCP bearer and a sealed /account session; so does B.
+        bearer_a = browser.bearer_for(USER_A)
+        bearer_b = browser.bearer_for(USER_B)
+        assert call_tool(client, bearer_a, "list_courses")["isError"] is False
+        assert browser.account_sign_in(USER_A).status_code == 303
+        a_session = client.cookies.get("__Host-cmcp_session")
+        assert browser.account_sign_in(USER_B).status_code == 303
+        b_session = client.cookies.get("__Host-cmcp_session")
+        assert a_session and b_session and a_session != b_session
+
+        # The owner disables A, keeping the stored token row.
+        assert browser.account_sign_in(OWNER).status_code == 303
+        disable = client.post("/account/admin/disable", data={
+            "csrf": browser.csrf("/account/admin"), "principal_key": user_a_key,
+        }, headers=ORIGIN, follow_redirects=False)
+        assert disable.status_code == 303
+        assert store.get_principal_status(user_a_key).disabled
+
+        # Restart: everything in memory is rebuilt over the same database and OAuth state.
+        restarted_runtime = prepare_selfhost(enrolled.runtime.settings)
+        assert restarted_runtime.store is not store
+        assert restarted_runtime.access is not enrolled.runtime.access
+        config: Any = SimpleNamespace(canvas_api_url=f"{CANVAS}/api/v1")
+        mcp = FastMCP("e2e-restarted", auth=build_entra_auth_provider(restarted_runtime.settings))
+        register_course_tools(mcp)
+        install_selfhost(mcp, restarted_runtime, config)
+        app = build_selfhost_asgi_app(mcp, restarted_runtime, config)
+        enrolled.canvas.seen.clear()
+
+        with TestClient(app, base_url=BASE) as restarted:
+            # The decision was read back from disk.
+            assert restarted_runtime.store.get_principal_status(user_a_key).disabled
+
+            # The old MCP token is refused on every kind of request.
+            for method, params in (
+                ("tools/call", {"name": "list_courses", "arguments": {}}),
+                ("tools/list", None),
+            ):
+                refused = rpc(restarted, bearer_a, method, params)
+                assert refused.status_code == 403, refused.text
+                assert "disabled by an administrator" in refused.json()["error"]
+
+            # The old /account session is dead: the page asks for a sign-in and the
+            # session cannot enroll, so the kept row is not touched either.
+            restarted.cookies.set("__Host-cmcp_session", a_session, domain="canvas.example.test", path="/")
+            assert "Sign in with Microsoft" in restarted.get("/account").text
+            replay = restarted.post("/account/token", data={
+                "csrf": "x", "canvas_token": USER_A.canvas_token,
+            }, headers=ORIGIN, follow_redirects=False)
+            assert replay.status_code == 303 and replay.headers["location"] == "/account"
+            assert enrolled.canvas.seen == []  # Canvas was never reached for A
+
+            # Control: the restarted app is healthy. B's old bearer and old session
+            # still work on it, so A is refused because of the disable.
+            assert call_tool(restarted, bearer_b, "list_courses")["isError"] is False
+            restarted.cookies.set("__Host-cmcp_session", b_session, domain="canvas.example.test", path="/")
+            assert "Sign in with Microsoft" not in restarted.get("/account").text
+
+        assert restarted_runtime.store.get_principal_status(user_a_key).disabled
+
     def test_a_user_deleting_their_own_token_may_enroll_again(self, enrolled):
         user_a_key = f"entra:{TENANT}:{USER_A.oid}"
         assert enrolled.browser.account_sign_in(USER_A).status_code == 303
