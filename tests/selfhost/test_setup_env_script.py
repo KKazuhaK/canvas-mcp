@@ -138,7 +138,7 @@ def test_read_only_file_turns_writes_on_by_uncommenting_not_regenerating(tmp_pat
     text = (tmp_path / ".env").read_text(encoding="utf-8")
     assert "# ALLOWED_WRITE_TOOLS=all" in text
     assert "# COURSE_AGENT_POLICY_DEFAULT=allow" in text
-    assert "不要重新运行 setup-env.sh" in text
+    assert "Do not rerun setup-env.sh" in text
     uncommented = text.replace("# ALLOWED_WRITE_TOOLS", "ALLOWED_WRITE_TOOLS").replace(
         "# STUDENT_WRITE_TOOLS", "STUDENT_WRITE_TOOLS"
     ).replace("# COURSE_AGENT_POLICY_DEFAULT", "COURSE_AGENT_POLICY_DEFAULT")
@@ -154,7 +154,7 @@ def test_refusing_to_overwrite_explains_the_key_loss(tmp_path):
     result = run_script(tmp_path, env=preset())
     assert result.returncode != 0
     assert "CANVAS_TOKEN_KEYS" in result.stderr
-    assert "直接编辑" in result.stderr
+    assert "just edit" in result.stderr
 
 
 def test_opt_in_flags_enable_every_student_write_tool_and_real_names(tmp_path):
@@ -258,7 +258,7 @@ def test_the_file_is_private(tmp_path):
 def test_invalid_input_is_refused_and_writes_nothing(tmp_path, overrides, secret):
     result = run_script(tmp_path, env=preset(**overrides), stdin=secret + "\n")
     assert result.returncode != 0
-    assert "错误" in result.stderr
+    assert "Error:" in result.stderr
     assert not (tmp_path / ".env").exists()
     if secret and len(secret) >= 16:
         assert secret not in result.stdout + result.stderr

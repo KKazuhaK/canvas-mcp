@@ -1,20 +1,21 @@
-# Caddy 反向代理示例：自动申请并续期 TLS 证书，Host 头默认原样转发。
+# Caddy reverse proxy example: TLS certificates are obtained and renewed automatically, and the Host header is forwarded unchanged by default.
 #
-# 限流：/register（动态客户端注册）和 /authorize 不需要登录，每次调用都会往数据卷
-# 写文件。服务自己有一个全进程的限流兜底，但分不清来源 IP，所以按 IP 的限流要放在
-# 代理这一层。标准版 Caddy 不带限流模块，两种办法选一个：
-#   1. 用 xcaddy 编译带 github.com/mholt/caddy-ratelimit 的 Caddy，然后启用下面
-#      注释掉的 rate_limit 块；
-#   2. 在 Cloudflare 里给 /register 和 /authorize 加速率限制规则（见 README）。
-# 启用第 1 种办法时，还要在 Caddyfile 最顶部加全局选项（指令顺序）：
+# Rate limiting: /register (dynamic client registration) and /authorize need no sign-in,
+# and every call writes a file to the data volume. The service has a process-wide limit
+# as a backstop, but it cannot tell source IPs apart, so the per-IP limit belongs in the
+# proxy layer. Standard Caddy has no rate-limit module; pick one of two options:
+#   1. Build Caddy with xcaddy including github.com/mholt/caddy-ratelimit, then enable
+#      the commented-out rate_limit block below;
+#   2. Add a rate-limiting rule for /register and /authorize in Cloudflare (see the README).
+# If you use option 1, also add a global option (directive order) at the very top of the Caddyfile:
 #   {
 #   	order rate_limit before basic_auth
 #   }
-# 若前面有 Cloudflare，{remote_host} 是 Cloudflare 的地址：用 trusted_proxies 配合
-# {client_ip} 还原真实 IP，或者直接用第 2 种办法。
+# If Cloudflare is in front, {remote_host} is a Cloudflare address: restore the real IP with
+# trusted_proxies together with {client_ip}, or simply use option 2.
 canvas.mcp.kazuhahub.com {
-	# 需要 caddy-ratelimit 模块；没有这个模块时 Caddy 会因为未知指令而拒绝加载，
-	# 所以默认保持注释。
+	# Requires the caddy-ratelimit module; without it Caddy refuses to load the file
+	# because of an unknown directive, so this stays commented out by default.
 	# @oauth_open path /register /authorize
 	# rate_limit @oauth_open {
 	# 	zone oauth_open {
@@ -25,7 +26,7 @@ canvas.mcp.kazuhahub.com {
 	# }
 
 	reverse_proxy 127.0.0.1:8819 {
-		# MCP 使用流式响应（SSE）：立即刷新，不缓冲。
+		# MCP uses streaming responses (SSE): flush immediately, do not buffer.
 		flush_interval -1
 		transport http {
 			read_timeout 300s

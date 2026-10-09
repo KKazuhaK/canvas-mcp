@@ -455,11 +455,17 @@ _DENIAL_ZH: dict[str, str] = {
     ),
 }
 
+# Chinese line shown for a refusal message that has no entry in _DENIAL_ZH.
+_DENIAL_ZH_FALLBACK = "此账号没有使用权限，请联系服务器所有者。"
+
+# The language switcher shows each language's own name (its endonym).
+_ZH_ENDONYM = "中文"
+
 
 def _denial_html(message: str) -> str:
     """The identity layer's refusal text; Chinese gets a translation or a generic line."""
     if _current_lang() == "zh":
-        return _e(_DENIAL_ZH.get(message, "此账号没有使用权限，请联系服务器所有者。"))
+        return _e(_DENIAL_ZH.get(message, _DENIAL_ZH_FALLBACK))
     return _e(message)
 
 
@@ -518,7 +524,7 @@ def _header(session: _Session | None = None) -> str:
     if ctx.lang == "zh":
         tools.append(f'<a href="{_e(ctx.path)}?lang=en" hreflang="en" lang="en">English</a>')
     else:
-        tools.append(f'<a href="{_e(ctx.path)}?lang=zh" hreflang="zh" lang="zh">中文</a>')
+        tools.append(f'<a href="{_e(ctx.path)}?lang=zh" hreflang="zh" lang="zh">{_ZH_ENDONYM}</a>')
     if session is not None:
         tools.append(
             f'<form method="post" action="{_LOGOUT_PATH}" class="inline">'

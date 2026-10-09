@@ -73,11 +73,11 @@ def test_env_example_sets_every_required_variable(env_text, name):
 
 
 @pytest.mark.parametrize("name", REQUIRED_VARS)
-def test_required_variables_are_marked_in_chinese(env_text, name):
+def test_required_variables_are_marked_required(env_text, name):
     lines = env_text.splitlines()
     index = next(i for i, line in enumerate(lines) if line.startswith(f"{name}="))
     block = "\n".join(lines[max(0, index - 8) : index])
-    assert "必填" in block, f"{name} is not marked 必填"
+    assert "Required." in block, f"{name} is not marked Required."
 
 
 def test_must_be_unset_variables_appear_only_in_comments(env_text):
@@ -124,8 +124,8 @@ def test_the_opt_in_values_are_shown_commented_out_next_to_the_warning(env_text)
     assert commented["ALLOWED_WRITE_TOOLS"] == "all"
     assert commented["COURSE_AGENT_POLICY_DEFAULT"] == "allow"
     assert tuple(commented["STUDENT_WRITE_TOOLS"].split(",")) == STUDENT_WRITE_TOOLS
-    block = env_text[env_text.index("提示词注入") : env_text.index("# ALLOWED_WRITE_TOOLS=all")]
-    assert "主动开启" in block
+    block = env_text[env_text.index("prompt injection") : env_text.index("# ALLOWED_WRITE_TOOLS=all")]
+    assert "opt-in" in block
 
 
 def test_the_template_ships_no_host_specific_live_values(env_text):
@@ -153,11 +153,11 @@ def test_an_unedited_template_is_refused_at_startup(env_text):
 
 
 def test_the_audit_log_is_documented_as_opt_in(env_text, readme):
-    block = env_text[env_text.index("审计日志默认是关闭的") :]
+    block = env_text[env_text.index("The audit log is off by default") :]
     assert "LOG_ACCESS_EVENTS=true" in block
-    assert "/account" in block and "不写审计日志" in block
-    assert "审计日志**默认是关闭的**" in readme
-    assert "不写审计日志" in readme
+    assert "/account" in block and "does not write an audit log entry" in block
+    assert "The audit log is **off by default**" in readme
+    assert "does not write an audit log entry" in readme
 
 
 def test_env_example_ships_no_secret_values(env_text):
@@ -295,7 +295,7 @@ def test_proxy_examples_rate_limit_the_unauthenticated_oauth_endpoints(readme):
     assert "limit_req_zone" in readme and "location = /register" in readme
     caddy = (SELFHOST / "Caddyfile.example").read_text(encoding="utf-8")
     assert "caddy-ratelimit" in caddy
-    assert "磁盘与滥用防护" in readme and "Cloudflare" in readme
+    assert "Disk and abuse protection" in readme and "Cloudflare" in readme
 
 
 def test_http2_directive_comes_with_the_nginx_version_note(readme):
@@ -318,12 +318,12 @@ def test_readme_never_tells_the_operator_to_just_restart_after_editing_env(readm
     assert "docker compose restart" in readme  # ...only to warn against it
     for line in readme.splitlines():
         if "docker compose restart" in line:
-            assert "不会重新读取" in line or "不要用" in line, line
-    secrets_table = readme[readme.index("### 其他密钥") : readme.index("## 备份与恢复")]
+            assert "does not re-read" in line or "do not use" in line, line
+    secrets_table = readme[readme.index("### Other secrets") : readme.index("## Backup and restore")]
     for name in ("ENTRA_CLIENT_SECRET", "ACCOUNT_SESSION_SECRET", "OAUTH_JWT_SIGNING_KEY"):
         row = next(line for line in secrets_table.splitlines() if f"`{name}`" in line)
         assert "docker compose up -d" in row, row
-    rotation = readme[readme.index("### Canvas token 密钥环") : readme.index("### 其他密钥")]
+    rotation = readme[readme.index("### Canvas token key ring") : readme.index("### Other secrets")]
     assert rotation.count("docker compose up -d") >= 2
 
 

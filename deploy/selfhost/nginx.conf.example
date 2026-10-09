@@ -1,14 +1,16 @@
-# nginx 反向代理示例：canvas.mcp.kazuhahub.com -> 127.0.0.1:8819
-# 把证书路径换成你自己的（certbot / acme.sh / Cloudflare Origin 证书都可以）。
-# 这个文件放在 conf.d/ 或 sites-enabled/ 里（会被 include 到 http 块中），
-# 所以最上面的 limit_req_zone 可以直接写在文件顶层。
+# nginx reverse proxy example: canvas.mcp.kazuhahub.com -> 127.0.0.1:8819
+# Replace the certificate paths with your own (certbot / acme.sh / a Cloudflare Origin certificate all work).
+# Put this file in conf.d/ or sites-enabled/ (it is included inside the http block),
+# so the limit_req_zone at the top can sit at the top level of the file.
 
-# 限流：/register（动态客户端注册）和 /authorize 不需要登录，任何人都能调用，
-# 每次调用都会往数据卷写文件。服务自己也有一个全进程的限流作为兜底，但它分不清
-# 来源 IP（uvicorn 不信任 X-Forwarded-*），所以按 IP 的限流要在这里做。
-# 如果前面还有 Cloudflare，$binary_remote_addr 是 Cloudflare 的地址：
-# 先用 ngx_http_realip_module（set_real_ip_from + real_ip_header CF-Connecting-IP）
-# 还原真实 IP，或者改在 Cloudflare 里用速率限制规则（见 README）。
+# Rate limiting: /register (dynamic client registration) and /authorize need no sign-in,
+# anyone can call them, and every call writes a file to the data volume. The service has
+# its own process-wide limit as a backstop, but it cannot tell source IPs apart (uvicorn
+# does not trust X-Forwarded-*), so the per-IP limit has to be done here.
+# If Cloudflare is in front, $binary_remote_addr is a Cloudflare address:
+# either restore the real IP first with ngx_http_realip_module
+# (set_real_ip_from + real_ip_header CF-Connecting-IP), or use a Cloudflare
+# rate-limiting rule instead (see the README).
 limit_req_zone $binary_remote_addr zone=canvas_oauth:10m rate=10r/m;
 limit_req_status 429;
 
@@ -17,7 +19,7 @@ server {
     listen [::]:80;
     server_name canvas.mcp.kazuhahub.com;
 
-    # ACME 验证若走 HTTP-01，请在这里加 location /.well-known/acme-challenge/
+    # If ACME validation uses HTTP-01, add a location /.well-known/acme-challenge/ here
     location / {
         return 301 https://$host$request_uri;
     }
@@ -26,10 +28,11 @@ server {
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
-    # nginx 1.25.1 及以上才有独立的 `http2 on;` 指令。较老的 nginx（例如
-    # Ubuntu 22.04 自带的 1.18）会报 unknown directive "http2"：删掉下面这行，
-    # 并把上面两行 listen 改成 `listen 443 ssl http2;` 和 `listen [::]:443 ssl http2;`。
-    # HTTP/2 不是必须的，不想折腾可以直接删掉。
+    # The standalone `http2 on;` directive exists only in nginx 1.25.1 and later. Older
+    # nginx (for example the 1.18 shipped with Ubuntu 22.04) fails with unknown directive
+    # "http2": delete the line below and change the two listen lines above to
+    # `listen 443 ssl http2;` and `listen [::]:443 ssl http2;`.
+    # HTTP/2 is not required; if you do not want the hassle, just delete the line.
     http2 on;
     server_name canvas.mcp.kazuhahub.com;
 
@@ -39,11 +42,11 @@ server {
 
     add_header Strict-Transport-Security "max-age=31536000" always;
 
-    # claude.ai 的 MCP 请求体和 /account 表单都很小；10m 绰绰有余。
+    # claude.ai MCP request bodies and the /account forms are tiny; 10m is more than enough.
     client_max_body_size 10m;
 
-    # 不需要登录的两个 OAuth 入口：每个 IP 每分钟 10 次（突发 5 次）。
-    # 正常使用里这两个很少被调用：连接一次连接器才走一遍。
+    # The two OAuth entry points that need no sign-in: 10 requests per minute per IP (burst of 5).
+    # In normal use they are rarely called: they run only once when a connector is connected.
     location = /register {
         limit_req zone=canvas_oauth burst=5 nodelay;
         proxy_pass http://127.0.0.1:8819;
@@ -67,12 +70,12 @@ server {
         proxy_pass http://127.0.0.1:8819;
         proxy_http_version 1.1;
 
-        # 服务只放行 PUBLIC_BASE_URL 的 Host，必须原样转发，否则会 421。
+        # The service allows only the Host of PUBLIC_BASE_URL; forward it unchanged, otherwise you get 421.
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        # MCP 使用流式响应（SSE）：不能缓冲、不能缓存。
+        # MCP uses streaming responses (SSE): do not buffer and do not cache.
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout 300s;
