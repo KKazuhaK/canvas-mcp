@@ -362,3 +362,76 @@ def test_help_describes_the_options_and_writes_nothing(tmp_path):
     for option in ("--enable-writes", "--real-names", "--output"):
         assert option in result.stdout
     assert not (tmp_path / ".env").exists()
+
+
+# -- --school-search ---------------------------------------------------------------------------
+
+
+def test_schools_are_off_by_default_and_shown_commented_out(tmp_path):
+    result = run_script(tmp_path, env=preset())
+    assert result.returncode == 0, result.stderr
+    values = read_env(tmp_path / ".env")
+    assert "CANVAS_FEATURED_SCHOOLS" not in values
+    assert "CANVAS_SCHOOL_SEARCH" not in values
+    text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "# CANVAS_FEATURED_SCHOOLS=canvas.school.example\n" in text
+    assert "# CANVAS_SCHOOL_SEARCH=true\n" in text
+    settings = load(values, tmp_path)
+    assert settings.featured_schools == ()
+    assert settings.school_search is False
+
+
+def test_school_search_writes_the_featured_host_and_turns_search_on(tmp_path):
+    result = run_script(tmp_path, "--school-search", env=preset())
+    assert result.returncode == 0, result.stderr
+    values = read_env(tmp_path / ".env")
+    assert values["CANVAS_SCHOOL_SEARCH"] == "true"
+    assert values["CANVAS_FEATURED_SCHOOLS"] == "canvas.school.example"
+    assert values["CANVAS_API_URL"] == CANVAS
+
+    settings = load(values, tmp_path)
+    assert settings.school_search is True
+    assert [school.host for school in settings.featured_schools] == ["canvas.school.example"]
+    assert "directory" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        "https://Canvas.School.Example:8443",
+        "https://CANVAS.school.example/api/v1/",
+        "https://canvas.school.example:8443/api/v1",
+    ],
+)
+def test_the_featured_host_has_no_port_path_or_capitals(tmp_path, given):
+    result = run_script(tmp_path, "--school-search", env=preset(CANVAS_API_URL=given))
+    assert result.returncode == 0, result.stderr
+    values = read_env(tmp_path / ".env")
+    assert values["CANVAS_FEATURED_SCHOOLS"] == "canvas.school.example"
+    settings = load(values, tmp_path)
+    assert settings.featured_schools[0].host == "canvas.school.example"
+
+
+def test_school_search_combines_with_the_other_flags(tmp_path):
+    result = run_script(tmp_path, "--school-search", "--enable-writes", "--real-names", env=preset())
+    assert result.returncode == 0, result.stderr
+    values = read_env(tmp_path / ".env")
+    assert values["CANVAS_SCHOOL_SEARCH"] == "true"
+    assert values["ALLOWED_WRITE_TOOLS"] == "all"
+    assert values["ENABLE_DATA_ANONYMIZATION"] == "false"
+    load(values, tmp_path)
+
+
+def test_the_summary_mentions_the_school_mode(tmp_path):
+    plain = run_script(tmp_path, env=preset())
+    assert "Single school" in plain.stderr
+    (tmp_path / ".env").unlink()
+    searched = run_script(tmp_path, "--school-search", env=preset())
+    assert "directory search on" in searched.stderr
+
+
+def test_help_lists_the_school_search_option(tmp_path):
+    result = run_script(tmp_path, "--help")
+    assert result.returncode == 0
+    assert "--school-search" in result.stdout
+    assert "CANVAS_SCHOOL_SEARCH" in result.stdout

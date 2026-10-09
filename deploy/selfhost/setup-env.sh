@@ -28,13 +28,16 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-用法：bash setup-env.sh [--enable-writes] [--real-names] [--output FILE]
+用法：bash setup-env.sh [--enable-writes] [--real-names] [--school-search] [--output FILE]
 
 在部署目录（例如 /opt/canvas-mcp）里生成自托管多用户模式的 .env。
 
   --enable-writes  开启全部 11 个学生写入工具，并允许在没有教师策略的课程里写入。
                    默认只读；风险见 README.md「写入工具的提示词注入风险」。
   --real-names     关闭数据匿名化（ENABLE_DATA_ANONYMIZATION=false，镜像默认开启）。
+  --school-search  Let each user pick their own school: writes CANVAS_SCHOOL_SEARCH=true and
+                   CANVAS_FEATURED_SCHOOLS=<host of CANVAS_API_URL>. Search terms are sent to
+                   Instructure's public school directory; see README.md (multiple schools).
   --output FILE    输出文件，默认 ./.env
   -h, --help       显示这段说明
 
@@ -54,11 +57,13 @@ die() {
 OUTPUT=".env"
 ENABLE_WRITES=false
 REAL_NAMES=false
+SCHOOL_SEARCH=false
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --enable-writes) ENABLE_WRITES=true ;;
     --real-names) REAL_NAMES=true ;;
+    --school-search) SCHOOL_SEARCH=true ;;
     --output)
       [ "$#" -ge 2 ] || die "--output 需要一个文件名"
       OUTPUT="$2"
@@ -130,6 +135,10 @@ ask CANVAS_API_URL "Canvas 地址（例如 https://canvas.school.edu）"
   || die "CANVAS_API_URL 必须是 https://Canvas主机名（可以带 /api/v1），不要粘贴课程页面之类的完整地址"
 check_port CANVAS_API_URL "$CANVAS_API_URL"
 CANVAS_API_URL="${CANVAS_API_URL%/}"
+# Host of the default school: no scheme, port or path, lowercase (a CANVAS_FEATURED_SCHOOLS entry).
+CANVAS_HOST=""
+[[ "$CANVAS_API_URL" =~ ^https://([^/:]+) ]] && CANVAS_HOST="${BASH_REMATCH[1],,}"
+[ -n "$CANVAS_HOST" ] || die "Could not read the host name from CANVAS_API_URL"
 
 ENTRA_CLIENT_SECRET=""
 if [ -t 0 ]; then
@@ -202,6 +211,26 @@ EOF
 # COURSE_AGENT_POLICY_DEFAULT=allow
 EOF
   fi
+  if [ "$SCHOOL_SEARCH" = true ]; then
+    cat <<EOF
+
+# Multiple schools: enabled (--school-search). Users pick a school on /account.
+# CANVAS_FEATURED_SCHOOLS lists the quick picks (host names only, comma separated,
+# optionally host=Display Name). CANVAS_SCHOOL_SEARCH=true also lets users search
+# Instructure's public school directory; the search terms are sent to Instructure
+# and enrollment then needs outbound HTTPS to canvas.instructure.com.
+CANVAS_FEATURED_SCHOOLS=${CANVAS_HOST}
+CANVAS_SCHOOL_SEARCH=true
+EOF
+  else
+    cat <<EOF
+
+# Multiple schools: off (every user is on CANVAS_API_URL). To let users pick their
+# own school, remove the leading "# " from the two lines below, then docker compose up -d.
+# CANVAS_FEATURED_SCHOOLS=${CANVAS_HOST}
+# CANVAS_SCHOOL_SEARCH=true
+EOF
+  fi
   if [ "$REAL_NAMES" = true ]; then
     cat <<EOF
 
@@ -233,6 +262,8 @@ writes_label="关闭（只读）"
 [ "$ENABLE_WRITES" = true ] && writes_label="全部开启"
 names_label="匿名化（镜像默认）"
 [ "$REAL_NAMES" = true ] && names_label="真实姓名"
+schools_label="Single school (CANVAS_API_URL)"
+[ "$SCHOOL_SEARCH" = true ] && schools_label="Users pick a school; directory search on"
 
 cat >&2 <<EOF
 
@@ -241,6 +272,7 @@ cat >&2 <<EOF
   Canvas     $CANVAS_API_URL（服务器会用 /api/v1）
   写入工具   $writes_label
   姓名显示   $names_label
+  Schools    $schools_label
 
 下一步：
   1. 把 $OUTPUT 离线备份一份（密码管理器）。
