@@ -32,7 +32,7 @@ import os
 import pathlib
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -284,6 +284,7 @@ def ensure_ready(
     options: MigrationOptions | None = None,
     report: AccountMigrationReport | None = None,
     auto_backup: bool = True,
+    populate: Callable[[Connection], None] | None = None,
 ) -> None:
     """Make the database current, or refuse. Used at every start of the server.
 
@@ -291,13 +292,21 @@ def ensure_ready(
     database holds some. ``options.dry_run`` runs the upgrade and rolls it back;
     ``report`` collects what happened. ``auto_backup=False`` skips the SQLite copy
     (the caller already made one).
+
+    ``populate`` (PostgreSQL only; used by ``token_admin db import-sqlite``) is called
+    with the connection of the transaction that creates or upgrades the schema, after
+    it, under the migration lock. PostgreSQL DDL is transactional, so if ``populate``
+    raises, the schema it was about to fill is rolled back too: an empty database
+    stays empty (state "uninitialized") instead of being left with tables and no data.
     """
     opts = options or MigrationOptions()
+    if populate is not None and (db.kind != "postgresql" or opts.dry_run):
+        raise TokenStoreError("populate runs on PostgreSQL, outside a dry run")
     with db.guard():
         if db.kind == "sqlite":
             _ensure_sqlite(db, auto, keyring, opts, report, auto_backup)
         else:
-            _ensure_postgresql(db, auto, keyring, opts, report)
+            _ensure_postgresql(db, auto, keyring, opts, report, populate)
 
 
 def _ensure_sqlite(
@@ -344,11 +353,12 @@ def _ensure_postgresql(
     keyring: Any,
     options: MigrationOptions,
     report: AccountMigrationReport | None,
+    populate: Callable[[Connection], None] | None = None,
 ) -> None:
     with db.read() as conn:
         status = read_status(conn)
     _refuse_unusable(status)
-    if status.state == STATE_CURRENT:
+    if status.state == STATE_CURRENT and populate is None:
         return
     if not auto:
         raise _needs_migration_error()
@@ -370,6 +380,8 @@ def _ensure_postgresql(
                 _apply(conn, status, keyring=keyring, options=options, report=report)
                 if options.dry_run:
                     raise _DryRun
+            if populate is not None:
+                populate(conn)
     except _DryRun:
         return
 

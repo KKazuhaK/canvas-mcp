@@ -5,11 +5,25 @@ Switching ``DATABASE_URL`` to an empty database would silently drop
 then enroll again. The server and the operator CLI therefore refuse to run in that
 situation (``refuse_silent_switch``: the target holds no rows while the default
 SQLite file does; an empty schema does not count as data) and
-``token_admin db import-sqlite`` is the way across: one transaction, ciphertexts copied unchanged (the AAD does not depend
-on the backend), and a check that the counts match and that every stored token
-still decrypts with the keyring. A SQLite file from before the account model is
-migrated (on a private copy) with that keyring first. Anything wrong rolls the whole
-import back.
+``token_admin db import-sqlite`` is the way across.
+
+The import is all or nothing: it ends in a PostgreSQL database at the current schema
+with every row, or it leaves the target exactly as it was:
+
+1. The SQLite file is copied to a private temporary file (the source is opened
+   read-only and never modified) and that copy is migrated to the current schema
+   with the keyring: a file from before the account model (schema 1 to 4) gets its
+   accounts and identities, and every token is re-encrypted under its ``acct:<uuid>``
+   principal, exactly as ``db upgrade`` would do it. PostgreSQL has not been touched yet.
+2. In ONE PostgreSQL transaction (DDL is transactional there) the schema is created,
+   the migrated rows are copied unchanged (the AAD does not depend on the backend),
+   the identity sequences are moved past the copied ids, the row counts are compared
+   and every stored token is decrypted with the keyring.
+
+Any failure rolls the transaction back, schema included, so an empty database is
+still "uninitialized" afterwards and the silent-switch guard keeps the server
+refusing (it judges by data, never by schema). The temporary copy is deleted.
+Messages carry counts and key ids only.
 """
 
 from __future__ import annotations
@@ -17,10 +31,12 @@ from __future__ import annotations
 import pathlib
 import sqlite3
 import tempfile
+import time
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import func, insert, select, text
+from sqlalchemy import func, insert, select, text, update
+from sqlalchemy.engine import Connection
 
 from . import migrate, schema
 from .engine import Database
@@ -145,99 +161,186 @@ def refuse_silent_switch(target: Database, legacy_path: pathlib.Path) -> None:
     )
 
 
-def import_sqlite(target: Database, source: pathlib.Path, keyring: Any) -> ImportReport:
-    """Copy every table of the SQLite file ``source`` into the empty PostgreSQL ``target``.
+def _private_migrated_copy(
+    source: pathlib.Path, workdir: pathlib.Path, keyring: Any, *, mark_undecryptable_invalid: bool
+) -> dict[str, list[Any]]:
+    """Copy ``source`` into ``workdir``, migrate the copy to head, return its rows.
 
-    ``source`` is never modified: it is copied to a private temporary file, adopted
-    to the current schema there (with ``keyring``, because the account model
-    re-encrypts the tokens), and read from the copy.
+    Touches neither ``source`` nor PostgreSQL. Raises :class:`StoreUnavailable` if the
+    file cannot be read and :class:`TokenStoreError` (naming the migration, not the
+    import) if the copy cannot be brought to the current schema.
     """
-    from ..token_store import (
-        KeyringError,
-        TokenDecryptionError,
-        _aad_for_principal,
-    )
+    copy = workdir / "source.sqlite3"
+    try:
+        src = sqlite3.connect(f"file:{source.as_posix()}?mode=ro", uri=True, timeout=5.0)
+        try:
+            dst = sqlite3.connect(str(copy))
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+    except sqlite3.Error:
+        raise StoreUnavailable("the SQLite file cannot be read", "sqlite3.Error") from None
+    origin = Database.sqlite(copy)
+    try:
+        try:
+            migrate.ensure_ready(
+                origin,
+                auto=True,
+                keyring=keyring,
+                options=migrate.MigrationOptions(
+                    mark_undecryptable_invalid=mark_undecryptable_invalid
+                ),
+                auto_backup=False,
+            )
+        except TokenStoreError as exc:
+            # Includes KeyringError. The detail is curated by the migration (counts and
+            # key ids); what this adds is where it happened and what was left alone.
+            raise TokenStoreError(
+                "the SQLite file could not be migrated to the current schema in a "
+                f"private copy: {exc}. Nothing was imported; the SQLite file and "
+                "PostgreSQL were not changed"
+            ) from None
+        if migrate.current(origin).state != migrate.STATE_CURRENT:
+            raise TokenStoreError(
+                "the private copy of the SQLite file is not at the current schema after "
+                "its migration. Nothing was imported"
+            )
+        with origin.read() as oconn:
+            return {
+                name: list(oconn.execute(select(schema.metadata.tables[name])).all())
+                for name in COPIED_TABLES
+            }
+    finally:
+        origin.dispose()
 
+
+def _verify_tokens(conn: Connection, keyring: Any, *, mark_invalid: bool = False) -> int:
+    """Decrypt every stored token as the server would; raise on the first that fails.
+
+    With ``mark_invalid`` (the operator passed ``--mark-undecryptable-invalid``) a row
+    that cannot be read is marked invalid (``decrypt_failed``) instead of failing the
+    import; that only happens to rows the account migration left alone (principals
+    that are not Entra users, which nobody can reach anyway). Returns how many.
+    """
+    from ..token_store import KeyringError, TokenDecryptionError, _aad_for_principal
+
+    tokens = schema.canvas_tokens
+    key_ids = set(keyring.key_ids)
+    unreadable: list[tuple[str, str | None]] = []
+    for row in conn.execute(
+        select(
+            tokens.c.principal_key,
+            tokens.c.canvas_host,
+            tokens.c.key_id,
+            tokens.c.nonce,
+            tokens.c.ciphertext,
+            tokens.c.status,
+            tokens.c.invalid_reason,
+        )
+    ):
+        if row.status == "invalid" and row.invalid_reason == "decrypt_failed":
+            # Already known to be unreadable in the source: carried over as it was.
+            continue
+        if row.key_id not in key_ids:
+            if mark_invalid:
+                unreadable.append((row.principal_key, row.canvas_host))
+                continue
+            raise KeyringError(
+                f"CANVAS_TOKEN_KEYS is missing key id {row.key_id}; nothing was imported"
+            )
+        try:
+            aad = _aad_for_principal(row.principal_key, row.canvas_host, row.key_id)
+            keyring.decrypt(row.key_id, bytes(row.nonce), bytes(row.ciphertext), aad)
+        except (TokenDecryptionError, ValueError):
+            if mark_invalid:
+                unreadable.append((row.principal_key, row.canvas_host))
+                continue
+            raise TokenStoreError(
+                "a stored token does not decrypt with CANVAS_TOKEN_KEYS after the copy; "
+                "nothing was imported (repeat with --mark-undecryptable-invalid to mark "
+                "such rows invalid)"
+            ) from None
+    now = int(time.time())
+    for principal_key, host in unreadable:
+        conn.execute(
+            update(tokens)
+            .where(tokens.c.principal_key == principal_key, tokens.c.canvas_host.is_not_distinct_from(host))
+            .values(status="invalid", invalid_reason="decrypt_failed", invalid_since=now)
+        )
+    return len(unreadable)
+
+
+def _copy_rows(conn: Connection, rows: dict[str, list[Any]]) -> dict[str, int]:
+    """Insert ``rows`` into the empty tables of ``conn`` and move the identity sequences."""
+    counts: dict[str, int] = {}
+    for name in COPIED_TABLES:
+        table = schema.metadata.tables[name]
+        if conn.execute(select(func.count()).select_from(table)).scalar_one():
+            raise TokenStoreError(
+                "refusing to import into a PostgreSQL database that already holds data"
+            )
+    for name in COPIED_TABLES:
+        table = schema.metadata.tables[name]
+        data = [dict(row._mapping) for row in rows[name]]
+        if data:
+            conn.execute(insert(table), data)
+        counts[name] = len(data)
+    # Keep every identity column ahead of the ids just copied.
+    for identity_table in _IDENTITY_TABLES:
+        conn.execute(
+            text(
+                f"SELECT setval(pg_get_serial_sequence('{identity_table}', 'id'),"
+                f" COALESCE((SELECT MAX(id) FROM {identity_table}), 1),"
+                f" (SELECT MAX(id) IS NOT NULL FROM {identity_table}))"
+            )
+        )
+    for name in COPIED_TABLES:
+        stored = conn.execute(
+            select(func.count()).select_from(schema.metadata.tables[name])
+        ).scalar_one()
+        if stored != counts[name]:
+            raise TokenStoreError("row counts differ after the copy; nothing was imported")
+    return counts
+
+
+def import_sqlite(
+    target: Database,
+    source: pathlib.Path,
+    keyring: Any,
+    *,
+    mark_undecryptable_invalid: bool = False,
+) -> ImportReport:
+    """Copy the SQLite file ``source`` into the empty PostgreSQL ``target``, all or nothing.
+
+    See the module docstring for the two steps. ``source`` is never modified, and
+    ``target`` is untouched until the private migrated copy is ready; from then on
+    the schema and the data are created in one transaction.
+    """
     if target.kind != "postgresql":
         raise TokenStoreError("import-sqlite writes to PostgreSQL; DATABASE_URL must name it")
     if not source.is_file():
         raise TokenStoreError("the SQLite file to import does not exist")
+    if target_holds_rows(target):
+        raise TokenStoreError(
+            "refusing to import into a PostgreSQL database that already holds data"
+        )
 
     with tempfile.TemporaryDirectory(prefix="canvas-mcp-import-") as tmp:
-        copy = pathlib.Path(tmp) / "source.sqlite3"
-        try:
-            src = sqlite3.connect(f"file:{source.as_posix()}?mode=ro", uri=True, timeout=5.0)
-            try:
-                dst = sqlite3.connect(str(copy))
-                try:
-                    src.backup(dst)
-                finally:
-                    dst.close()
-            finally:
-                src.close()
-        except sqlite3.Error:
-            raise StoreUnavailable("the SQLite file cannot be read", "sqlite3.Error") from None
-        origin = Database.sqlite(copy)
-        try:
-            migrate.ensure_ready(origin, auto=True, keyring=keyring, auto_backup=False)
-            with origin.read() as oconn:
-                rows = {name: oconn.execute(select(schema.metadata.tables[name])).all() for name in COPIED_TABLES}
-        finally:
-            origin.dispose()
+        rows = _private_migrated_copy(
+            source,
+            pathlib.Path(tmp),
+            keyring,
+            mark_undecryptable_invalid=mark_undecryptable_invalid,
+        )
 
-    migrate.ensure_ready(target, auto=True)
     counts: dict[str, int] = {}
-    with target.guard(), target.write() as conn:
-        for name in COPIED_TABLES:
-            table = schema.metadata.tables[name]
-            if conn.execute(select(func.count()).select_from(table)).scalar_one():
-                raise TokenStoreError(
-                    "refusing to import into a PostgreSQL database that already holds data"
-                )
-        for name in COPIED_TABLES:
-            table = schema.metadata.tables[name]
-            data = [dict(row._mapping) for row in rows[name]]
-            if data:
-                conn.execute(insert(table), data)
-            counts[name] = len(data)
-        # Keep every identity column ahead of the ids just copied.
-        for identity_table in _IDENTITY_TABLES:
-            conn.execute(
-                text(
-                    f"SELECT setval(pg_get_serial_sequence('{identity_table}', 'id'),"
-                    f" COALESCE((SELECT MAX(id) FROM {identity_table}), 1),"
-                    f" (SELECT MAX(id) IS NOT NULL FROM {identity_table}))"
-                )
-            )
-        for name in COPIED_TABLES:
-            stored = conn.execute(select(func.count()).select_from(schema.metadata.tables[name])).scalar_one()
-            if stored != counts[name]:
-                raise TokenStoreError("row counts differ after the import; nothing was imported")
-        tokens = schema.canvas_tokens
-        key_ids = set(keyring.key_ids)
-        for row in conn.execute(
-            select(
-                tokens.c.principal_key,
-                tokens.c.canvas_host,
-                tokens.c.key_id,
-                tokens.c.nonce,
-                tokens.c.ciphertext,
-                tokens.c.status,
-                tokens.c.invalid_reason,
-            )
-        ):
-            if row.status == "invalid" and row.invalid_reason == "decrypt_failed":
-                # Already known to be unreadable in the source: carried over as it was.
-                continue
-            if row.key_id not in key_ids:
-                raise KeyringError(
-                    f"CANVAS_TOKEN_KEYS is missing key id {row.key_id}; nothing was imported"
-                )
-            try:
-                aad = _aad_for_principal(row.principal_key, row.canvas_host, row.key_id)
-                keyring.decrypt(row.key_id, bytes(row.nonce), bytes(row.ciphertext), aad)
-            except (TokenDecryptionError, ValueError):
-                raise TokenStoreError(
-                    "a stored token does not decrypt with CANVAS_TOKEN_KEYS; nothing was imported"
-                ) from None
+
+    def populate(conn: Connection) -> None:
+        counts.update(_copy_rows(conn, rows))
+        _verify_tokens(conn, keyring, mark_invalid=mark_undecryptable_invalid)
+
+    migrate.ensure_ready(target, auto=True, populate=populate)
     return ImportReport(counts)

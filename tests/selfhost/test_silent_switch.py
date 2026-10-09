@@ -222,13 +222,59 @@ class TestPostgres:
         self._prepare(env)
 
     def test_a_failed_import_leaves_the_server_refusing(self, env, monkeypatch, capsys) -> None:
-        # A key ring that lacks the key id of a stored token: the data is rolled
-        # back, the schema stays, and the server must still refuse.
+        # A key ring that lacks the key id of a stored token: the private copy of the
+        # SQLite file cannot be migrated, so the import stops before it touches
+        # PostgreSQL. The database is still uninitialized (no tables at all) and the
+        # server must still refuse it.
         source = env / "old.sqlite3"
         legacy.build(source, "v4")
         assert token_admin.main(["db", "import-sqlite", str(source)]) == token_admin.EXIT_CONFIG
         capsys.readouterr()
+        assert migrate.current(_pg()).state == migrate.STATE_UNINITIALIZED
+        with pytest.raises(SelfhostConfigError):
+            self._prepare(env)
+
+    def test_a_failure_after_the_copy_leaves_nothing_behind_and_the_server_refusing(
+        self, env, monkeypatch, capsys
+    ) -> None:
+        # The import fails inside the PostgreSQL transaction. DDL is transactional
+        # there, so the schema it created goes with the rows: "uninitialized" again,
+        # not "current but empty". Either way the guard refuses (it counts rows).
+        from canvas_mcp.core.selfhost.db import transfer
+
+        source = env / "old.sqlite3"
+        legacy.build(source, "v4")
+
+        def broken(*_args, **_kwargs) -> None:
+            raise TokenStoreError("simulated failure; nothing was imported")
+
+        monkeypatch.setattr(transfer, "_verify_tokens", broken)
+        assert token_admin.main(["db", "import-sqlite", str(source)]) == token_admin.EXIT_CONFIG
+        capsys.readouterr()
+        assert migrate.current(_pg()).state == migrate.STATE_UNINITIALIZED
+        assert not target_holds_rows(_pg())
+        with pytest.raises(SelfhostConfigError):
+            self._prepare(env)
+
+    def test_an_empty_current_schema_stays_empty_after_a_failed_import(
+        self, env, monkeypatch, capsys
+    ) -> None:
+        # Here the schema was created before (db upgrade), so it legitimately stays:
+        # "current" and empty. What matters is that no row got in and the server refuses.
+        from canvas_mcp.core.selfhost.db import transfer
+
+        assert token_admin.main(["db", "upgrade"]) == 0
+        source = env / "old.sqlite3"
+        legacy.build(source, "v4")
+
+        def broken(*_args, **_kwargs) -> None:
+            raise TokenStoreError("simulated failure; nothing was imported")
+
+        monkeypatch.setattr(transfer, "_verify_tokens", broken)
+        assert token_admin.main(["db", "import-sqlite", str(source)]) == token_admin.EXIT_CONFIG
+        capsys.readouterr()
         assert migrate.current(_pg()).state == migrate.STATE_CURRENT
+        assert not target_holds_rows(_pg())
         with pytest.raises(SelfhostConfigError):
             self._prepare(env)
 

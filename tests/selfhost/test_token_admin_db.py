@@ -13,7 +13,12 @@ from canvas_mcp.core.selfhost import token_admin
 from canvas_mcp.core.selfhost.db import migrate
 from canvas_mcp.core.selfhost.db.engine import Database
 from canvas_mcp.core.selfhost.db.url import parse_database_url
-from canvas_mcp.core.selfhost.token_store import OPERATOR, Keyring, TokenStore
+from canvas_mcp.core.selfhost.token_store import (
+    OPERATOR,
+    Keyring,
+    TokenStore,
+    TokenStoreError,
+)
 
 from . import legacy_schemas as legacy
 
@@ -139,6 +144,13 @@ class TestUpgrade:
         assert "writes to PostgreSQL" in capsys.readouterr().err
 
 
+    def test_populate_is_for_postgres(self, tmp_path) -> None:
+        db = Database.sqlite(tmp_path / "x.sqlite3")
+        with pytest.raises(TokenStoreError, match="PostgreSQL"):
+            migrate.ensure_ready(db, auto=True, populate=lambda conn: None)
+        assert not (tmp_path / "x.sqlite3").exists()
+
+
 @pytest.mark.postgres
 class TestImportIntoPostgres:
     @pytest.fixture(autouse=True)
@@ -146,31 +158,54 @@ class TestImportIntoPostgres:
         reset_public_schema()
         monkeypatch.setenv("DATABASE_URL", PG_URL)
 
+    def _db(self) -> Database:
+        return Database(parse_database_url(PG_URL, pathlib.Path("/data")))
+
     def _store(self) -> TokenStore:
-        db = Database(parse_database_url(PG_URL, pathlib.Path("/data")))
-        return TokenStore(db, Keyring.parse(KEYS))
+        return TokenStore(self._db(), Keyring.parse(KEYS))
 
     def test_every_table_moves_and_every_token_decrypts(self, tmp_path, capsys) -> None:
+        # A schema 4 file (accounts do not exist yet) ends as a schema 5 PostgreSQL
+        # database: accounts and identities created, tokens re-encrypted, state kept.
         source = tmp_path / "old.sqlite3"
         seeded = legacy.build(source, "v4")
         before = source.read_bytes()
         assert token_admin.main(["db", "import-sqlite", str(source)]) == 0
         out = capsys.readouterr().out
-        assert "canvas_tokens: 4 row(s)" in out and "principal_status: 2 row(s)" in out
+        # principal_status is absorbed into accounts: it is neither a table nor a line.
+        assert "principal_status:" not in out
+        for line in (
+            "canvas_tokens: 4 row(s)",
+            "user_tool_prefs: 1 row(s)",
+            "accounts: 3 row(s)",  # B, C (from principal_status) and A (a token only)
+            "external_identities: 3 row(s)",
+            "principal_status_events: 4 row(s)",
+            "credential_generations: 2 row(s)",
+            "auth_events: 0 row(s)",
+        ):
+            assert line in out
+        assert "audit_log: 1 row(s)" in out  # the migration's own entry
         assert source.read_bytes() == before  # the source is never modified
+        status = migrate.current(self._db())
+        assert status.state == migrate.STATE_CURRENT and status.meta_version == "5"
         store = self._store()
         store.initialize(auto_migrate=False)
+        accounts = {key: store.resolve_legacy_key(key) for key in (legacy.KEY_A, legacy.KEY_B, legacy.KEY_C)}
+        assert all(accounts.values()) and len(set(accounts.values())) == 3
         for key, token in seeded.plaintexts.items():
-            row = store.get(key)
-            assert row is not None and row.api_token == token
-        status = store.get_principal_status(legacy.KEY_C)
-        assert status.disabled and status.session_epoch == 3 and status.credential_generation == 5
-        assert [e.action for e in store.list_status_events(legacy.KEY_C)] == [
-            "disabled", "enabled", "disabled"
-        ]
+            if key in accounts:
+                row = store.get(accounts[key])
+                assert row is not None and row.api_token == token
+        # The unmapped principal is carried over unchanged (and still decrypts: the
+        # import verified it) rather than dropped.
+        assert store.count() == 4
+        c = accounts[legacy.KEY_C]
+        status_c = store.get_principal_status(c)
+        assert status_c.disabled and status_c.session_epoch == 3 and status_c.credential_generation == 5
+        assert [e.action for e in store.list_status_events(c)] == ["disabled", "enabled", "disabled"]
         # The history keeps counting after the copied ids.
-        store.enable_principal(legacy.KEY_C, actor=OPERATOR)
-        newest = store.list_status_events(legacy.KEY_C, limit=1)[0]
+        store.enable_principal(c, actor=OPERATOR)
+        newest = store.list_status_events(c, limit=1)[0]
         assert newest.action == "enabled" and newest.id > 4
 
     def test_a_database_that_already_holds_data_is_never_overwritten(self, tmp_path, capsys) -> None:
@@ -181,19 +216,85 @@ class TestImportIntoPostgres:
         assert token_admin.main(["db", "import-sqlite", str(source)]) == token_admin.EXIT_CONFIG
         assert "already holds data" in capsys.readouterr().err
 
+    def test_an_empty_schema_is_filled_in_place(self, tmp_path, capsys) -> None:
+        # `db upgrade` (or an earlier refusal) left a current schema without rows.
+        source = tmp_path / "old.sqlite3"
+        legacy.build(source, "v4")
+        assert token_admin.main(["db", "upgrade"]) == 0
+        assert migrate.current(self._db()).state == migrate.STATE_CURRENT
+        assert token_admin.main(["db", "import-sqlite", str(source)]) == 0
+        capsys.readouterr()
+        store = self._store()
+        store.initialize(auto_migrate=False)
+        assert store.count() == 4
+
     def test_a_token_that_does_not_decrypt_rolls_everything_back(
         self, tmp_path, monkeypatch, capsys
     ) -> None:
+        # k2 is the wrong key: the tokens sealed under it cannot be re-encrypted. The
+        # failure is in the migration of the private copy and says so; PostgreSQL has
+        # not been touched, not even its schema.
         source = tmp_path / "old.sqlite3"
         legacy.build(source, "v4")
+        before = source.read_bytes()
         wrong = "k2:" + base64.b64encode(bytes([9]) * 32).decode() + ",k1:" + base64.b64encode(bytes([1]) * 32).decode()
         monkeypatch.setenv("CANVAS_TOKEN_KEYS", wrong)
         assert token_admin.main(["db", "import-sqlite", str(source)]) == token_admin.EXIT_CONFIG
-        assert "nothing was imported" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "could not be migrated to the current schema" in err
+        assert "does not decrypt with CANVAS_TOKEN_KEYS" in err
+        assert "Nothing was imported" in err
+        assert "db upgrade" not in err  # that command would not help here
+        assert "--mark-undecryptable-invalid" in err
+        assert wrong not in err
+        assert source.read_bytes() == before
+        assert migrate.current(self._db()).state == migrate.STATE_UNINITIALIZED
         monkeypatch.setenv("CANVAS_TOKEN_KEYS", KEYS)
         store = self._store()
         store.initialize()
         assert store.count() == 0 and store.list_principal_statuses() == []
+
+    def test_undecryptable_tokens_can_be_marked_invalid_during_the_import(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        source = tmp_path / "old.sqlite3"
+        seeded = legacy.build(source, "v4")
+        wrong = "k2:" + base64.b64encode(bytes([9]) * 32).decode() + ",k1:" + base64.b64encode(bytes([1]) * 32).decode()
+        monkeypatch.setenv("CANVAS_TOKEN_KEYS", wrong)
+        argv = ["db", "import-sqlite", str(source), "--mark-undecryptable-invalid"]
+        assert token_admin.main(argv) == 0
+        capsys.readouterr()
+        monkeypatch.setenv("CANVAS_TOKEN_KEYS", wrong)
+        store = TokenStore(self._db(), Keyring.parse(wrong))
+        store.initialize(auto_migrate=False)
+        a = store.resolve_legacy_key(legacy.KEY_A)  # sealed under k1: still readable
+        row = store.get(a)
+        assert row is not None and row.api_token == seeded.plaintexts[legacy.KEY_A]
+        b = store.resolve_legacy_key(legacy.KEY_B)  # sealed under k2: marked invalid
+        info = {e.principal_key: e for e in store.list_enrollments()}
+        assert info[b].status == "invalid" and info[b].invalid_reason == "decrypt_failed"
+        assert info[a].status == "active"
+        # A principal the account migration does not map is marked the same way.
+        assert info[legacy.KEY_OTHER].status == "invalid"
+
+    def test_a_failure_inside_the_transaction_leaves_no_schema_behind(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        # The copy migrated fine; the PostgreSQL transaction fails after the schema
+        # and every row were written. DDL is transactional: all of it is rolled back.
+        from canvas_mcp.core.selfhost.db import transfer
+
+        source = tmp_path / "old.sqlite3"
+        legacy.build(source, "v4")
+
+        def broken(*_args, **_kwargs) -> None:
+            raise TokenStoreError("simulated failure after the copy; nothing was imported")
+
+        monkeypatch.setattr(transfer, "_verify_tokens", broken)
+        assert token_admin.main(["db", "import-sqlite", str(source)]) == token_admin.EXIT_CONFIG
+        assert "simulated failure" in capsys.readouterr().err
+        assert migrate.current(self._db()).state == migrate.STATE_UNINITIALIZED
+        assert not transfer.target_holds_rows(self._db())
 
     def test_a_version_1_file_is_adopted_in_the_copy_and_imported(self, tmp_path, capsys) -> None:
         source = tmp_path / "old.sqlite3"
@@ -202,8 +303,11 @@ class TestImportIntoPostgres:
         capsys.readouterr()
         store = self._store()
         store.initialize(auto_migrate=False)
-        row = store.get(legacy.KEY_A)
+        account = store.resolve_legacy_key(legacy.KEY_A)
+        assert account is not None
+        row = store.get(account)
         assert row is not None and row.api_token == seeded.plaintexts[legacy.KEY_A]
+        assert migrate.current(self._db()).meta_version == "5"
         conn = sqlite3.connect(str(source))
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == ("1",)
         conn.close()

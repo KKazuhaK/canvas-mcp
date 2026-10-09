@@ -17,6 +17,7 @@ Usage::
     python -m canvas_mcp.core.selfhost.token_admin db upgrade [--backup PATH] [--dry-run]
                                                               [--mark-undecryptable-invalid]
     python -m canvas_mcp.core.selfhost.token_admin db import-sqlite PATH
+                                                              [--mark-undecryptable-invalid]
 
 ``PRINCIPAL`` names an account in any of these forms: ``acct:<uuid>`` (or the bare
 uuid), ``entra:<tenant id>:<object id>`` (the key of the releases before the account
@@ -55,8 +56,11 @@ written (or use ``--backup PATH`` to choose the copy); back up PostgreSQL with
 would happen and rolls everything back. A token that does not decrypt with the keys
 stops the upgrade; ``--mark-undecryptable-invalid`` marks such rows invalid instead (the
 user enrolls again). ``db import-sqlite PATH`` copies a SQLite token database into an
-empty PostgreSQL database (``DATABASE_URL``) in one transaction and checks that every
-token still decrypts; the source file is not modified.
+empty PostgreSQL database (``DATABASE_URL``): a file from before the account model is
+first migrated to the current schema in a private copy (it needs the keys and accepts
+``--mark-undecryptable-invalid`` like ``db upgrade``), then the schema and every row are
+created in one PostgreSQL transaction and every token is checked to still decrypt. On
+any failure PostgreSQL is left as it was; the source file is never modified.
 
 Every command except ``db ...`` refuses to run (exit 2) on a database that holds no
 rows while the default SQLite file in the data directory still has data: using it
@@ -205,6 +209,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "import-sqlite", help="copy a SQLite token database into an empty PostgreSQL database"
     )
     import_sqlite.add_argument("path", help="the SQLite file to import (it is not modified)")
+    import_sqlite.add_argument(
+        "--mark-undecryptable-invalid",
+        action="store_true",
+        help="mark tokens that do not decrypt invalid instead of refusing the import",
+    )
     return parser
 
 
@@ -323,10 +332,18 @@ def _run_db(args: argparse.Namespace) -> int:
         from canvas_mcp.core.selfhost.db.transfer import import_sqlite
 
         keyring = Keyring.parse(os.environ.get(KEYS_ENV, ""))
-        report_ = import_sqlite(db, pathlib.Path(args.path), keyring)
+        report_ = import_sqlite(
+            db,
+            pathlib.Path(args.path),
+            keyring,
+            mark_undecryptable_invalid=args.mark_undecryptable_invalid,
+        )
         for table, count in report_.counts.items():
             print(f"{table}: {count} row(s)")
-        print("imported; every stored token decrypts with CANVAS_TOKEN_KEYS")
+        print(
+            "imported at the current schema; every stored token that is not marked invalid "
+            "decrypts with CANVAS_TOKEN_KEYS"
+        )
         return EXIT_OK
     raise AssertionError(command)  # pragma: no cover - argparse enforces choices
 

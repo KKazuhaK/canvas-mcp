@@ -650,8 +650,8 @@ def _plan_tokens(
             if not options.mark_undecryptable_invalid:
                 raise TokenStoreError(
                     "a stored token does not decrypt with CANVAS_TOKEN_KEYS; nothing was "
-                    "migrated (restore the right keys, or run 'db upgrade "
-                    "--mark-undecryptable-invalid' to mark such rows invalid)"
+                    "migrated (restore the right keys, or repeat the command with "
+                    "--mark-undecryptable-invalid to mark such rows invalid)"
                 )
             report.tokens_marked_invalid += 1
             new_row.update(
