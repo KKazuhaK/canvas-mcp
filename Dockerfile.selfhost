@@ -30,8 +30,10 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --ignore-scripts
 
+# check:dist fails the image build if the dist about to be copied has inline
+# scripts, remote URLs, eval or dev-mock code (the CSP / mock-isolation checks).
 COPY web/ ./
-RUN npm run build
+RUN npm run build && npm run check:dist
 
 
 FROM python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6 AS build

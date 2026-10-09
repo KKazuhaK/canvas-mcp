@@ -80,7 +80,8 @@ def test_the_node_image_satisfies_the_web_projects_engines():
 def test_the_web_stage_builds_from_the_lock_file_without_running_package_scripts(instructions):
     runs = [args for name, args in instructions if name == "RUN"]
     assert "npm ci --ignore-scripts" in runs
-    assert "npm run build" in runs
+    # The dist that ships is checked in the same stage that builds it.
+    assert "npm run build && npm run check:dist" in runs
     text = DOCKERFILE.read_text(encoding="utf-8")
     assert "npm install" not in text
     copies = [args for name, args in instructions if name == "COPY"]
