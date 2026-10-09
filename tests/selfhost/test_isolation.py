@@ -349,7 +349,15 @@ class TestConfirmationGuard:
         assert not isinstance(guard.claim(token, fp), str)
         assert isinstance(guard.claim(token, fp), str)
 
-    def test_re_enrolling_a_canvas_token_does_not_void_a_pending_preview(self):
+    def test_the_preview_identity_does_not_depend_on_the_token_string(self):
+        """A different token string alone, with no credential-generation change, voids nothing.
+
+        The caller identity is the principal, the school and the credential generation,
+        never the token. This test replaces the token in the request context without
+        raising the generation, which models no real event. A real re-enrollment raises the
+        generation and voids the preview (``test_credential_generation.py::TestPendingConfirmations``
+        and ``test_multiuser_e2e.py::TestCredentialLifecycle``).
+        """
         guard = ConfirmationGuard()
         as_user_sync(OID_A)
         fp = guard.fingerprint("delete_page", "course-1", "page-9")
@@ -516,7 +524,12 @@ class TestSchoolChange:
         refusal = guard.check(token, fp_y)
         assert refusal is not None and "does not match" in refusal
 
-    def test_a_preview_survives_re_enrolling_at_the_same_school(self):
+    def test_a_preview_survives_a_token_string_change_at_the_same_school_and_generation(self):
+        """Same principal, school and generation, only the token string differs: still valid.
+
+        No generation is raised here, so this is not a re-enrollment; a real one raises it
+        and voids the preview (``test_credential_generation.py::TestPendingConfirmations``).
+        """
         guard = ConfirmationGuard()
         at_school(OID_A, SCHOOL_X, token="the-first-canvas-token-1234567890")
         fp = guard.fingerprint("delete_page", "course-1", "page-9")
