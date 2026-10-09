@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pathlib
+import sqlite3
 from typing import Any
 
 import pytest
@@ -24,6 +26,7 @@ from canvas_mcp.core.selfhost.request_context import (
     token_revoked_message,
     unreadable_token_message,
 )
+from canvas_mcp.core.selfhost.token_health import TokenHealth
 from canvas_mcp.core.selfhost.token_store import (
     REASON_CANVAS_TOKEN_REJECTED,
     REASON_DECRYPT_FAILED,
@@ -31,6 +34,7 @@ from canvas_mcp.core.selfhost.token_store import (
     STATUS_ACTIVE,
     STATUS_INVALID,
     TokenDecryptionError,
+    TokenStore,
 )
 from canvas_mcp.core.selfhost.tool_gate import SelfhostCredentialGate
 
@@ -46,6 +50,8 @@ from .test_request_context import (
     _run,
     _user,
 )
+from .test_token_store import Clock as StoreClock
+from .test_token_store import _ring
 
 
 class StatusRow(_Row):
@@ -78,6 +84,7 @@ class RowStore(FakeStore):
 class Recorder:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.versions: list[int | None] = []
         self.fail = False
 
     async def mark_invalid(
@@ -86,6 +93,7 @@ class Recorder:
         if self.fail:
             raise RuntimeError("store exploded")
         self.calls.append((principal_key, reason))
+        self.versions.append(expected_updated_at)
         return True
 
 
@@ -161,14 +169,71 @@ class TestInvalidRows:
         assert get_request_token_state() is None
 
 
+def _decrypt_error(version: int | None) -> TokenDecryptionError:
+    error = TokenDecryptionError("nope")
+    error.updated_at = version
+    return error
+
+
 class TestDecryptFailure:
-    async def test_a_failed_decryption_marks_the_row_invalid(self) -> None:
+    async def test_a_failed_decryption_marks_the_failing_row_invalid(self) -> None:
         health = Recorder()
-        probe = await serve(RowStore(None, fail=TokenDecryptionError("nope")), health)
+        probe = await serve(RowStore(None, fail=_decrypt_error(4321)), health)
         assert health.calls == [(f"entra:{TENANT}:{OID_A}", REASON_DECRYPT_FAILED)]
+        # Only the row version that failed to decrypt may be marked.
+        assert health.versions == [4321]
         assert probe.seen["creds"] is None
         assert probe.seen["message"] == unreadable_token_message(ACCOUNT_URL)
         assert probe.state is not None and probe.state.dead
+
+    async def test_without_a_row_version_nothing_is_marked(self) -> None:
+        health = Recorder()
+        probe = await serve(RowStore(None, fail=_decrypt_error(None)), health)
+        assert health.calls == []
+        assert probe.seen["message"] == unreadable_token_message(ACCOUNT_URL)
+        assert probe.state is not None and probe.state.dead
+
+    async def test_a_token_saved_while_the_old_row_was_unreadable_stays_active(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        store = TokenStore(tmp_path / "tokens.sqlite3", _ring(("k1", 1)), clock=StoreClock())
+        store.initialize()
+        put_args: dict[str, Any] = {
+            "tenant_id": TENANT,
+            "object_id": OID_A,
+            "canvas_user_id": "42",
+            "canvas_user_name": "Ada",
+            "entra_display_name": "Ada",
+            "entra_upn": "ada@example.test",
+        }
+        store.put(api_token=SECRET_TOKEN, **put_args)
+        with sqlite3.connect(str(store._path), isolation_level=None) as conn:
+            conn.execute("UPDATE canvas_tokens SET ciphertext = x'00'")
+        key = f"entra:{TENANT}:{OID_A}"
+
+        class RacingStore(TokenStore):
+            """The user saves a new token right after the read of the old row failed."""
+
+            def get(self, principal_key: str, object_id: str | None = None) -> Any:
+                try:
+                    return super().get(principal_key, object_id)
+                finally:
+                    # The fresh row gets a newer updated_at than the failed read.
+                    store_clock.now += 5
+                    self.put(api_token="7~" + "R" * 62, **put_args)
+
+        store_clock = StoreClock()
+        racing = RacingStore(store._path, _ring(("k1", 1)), clock=store_clock)
+        health = TokenHealth(racing, account_url=ACCOUNT_URL)
+        probe = StateProbe()
+        middleware = _middleware(probe, racing)  # type: ignore[arg-type]
+        middleware.health = health
+        await _run(middleware, user=_user(_claims()))
+
+        row = racing.info(key)
+        assert row is not None and row.status == STATUS_ACTIVE
+        assert row.invalid_reason is None
+        assert probe.state is not None and probe.state.dead  # this request still fails closed
 
     @pytest.mark.parametrize("error", [RuntimeError("database is locked"), OSError("disk")])
     async def test_a_store_failure_that_is_not_a_decryption_error_changes_nothing(

@@ -187,7 +187,14 @@ class KeyringError(TokenStoreError):
 
 
 class TokenDecryptionError(TokenStoreError):
-    """A stored token could not be decrypted."""
+    """A stored token could not be decrypted.
+
+    ``updated_at`` is the version of the row that failed, when the store read
+    one; callers use it to invalidate exactly that row and not a replacement
+    saved a moment later.
+    """
+
+    updated_at: int | None = None
 
 
 @dataclass(frozen=True)
@@ -714,14 +721,18 @@ class TokenStore:
         # stored next to the row, so a row that was moved to another principal
         # fails to decrypt.
         try:
-            aad = _aad_for_principal(key, row[10], row[0])
-        except ValueError:
-            raise TokenDecryptionError("stored token could not be decrypted") from None
-        plaintext = self._keyring.decrypt(row[0], bytes(row[1]), bytes(row[2]), aad)
-        try:
-            api_token = plaintext.decode("utf-8")
-        except UnicodeDecodeError:
-            raise TokenDecryptionError("stored token could not be decrypted") from None
+            try:
+                aad = _aad_for_principal(key, row[10], row[0])
+            except ValueError:
+                raise TokenDecryptionError("stored token could not be decrypted") from None
+            plaintext = self._keyring.decrypt(row[0], bytes(row[1]), bytes(row[2]), aad)
+            try:
+                api_token = plaintext.decode("utf-8")
+            except UnicodeDecodeError:
+                raise TokenDecryptionError("stored token could not be decrypted") from None
+        except TokenDecryptionError as exc:
+            exc.updated_at = row[8] if isinstance(row[8], int) else None
+            raise
         return StoredToken(
             tenant_id=row[11],
             object_id=row[12],

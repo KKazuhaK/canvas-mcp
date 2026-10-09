@@ -250,7 +250,7 @@ class SelfhostRequestContextMiddleware:
             if isinstance(exc, TokenDecryptionError):
                 # Only a failed decryption invalidates the row; a locked or
                 # failing database says nothing about the token.
-                await self._record_unreadable(principal_key)
+                await self._record_unreadable(principal_key, exc.updated_at)
             message = unreadable_token_message(self.account_url)
             set_missing_credentials_message(message)
             self._mark_request_dead(message)
@@ -292,12 +292,20 @@ class SelfhostRequestContextMiddleware:
         except Exception:
             pass  # last-used bookkeeping must never fail a request
 
-    async def _record_unreadable(self, principal_key: str) -> None:
-        """A stored token that cannot be decrypted is marked invalid (decrypt_failed)."""
-        if self.health is None:
+    async def _record_unreadable(self, principal_key: str, version: int | None) -> None:
+        """A stored token that cannot be decrypted is marked invalid (decrypt_failed).
+
+        Only the exact row that failed is marked (``version`` is its
+        ``updated_at``): a replacement the user saved in the meantime must not be
+        invalidated by a request that read the old row. Without a version
+        nothing is changed.
+        """
+        if self.health is None or version is None:
             return
         try:
-            await self.health.mark_invalid(principal_key, REASON_DECRYPT_FAILED)
+            await self.health.mark_invalid(
+                principal_key, REASON_DECRYPT_FAILED, expected_updated_at=version
+            )
         except Exception:  # noqa: BLE001 - recording must never change the answer
             pass
 

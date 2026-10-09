@@ -266,6 +266,16 @@ class TestTamperResistance:
         with pytest.raises(TokenDecryptionError):
             store.get(TID, OID_A)
 
+    def test_a_decryption_failure_carries_the_version_of_the_row_that_failed(
+        self, store: TokenStore
+    ) -> None:
+        info = _put(store)
+        with _raw(store) as conn:
+            conn.execute("UPDATE canvas_tokens SET ciphertext = x'00'")
+        with pytest.raises(TokenDecryptionError) as exc:
+            store.get(TID, OID_A)
+        assert exc.value.updated_at == info.updated_at
+
     def test_swapping_ciphertext_between_rows_fails(self, store: TokenStore) -> None:
         _put(store, oid=OID_A, token=TOKEN_A)
         _put(store, oid=OID_B, token=TOKEN_B)
