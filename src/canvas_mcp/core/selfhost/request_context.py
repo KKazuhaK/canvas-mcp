@@ -7,6 +7,13 @@ policy, looks up the caller's own Canvas token in the encrypted store, and
 publishes both through the request ContextVars that the Canvas client reads.
 Nothing here trusts a request header, and nothing outlives the request.
 
+A row whose token is marked invalid (Canvas rejected it, it could not be
+decrypted, or an administrator revoked it) gets no credentials at all: the
+request carries the re-enroll message instead, so not one Canvas request is made
+with that token. Each request also starts a shared token-health object, so a
+token found dead part-way through (see :mod:`canvas_mcp.core.token_health`) stops
+the rest of that request's Canvas calls.
+
 The Canvas school comes only from the caller's own stored row, mapped through
 the operator's :class:`SchoolPolicy`. A host the current settings no longer
 allow is treated as "not enrolled": no Canvas call is ever made for it, and
@@ -26,15 +33,23 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..credentials import (
     RequestCredentials,
+    RequestTokenState,
     clear_http_request_context,
     set_http_request_active,
     set_missing_credentials_message,
     set_request_credentials,
     set_request_principal,
+    set_request_token_state,
 )
 from ..logging import log_error, log_warning
 from .identity import ClaimsDenied, ClaimsPolicy, evaluate_entra_claims
 from .schools import SchoolPolicy
+from .token_store import (
+    REASON_DECRYPT_FAILED,
+    REASON_REVOKED_BY_ADMIN,
+    STATUS_INVALID,
+    TokenDecryptionError,
+)
 
 _GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -51,6 +66,14 @@ class StoredTokenLike(Protocol):
 
     @property
     def canvas_host(self) -> str | None: ...
+
+
+class TokenInvalidator(Protocol):
+    """The slice of the token-health service the middleware uses."""
+
+    async def mark_invalid(
+        self, principal_key: str, reason: str, *, expected_updated_at: int | None = None
+    ) -> bool: ...
 
 
 class CanvasTokenReader(Protocol):
@@ -74,6 +97,33 @@ def unreadable_token_message(account_url: str) -> str:
         "Your stored Canvas access token could not be read. "
         f"Open {account_url} and enroll it again."
     )
+
+
+def token_rejected_message(account_url: str) -> str:
+    """Canvas rejected the stored token: the model relays this to the user."""
+    return (
+        "Canvas rejected your stored access token (it was revoked, expired, or "
+        f"regenerated). Open {account_url}, sign in, and enroll a new Canvas token "
+        "there (never paste it into this chat). Your other settings are kept."
+    )
+
+
+def token_revoked_message(account_url: str) -> str:
+    """The server administrator marked the stored token invalid."""
+    return (
+        "The server administrator marked your stored Canvas access token as invalid. "
+        f"Open {account_url}, sign in, and enroll a new Canvas token there "
+        "(never paste it into this chat). Your other settings are kept."
+    )
+
+
+def invalid_token_message(account_url: str, reason: str | None) -> str:
+    """The message for a row whose status is invalid, by the reason recorded."""
+    if reason == REASON_DECRYPT_FAILED:
+        return unreadable_token_message(account_url)
+    if reason == REASON_REVOKED_BY_ADMIN:
+        return token_revoked_message(account_url)
+    return token_rejected_message(account_url)
 
 
 async def _send_json(send: Send, status: int, message: str) -> None:
@@ -106,6 +156,7 @@ class SelfhostRequestContextMiddleware:
         store: CanvasTokenReader,
         schools: SchoolPolicy,
         account_url: str,
+        health: TokenInvalidator | None = None,
     ) -> None:
         self.app = app
         self.mcp_path = mcp_path
@@ -113,6 +164,7 @@ class SelfhostRequestContextMiddleware:
         self.store = store
         self.schools = schools
         self.account_url = account_url
+        self.health = health
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -152,23 +204,45 @@ class SelfhostRequestContextMiddleware:
                 return
 
             set_request_principal(verdict)
-            await self._attach_canvas_credentials(verdict.tenant_id, verdict.object_id)
+            set_request_token_state(RequestTokenState())
+            await self._attach_canvas_credentials(
+                verdict.tenant_id, verdict.object_id, verdict.key
+            )
             await self.app(scope, receive, send)
         finally:
             clear_http_request_context()
 
-    async def _attach_canvas_credentials(self, tenant_id: str, object_id: str) -> None:
+    async def _attach_canvas_credentials(
+        self, tenant_id: str, object_id: str, principal_key: str
+    ) -> None:
         try:
             row: Any = await anyio.to_thread.run_sync(self.store.get, tenant_id, object_id)
-        except Exception:
+        except Exception as exc:
             # The exception text is never logged: it can sit next to key or
             # token material.
             log_error("stored Canvas token unreadable", entra_oid=object_id)
-            set_missing_credentials_message(unreadable_token_message(self.account_url))
+            if isinstance(exc, TokenDecryptionError):
+                # Only a failed decryption invalidates the row; a locked or
+                # failing database says nothing about the token.
+                await self._record_unreadable(principal_key)
+            message = unreadable_token_message(self.account_url)
+            set_missing_credentials_message(message)
+            self._mark_request_dead(message)
             return
 
         if row is None:
             set_missing_credentials_message(not_enrolled_message(self.account_url))
+            return
+
+        if getattr(row, "status", None) == STATUS_INVALID:
+            # Canvas rejected this token, an administrator revoked it, or it
+            # could not be decrypted before: mount no credentials, so this
+            # request makes no Canvas call, and say how to fix it.
+            message = invalid_token_message(
+                self.account_url, getattr(row, "invalid_reason", None)
+            )
+            set_missing_credentials_message(message)
+            self._mark_request_dead(message)
             return
 
         school = self.schools.resolve_stored(getattr(row, "canvas_host", None))
@@ -183,7 +257,24 @@ class SelfhostRequestContextMiddleware:
         set_request_credentials(
             RequestCredentials(api_token=row.api_token, api_url=school.api_url)
         )
+        version = getattr(row, "updated_at", None)
+        set_request_token_state(
+            RequestTokenState(token_version=version if isinstance(version, int) else None)
+        )
         try:
             await anyio.to_thread.run_sync(self.store.touch, tenant_id, object_id)
         except Exception:
             pass  # last-used bookkeeping must never fail a request
+
+    async def _record_unreadable(self, principal_key: str) -> None:
+        """A stored token that cannot be decrypted is marked invalid (decrypt_failed)."""
+        if self.health is None:
+            return
+        try:
+            await self.health.mark_invalid(principal_key, REASON_DECRYPT_FAILED)
+        except Exception:  # noqa: BLE001 - recording must never change the answer
+            pass
+
+    @staticmethod
+    def _mark_request_dead(message: str) -> None:
+        set_request_token_state(RequestTokenState(dead=True, message=message))

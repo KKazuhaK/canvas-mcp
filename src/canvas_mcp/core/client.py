@@ -18,6 +18,12 @@ from .credentials import (
     missing_credentials_message,
 )
 from .logging import log_debug, log_error, log_warning, sanitize_url
+from .token_health import (
+    check_for_dead_token,
+    dead_token_failure,
+    dead_token_message,
+    note_canvas_success,
+)
 from .write_outcome import NO_WRITE_STATUSES, RequestFailure, WriteOutcome
 
 # Rate limit retry configuration
@@ -427,6 +433,10 @@ async def canvas_authenticated_client() -> AsyncIterator[httpx.AsyncClient]:
 
     req_creds = get_request_credentials()
     if req_creds:
+        dead = dead_token_message()
+        if dead is not None:
+            # This request already found the token dead: send nothing.
+            raise PermissionError(dead)
         config = get_config()
         async with httpx.AsyncClient(
             headers=_canvas_auth_headers(req_creds.api_token),
@@ -474,6 +484,12 @@ async def make_canvas_request(
 
     # Check for per-request credentials (HTTP transport mode)
     req_creds = get_request_credentials()
+    if req_creds:
+        # A token found dead earlier in this request (a sibling of a gather, an
+        # earlier page) stops every later call before it is sent.
+        short_circuit = dead_token_failure()
+        if short_circuit is not None:
+            return short_circuit
 
     # Ensure the endpoint starts with a slash
     if not endpoint.startswith('/'):
@@ -622,6 +638,7 @@ async def make_canvas_request(
 
                     # Audit: log successful data access
                     log_data_access(method, endpoint, "success")
+                    await note_canvas_success(req_creds)
 
                     return result
 
@@ -641,6 +658,19 @@ async def make_canvas_request(
                         log_warning(f"Rate limited (429). Retrying in {wait_time}s...", attempt=attempt + 1, max_retries=MAX_RETRIES)
                         await asyncio.sleep(wait_time)
                         continue
+
+                    # A 401 is never retried. If it looks like a dead token and
+                    # Canvas confirms it, report that instead of the raw error;
+                    # any other 401 stays an ordinary (permission) error below.
+                    if e.response.status_code == 401:
+                        dead_message = await check_for_dead_token(e.response, req_creds)
+                        if dead_message is not None:
+                            log_error(
+                                f"API error on {sanitize_url(endpoint)}",
+                                status_code=401,
+                            )
+                            log_data_access(method, endpoint, "error", "HTTP 401 (token rejected)")
+                            return RequestFailure(dead_message, WriteOutcome.REJECTED)
 
                     # Not a rate limit error or out of retries - format and return error
                     error_message = f"HTTP error: {e.response.status_code}"
@@ -812,6 +842,12 @@ async def upload_file_to_storage(
                             confirm_response = await canvas_client.get(
                                 str(confirm_url), follow_redirects=False
                             )
+                            if confirm_response.status_code == 401:
+                                dead_message = await check_for_dead_token(
+                                    confirm_response, get_request_credentials()
+                                )
+                                if dead_message is not None:
+                                    return {"error": dead_message}
                             confirm_response.raise_for_status()
                             confirmed: dict[str, Any] = confirm_response.json()
                             return confirmed

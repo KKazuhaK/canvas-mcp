@@ -36,6 +36,7 @@ from .client import (
 )
 from .config import get_config
 from .credentials import get_request_credentials, is_http_request_active
+from .token_health import check_for_dead_token
 from .validation import coerce_canvas_id
 
 #: Canvas statuses that mean "you may not list/see this through this route".
@@ -265,6 +266,12 @@ async def stream_file_download(
                         except httpx.InvalidURL:
                             return {"error": "Download redirected to an invalid URL"}
                         continue
+                    if status == 401 and on_canvas:
+                        dead_message = await check_for_dead_token(
+                            response, get_request_credentials()
+                        )
+                        if dead_message is not None:
+                            return {"error": dead_message}
                     if status >= 400:
                         return {"error": f"HTTP {status} while downloading the file"}
 

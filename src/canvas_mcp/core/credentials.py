@@ -45,6 +45,21 @@ class RequestPrincipal:
     is_owner: bool
 
 
+@dataclass
+class RequestTokenState:
+    """Mutable health of the caller's Canvas token, shared by everything in one request.
+
+    A ContextVar holds one instance per request, so concurrent sub-requests of a
+    ``gather`` (which each run in a copy of the context) all see the same object:
+    once one of them finds the token dead, the others stop sending requests.
+    ``token_version`` is the ``updated_at`` of the stored row the request used.
+    """
+
+    token_version: int | None = None
+    dead: bool = False
+    message: str | None = None
+
+
 # Random per-process key: derives opaque cache keys from Canvas tokens in the
 # legacy HTTP mode without ever keeping or logging the token itself.
 _PROCESS_KEY = secrets.token_bytes(32)
@@ -65,6 +80,11 @@ _request_principal: ContextVar[RequestPrincipal | None] = ContextVar(
 
 _missing_credentials_message: ContextVar[str | None] = ContextVar(
     "missing_credentials_message", default=None
+)
+
+
+_request_token_state: ContextVar[RequestTokenState | None] = ContextVar(
+    "request_token_state", default=None
 )
 
 
@@ -117,6 +137,16 @@ def missing_credentials_message() -> str:
     return _missing_credentials_message.get() or LEGACY_MISSING_CREDENTIALS_MESSAGE
 
 
+def get_request_token_state() -> RequestTokenState | None:
+    """The shared token-health object of the current request, if one was started."""
+    return _request_token_state.get()
+
+
+def set_request_token_state(state: RequestTokenState | None) -> Token[RequestTokenState | None]:
+    """Start (or clear) the shared token-health object for the current request."""
+    return _request_token_state.set(state)
+
+
 def current_principal_key() -> str:
     """An opaque key for whoever is making the current request.
 
@@ -147,3 +177,4 @@ def clear_http_request_context() -> None:
     _http_request_active.set(False)
     _request_principal.set(None)
     _missing_credentials_message.set(None)
+    _request_token_state.set(None)

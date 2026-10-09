@@ -336,3 +336,13 @@ def make_docx():
     """Builder: heading, paragraph, table, paragraph."""
     pytest.importorskip("docx")
     return _make_docx
+
+
+@pytest.fixture(autouse=True)
+def no_token_health_monitor():
+    """No test may leave a token-health monitor registered for the next one."""
+    from canvas_mcp.core.token_health import set_token_health_monitor
+
+    set_token_health_monitor(None)
+    yield
+    set_token_health_monitor(None)

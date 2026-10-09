@@ -18,12 +18,14 @@ from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp
 
 from ..config import Config, validate_canvas_url_scheme
+from ..token_health import set_token_health_monitor
 from .edge_guard import SelfhostEdgeGuard
 from .identity import ClaimsPolicy, authorize_id_token_claims
 from .oauth import cull_expired_oauth_state
 from .request_context import SelfhostRequestContextMiddleware
 from .schools import SchoolPolicy, is_blocked_hostname
 from .settings import SelfhostConfigError, SelfhostSettings
+from .token_health import TokenHealth
 from .tool_gate import SelfhostCredentialGate
 
 if TYPE_CHECKING:
@@ -34,11 +36,12 @@ HEALTH_PATH = "/healthz"
 
 @dataclass(frozen=True)
 class SelfhostRuntime:
-    """What the running server shares: validated settings, token store, claim policy."""
+    """What the running server shares: settings, token store, claim policy, token health."""
 
     settings: SelfhostSettings
     store: TokenStore
     policy: ClaimsPolicy
+    health: TokenHealth
 
 
 def _writable_directory_problem(name: str, path: Path) -> str | None:
@@ -183,7 +186,8 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         required_role=settings.required_role,
         owner_role=settings.owner_role,
     )
-    return SelfhostRuntime(settings=settings, store=store, policy=policy)
+    health = TokenHealth(store, account_url=settings.account_url)
+    return SelfhostRuntime(settings=settings, store=store, policy=policy, health=health)
 
 
 def install_selfhost(
@@ -198,6 +202,8 @@ def install_selfhost(
 
     settings = runtime.settings
     mcp.add_middleware(SelfhostCredentialGate())
+    # The Canvas client confirms a suspected dead token through this service.
+    set_token_health_monitor(runtime.health)
 
     register_account_routes(
         mcp,
@@ -245,6 +251,7 @@ def build_selfhost_asgi_app(
                 store=runtime.store,
                 schools=selfhost_school_policy(settings, config),
                 account_url=settings.account_url,
+                health=runtime.health,
             )
         ],
         host_origin_protection=True,

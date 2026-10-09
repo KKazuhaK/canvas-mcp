@@ -112,7 +112,9 @@ def _emit(event: dict[str, Any]) -> None:
     # The identity only: current_principal_key() also carries the school.
     principal = get_request_principal()
     if principal is not None and principal.key.startswith("entra:"):
-        event["principal"] = principal.key
+        # An event that names its own subject (an admin acting on someone else's
+        # enrollment) keeps it.
+        event.setdefault("principal", principal.key)
     _audit_logger.info(json.dumps(event, default=str))
 
 
@@ -203,6 +205,44 @@ def log_access_change(
     if upn:
         event["upn"] = upn
     event["source"] = source
+    _emit(event)
+
+
+def log_token_event(
+    action: str,
+    principal_key: str,
+    *,
+    reason: str | None = None,
+    outcome: str | None = None,
+    actor: str | None = None,
+) -> None:
+    """Audit a change in the health of a stored Canvas token.
+
+    Records only the principal key (an opaque identity string, never a Canvas
+    token, name or e-mail address) and short closed-set codes.
+
+    Args:
+        action: "invalidated", "recheck", "admin_marked_invalid",
+            "identity_change_detected" or "identity_change_confirmed".
+        principal_key: Whose token it is.
+        reason: Why a token was invalidated (closed set).
+        outcome: Result of a re-check ("restored", "still_rejected", "unavailable").
+        actor: Principal key of the person who did it, when that is not the owner
+            of the token (an administrator).
+    """
+    if not _access_events_enabled:
+        return
+    event: dict[str, Any] = {
+        "event_type": "canvas_token",
+        "action": action,
+        "principal": principal_key,
+    }
+    if reason:
+        event["reason"] = reason
+    if outcome:
+        event["outcome"] = outcome
+    if actor:
+        event["actor"] = actor
     _emit(event)
 
 

@@ -19,6 +19,7 @@ from fastmcp.tools import ToolResult
 from ..credentials import (
     get_request_credentials,
     get_request_principal,
+    get_request_token_state,
     missing_credentials_message,
 )
 from ..logging import log_error
@@ -42,7 +43,14 @@ def _check_request_context(error_type: type[Exception]) -> None:
         raise error_type(_IDENTITY_MISMATCH)
 
     if get_request_credentials() is None:
+        # Also the answer for a token marked invalid: the request context mounts
+        # no credentials for it and carries the re-enroll message instead, so
+        # the call is refused before any Canvas request is made.
         raise error_type(missing_credentials_message())
+
+    state = get_request_token_state()
+    if state is not None and state.dead and state.message:
+        raise error_type(state.message)
 
 
 class SelfhostCredentialGate(Middleware):
