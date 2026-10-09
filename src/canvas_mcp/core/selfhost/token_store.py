@@ -39,6 +39,12 @@ re-check can restore it. Opening an older database migrates it in place,
 idempotently. A version 2 database is refused by older
 servers, so roll back only together with a backup taken before the upgrade.
 
+The same database holds one more table, ``user_tool_prefs``: the write tools each
+principal has switched on at ``/account`` (see :mod:`.tool_prefs`). It is keyed by
+``principal_key``, is created idempotently when the store opens (the schema version
+stays 2, so an older server simply ignores it), and is independent of the token row:
+replacing, deleting or invalidating a token does not touch it.
+
 Keys come from ``CANVAS_TOKEN_KEYS`` (``kid:base64key[,kid:base64key...]``).
 The first entry encrypts new rows; every entry decrypts. Error messages never
 contain key or token material.
@@ -51,13 +57,14 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import os
 import pathlib
 import re
 import sqlite3
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
@@ -126,6 +133,15 @@ _SCHEMA_TOKENS = (
     " PRIMARY KEY (tenant_id, object_id)"
     ") WITHOUT ROWID"
 )
+_SCHEMA_TOOL_PREFS = (
+    "CREATE TABLE IF NOT EXISTS user_tool_prefs ("
+    " principal_key TEXT PRIMARY KEY,"
+    " enabled_write_tools TEXT NOT NULL DEFAULT '[]',"
+    " enabled_at TEXT NOT NULL DEFAULT '{}',"
+    " updated_at INTEGER NOT NULL,"
+    " updated_via TEXT NOT NULL DEFAULT 'account_web'"
+    ") WITHOUT ROWID"
+)
 _SCHEMA_PRINCIPAL_INDEX = (
     "CREATE UNIQUE INDEX IF NOT EXISTS canvas_tokens_principal_key"
     " ON canvas_tokens (principal_key)"
@@ -148,6 +164,9 @@ _INFO_COLUMNS = (
     " principal_key, status, invalid_reason, invalid_since, last_verified_at,"
     " expires_hint_at"
 )
+_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_MAX_PREF_TOOLS = 256
+_MAX_PREF_VIA = 32
 _MAX_EXPIRES_HINT = 4_102_444_800  # 2100-01-01 UTC: a sanity bound, not a policy
 
 
@@ -216,6 +235,58 @@ class EnrollmentInfo:
     invalid_since: int | None = None
     last_verified_at: int | None = None
     expires_hint_at: int | None = None
+
+
+@dataclass(frozen=True)
+class ToolPrefs:
+    """The write tools a principal has switched on, by explicit name.
+
+    ``enabled_write_tools`` may name tools the server no longer offers: they are
+    kept (so they come back if the operator offers them again) and ignored when
+    the effective set is worked out. ``enabled_at`` maps a name to the epoch time
+    it was switched on.
+    """
+
+    principal_key: str
+    enabled_write_tools: frozenset[str]
+    enabled_at: dict[str, int]
+    updated_at: int
+    updated_via: str
+
+
+def _validate_tool_names(names: Iterable[str]) -> frozenset[str]:
+    """Explicit, well-formed tool names only; raises ValueError otherwise."""
+    result: set[str] = set()
+    for name in names:
+        if not isinstance(name, str) or not _TOOL_NAME_RE.fullmatch(name):
+            raise ValueError("tool names must be lower-case identifiers")
+        result.add(name)
+    if len(result) > _MAX_PREF_TOOLS:
+        raise ValueError("too many tool names")
+    return frozenset(result)
+
+
+def _decode_tool_prefs(
+    principal_key: str, names_json: str, at_json: str, updated_at: int, via: str
+) -> ToolPrefs:
+    """Read a stored row; anything unreadable counts as "nothing enabled" (fail closed)."""
+    names: frozenset[str] = frozenset()
+    stamps: dict[str, int] = {}
+    try:
+        raw_names = json.loads(names_json)
+        if isinstance(raw_names, list):
+            names = _validate_tool_names(raw_names)
+        raw_at = json.loads(at_json)
+        if isinstance(raw_at, dict):
+            stamps = {
+                key: value
+                for key, value in raw_at.items()
+                if key in names and isinstance(value, int) and not isinstance(value, bool)
+            }
+    except (ValueError, TypeError):
+        names = frozenset()
+        stamps = {}
+    return ToolPrefs(principal_key, names, stamps, int(updated_at), str(via))
 
 
 def _decode_key(text: str) -> bytes | None:
@@ -531,6 +602,7 @@ class TokenStore:
                 if row is None:
                     conn.execute(_SCHEMA_TOKENS)
                     self._migrate_columns(conn)
+                    conn.execute(_SCHEMA_TOOL_PREFS)
                     conn.execute(
                         "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
                         (str(SCHEMA_VERSION),),
@@ -549,6 +621,7 @@ class TokenStore:
                         )
                     conn.execute(_SCHEMA_TOKENS)
                     self._migrate_columns(conn)
+                    conn.execute(_SCHEMA_TOOL_PREFS)
                     if version < SCHEMA_VERSION:
                         conn.execute(
                             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
@@ -900,6 +973,70 @@ class TokenStore:
                 )
         except (sqlite3.Error, ValueError, OSError):
             return
+
+    # -- per-user write-tool preferences -------------------------------------
+
+    def get_tool_prefs(self, principal_key: str) -> ToolPrefs | None:
+        """The stored write-tool preferences of a principal, or None if never saved."""
+        key = _validate_principal_key(principal_key)
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT enabled_write_tools, enabled_at, updated_at, updated_via"
+                " FROM user_tool_prefs WHERE principal_key = ?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _decode_tool_prefs(key, row[0], row[1], row[2], row[3])
+
+    def set_tool_prefs(
+        self,
+        principal_key: str,
+        enabled_write_tools: Iterable[str],
+        *,
+        via: str = "account_web",
+    ) -> ToolPrefs:
+        """Replace a principal's switched-on write tools with exactly these names.
+
+        Only explicit names are stored. A name that was already on keeps its
+        ``enabled_at``; a new one gets the current time. Raises ValueError for a
+        malformed name or an oversized list.
+        """
+        key = _validate_principal_key(principal_key)
+        names = _validate_tool_names(enabled_write_tools)
+        if not isinstance(via, str) or not 1 <= len(via) <= _MAX_PREF_VIA or not via.isascii():
+            raise ValueError("via must be a short ASCII label")
+        now = self._now()
+        with self._write() as conn:
+            row = conn.execute(
+                "SELECT enabled_write_tools, enabled_at, updated_at, updated_via"
+                " FROM user_tool_prefs WHERE principal_key = ?",
+                (key,),
+            ).fetchone()
+            previous = (
+                _decode_tool_prefs(key, row[0], row[1], row[2], row[3]).enabled_at
+                if row is not None
+                else {}
+            )
+            stamps = {name: previous.get(name, now) for name in names}
+            conn.execute(
+                "INSERT INTO user_tool_prefs"
+                " (principal_key, enabled_write_tools, enabled_at, updated_at, updated_via)"
+                " VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT (principal_key) DO UPDATE SET"
+                " enabled_write_tools = excluded.enabled_write_tools,"
+                " enabled_at = excluded.enabled_at,"
+                " updated_at = excluded.updated_at,"
+                " updated_via = excluded.updated_via",
+                (
+                    key,
+                    json.dumps(sorted(names)),
+                    json.dumps(stamps, sort_keys=True),
+                    now,
+                    via,
+                ),
+            )
+        return ToolPrefs(key, names, stamps, now, via)
 
     def rotate(self) -> int:
         """Re-encrypt every row not under the active key; returns rows changed."""

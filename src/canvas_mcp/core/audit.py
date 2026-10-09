@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import sys
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -243,6 +244,41 @@ def log_token_event(
         event["outcome"] = outcome
     if actor:
         event["actor"] = actor
+    _emit(event)
+
+
+def log_write_tools_event(
+    action: str,
+    principal_key: str,
+    *,
+    enabled: Iterable[str] = (),
+    disabled: Iterable[str] = (),
+    outcome: str | None = None,
+) -> None:
+    """Audit a change to the write tools a user switched on at /account.
+
+    Records the principal key and tool names only (a fixed vocabulary), never a
+    token, name or e-mail address.
+
+    Args:
+        action: "changed" (a switch was saved), "cleared" (the user turned every
+            write tool off) or "refused" (a change was not saved).
+        principal_key: Whose switches they are.
+        enabled: Tool names switched on by this change.
+        disabled: Tool names switched off by this change.
+        outcome: Why a change was refused ("sign_in_too_old").
+    """
+    if not _access_events_enabled:
+        return
+    event: dict[str, Any] = {
+        "event_type": "write_tools",
+        "action": action,
+        "principal": principal_key,
+        "enabled": sorted(enabled),
+        "disabled": sorted(disabled),
+    }
+    if outcome:
+        event["outcome"] = outcome
     _emit(event)
 
 

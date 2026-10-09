@@ -1856,6 +1856,7 @@ class TestRegistration:
             "/account/admin/revoke",
             "/account/admin/invalidate",
             "/account/schools",
+            "/account/write-tools",
         }
         client = TestClient(mcp.http_app(), base_url=BASE, follow_redirects=False)
         response = client.get("/account")
@@ -1959,3 +1960,73 @@ class TestTokenHealthChinese:
         assert "Needs re-enroll" not in text and "Mark as invalid" not in text
         filtered = h.client.get("/account/admin", params={"filter": "needs_reenroll", **ZH}).text
         assert "显示全部" in filtered
+
+
+# -- write tools in Chinese -----------------------------------------------------
+
+
+class TestWriteToolsChinese:
+    """The Write tools section and its notices, in both languages."""
+
+    OFFERED = ["list_courses", "send_message", "submit_assignment", "create_assignment"]
+
+    def rig(self, tmp_path: pathlib.Path) -> Harness:
+        from canvas_mcp.core.selfhost.tool_prefs import WriteToolCatalog
+
+        async def listing() -> list[str]:
+            return list(self.OFFERED)
+
+        return build_harness(
+            tmp_path,
+            write_tools=WriteToolCatalog(
+                ceiling={"send_message", "create_assignment"}, list_registered=listing
+            ),
+        )
+
+    def test_the_section_the_layers_and_the_notes(self, tmp_path: pathlib.Path) -> None:
+        h = self.rig(tmp_path)
+        sign_in(h)
+        text = h.client.get(ACCOUNT_PATH, params=ZH).text
+        assert "<h2>写工具</h2>" in text
+        assert "服务器允许" in text and "你已开启" in text and "课程允许" in text
+        assert "写工具仍然会先预览并要求确认" in text
+        assert "开启新的对话或重新连接连接器" in text
+        assert "<legend>站内信</legend>" in text and "<legend>作业提交与评论</legend>" in text
+        assert "<legend>其他写工具</legend>" in text
+        assert "以你的名义向你指定的人发送 Canvas 站内信" in text  # send_message
+        assert "以你的名义修改 Canvas 中的内容。" in text  # create_assignment, the generic note
+        assert "本服务器未开放" in text  # submit_assignment is over the ceiling
+        assert "保存" in text and "全部关闭" in text
+        for english in ("The server allows it", "Turn all off", "not offered on this server", "Write tools"):
+            assert english not in text
+        english = h.client.get(ACCOUNT_PATH, params=EN).text
+        assert "<h2>Write tools</h2>" in english
+        assert not CJK.search(strip_chrome(english))
+
+    def test_the_notices(self, tmp_path: pathlib.Path) -> None:
+        h = self.rig(tmp_path)
+        sign_in(h)
+        use_lang(h, "zh")
+        csrf = csrf_of(h)
+        saved = post_form(h, "/account/write-tools", {"csrf": csrf, "tool.send_message": "1"})
+        assert "写工具设置已保存。" in saved.text
+        again = post_form(h, "/account/write-tools", {"csrf": csrf, "tool.send_message": "1"})
+        assert "没有需要保存的更改。" in again.text
+        h.now += 700
+        refused = post_form(
+            h, "/account/write-tools", {"csrf": csrf, "tool.send_message": "1", "tool.create_assignment": "1"}
+        )
+        assert refused.status_code == 403
+        assert "开启写工具需要最近 10 分钟内的登录" in refused.text
+        assert "needs a sign-in" not in refused.text
+
+    def test_the_no_write_tools_notice(self, tmp_path: pathlib.Path) -> None:
+        from canvas_mcp.core.selfhost.tool_prefs import WriteToolCatalog
+
+        async def listing() -> list[str]:
+            return ["list_courses"]
+
+        h = build_harness(tmp_path, write_tools=WriteToolCatalog(ceiling=set(), list_registered=listing))
+        sign_in(h)
+        text = h.client.get(ACCOUNT_PATH, params=ZH).text
+        assert "本服务器没有开放任何写工具" in text

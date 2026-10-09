@@ -29,6 +29,10 @@ Security notes:
   once a minute per user) that probes Canvas once and can restore it. Replacing a
   token with one that belongs to a different Canvas user at the same school needs
   an explicit confirmation on the page and is logged.
+* Write tools are off for everyone until the user ticks them in the "Write tools"
+  section (POST, CSRF, Origin). Turning anything on needs a session issued within
+  the last ten minutes; turning off never does. Only this page can change the
+  switches (see :mod:`.tool_prefs`).
 """
 
 from __future__ import annotations
@@ -85,7 +89,16 @@ from canvas_mcp.core.selfhost.token_store import (
     EnrollmentInfo,
     TokenDecryptionError,
     TokenStore,
+    ToolPrefs,
 )
+from canvas_mcp.core.selfhost.tool_prefs import (
+    OTHER_GROUP,
+    WRITE_TOOL_GROUPS,
+    ToolPrefsCache,
+    WriteToolCatalog,
+    user_can_enable,
+)
+from canvas_mcp.core.tool_policy import TOOL_EFFECTS, Effect
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -103,6 +116,7 @@ _ADMIN_PATH = "/account/admin"
 _ADMIN_REVOKE_PATH = "/account/admin/revoke"
 _ADMIN_INVALIDATE_PATH = "/account/admin/invalidate"
 _SCHOOLS_PATH = "/account/schools"
+_WRITE_TOOLS_PATH = "/account/write-tools"
 
 LOGIN_COOKIE = "__Host-cmcp_login"
 SESSION_COOKIE = "__Host-cmcp_session"
@@ -122,6 +136,10 @@ _RATE_LIMIT_WINDOW_SECONDS = 600
 _RATE_LIMIT_MAX_KEYS = 1024
 _RECHECK_LIMIT_ATTEMPTS = 1
 _RECHECK_LIMIT_WINDOW_SECONDS = 60
+# Turning a write tool ON needs a session issued this recently (OFF never does).
+_FRESH_SIGN_IN_SECONDS = 600
+# One checkbox per offered write tool plus the CSRF token and a button.
+_WRITE_FORM_MAX_FIELDS = 120
 _EXPIRY_REMINDER_DAYS = 7
 _EXPIRY_MAX_YEARS = 10
 _FILTER_NEEDS_REENROLL = "needs_reenroll"
@@ -264,6 +282,9 @@ class _Session:
     owner: bool
     csrf: str
     exp: int
+    # When the sign-in happened (epoch seconds); 0 for a cookie that carries none,
+    # which counts as "not recent".
+    iat: int = 0
 
 
 class _RateLimiter:
@@ -621,8 +642,12 @@ class _AccountApp:
         directory: SchoolDirectoryLike | None = None,
         resolve_host: HostResolver | None = None,
         health: TokenHealth | None = None,
+        write_tools: WriteToolCatalog | None = None,
+        tool_prefs: ToolPrefsCache | None = None,
     ) -> None:
         self.cfg = cfg
+        self.write_tools = write_tools
+        self.tool_prefs = tool_prefs
         self.schools = cfg.schools
         self.base = cfg.public_base_url.rstrip("/")
         self.tenant = cfg.tenant_id.lower()
@@ -674,6 +699,7 @@ class _AccountApp:
             (_ADMIN_REVOKE_PATH, {"POST": self.admin_revoke}),
             (_ADMIN_INVALIDATE_PATH, {"POST": self.admin_invalidate}),
             (_SCHOOLS_PATH, {"GET": self.schools_page}),
+            (_WRITE_TOOLS_PATH, {"POST": self.save_write_tools}),
         ]
         return [
             Route(path, self._endpoint(handlers), methods=_ALL_METHODS)
@@ -796,7 +822,14 @@ class _AccountApp:
             or not csrf
         ):
             return None
-        return _Session(tid, oid.lower(), name, upn, owner, csrf, exp)
+        raw_iat = payload.get("iat")
+        iat = raw_iat if isinstance(raw_iat, int) and not isinstance(raw_iat, bool) else 0
+        return _Session(tid, oid.lower(), name, upn, owner, csrf, exp, iat)
+
+    def _signed_in_recently(self, session: _Session) -> bool:
+        """True when this session was issued within the last ``_FRESH_SIGN_IN_SECONDS``."""
+        age = self.clock() - session.iat
+        return session.iat > 0 and -_IAT_SKEW_SECONDS <= age <= _FRESH_SIGN_IN_SECONDS
 
     def _csrf_ok(self, session: _Session, supplied: str | None) -> bool:
         if not supplied:
@@ -819,7 +852,7 @@ class _AccountApp:
         selected = self._selection(
             request.query_params.get("school"), session, request.query_params.get("sig")
         )
-        return self.account_page(session, info, selected=selected)
+        return await self.account_page(session, info, selected=selected)
 
     def _pick_signature(self, session: _Session, host: str) -> str:
         """Proof that ``host`` came from this session's own school search results."""
@@ -1098,7 +1131,7 @@ class _AccountApp:
             f"{self._settings_link(info)}{recheck}</section>"
         )
 
-    def account_page(
+    async def account_page(
         self,
         session: _Session,
         info: EnrollmentInfo | None,
@@ -1106,6 +1139,7 @@ class _AccountApp:
         status: int = 200,
         selected: str | None = None,
         identity_change: tuple[str, str] | None = None,
+        write_notice: tuple[Literal["error", "ok"], str] | None = None,
     ) -> Response:
         parts: list[str] = [
             _header(session),
@@ -1166,6 +1200,7 @@ class _AccountApp:
             )
         parts.append(self._search_section())
         parts.append(self._mcp_url_section())
+        parts.append(await self._write_tools_section(session, write_notice))
         return self.html_page(status, _bi("Canvas 账户", "Canvas account"), "".join(parts))
 
     # -- school search ---------------------------------------------------------
@@ -1543,7 +1578,9 @@ class _AccountApp:
 
     # -- POST plumbing -------------------------------------------------------
 
-    async def _read_form(self, request: Request) -> dict[str, str] | Response:
+    async def _read_form(
+        self, request: Request, max_fields: int = 10
+    ) -> dict[str, str] | Response:
         media = request.headers.get("content-type", "").split(";")[0].strip().lower()
         if media != _FORM_CONTENT_TYPE:
             return self.message_page(
@@ -1576,14 +1613,14 @@ class _AccountApp:
         try:
             text = b"".join(chunks).decode("utf-8")
             parsed = urllib.parse.parse_qs(
-                text, keep_blank_values=True, max_num_fields=10
+                text, keep_blank_values=True, max_num_fields=max_fields
             )
         except (UnicodeDecodeError, ValueError):
             return self.message_page(400, _bi("请求格式不正确。", "Malformed request."))
         return {key: values[0] for key, values in parsed.items() if values}
 
     async def _guard_post(
-        self, request: Request, *, owner_only: bool = False
+        self, request: Request, *, owner_only: bool = False, max_fields: int = 10
     ) -> tuple[_Session, dict[str, str]] | Response:
         """Session, Origin, content type, size and CSRF checks for a POST."""
         session = self.session_from(request)
@@ -1597,7 +1634,7 @@ class _AccountApp:
             return self.message_page(
                 403, _bi("请求来源不被允许。", "The request origin is not allowed.")
             )
-        form = await self._read_form(request)
+        form = await self._read_form(request, max_fields)
         if isinstance(form, Response):
             return form
         if not self._csrf_ok(session, form.get("csrf")):
@@ -1806,7 +1843,7 @@ class _AccountApp:
         identity_change: tuple[str, str] | None = None,
     ) -> Response:
         info = await anyio.to_thread.run_sync(self._safe_info, session)
-        return self.account_page(
+        return await self.account_page(
             session,
             info,
             ("error", message_html),
@@ -1915,11 +1952,290 @@ class _AccountApp:
         logger.info("account recheck restored oid=%s", session.oid)
         audit.log_token_event("recheck", principal_key, outcome="restored")
         fresh = await anyio.to_thread.run_sync(self._safe_info, session)
-        return self.account_page(
+        return await self.account_page(
             session,
             fresh,
             ("ok", _bi("Canvas 接受了这个令牌，已恢复使用。", "Canvas accepts this token again. It is active.")),
         )
+
+    # -- write tools ---------------------------------------------------------
+
+    @staticmethod
+    def _group_title(group: str) -> str:
+        titles = {
+            "planner": _bi("计划与日历", "Planner and calendar"),
+            "submissions": _bi("作业提交与评论", "Submissions and comments"),
+            "modules": _bi("模块完成", "Module completion"),
+            "inbox": _bi("站内信", "Inbox"),
+            OTHER_GROUP: _bi("其他写工具", "Other write tools"),
+        }
+        return titles[group]
+
+    @staticmethod
+    def _tool_note(name: str) -> str:
+        """One line on what the tool changes, with the risk where there is one."""
+        notes = {
+            "create_planner_note": _bi(
+                "在你的 Canvas 计划表里新建一条个人备忘。",
+                "Adds a personal note to your Canvas planner.",
+            ),
+            "update_planner_note": _bi(
+                "修改你的一条计划备忘。", "Edits one of your planner notes."
+            ),
+            "delete_planner_note": _bi(
+                "删除你的一条计划备忘。", "Deletes one of your planner notes."
+            ),
+            "mark_planner_item_complete": _bi(
+                "把计划表里的事项标为已完成或未完成。",
+                "Marks an item in your planner as done or not done.",
+            ),
+            "create_personal_calendar_event": _bi(
+                "在你的个人 Canvas 日历里新建一个事件。",
+                "Adds an event to your personal Canvas calendar.",
+            ),
+            "delete_personal_calendar_event": _bi(
+                "删除你个人日历里的一个事件。",
+                "Deletes an event from your personal calendar.",
+            ),
+            "submit_assignment": _bi(
+                "以你的名义提交作业。提交可能计入成绩，而且可能无法撤回。",
+                "Submits work for an assignment in your name. A submission can count toward your grade and may not be undoable.",
+            ),
+            "comment_on_my_submission": _bi(
+                "在你自己的提交下发表评论，老师可以看到。",
+                "Posts a comment on your own submission, which your instructors can see.",
+            ),
+            "mark_module_item_done": _bi(
+                "替你把模块里的一项标为已完成，这可能解锁后面的内容。",
+                "Marks a module item as done for you, which can unlock later items.",
+            ),
+            "send_message": _bi(
+                "以你的名义向你指定的人发送 Canvas 站内信，对方会看到。",
+                "Sends a Canvas inbox message in your name to the people you pick. They will see it.",
+            ),
+            "reply_to_conversation": _bi(
+                "以你的名义回复一个已有的 Canvas 会话，对方会看到。",
+                "Replies in an existing Canvas conversation in your name. The others will see it.",
+            ),
+        }
+        note = notes.get(name)
+        if note is not None:
+            return note
+        if TOOL_EFFECTS.get(name) is Effect.LOCAL_WRITE:
+            return _bi("在服务器上写入文件。", "Writes files on the server.")
+        return _bi(
+            "以你的名义修改 Canvas 中的内容。",
+            "Changes things in Canvas in your name.",
+        )
+
+    def _write_group_rows(
+        self,
+        group: str,
+        names: list[str],
+        offered: frozenset[str],
+        prefs: ToolPrefs | None,
+    ) -> str:
+        enabled = prefs.enabled_write_tools if prefs is not None else frozenset()
+        rows: list[str] = []
+        for name in names:
+            is_offered = name in offered
+            checked = " checked" if is_offered and name in enabled else ""
+            disabled = "" if is_offered else " disabled"
+            extra = ""
+            if not is_offered:
+                kept = (
+                    _bi("（你之前的选择会保留）", " (your earlier choice is kept)")
+                    if name in enabled
+                    else ""
+                )
+                extra = (
+                    f' <span class="muted small">'
+                    f'{_bi("本服务器未开放", "not offered on this server")}{kept}</span>'
+                )
+            elif name in enabled and prefs is not None and name in prefs.enabled_at:
+                extra = (
+                    f' <span class="muted small">'
+                    f'{_bi("开启于", "on since")} {_e(_fmt_date(prefs.enabled_at[name]))}</span>'
+                )
+            rows.append(
+                '<label class="choice">'
+                f'<input type="checkbox" name="tool.{_e(name)}" value="1"{checked}{disabled}>'
+                f"<span><code>{_e(name)}</code>{extra}<br>"
+                f'<span class="muted small">{self._tool_note(name)}</span></span></label>'
+            )
+        return (
+            f"<fieldset><legend>{self._group_title(group)}</legend>{''.join(rows)}</fieldset>"
+        )
+
+    async def _write_tools_section(
+        self,
+        session: _Session,
+        notice: tuple[Literal["error", "ok"], str] | None = None,
+    ) -> str:
+        """The "Write tools" card: the three layers, and one checkbox per write tool."""
+        if self.write_tools is None:
+            return ""
+        notice_html = (
+            f'<div class="notice {notice[0]}" role="alert">{notice[1]}</div>'
+            if notice is not None
+            else ""
+        )
+        try:
+            offered = await self.write_tools.offered()
+            prefs = await anyio.to_thread.run_sync(
+                self.store.get_tool_prefs, self._principal_key(session)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("account write tools read failed: %s", type(exc).__name__)
+            return (
+                f'<section class="card" id="write-tools"><h2>{_bi("写工具", "Write tools")}</h2>'
+                f'<p class="warn">{_bi("暂时无法读取写工具设置。", "Your write-tool settings cannot be read right now.")}</p>'
+                f"{notice_html}</section>"
+            )
+        enabled = prefs.enabled_write_tools if prefs is not None else frozenset()
+
+        grouped: list[tuple[str, list[str]]] = []
+        known: set[str] = set()
+        for group, names in WRITE_TOOL_GROUPS:
+            grouped.append((group, list(names)))
+            known.update(names)
+        others = sorted(name for name in offered if name not in known)
+        if others:
+            grouped.append((OTHER_GROUP, others))
+        # Names the user had on that this server no longer offers and the page has
+        # no row for: kept in the database, listed here so they are not invisible.
+        hidden_kept = sorted(
+            name for name in enabled if name not in offered and name not in known
+        )
+
+        intro = (
+            f"<p>{_bi('默认情况下，AI 助手只能读取你的 Canvas 数据。写工具可以以你的名义修改 Canvas 里的内容，所以每一个都保持关闭，直到你在这里打开。只有你本人能在这个页面改这些开关，聊天消息和任何工具都改不了。', 'By default the AI assistant can only read your Canvas data. A write tool lets it change something in Canvas in your name, so each one stays off until you turn it on here. Only you can change these switches, and only from this page: no chat message or tool can.')}</p>"
+            "<ol>"
+            f"<li><strong>{_bi('服务器允许', 'The server allows it')}</strong>: "
+            f"{_bi('服务器管理员决定有哪些写工具可用。服务器没有开放的工具，你无法打开。', 'The server operator decides which write tools exist at all. You cannot turn on a tool the server does not offer.')}</li>"
+            f"<li><strong>{_bi('你已开启', 'You turn it on')}</strong>: "
+            f"{_bi('在下面勾选你需要的工具。在你勾选之前一个都不会开启，管理员以后新增的工具也默认关闭。', 'Tick the tools you want below. Nothing is on until you do, and tools the operator adds later start off.')}</li>"
+            f"<li><strong>{_bi('课程允许', 'Your course allows it')}</strong>: "
+            f"{_bi('每门课程仍可以拒绝写入。每次使用工具时都会检查，只会收窄你开启的范围，不会放宽。', 'Each course can still refuse writes. That is checked every time a tool is used, and it can only narrow what you turned on, never widen it.')}</li>"
+            "</ol>"
+            f'<p class="muted small">{_bi("开启工具不会跳过任何保护：写工具仍然会先预览并要求确认，你的 AI 应用也可能让你逐次批准。开启需要最近 10 分钟内的登录，关闭则不需要。", "Turning a tool on skips no safeguard: write tools still show a preview and ask for confirmation, and your AI app may ask you to approve each call. Turning a tool on needs a sign-in from the last 10 minutes; turning one off never does.")}</p>'
+            f'<p class="muted small">{_bi("AI 应用可能会缓存工具列表。修改之后，请开启新的对话或重新连接连接器，让它看到变化。", "AI apps may remember the tool list. After a change, start a new chat or reconnect the connector so the app sees it.")}</p>'
+        )
+        if not offered:
+            intro += (
+                f'<p class="warn">{_bi("本服务器没有开放任何写工具，所以下面的开关都不可用。", "This server does not offer any write tools, so the switches below are unavailable.")}</p>'
+            )
+
+        fieldsets = "".join(
+            self._write_group_rows(group, names, offered, prefs)
+            for group, names in grouped
+        )
+        kept_line = ""
+        if hidden_kept:
+            kept_line = (
+                f'<p class="muted small">{_bi("已保留但本服务器未开放：", "Kept, but not offered on this server:")} '
+                f"{', '.join(f'<code>{_e(name)}</code>' for name in hidden_kept)}</p>"
+            )
+        buttons = ""
+        if offered or enabled:
+            buttons = (
+                f'<button class="btn" type="submit">{_bi("保存", "Save")}</button> '
+                '<button class="btn danger" type="submit" name="disable_all" value="1" '
+                f'formnovalidate>{_bi("全部关闭", "Turn all off")}</button>'
+            )
+        return (
+            f'<section class="card" id="write-tools"><h2>{_bi("写工具", "Write tools")}</h2>'
+            f"{notice_html}{intro}"
+            f'<form method="post" action="{_WRITE_TOOLS_PATH}">'
+            f"{_csrf_field(session.csrf)}{fieldsets}{kept_line}{buttons}</form></section>"
+        )
+
+    async def save_write_tools(self, request: Request) -> Response:
+        """Save the user's write-tool switches; turning any on needs a recent sign-in."""
+        guarded = await self._guard_post(request, max_fields=_WRITE_FORM_MAX_FIELDS)
+        if isinstance(guarded, Response):
+            return guarded
+        session, form = guarded
+        if self.write_tools is None:
+            return self.message_page(
+                404, _bi("此服务器没有写工具设置。", "This server has no write-tool settings.")
+            )
+        key = self._principal_key(session)
+
+        async def show(
+            kind: Literal["error", "ok"], message: str, status: int
+        ) -> Response:
+            info = await anyio.to_thread.run_sync(self._safe_info, session)
+            return await self.account_page(
+                session, info, status=status, write_notice=(kind, message)
+            )
+
+        try:
+            offered = await self.write_tools.offered()
+            prefs = await anyio.to_thread.run_sync(self.store.get_tool_prefs, key)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("account write tools read failed: %s", type(exc).__name__)
+            return await show(
+                "error",
+                _bi("暂时无法读取写工具设置。", "Your write-tool settings cannot be read right now."),
+                503,
+            )
+        current = prefs.enabled_write_tools if prefs is not None else frozenset()
+
+        if form.get("disable_all") == "1":
+            desired: frozenset[str] = frozenset()
+        else:
+            # Only tools the server offers can be ticked; names that are kept but
+            # not offered stay as they are. A submitted name outside "offered" is
+            # ignored, so this form can never widen the server's ceiling.
+            ticked = frozenset(
+                name for name in offered if user_can_enable(name) and form.get(f"tool.{name}") == "1"
+            )
+            desired = ticked | (current - offered)
+        turned_on = desired - current
+        turned_off = current - desired
+
+        if turned_on and not self._signed_in_recently(session):
+            audit.log_write_tools_event(
+                "refused", key, enabled=turned_on, disabled=(), outcome="sign_in_too_old"
+            )
+            return await show(
+                "error",
+                _bi(
+                    "为了安全，开启写工具需要最近 10 分钟内的登录。请退出后重新登录，再试一次。关闭写工具不受此限制。",
+                    "For your security, turning on a write tool needs a sign-in from the last 10 minutes. Sign out, sign in again and retry. Turning tools off is always allowed.",
+                ),
+                403,
+            )
+        if not turned_on and not turned_off:
+            return await show("ok", _bi("没有需要保存的更改。", "Nothing to change."), 200)
+
+        try:
+            await anyio.to_thread.run_sync(
+                functools.partial(self.store.set_tool_prefs, key, desired)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("account write tools save failed: %s", type(exc).__name__)
+            return await show(
+                "error",
+                _bi("暂时无法保存写工具设置。", "The write-tool settings could not be saved right now."),
+                503,
+            )
+        if self.tool_prefs is not None:
+            self.tool_prefs.invalidate(key)
+        audit.log_write_tools_event(
+            "cleared" if not desired else "changed",
+            key,
+            enabled=turned_on,
+            disabled=turned_off,
+        )
+        logger.info(
+            "account write tools changed oid=%s on=%d off=%d",
+            session.oid,
+            len(turned_on),
+            len(turned_off),
+        )
+        return await show("ok", _bi("写工具设置已保存。", "Write-tool settings saved."), 200)
 
     async def logout(self, request: Request) -> Response:
         guarded = await self._guard_post(request)
@@ -2121,13 +2437,17 @@ def build_account_routes(
     directory: SchoolDirectoryLike | None = None,
     resolve_host: HostResolver | None = None,
     health: TokenHealth | None = None,
+    write_tools: WriteToolCatalog | None = None,
+    tool_prefs: ToolPrefsCache | None = None,
 ) -> list[Route]:
     """Build the /account Starlette routes.
 
     ``directory`` and ``resolve_host`` replace the Instructure school directory
     and the system DNS resolver (tests inject fakes; no real network is needed).
     ``health`` is the token-health service shared with the MCP side; the pages
-    build their own when none is given.
+    build their own when none is given. ``write_tools`` lists the write tools the
+    server offers (the "Write tools" section is hidden without it) and
+    ``tool_prefs`` is the cache the MCP side reads, dropped when a user saves.
     """
     app = _AccountApp(
         cfg,
@@ -2140,6 +2460,8 @@ def build_account_routes(
         directory,
         resolve_host,
         health,
+        write_tools,
+        tool_prefs,
     )
     return app.routes()
 
