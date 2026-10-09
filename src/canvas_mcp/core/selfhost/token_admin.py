@@ -63,7 +63,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check", help="open the store, print the row count and key ids")
-    sub.add_parser("list", help="list enrollments (tab-separated, no tokens)")
+    sub.add_parser(
+        "list",
+        help="list enrollments (tab-separated: tenant, object, name, created, "
+        "last used, Canvas host; no tokens)",
+    )
     revoke = sub.add_parser("revoke", help="delete one user's enrollment")
     revoke.add_argument("tenant_id")
     revoke.add_argument("object_id")
@@ -87,6 +91,9 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
         kids = sorted({row.key_id for row in rows})
         print(f"rows: {len(rows)}")
         print("key ids in use: " + (", ".join(kids) if kids else "(none)"))
+        schools = sorted({row.canvas_host for row in rows if row.canvas_host})
+        legacy = sum(1 for row in rows if not row.canvas_host)
+        print(f"schools in use: {len(schools)}" + (f" (+{legacy} legacy row(s))" if legacy else ""))
         return EXIT_OK
     if command == "list":
         for row in store.list_enrollments():
@@ -98,6 +105,7 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
                         _cell(row.canvas_user_name),
                         _iso(row.created_at),
                         _iso(row.last_used_at),
+                        _cell(row.canvas_host or "") or "-",
                     ]
                 )
             )

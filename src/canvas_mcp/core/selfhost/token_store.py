@@ -2,9 +2,25 @@
 
 One SQLite file holds one row per Entra principal ``(tenant_id, object_id)``.
 The Canvas personal access token is encrypted with AES-256-GCM; the associated
-data binds each ciphertext to its row and key id, so a copied or swapped row
-fails to decrypt. Metadata columns (Canvas name and id, timestamps) are
+data binds each ciphertext to its row, key id and (when recorded) Canvas host,
+so a copied or swapped row, or a row whose host was edited in the database,
+fails to decrypt instead of sending the token to another school. Metadata columns (Canvas name and id, timestamps) are
 plaintext on purpose: the admin page and the operator CLI never need to decrypt.
+
+Associated data (AAD) layouts, joined by ``0x1f``:
+
+* v1 (rows without a host, written before schools existed):
+  ``"canvas-mcp/canvas-token/v1" tenant object key_id``
+* v2 (rows with a host): ``"canvas-mcp/canvas-token/v2" tenant object key_id host``
+
+Whether a row has a host decides which layout is used, so no version column is
+needed. The host is used exactly as stored, never normalised on read; removing
+or changing it, or adding one to a v1 row, makes decryption fail. Saving a row
+always goes through the account page with a host, which re-seals a v1 row as v2.
+
+Schema version 2 adds the nullable ``canvas_host`` column; opening a version 1
+database migrates it in place (idempotently). A version 2 database is refused by
+older servers, so roll back only together with a backup taken before the upgrade.
 
 Keys come from ``CANVAS_TOKEN_KEYS`` (``kid:base64key[,kid:base64key...]``).
 The first entry encrypts new rows; every entry decrypts. Error messages never
@@ -32,13 +48,15 @@ from typing import Any
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _KEY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 _GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
-_AAD_PREFIX = b"canvas-mcp/canvas-token/v1\x1f"
+_AAD_PREFIX_V1 = b"canvas-mcp/canvas-token/v1\x1f"
+_AAD_PREFIX_V2 = b"canvas-mcp/canvas-token/v2\x1f"
+_MAX_HOST = 253
 _KEY_BYTES = 32
 _NONCE_BYTES = 12
 
@@ -66,13 +84,14 @@ _SCHEMA_TOKENS = (
     " created_at INTEGER NOT NULL,"
     " updated_at INTEGER NOT NULL,"
     " last_used_at INTEGER,"
+    " canvas_host TEXT,"
     " PRIMARY KEY (tenant_id, object_id)"
     ") WITHOUT ROWID"
 )
 
 _INFO_COLUMNS = (
     "tenant_id, object_id, canvas_user_id, canvas_user_name, entra_display_name,"
-    " entra_upn, key_id, created_at, updated_at, last_used_at"
+    " entra_upn, key_id, created_at, updated_at, last_used_at, canvas_host"
 )
 
 
@@ -103,6 +122,7 @@ class StoredToken:
     created_at: int
     updated_at: int
     last_used_at: int | None
+    canvas_host: str | None = None
 
 
 @dataclass(frozen=True)
@@ -119,6 +139,7 @@ class EnrollmentInfo:
     created_at: int
     updated_at: int
     last_used_at: int | None
+    canvas_host: str | None = None
 
 
 def _decode_key(text: str) -> bytes | None:
@@ -225,15 +246,31 @@ def _normalize_guid(value: str, label: str) -> str:
     return value.lower()
 
 
-def _aad(tenant_id: str, object_id: str, key_id: str) -> bytes:
-    return (
-        _AAD_PREFIX
-        + tenant_id.encode()
-        + b"\x1f"
-        + object_id.encode()
-        + b"\x1f"
-        + key_id.encode()
-    )
+def _validate_host_value(host: str | None) -> str | None:
+    """A host to store: None (legacy / default school) or a lowercase ASCII name.
+
+    Deliberately generic: the operator's default school may be an IP or a
+    ``.test`` name. The account page applies the strict school rules.
+    """
+    if host is None:
+        return None
+    if (
+        not isinstance(host, str)
+        or not 1 <= len(host) <= _MAX_HOST
+        or not host.isascii()
+        or host != host.lower()
+        or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in host)
+    ):
+        raise ValueError("canvas_host must be a lowercase ASCII host name")
+    return host
+
+
+def _aad(tenant_id: str, object_id: str, key_id: str, canvas_host: str | None = None) -> bytes:
+    """Associated data of one row; a host selects the v2 layout and is bound."""
+    base = tenant_id.encode() + b"\x1f" + object_id.encode() + b"\x1f" + key_id.encode()
+    if canvas_host is None:
+        return _AAD_PREFIX_V1 + base
+    return _AAD_PREFIX_V2 + base + b"\x1f" + canvas_host.encode("utf-8", "surrogatepass")
 
 
 def _info_from_row(row: tuple[Any, ...]) -> EnrollmentInfo:
@@ -248,6 +285,7 @@ def _info_from_row(row: tuple[Any, ...]) -> EnrollmentInfo:
         created_at=row[7],
         updated_at=row[8],
         last_used_at=row[9],
+        canvas_host=row[10],
     )
 
 
@@ -315,6 +353,7 @@ class TokenStore:
                 ).fetchone()
                 if row is None:
                     conn.execute(_SCHEMA_TOKENS)
+                    self._ensure_host_column(conn)
                     conn.execute(
                         "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
                         (str(SCHEMA_VERSION),),
@@ -332,6 +371,12 @@ class TokenStore:
                             f"than this server supports ({SCHEMA_VERSION})"
                         )
                     conn.execute(_SCHEMA_TOKENS)
+                    self._ensure_host_column(conn)
+                    if version < SCHEMA_VERSION:
+                        conn.execute(
+                            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                            (str(SCHEMA_VERSION),),
+                        )
             except BaseException:
                 conn.execute("ROLLBACK")
                 raise
@@ -341,6 +386,13 @@ class TokenStore:
             os.chmod(self._path, 0o600)
 
         self._verify_keyring()
+
+    @staticmethod
+    def _ensure_host_column(conn: sqlite3.Connection) -> None:
+        """Version 1 -> 2: add the nullable ``canvas_host`` column once."""
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(canvas_tokens)")}
+        if "canvas_host" not in columns:
+            conn.execute("ALTER TABLE canvas_tokens ADD COLUMN canvas_host TEXT")
 
     def _verify_keyring(self) -> None:
         with self._connection() as conn:
@@ -357,7 +409,7 @@ class TokenStore:
                 )
             for kid in used:
                 probe = conn.execute(
-                    "SELECT tenant_id, object_id, nonce, ciphertext"
+                    "SELECT tenant_id, object_id, nonce, ciphertext, canvas_host"
                     " FROM canvas_tokens WHERE key_id = ? LIMIT 1",
                     (kid,),
                 ).fetchone()
@@ -368,7 +420,7 @@ class TokenStore:
                         kid,
                         probe[2],
                         probe[3],
-                        _aad(probe[0], probe[1], kid),
+                        _aad(probe[0], probe[1], kid, probe[4]),
                     )
                 except TokenDecryptionError:
                     raise KeyringError(
@@ -385,14 +437,14 @@ class TokenStore:
             row = conn.execute(
                 "SELECT key_id, nonce, ciphertext, canvas_user_id,"
                 " canvas_user_name, entra_display_name, entra_upn,"
-                " created_at, updated_at, last_used_at"
+                " created_at, updated_at, last_used_at, canvas_host"
                 " FROM canvas_tokens WHERE tenant_id = ? AND object_id = ?",
                 (tid, oid),
             ).fetchone()
         if row is None:
             return None
         plaintext = self._keyring.decrypt(
-            row[0], bytes(row[1]), bytes(row[2]), _aad(tid, oid, row[0])
+            row[0], bytes(row[1]), bytes(row[2]), _aad(tid, oid, row[0], row[10])
         )
         try:
             api_token = plaintext.decode("utf-8")
@@ -410,6 +462,7 @@ class TokenStore:
             created_at=row[7],
             updated_at=row[8],
             last_used_at=row[9],
+            canvas_host=row[10],
         )
 
     def info(self, tenant_id: str, object_id: str) -> EnrollmentInfo | None:
@@ -448,14 +501,20 @@ class TokenStore:
         canvas_user_name: str,
         entra_display_name: str,
         entra_upn: str,
+        canvas_host: str | None = None,
     ) -> EnrollmentInfo:
-        """Insert or replace an enrollment, preserving ``created_at``."""
+        """Insert or replace an enrollment, preserving ``created_at``.
+
+        ``canvas_host`` is the school the token belongs to (None only for the
+        legacy single-school layout); it is bound into the encryption.
+        """
         tid = _normalize_guid(tenant_id, "tenant_id")
         oid = _normalize_guid(object_id, "object_id")
+        host = _validate_host_value(canvas_host)
         if not isinstance(api_token, str) or not api_token:
             raise ValueError("api_token must be a non-empty string")
         kid, nonce, ciphertext = self._keyring.encrypt(
-            api_token.encode("utf-8"), _aad(tid, oid, self._keyring.active_key_id)
+            api_token.encode("utf-8"), _aad(tid, oid, self._keyring.active_key_id, host)
         )
         now = self._now()
         with self._write() as conn:
@@ -463,7 +522,8 @@ class TokenStore:
                 "INSERT INTO canvas_tokens (tenant_id, object_id, key_id, nonce,"
                 " ciphertext, canvas_user_id, canvas_user_name,"
                 " entra_display_name, entra_upn, created_at, updated_at,"
-                " last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)"
+                " last_used_at, canvas_host)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)"
                 " ON CONFLICT (tenant_id, object_id) DO UPDATE SET"
                 " key_id = excluded.key_id, nonce = excluded.nonce,"
                 " ciphertext = excluded.ciphertext,"
@@ -471,6 +531,7 @@ class TokenStore:
                 " canvas_user_name = excluded.canvas_user_name,"
                 " entra_display_name = excluded.entra_display_name,"
                 " entra_upn = excluded.entra_upn,"
+                " canvas_host = excluded.canvas_host,"
                 " updated_at = excluded.updated_at",
                 (
                     tid,
@@ -484,6 +545,7 @@ class TokenStore:
                     str(entra_upn)[:_MAX_UPN],
                     now,
                     now,
+                    host,
                 ),
             )
             row = conn.execute(
@@ -527,16 +589,17 @@ class TokenStore:
         changed = 0
         with self._write() as conn:
             rows = conn.execute(
-                "SELECT tenant_id, object_id, key_id, nonce, ciphertext"
+                "SELECT tenant_id, object_id, key_id, nonce, ciphertext, canvas_host"
                 " FROM canvas_tokens WHERE key_id != ?",
                 (active,),
             ).fetchall()
-            for tid, oid, kid, nonce, ciphertext in rows:
+            for tid, oid, kid, nonce, ciphertext, host in rows:
+                # Each row keeps its own host, so its AAD layout is preserved.
                 plaintext = self._keyring.decrypt(
-                    kid, bytes(nonce), bytes(ciphertext), _aad(tid, oid, kid)
+                    kid, bytes(nonce), bytes(ciphertext), _aad(tid, oid, kid, host)
                 )
                 new_kid, new_nonce, new_ct = self._keyring.encrypt(
-                    plaintext, _aad(tid, oid, active)
+                    plaintext, _aad(tid, oid, active, host)
                 )
                 conn.execute(
                     "UPDATE canvas_tokens SET key_id = ?, nonce = ?,"

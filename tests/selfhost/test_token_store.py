@@ -12,6 +12,7 @@ import threading
 
 import pytest
 
+from canvas_mcp.core.selfhost import token_store as token_store_module
 from canvas_mcp.core.selfhost.token_store import (
     EnrollmentInfo,
     Keyring,
@@ -330,8 +331,8 @@ class TestInitialize:
         with _raw(store) as conn:
             assert conn.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
-            ).fetchone() == ("1",)
-            conn.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
+            ).fetchone() == ("2",)
+            conn.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
         with pytest.raises(TokenStoreError, match="newer"):
             store.initialize()
         with _raw(store) as conn:
@@ -457,3 +458,242 @@ class TestConcurrency:
             t.join()
         assert errors == []
         assert store.count() == 8
+
+
+HOST_A = "canvas.school-a.edu"
+HOST_B = "canvas.school-b.edu"
+
+
+def _seal_v1(store: TokenStore, oid: str, token: str, kid: str = "k1") -> None:
+    """Write a row exactly as the pre-school (schema v1) server did."""
+    aad = (
+        b"canvas-mcp/canvas-token/v1\x1f"
+        + TID.encode()
+        + b"\x1f"
+        + oid.encode()
+        + b"\x1f"
+        + kid.encode()
+    )
+    _, nonce, ct = store._keyring.encrypt(token.encode(), aad)
+    with _raw(store) as conn:
+        conn.execute(
+            "INSERT INTO canvas_tokens (tenant_id, object_id, key_id, nonce, ciphertext,"
+            " canvas_user_id, canvas_user_name, entra_display_name, entra_upn,"
+            " created_at, updated_at, last_used_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)",
+            (TID, oid, kid, nonce, ct, "7", "Legacy", "L", "l@example.test", 1, 1),
+        )
+
+
+def _make_v1_database(path: pathlib.Path, ring: Keyring, oid: str, token: str) -> None:
+    """A database as the previous release left it: version '1', no canvas_host column."""
+    old_schema = (
+        "CREATE TABLE canvas_tokens ("
+        " tenant_id TEXT NOT NULL, object_id TEXT NOT NULL, key_id TEXT NOT NULL,"
+        " nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, canvas_user_id TEXT NOT NULL,"
+        " canvas_user_name TEXT NOT NULL, entra_display_name TEXT NOT NULL DEFAULT '',"
+        " entra_upn TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL,"
+        " updated_at INTEGER NOT NULL, last_used_at INTEGER,"
+        " PRIMARY KEY (tenant_id, object_id)) WITHOUT ROWID"
+    )
+    aad = b"canvas-mcp/canvas-token/v1\x1f" + f"{TID}\x1f{oid}\x1fk1".encode()
+    kid, nonce, ct = ring.encrypt(token.encode(), aad)
+    conn = sqlite3.connect(str(path), isolation_level=None)
+    try:
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID")
+        conn.execute(old_schema)
+        conn.execute("INSERT INTO meta VALUES ('schema_version', '1')")
+        conn.execute(
+            "INSERT INTO canvas_tokens VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)",
+            (TID, oid, kid, nonce, ct, "7", "Legacy", "L", "l@example.test", 1, 1),
+        )
+    finally:
+        conn.close()
+
+
+class TestCanvasHost:
+    def test_host_roundtrip_in_get_info_and_list(self, store: TokenStore) -> None:
+        info = _put(store, canvas_host=HOST_A)
+        assert info.canvas_host == HOST_A
+        got = store.get(TID, OID_A)
+        assert got is not None and got.canvas_host == HOST_A and got.api_token == TOKEN_A
+        assert store.info(TID, OID_A).canvas_host == HOST_A  # type: ignore[union-attr]
+        assert [r.canvas_host for r in store.list_enrollments()] == [HOST_A]
+
+    def test_no_host_means_legacy_none(self, store: TokenStore) -> None:
+        assert _put(store).canvas_host is None
+        got = store.get(TID, OID_A)
+        assert got is not None and got.canvas_host is None
+
+    @pytest.mark.parametrize(
+        "bad", ["", "Canvas.School.EDU", "canvas.school.edu\n", "caf\u00e9.edu", "a" * 254, "a\x1fb.edu", 5]
+    )
+    def test_put_validates_the_host(self, store: TokenStore, bad: object) -> None:
+        with pytest.raises(ValueError):
+            _put(store, canvas_host=bad)
+        assert store.count() == 0
+
+    def test_default_hosts_that_are_not_school_names_are_storable(self, store: TokenStore) -> None:
+        for host in ("127.0.0.1", "canvas.lan", "localhost"):
+            _put(store, canvas_host=host)
+            assert store.get(TID, OID_A).canvas_host == host  # type: ignore[union-attr]
+
+    def test_replacing_a_row_can_change_the_school(self, store: TokenStore) -> None:
+        _put(store, canvas_host=HOST_A)
+        _put(store, token=TOKEN_B, canvas_host=HOST_B)
+        got = store.get(TID, OID_A)
+        assert got is not None and (got.canvas_host, got.api_token) == (HOST_B, TOKEN_B)
+
+    def test_aad_layouts(self) -> None:
+        aad = token_store_module._aad
+        legacy = aad(TID, OID_A, "k1")
+        with_host = aad(TID, OID_A, "k1", HOST_A)
+        assert legacy == aad(TID, OID_A, "k1", None)
+        assert legacy.startswith(b"canvas-mcp/canvas-token/v1\x1f")
+        assert with_host.startswith(b"canvas-mcp/canvas-token/v2\x1f")
+        assert with_host.endswith(b"\x1f" + HOST_A.encode())
+        assert legacy != with_host
+        assert aad(TID, OID_A, "k1", HOST_A) != aad(TID, OID_A, "k1", HOST_B)
+        # The field boundaries cannot be shifted into one another.
+        assert aad(TID, OID_A, "k1", "a.edu") != aad(TID, OID_A, "k1" + "\x1f" + "a", "edu")
+
+    def test_the_database_value_is_used_exactly_as_read(self, store: TokenStore) -> None:
+        _put(store, canvas_host=HOST_A)
+        with _raw(store) as conn:
+            conn.execute("UPDATE canvas_tokens SET canvas_host = ?", (HOST_A.upper(),))
+        with pytest.raises(TokenDecryptionError):
+            store.get(TID, OID_A)
+
+
+class TestHostTamper:
+    def test_swapping_the_host_fails_and_never_decrypts(self, store: TokenStore) -> None:
+        _put(store, canvas_host=HOST_A)
+        _put(store, oid=OID_B, token=TOKEN_B, canvas_host=HOST_B)
+        with _raw(store) as conn:
+            conn.execute(
+                "UPDATE canvas_tokens SET canvas_host = ? WHERE object_id = ?", (HOST_B, OID_A)
+            )
+        with pytest.raises(TokenDecryptionError):
+            store.get(TID, OID_A)
+        other = store.get(TID, OID_B)
+        assert other is not None and other.api_token == TOKEN_B
+
+    def test_nulling_a_host_fails(self, store: TokenStore) -> None:
+        _put(store, canvas_host=HOST_A)
+        with _raw(store) as conn:
+            conn.execute("UPDATE canvas_tokens SET canvas_host = NULL")
+        with pytest.raises(TokenDecryptionError):
+            store.get(TID, OID_A)
+
+    def test_adding_a_host_to_a_legacy_row_fails(self, store: TokenStore) -> None:
+        _seal_v1(store, OID_A, TOKEN_A)
+        assert store.get(TID, OID_A).api_token == TOKEN_A  # type: ignore[union-attr]
+        with _raw(store) as conn:
+            conn.execute("UPDATE canvas_tokens SET canvas_host = ?", (HOST_A,))
+        with pytest.raises(TokenDecryptionError):
+            store.get(TID, OID_A)
+
+    def test_a_tampered_probe_row_is_a_keyring_error_at_open(self, tmp_path: pathlib.Path) -> None:
+        path = tmp_path / "t.sqlite3"
+        s = TokenStore(path, _ring(("k1", 1)))
+        s.initialize()
+        _put(s, canvas_host=HOST_A)
+        with _raw(s) as conn:
+            conn.execute("UPDATE canvas_tokens SET canvas_host = ?", (HOST_B,))
+        with pytest.raises(KeyringError):
+            TokenStore(path, _ring(("k1", 1))).initialize()
+
+    def test_wrong_key_with_v2_rows_is_a_keyring_error(self, tmp_path: pathlib.Path) -> None:
+        path = tmp_path / "t.sqlite3"
+        s = TokenStore(path, _ring(("k1", 1)))
+        s.initialize()
+        _put(s, canvas_host=HOST_A)
+        TokenStore(path, _ring(("k1", 1))).initialize()
+        with pytest.raises(KeyringError):
+            TokenStore(path, _ring(("k1", 9))).initialize()
+
+
+class TestMigration:
+    def test_version_1_database_is_migrated_in_place(self, tmp_path: pathlib.Path) -> None:
+        path = tmp_path / "t.sqlite3"
+        ring = _ring(("k1", 1))
+        _make_v1_database(path, ring, OID_A, TOKEN_A)
+        s = TokenStore(path, ring, clock=lambda: 1_700_000_000)
+        s.initialize()
+        with _raw(s) as conn:
+            assert conn.execute(
+                "SELECT value FROM meta WHERE key = 'schema_version'"
+            ).fetchone() == ("2",)
+            columns = [r[1] for r in conn.execute("PRAGMA table_info(canvas_tokens)")]
+        assert columns.count("canvas_host") == 1
+        got = s.get(TID, OID_A)
+        assert got is not None and got.api_token == TOKEN_A and got.canvas_host is None
+        assert s.info(TID, OID_A).canvas_host is None  # type: ignore[union-attr]
+
+    def test_migration_is_idempotent(self, tmp_path: pathlib.Path) -> None:
+        path = tmp_path / "t.sqlite3"
+        ring = _ring(("k1", 1))
+        _make_v1_database(path, ring, OID_A, TOKEN_A)
+        for _ in range(3):
+            TokenStore(path, ring).initialize()
+        s = TokenStore(path, ring)
+        s.initialize()
+        with _raw(s) as conn:
+            columns = [r[1] for r in conn.execute("PRAGMA table_info(canvas_tokens)")]
+        assert columns.count("canvas_host") == 1
+        assert s.get(TID, OID_A).api_token == TOKEN_A  # type: ignore[union-attr]
+
+    def test_a_half_migrated_database_is_completed(self, tmp_path: pathlib.Path) -> None:
+        """Column present but version still 1 (e.g. an interrupted manual step)."""
+        path = tmp_path / "t.sqlite3"
+        ring = _ring(("k1", 1))
+        _make_v1_database(path, ring, OID_A, TOKEN_A)
+        with sqlite3.connect(str(path)) as conn:
+            conn.execute("ALTER TABLE canvas_tokens ADD COLUMN canvas_host TEXT")
+        s = TokenStore(path, ring)
+        s.initialize()
+        assert s.get(TID, OID_A).api_token == TOKEN_A  # type: ignore[union-attr]
+
+    def test_saving_reseals_a_legacy_row_with_the_host(self, tmp_path: pathlib.Path) -> None:
+        path = tmp_path / "t.sqlite3"
+        ring = _ring(("k1", 1))
+        _make_v1_database(path, ring, OID_A, TOKEN_A)
+        s = TokenStore(path, ring)
+        s.initialize()
+        s.put(
+            tenant_id=TID, object_id=OID_A, api_token=TOKEN_A, canvas_user_id="7",
+            canvas_user_name="Legacy", entra_display_name="L", entra_upn="l@example.test",
+            canvas_host=HOST_A,
+        )
+        assert s.get(TID, OID_A).canvas_host == HOST_A  # type: ignore[union-attr]
+        # Now sealed as v2: dropping the host breaks it.
+        with _raw(s) as conn:
+            conn.execute("UPDATE canvas_tokens SET canvas_host = NULL")
+        with pytest.raises(TokenDecryptionError):
+            s.get(TID, OID_A)
+
+    def test_future_versions_are_still_refused(self, store: TokenStore) -> None:
+        with _raw(store) as conn:
+            conn.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+        with pytest.raises(TokenStoreError, match="newer"):
+            store.initialize()
+
+
+class TestMixedRotation:
+    def test_rotation_keeps_hosts_and_both_aad_kinds(self, tmp_path: pathlib.Path) -> None:
+        path = tmp_path / "t.sqlite3"
+        old = TokenStore(path, _ring(("k1", 1)))
+        old.initialize()
+        _seal_v1(old, OID_A, TOKEN_A)
+        _put(old, oid=OID_B, token=TOKEN_B, canvas_host=HOST_B)
+        both = TokenStore(path, _ring(("k2", 2), ("k1", 1)))
+        both.initialize()
+        assert both.rotate() == 2
+        assert both.rotate() == 0
+        only_new = TokenStore(path, _ring(("k2", 2)))
+        only_new.initialize()
+        a = only_new.get(TID, OID_A)
+        b = only_new.get(TID, OID_B)
+        assert a is not None and (a.api_token, a.canvas_host, a.key_id) == (TOKEN_A, None, "k2")
+        assert b is not None and (b.api_token, b.canvas_host, b.key_id) == (TOKEN_B, HOST_B, "k2")
+        with pytest.raises(KeyringError):
+            TokenStore(path, _ring(("k1", 1))).initialize()

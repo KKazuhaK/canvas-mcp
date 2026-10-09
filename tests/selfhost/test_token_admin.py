@@ -79,11 +79,12 @@ def test_list_is_tab_separated_and_has_no_tokens(env, capsys) -> None:
     assert len(lines) == 2
     first = lines[0].split("\t")
     assert first == [
-        TID, OID_A, "Ada Lovelace Two", "2027-01-15T08:00:00Z", "-",
+        TID, OID_A, "Ada Lovelace Two", "2027-01-15T08:00:00Z", "-", "-",
     ]
     second = lines[1].split("\t")
     assert second[:3] == [TID, OID_B, "Bob"]
     assert second[4] == "2027-01-15T08:00:00Z"
+    assert second[5] == "-"
     _no_secrets(captured.out, captured.err)
 
 
@@ -189,3 +190,48 @@ def test_runs_as_a_module(env) -> None:
     assert result.returncode == 0, result.stderr
     assert "rows: 2" in result.stdout
     _no_secrets(result.stdout, result.stderr)
+
+
+def test_list_shows_the_canvas_host_and_dash_for_legacy_rows(env, capsys) -> None:
+    store = _seed(env)
+    store.put(
+        tenant_id=TID, object_id=OID_B, api_token=TOKEN_B, canvas_user_id="2",
+        canvas_user_name="Bob", entra_display_name="Bob", entra_upn="bob@example.test",
+        canvas_host="canvas.school-b.edu",
+    )
+    assert token_admin.main(["list"]) == 0
+    captured = capsys.readouterr()
+    rows = [line.split("\t") for line in captured.out.splitlines()]
+    assert all(len(r) == 6 for r in rows)
+    assert rows[0][5] == "-"
+    assert rows[1][5] == "canvas.school-b.edu"
+    _no_secrets(captured.out, captured.err)
+
+
+def test_check_reports_schools_in_use(env, capsys) -> None:
+    store = _seed(env)
+    store.put(
+        tenant_id=TID, object_id=OID_B, api_token=TOKEN_B, canvas_user_id="2",
+        canvas_user_name="Bob", entra_display_name="Bob", entra_upn="bob@example.test",
+        canvas_host="canvas.school-b.edu",
+    )
+    assert token_admin.main(["check"]) == 0
+    out = capsys.readouterr().out
+    assert "schools in use: 1 (+1 legacy row(s))" in out
+
+
+def test_rotate_with_mixed_rows_keeps_working(env, monkeypatch, capsys) -> None:
+    store = _seed(env)
+    store.put(
+        tenant_id=TID, object_id=OID_B, api_token=TOKEN_B, canvas_user_id="2",
+        canvas_user_name="Bob", entra_display_name="Bob", entra_upn="bob@example.test",
+        canvas_host="canvas.school-b.edu",
+    )
+    monkeypatch.setenv("CANVAS_TOKEN_KEYS", f"k2:{KEY2},k1:{KEY1}")
+    assert token_admin.main(["rotate"]) == 0
+    assert "re-encrypted 2 row(s)" in capsys.readouterr().out
+    monkeypatch.setenv("CANVAS_TOKEN_KEYS", f"k2:{KEY2}")
+    assert token_admin.main(["check"]) == 0
+    assert token_admin.main(["list"]) == 0
+    out = capsys.readouterr().out
+    assert "canvas.school-b.edu" in out
