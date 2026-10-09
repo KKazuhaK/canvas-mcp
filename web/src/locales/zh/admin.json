@@ -1,0 +1,116 @@
+{
+  "title": "管理",
+  "ownerOnly": "只有所有者可以查看管理页面。",
+  "accounts": {
+    "title": "账户",
+    "search": "搜索姓名或邮箱",
+    "statusFilter": "状态",
+    "allStatuses": "全部",
+    "columns": {
+      "account": "账户",
+      "status": "状态",
+      "role": "角色",
+      "providers": "登录提供方",
+      "canvas": "Canvas 令牌",
+      "grants": "应用",
+      "lastLogin": "最近登录",
+      "actions": "操作"
+    },
+    "canvasState": {
+      "none": "未绑定",
+      "valid": "有效",
+      "invalid": "需要重新绑定",
+      "unknown": "未检查"
+    },
+    "noEmail": "无邮箱",
+    "neverLoggedIn": "从未",
+    "actions": {
+      "approve": "批准",
+      "disable": "停用",
+      "enable": "启用",
+      "makeOwner": "设为所有者",
+      "makeUser": "设为普通用户",
+      "revokeGrants": "撤销应用",
+      "unlinkIdentity": "解除登录绑定"
+    },
+    "confirm": {
+      "disableTitle": "停用 {{name}}？",
+      "disableBody": "对方会被退出登录，在你重新启用之前无法使用本服务器。",
+      "revokeGrantsTitle": "撤销 {{name}} 的所有应用？",
+      "revokeGrantsBody": "在重新批准之前，此账户已连接的所有应用都将停止工作。",
+      "unlinkTitle": "解除 {{name}} 的一种登录方式？",
+      "unlinkBody": "选择要移除的提供方。对方将无法再用它登录。",
+      "unlinkField": "提供方",
+      "setRoleTitle": "更改 {{name}} 的角色？",
+      "setRoleOwner": "{{name}} 将可以查看并修改本服务器上的所有账户。",
+      "setRoleUser": "{{name}} 将失去管理页面的访问权限。"
+    },
+    "done": {
+      "approve": "账户已批准。",
+      "disable": "账户已停用。",
+      "enable": "账户已启用。",
+      "set_role": "角色已更改。",
+      "unlink_identity": "已解除登录方式的绑定。",
+      "revoke_grants": "已撤销应用。"
+    },
+    "empty": "没有符合条件的账户。"
+  },
+  "enrollments": {
+    "title": "Canvas 令牌绑定",
+    "filter": "状态",
+    "filterAll": "全部",
+    "columns": {
+      "account": "账户",
+      "canvasUser": "Canvas 用户",
+      "state": "状态",
+      "lastUsed": "最近使用",
+      "actions": "操作"
+    },
+    "state": {
+      "none": "未绑定",
+      "valid": "有效",
+      "invalid": "需要重新绑定",
+      "unknown": "未检查"
+    },
+    "details": "技术详情",
+    "enrolledAt": "绑定时间",
+    "updatedAt": "更新时间",
+    "invalidSince": "被拒绝自",
+    "accountId": "账户 id",
+    "canvasUserId": "Canvas 用户 id",
+    "revoke": "撤销",
+    "confirmTitle": "撤销 {{name}} 的 Canvas 令牌？",
+    "confirmBody": "已保存的令牌会被删除，对方需要重新绑定。",
+    "done": "已撤销绑定。",
+    "empty": "还没有绑定记录。"
+  },
+  "audit": {
+    "title": "审计日志",
+    "actionFilter": "操作",
+    "actorFilter": "操作者 id",
+    "allActions": "全部操作",
+    "columns": {
+      "time": "时间",
+      "actor": "操作者",
+      "action": "操作",
+      "target": "对象",
+      "detail": "详情"
+    },
+    "actions": {
+      "approve": "批准账户",
+      "disable": "停用账户",
+      "enable": "启用账户",
+      "set_role": "更改角色",
+      "link": "绑定登录方式",
+      "unlink": "解除登录绑定",
+      "write_tool_toggle": "更改写入工具",
+      "token_enroll": "绑定 Canvas 令牌",
+      "token_delete": "删除 Canvas 令牌",
+      "grant_revoke": "撤销应用",
+      "enrollment_revoke": "撤销绑定",
+      "login": "登录"
+    },
+    "system": "系统",
+    "empty": "没有审计记录。"
+  }
+}

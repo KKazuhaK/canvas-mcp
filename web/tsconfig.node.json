@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    // The referenced project must be composite, which makes tsc emit. Send the
+    // emitted .js/.d.ts to a git-ignored cache so nothing lands next to the configs.
+    "outDir": "./node_modules/.cache/tsc-node",
+    "tsBuildInfoFile": "./node_modules/.cache/tsc-node/tsconfig.node.tsbuildinfo",
+    "skipLibCheck": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "types": ["node"]
+  },
+  "include": ["vite.config.ts", "vitest.config.ts"]
+}

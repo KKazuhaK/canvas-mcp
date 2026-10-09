@@ -1,0 +1,205 @@
+{
+  "home": {
+    "title": "Canvas 账户",
+    "signedInAs": "当前登录：{{name}}"
+  },
+  "school": {
+    "title": "学校",
+    "label": "学校",
+    "value": "默认 Canvas 站点",
+    "body": "选择学校的功能即将推出。目前你的令牌会在本服务器所配置的 Canvas 站点上校验。"
+  },
+  "enroll": {
+    "title": "绑定你的 Canvas 令牌",
+    "steps": {
+      "one": "在 Canvas 中打开 <b>Account → Settings → + New Access Token</b>。",
+      "two": "用途填 <c>Claude MCP</c>，并设置到期时间。",
+      "three": "复制令牌，粘贴到下方。"
+    },
+    "warning": "绝不要把令牌粘贴到 Claude 对话里。",
+    "field": "Canvas 访问令牌",
+    "helper": "{{min}} 到 {{max}} 个字符。令牌会先在 Canvas 上校验，加密保存，之后不会再显示。",
+    "submit": "验证并保存",
+    "submitting": "验证中…",
+    "saved": "Canvas 令牌已保存。"
+  },
+  "enrolled": {
+    "title": "Canvas 令牌已绑定",
+    "canvasUser": "Canvas 用户",
+    "canvasUserId": "id {{id}}",
+    "lastUsed": "最近使用",
+    "enrolled": "绑定时间",
+    "updated": "更新时间",
+    "lastChecked": "最近检查",
+    "recheck": "重新检查令牌",
+    "rechecking": "检查中…",
+    "rechecked": "已检查令牌。",
+    "replace": {
+      "summary": "替换令牌",
+      "submit": "验证并替换"
+    },
+    "delete": {
+      "button": "删除我的令牌",
+      "confirmTitle": "删除你的 Canvas 令牌？",
+      "confirmBody": "在你添加新令牌之前，Claude 将无法以你的身份读取 Canvas。",
+      "done": "Canvas 令牌已删除。"
+    }
+  },
+  "invalid": {
+    "title": "Canvas 拒绝了你的令牌",
+    "body": "自 {{date}} 起，Canvas 一直拒绝你的令牌。在你替换令牌之前，Claude 的 Canvas 工具将保持禁用。",
+    "bodyNoDate": "Canvas 拒绝了你的令牌。在你替换令牌之前，Claude 的 Canvas 工具将保持禁用。",
+    "replaceCta": "替换令牌"
+  },
+  "unknown": {
+    "body": "刚才无法在 Canvas 上校验此令牌。请稍后重新检查。"
+  },
+  "writeTools": {
+    "title": "写入工具",
+    "intro": "除非你启用特定的工具，否则 Claude 只能读取 Canvas，不能以你的身份做修改。每个工具默认关闭。",
+    "serverDisabled": "服务器所有者尚未启用写入工具，因此下面的工具都无法开启。",
+    "layers": {
+      "title": "由谁决定",
+      "server": "服务器允许",
+      "you": "你已启用",
+      "course": "课程允许",
+      "courseNote": "按课程逐个判断"
+    },
+    "layersNote": "只有三方都同意，工具才会运行。预览、确认、课程策略以及你所用客户端的批准提示，对每一次修改依然有效。",
+    "groups": {
+      "planner_calendar": {
+        "title": "计划与日历",
+        "body": "你自己的备注、计划打勾和个人日历事件。"
+      },
+      "submissions": {
+        "title": "作业提交",
+        "body": "提交作业，以及在自己的提交上留言。"
+      },
+      "modules": {
+        "title": "模块完成",
+        "body": "把模块条目标记为已完成。"
+      },
+      "messages": {
+        "title": "消息",
+        "body": "发送并回复 Canvas 收件箱消息。"
+      }
+    },
+    "risk": {
+      "low": "低风险",
+      "medium": "中风险",
+      "high": "高风险"
+    },
+    "sendsAsYou": "以你的名义发送",
+    "notAllowed": "本服务器不允许",
+    "unsaved": "有未保存的更改。",
+    "discard": "放弃更改",
+    "save": "保存更改",
+    "saving": "保存中…",
+    "saved": "写入工具已保存。",
+    "tools": {
+      "submit_assignment": {
+        "label": "提交作业",
+        "description": "为某项作业提交你的作业内容。"
+      },
+      "comment_on_my_submission": {
+        "label": "评论我的提交",
+        "description": "在你自己的某次提交上添加评论。"
+      },
+      "mark_module_item_done": {
+        "label": "标记模块条目完成",
+        "description": "为你把某个模块条目标记为已完成。"
+      },
+      "create_planner_note": {
+        "label": "创建计划备注",
+        "description": "在你的计划中添加一条备注。"
+      },
+      "update_planner_note": {
+        "label": "编辑计划备注",
+        "description": "修改你的某条计划备注。"
+      },
+      "delete_planner_note": {
+        "label": "删除计划备注",
+        "description": "删除你的某条计划备注。"
+      },
+      "mark_planner_item_complete": {
+        "label": "计划项打勾",
+        "description": "把某个计划项标记为已完成或未完成。"
+      },
+      "create_personal_calendar_event": {
+        "label": "创建日历事件",
+        "description": "在你的个人日历中添加事件。"
+      },
+      "delete_personal_calendar_event": {
+        "label": "删除日历事件",
+        "description": "从你的个人日历中删除事件。"
+      },
+      "send_message": {
+        "label": "发送消息",
+        "description": "向你指定的收件人发送新的 Canvas 收件箱消息。"
+      },
+      "reply_to_conversation": {
+        "label": "回复会话",
+        "description": "在已有的 Canvas 收件箱会话中回复。"
+      }
+    },
+    "unknownTool": "此版本的应用没有这个工具的说明。"
+  },
+  "identities": {
+    "title": "登录方式",
+    "intro": "你可以用来登录此账户的提供方。",
+    "currentSession": "当前会话",
+    "verified": "邮箱已验证",
+    "unverified": "邮箱未验证",
+    "linked": "绑定于 {{date}}",
+    "lastLogin": "最近登录 {{date}}",
+    "neverLoggedIn": "从未用于登录",
+    "linkTitle": "绑定其他提供方",
+    "linkWith": "绑定 {{name}}",
+    "noLinkable": "没有其他可绑定的提供方。",
+    "unlink": "解除绑定",
+    "unlinkLast": "不能解除你唯一的登录方式。",
+    "unlinkConfirmTitle": "解除绑定 {{name}}？",
+    "unlinkConfirmBody": "之后你将无法再用它登录此账户。",
+    "unlinked": "已解除登录方式的绑定。",
+    "reauth": {
+      "title": "请重新登录以绑定提供方",
+      "body": "出于安全考虑，绑定需要最近 10 分钟内登录过。",
+      "cta": "重新登录"
+    }
+  },
+  "grants": {
+    "title": "已连接的应用",
+    "intro": "可以以你的身份使用 Canvas MCP 的应用。撤销某个应用会立即切断它的访问。",
+    "emptyTitle": "还没有连接任何应用",
+    "emptyBody": "在 Claude 中添加下方的连接器地址即可连接应用。",
+    "connected": "连接于 {{date}}",
+    "lastUsed": "最近使用 {{date}}",
+    "neverUsed": "从未使用",
+    "revokedOn": "已于 {{date}} 撤销",
+    "revoke": "撤销",
+    "confirmTitle": "撤销 {{client}} 的访问权限？",
+    "confirmBody": "在你再次批准之前，{{client}} 将无法使用。",
+    "done": "已撤销访问权限。"
+  },
+  "activity": {
+    "title": "最近登录",
+    "intro": "你最近 20 次登录尝试。",
+    "columns": {
+      "time": "时间",
+      "provider": "提供方",
+      "result": "结果",
+      "reason": "原因",
+      "ip": "IP 地址",
+      "device": "设备"
+    },
+    "outcome": {
+      "success": "已登录",
+      "denied": "被拒绝",
+      "error": "出错"
+    },
+    "ipUnknown": "未知",
+    "empty": "还没有登录记录。",
+    "sessionsTitle": "会话",
+    "sessionsBody": "退出所有设备会结束所有会话，包括当前这个。"
+  }
+}

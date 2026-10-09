@@ -1,0 +1,17 @@
+{
+  // Hook rules plus the security rules this UI depends on. The plugin must be
+  // named: without "react" the react-* rules are silently inactive and the lint
+  // passes having checked nothing. A rule name this oxlint version does not know
+  // fails the config parse loudly, which is the behaviour we want.
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react"],
+  "categories": { "correctness": "off" },
+  "rules": {
+    "react-hooks/rules-of-hooks": "error",
+    "react-hooks/exhaustive-deps": "warn",
+    "react/no-danger": "error",
+    "no-eval": "error",
+    "no-implied-eval": "error",
+    "no-new-func": "error"
+  }
+}

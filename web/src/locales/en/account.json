@@ -1,0 +1,205 @@
+{
+  "home": {
+    "title": "Canvas account",
+    "signedInAs": "Signed in as {{name}}"
+  },
+  "school": {
+    "title": "School",
+    "label": "School",
+    "value": "Default Canvas site",
+    "body": "Choosing a school is coming soon. For now your token is checked against this server's Canvas site."
+  },
+  "enroll": {
+    "title": "Add your Canvas token",
+    "steps": {
+      "one": "In Canvas, open <b>Account → Settings → + New Access Token</b>.",
+      "two": "Purpose: <c>Claude MCP</c>. Set an expiry date.",
+      "three": "Copy the token and paste it below."
+    },
+    "warning": "Never paste the token into Claude.",
+    "field": "Canvas access token",
+    "helper": "{{min}} to {{max}} characters. It is checked against Canvas, stored encrypted and never shown again.",
+    "submit": "Verify and save",
+    "submitting": "Verifying…",
+    "saved": "Canvas token saved."
+  },
+  "enrolled": {
+    "title": "Canvas token enrolled",
+    "canvasUser": "Canvas user",
+    "canvasUserId": "id {{id}}",
+    "lastUsed": "Last used",
+    "enrolled": "Enrolled",
+    "updated": "Updated",
+    "lastChecked": "Last checked",
+    "recheck": "Re-check token",
+    "rechecking": "Checking…",
+    "rechecked": "The token was checked.",
+    "replace": {
+      "summary": "Replace token",
+      "submit": "Verify and replace"
+    },
+    "delete": {
+      "button": "Delete my token",
+      "confirmTitle": "Delete your Canvas token?",
+      "confirmBody": "Claude will not be able to read Canvas as you until you add a new token.",
+      "done": "Canvas token deleted."
+    }
+  },
+  "invalid": {
+    "title": "Canvas rejected your token",
+    "body": "Canvas has rejected your token since {{date}}. Claude's Canvas tools stay disabled until you replace it.",
+    "bodyNoDate": "Canvas rejected your token. Claude's Canvas tools stay disabled until you replace it.",
+    "replaceCta": "Replace token"
+  },
+  "unknown": {
+    "body": "We could not check this token against Canvas just now. Re-check it in a moment."
+  },
+  "writeTools": {
+    "title": "Write tools",
+    "intro": "Claude can only read Canvas unless you turn on specific tools that change things as you. Each tool is off by default.",
+    "serverDisabled": "The server owner has not enabled write tools, so none of these can be turned on.",
+    "layers": {
+      "title": "Who decides",
+      "server": "Server allows",
+      "you": "You enabled",
+      "course": "Course allows",
+      "courseNote": "decided per course"
+    },
+    "layersNote": "A tool runs only when all three agree. Previews, confirmations, course policy and your client's approval prompts still apply to every change.",
+    "groups": {
+      "planner_calendar": {
+        "title": "Planner and calendar",
+        "body": "Your own notes, planner check-marks and personal calendar events."
+      },
+      "submissions": {
+        "title": "Assignment submission",
+        "body": "Submit work and comment on your own submissions."
+      },
+      "modules": {
+        "title": "Module completion",
+        "body": "Mark module items as done."
+      },
+      "messages": {
+        "title": "Messages",
+        "body": "Send and reply to Canvas inbox messages."
+      }
+    },
+    "risk": {
+      "low": "Low risk",
+      "medium": "Medium risk",
+      "high": "High risk"
+    },
+    "sendsAsYou": "Sends as you",
+    "notAllowed": "Not allowed by this server",
+    "unsaved": "You have unsaved changes.",
+    "discard": "Discard",
+    "save": "Save changes",
+    "saving": "Saving…",
+    "saved": "Write tools saved.",
+    "tools": {
+      "submit_assignment": {
+        "label": "Submit assignment",
+        "description": "Submits your work for an assignment."
+      },
+      "comment_on_my_submission": {
+        "label": "Comment on my submission",
+        "description": "Adds a comment to one of your own submissions."
+      },
+      "mark_module_item_done": {
+        "label": "Mark module item done",
+        "description": "Marks a module item as completed for you."
+      },
+      "create_planner_note": {
+        "label": "Create planner note",
+        "description": "Adds a note to your planner."
+      },
+      "update_planner_note": {
+        "label": "Edit planner note",
+        "description": "Changes one of your planner notes."
+      },
+      "delete_planner_note": {
+        "label": "Delete planner note",
+        "description": "Deletes one of your planner notes."
+      },
+      "mark_planner_item_complete": {
+        "label": "Check off planner item",
+        "description": "Marks a planner item complete or incomplete."
+      },
+      "create_personal_calendar_event": {
+        "label": "Create calendar event",
+        "description": "Adds an event to your personal calendar."
+      },
+      "delete_personal_calendar_event": {
+        "label": "Delete calendar event",
+        "description": "Deletes an event from your personal calendar."
+      },
+      "send_message": {
+        "label": "Send message",
+        "description": "Sends a new Canvas inbox message to recipients you name."
+      },
+      "reply_to_conversation": {
+        "label": "Reply to conversation",
+        "description": "Replies in an existing Canvas inbox conversation."
+      }
+    },
+    "unknownTool": "Tool without a description in this version of the app."
+  },
+  "identities": {
+    "title": "Sign-in methods",
+    "intro": "The providers you can use to sign in to this account.",
+    "currentSession": "This session",
+    "verified": "Email verified",
+    "unverified": "Email not verified",
+    "linked": "Linked {{date}}",
+    "lastLogin": "Last sign-in {{date}}",
+    "neverLoggedIn": "Never used to sign in",
+    "linkTitle": "Link another provider",
+    "linkWith": "Link {{name}}",
+    "noLinkable": "There are no other providers to link.",
+    "unlink": "Unlink",
+    "unlinkLast": "You cannot unlink your only sign-in method.",
+    "unlinkConfirmTitle": "Unlink {{name}}?",
+    "unlinkConfirmBody": "You will no longer be able to sign in to this account with it.",
+    "unlinked": "Sign-in method unlinked.",
+    "reauth": {
+      "title": "Sign in again to link a provider",
+      "body": "For safety, linking needs a sign-in from the last 10 minutes.",
+      "cta": "Sign in again"
+    }
+  },
+  "grants": {
+    "title": "Connected apps",
+    "intro": "Apps that can use Canvas MCP as you. Revoke an app to cut off its access immediately.",
+    "emptyTitle": "No apps are connected yet",
+    "emptyBody": "Add the connector URL below in Claude to connect an app.",
+    "connected": "Connected {{date}}",
+    "lastUsed": "Last used {{date}}",
+    "neverUsed": "Never used",
+    "revokedOn": "Revoked {{date}}",
+    "revoke": "Revoke",
+    "confirmTitle": "Revoke access for {{client}}?",
+    "confirmBody": "{{client}} will stop working until you approve it again.",
+    "done": "Access revoked."
+  },
+  "activity": {
+    "title": "Recent sign-ins",
+    "intro": "Your last 20 sign-in attempts.",
+    "columns": {
+      "time": "Time",
+      "provider": "Provider",
+      "result": "Result",
+      "reason": "Reason",
+      "ip": "IP address",
+      "device": "Device"
+    },
+    "outcome": {
+      "success": "Signed in",
+      "denied": "Denied",
+      "error": "Error"
+    },
+    "ipUnknown": "unknown",
+    "empty": "No sign-ins recorded yet.",
+    "sessionsTitle": "Sessions",
+    "sessionsBody": "Signing out of all devices ends every session, including this one."
+  }
+}

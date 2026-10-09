@@ -1,0 +1,116 @@
+{
+  "title": "Admin",
+  "ownerOnly": "Only owners can see the admin pages.",
+  "accounts": {
+    "title": "Accounts",
+    "search": "Search name or email",
+    "statusFilter": "Status",
+    "allStatuses": "All",
+    "columns": {
+      "account": "Account",
+      "status": "Status",
+      "role": "Role",
+      "providers": "Providers",
+      "canvas": "Canvas token",
+      "grants": "Apps",
+      "lastLogin": "Last sign-in",
+      "actions": "Actions"
+    },
+    "canvasState": {
+      "none": "Not enrolled",
+      "valid": "Valid",
+      "invalid": "Needs re-enrollment",
+      "unknown": "Unchecked"
+    },
+    "noEmail": "No email",
+    "neverLoggedIn": "Never",
+    "actions": {
+      "approve": "Approve",
+      "disable": "Disable",
+      "enable": "Enable",
+      "makeOwner": "Make owner",
+      "makeUser": "Make user",
+      "revokeGrants": "Revoke apps",
+      "unlinkIdentity": "Unlink sign-in"
+    },
+    "confirm": {
+      "disableTitle": "Disable {{name}}?",
+      "disableBody": "They will be signed out and unable to use the server until you enable them again.",
+      "revokeGrantsTitle": "Revoke every app for {{name}}?",
+      "revokeGrantsBody": "All connected apps stop working for this account until they are approved again.",
+      "unlinkTitle": "Unlink a sign-in method for {{name}}?",
+      "unlinkBody": "Pick the provider to remove. They can no longer sign in with it.",
+      "unlinkField": "Provider",
+      "setRoleTitle": "Change the role of {{name}}?",
+      "setRoleOwner": "{{name}} will be able to see and change every account on this server.",
+      "setRoleUser": "{{name}} will lose access to the admin pages."
+    },
+    "done": {
+      "approve": "Account approved.",
+      "disable": "Account disabled.",
+      "enable": "Account enabled.",
+      "set_role": "Role changed.",
+      "unlink_identity": "Sign-in method unlinked.",
+      "revoke_grants": "Apps revoked."
+    },
+    "empty": "No accounts match."
+  },
+  "enrollments": {
+    "title": "Canvas enrollments",
+    "filter": "State",
+    "filterAll": "All",
+    "columns": {
+      "account": "Account",
+      "canvasUser": "Canvas user",
+      "state": "State",
+      "lastUsed": "Last used",
+      "actions": "Actions"
+    },
+    "state": {
+      "none": "Not enrolled",
+      "valid": "Valid",
+      "invalid": "Needs re-enrollment",
+      "unknown": "Unchecked"
+    },
+    "details": "Technical details",
+    "enrolledAt": "Enrolled",
+    "updatedAt": "Updated",
+    "invalidSince": "Rejected since",
+    "accountId": "Account id",
+    "canvasUserId": "Canvas user id",
+    "revoke": "Revoke",
+    "confirmTitle": "Revoke the Canvas token of {{name}}?",
+    "confirmBody": "The stored token is deleted and they have to enroll again.",
+    "done": "Enrollment revoked.",
+    "empty": "No enrollments yet."
+  },
+  "audit": {
+    "title": "Audit log",
+    "actionFilter": "Action",
+    "actorFilter": "Actor id",
+    "allActions": "All actions",
+    "columns": {
+      "time": "Time",
+      "actor": "Actor",
+      "action": "Action",
+      "target": "Target",
+      "detail": "Detail"
+    },
+    "actions": {
+      "approve": "Approved account",
+      "disable": "Disabled account",
+      "enable": "Enabled account",
+      "set_role": "Changed role",
+      "link": "Linked sign-in",
+      "unlink": "Unlinked sign-in",
+      "write_tool_toggle": "Changed write tools",
+      "token_enroll": "Enrolled Canvas token",
+      "token_delete": "Deleted Canvas token",
+      "grant_revoke": "Revoked app",
+      "enrollment_revoke": "Revoked enrollment",
+      "login": "Signed in"
+    },
+    "system": "System",
+    "empty": "No audit entries."
+  }
+}

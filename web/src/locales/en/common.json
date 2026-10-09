@@ -1,0 +1,86 @@
+{
+  "brand": "Canvas MCP",
+  "pageTitle": "Canvas account",
+  "actions": {
+    "retry": "Try again",
+    "refresh": "Refresh",
+    "copy": "Copy",
+    "copied": "Copied",
+    "signIn": "Sign in",
+    "signOut": "Sign out",
+    "signOutAll": "Sign out of all devices",
+    "cancel": "Cancel",
+    "confirm": "Confirm",
+    "delete": "Delete",
+    "revoke": "Revoke",
+    "save": "Save",
+    "close": "Close",
+    "goHome": "Back to home",
+    "openMenu": "Open menu",
+    "loadMore": "Load more"
+  },
+  "nav": {
+    "main": "Main navigation",
+    "home": "Account",
+    "token": "Canvas token",
+    "writeTools": "Write tools",
+    "identities": "Sign-in methods",
+    "connectedApps": "Connected apps",
+    "activity": "Recent sign-ins",
+    "admin": "Admin",
+    "adminAccounts": "Accounts",
+    "adminEnrollments": "Enrollments",
+    "adminAudit": "Audit log"
+  },
+  "language": {
+    "names": { "en": "English", "zh": "中文" },
+    "switchTo": "Switch language to {{name}}"
+  },
+  "theme": {
+    "label": "Theme",
+    "auto": "Auto",
+    "light": "Light",
+    "dark": "Dark"
+  },
+  "status": {
+    "active": "Active",
+    "pending": "Pending",
+    "disabled": "Disabled"
+  },
+  "role": {
+    "owner": "Owner",
+    "user": "User"
+  },
+  "chrome": {
+    "signedInAs": "Signed in as {{name}}",
+    "skipToContent": "Skip to content"
+  },
+  "time": {
+    "never": "Never",
+    "unknown": "Unknown"
+  },
+  "states": {
+    "loading": "Loading…",
+    "notFound": {
+      "title": "Page not found",
+      "body": "That page does not exist."
+    },
+    "forbidden": {
+      "title": "Not allowed",
+      "body": "You do not have access to this page."
+    },
+    "crash": {
+      "title": "Something went wrong",
+      "body": "The page hit an unexpected error. Reload to try again."
+    },
+    "reload": "Reload"
+  },
+  "mcp": {
+    "title": "MCP connector URL",
+    "body": "Add this URL as a custom connector in Claude, or in any other MCP client.",
+    "copyLabel": "Copy connector URL"
+  },
+  "table": {
+    "empty": "Nothing to show."
+  }
+}

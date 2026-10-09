@@ -1,0 +1,86 @@
+{
+  "brand": "Canvas MCP",
+  "pageTitle": "Canvas 账户",
+  "actions": {
+    "retry": "重试",
+    "refresh": "刷新",
+    "copy": "复制",
+    "copied": "已复制",
+    "signIn": "登录",
+    "signOut": "退出登录",
+    "signOutAll": "退出所有设备",
+    "cancel": "取消",
+    "confirm": "确认",
+    "delete": "删除",
+    "revoke": "撤销",
+    "save": "保存",
+    "close": "关闭",
+    "goHome": "返回首页",
+    "openMenu": "打开菜单",
+    "loadMore": "加载更多"
+  },
+  "nav": {
+    "main": "主导航",
+    "home": "账户",
+    "token": "Canvas 令牌",
+    "writeTools": "写入工具",
+    "identities": "登录方式",
+    "connectedApps": "已连接的应用",
+    "activity": "最近登录",
+    "admin": "管理",
+    "adminAccounts": "账户",
+    "adminEnrollments": "令牌绑定",
+    "adminAudit": "审计日志"
+  },
+  "language": {
+    "names": { "en": "English", "zh": "中文" },
+    "switchTo": "切换语言为 {{name}}"
+  },
+  "theme": {
+    "label": "主题",
+    "auto": "自动",
+    "light": "浅色",
+    "dark": "深色"
+  },
+  "status": {
+    "active": "正常",
+    "pending": "待审批",
+    "disabled": "已停用"
+  },
+  "role": {
+    "owner": "所有者",
+    "user": "用户"
+  },
+  "chrome": {
+    "signedInAs": "当前登录：{{name}}",
+    "skipToContent": "跳到正文"
+  },
+  "time": {
+    "never": "从未",
+    "unknown": "未知"
+  },
+  "states": {
+    "loading": "加载中…",
+    "notFound": {
+      "title": "页面不存在",
+      "body": "找不到这个页面。"
+    },
+    "forbidden": {
+      "title": "无权访问",
+      "body": "你没有权限查看此页面。"
+    },
+    "crash": {
+      "title": "出错了",
+      "body": "页面遇到了意外错误，请重新加载后再试。"
+    },
+    "reload": "重新加载"
+  },
+  "mcp": {
+    "title": "MCP 连接器地址",
+    "body": "把这个地址作为自定义连接器添加到 Claude 或其他 MCP 客户端。",
+    "copyLabel": "复制连接器地址"
+  },
+  "table": {
+    "empty": "暂无内容。"
+  }
+}
