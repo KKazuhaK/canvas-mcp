@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -273,6 +273,25 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         access=PrincipalAccessCache(store),
         limiters=build_rate_limiters(settings.state_backend),
     )
+
+
+async def apply_disabled_tools(mcp: FastMCP, names: Collection[str]) -> list[str]:
+    """Remove the tools the operator named in ``SELFHOST_DISABLED_TOOLS``.
+
+    Runs once at startup, after registration and ``apply_tool_policy``. It only
+    removes: a name that is not registered (a tool of another role profile, or one
+    ``ALLOWED_WRITE_TOOLS`` already removed) is skipped, and nothing is ever added.
+    A removed tool is neither listed nor callable. Returns the removed names, sorted.
+    """
+    wanted = set(names)
+    if not wanted:
+        return []
+    removed: list[str] = []
+    for tool in await mcp.list_tools(run_middleware=False):
+        if tool.name in wanted:
+            mcp.local_provider.remove_tool(tool.name)
+            removed.append(tool.name)
+    return sorted(removed)
 
 
 def install_selfhost(

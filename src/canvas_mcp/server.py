@@ -604,6 +604,7 @@ def _selfhost_summary(settings: SelfhostSettings) -> list[str]:
         + (", ".join(school.host for school in settings.featured_schools) or "none")
         + f", search={'on' if settings.school_search else 'off'}",
         f"  Course state: {settings.course_state}",
+        "  Disabled tools: " + (", ".join(settings.disabled_tools) or "none"),
     ]
 
 
@@ -611,6 +612,7 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
     """Start the self-hosted Entra OAuth mode, or exit 1 (fail closed)."""
     from .core.audit import init_audit_logging
     from .core.selfhost.app import (
+        apply_disabled_tools,
         build_selfhost_asgi_app,
         install_selfhost,
         prepare_selfhost,
@@ -684,6 +686,7 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
 
     register_all_tools(mcp, role=role)
     removed_tools = asyncio.run(apply_tool_policy(mcp, tool_policy))
+    disabled_tools = asyncio.run(apply_disabled_tools(mcp, settings.disabled_tools))
     install_selfhost(mcp, runtime, config, tool_policy=tool_policy)
 
     log_info(
@@ -695,6 +698,7 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
         tool_profile=role,
         tool_policy=tool_policy.source,
         removed_tools=len(removed_tools),
+        disabled_tools=len(disabled_tools),
         token_store=settings.database_target.description,
         enrollments=runtime.store.count(),
     )

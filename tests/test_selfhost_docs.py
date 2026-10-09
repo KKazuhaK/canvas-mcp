@@ -241,6 +241,7 @@ def test_every_variable_the_selfhost_settings_read_is_documented(env_text):
     read = set(re.findall(r'get\("([A-Z][A-Z0-9_]+)"\)', source))
     read |= {
         "ACCOUNT_SESSION_TTL_SECONDS", "OAUTH_ALLOWED_REDIRECT_URIS", "MCP_AUTH_MODE", "SELFHOST_COURSE_STATE",
+        "SELFHOST_DISABLED_TOOLS",
     }
     assert len(read) >= 12  # the regex still finds the settings
     for name in sorted(read):
@@ -576,6 +577,20 @@ def test_the_course_state_setting_ships_at_its_default_and_is_documented(env_tex
     for value in COURSE_STATES:
         assert f"`{value}`" in section, f"README does not explain {value}"
     assert "default" in section.lower() and "opt-in" in section.lower()
+
+
+def test_the_disabled_tools_setting_ships_off_and_is_documented(env_text, readme):
+    from canvas_mcp.core.selfhost.settings import DISABLED_TOOLS_ENV
+
+    assert DISABLED_TOOLS_ENV == "SELFHOST_DISABLED_TOOLS"
+    assert _commented_assignments(env_text)[DISABLED_TOOLS_ENV] == ""
+    assert DISABLED_TOOLS_ENV not in _assignments(env_text)
+    assert "## Disabling tools" in readme
+    section = readme[readme.index("## Disabling tools") :]
+    section = section[: section.index(chr(10) + "## ", 5)]
+    assert DISABLED_TOOLS_ENV in section
+    for text in ("read_course_file_text", "unknown", "only remove", "--config", "restart"):
+        assert text in section, f"README no longer mentions {text!r} for disabling tools"
 
 
 def test_readme_records_what_the_oauth_proxy_does_with_replayed_codes_and_refresh_tokens(readme):

@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 from typing import ClassVar, Literal
 from urllib.parse import urlsplit
 
+from ..tool_policy import TOOL_EFFECTS
 from .db.url import (
     ALLOW_OUTSIDE_ENV,
     DATABASE_URL_ENV,
@@ -36,6 +37,8 @@ COURSE_STATE_REQUEST_LOCAL = "request_local"
 COURSE_STATE_PER_PRINCIPAL = "per_principal"
 COURSE_STATES = (COURSE_STATE_REQUEST_LOCAL, COURSE_STATE_PER_PRINCIPAL)
 DEFAULT_COURSE_STATE = COURSE_STATE_REQUEST_LOCAL
+
+DISABLED_TOOLS_ENV = "SELFHOST_DISABLED_TOOLS"
 
 DEFAULT_API_SCOPE = "Canvas.Access"
 DEFAULT_REQUIRED_ROLE = "Canvas.User"
@@ -60,6 +63,7 @@ _GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 _SCOPE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _ROLE_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/_-]+={0,2}$")
 _RESERVED_TENANTS = frozenset({"common", "organizations", "consumers"})
@@ -115,6 +119,10 @@ class SelfhostSettings:
     database: DatabaseTarget | None = None
     auto_migrate: bool = True
     state_backend: Literal["memory"] = "memory"
+    # Tools (read or write) the operator removes at startup, sorted and de-duplicated.
+    # It can only remove tools: it never registers one and never widens what
+    # ``ALLOWED_WRITE_TOOLS`` or a user's own switches allow.
+    disabled_tools: tuple[str, ...] = ()
 
     mcp_path: ClassVar[str] = "/mcp"
 
@@ -368,6 +376,34 @@ def _parse_state_backend(raw: str, problems: list[str]) -> Literal["memory"]:
     return "memory"
 
 
+def _parse_disabled_tools(raw: str, problems: list[str]) -> tuple[str, ...]:
+    """Comma-separated tool names to remove; an unknown name is refused.
+
+    Only names are echoed, and only names that look like tool names and are not
+    known tools. An entry that is not shaped like a tool name is counted, never
+    quoted, so a value pasted into the wrong variable cannot reach the log.
+    """
+    entries = [part.strip().lower() for part in raw.split(",")]
+    entries = [part for part in entries if part]
+    unknown: set[str] = set()
+    malformed = 0
+    for entry in entries:
+        if not _TOOL_NAME_RE.match(entry):
+            malformed += 1
+        elif entry not in TOOL_EFFECTS:
+            unknown.add(entry)
+    if unknown:
+        problems.append(
+            f"{DISABLED_TOOLS_ENV} names unknown tools: {', '.join(sorted(unknown))}"
+        )
+    if malformed:
+        problems.append(
+            f"{DISABLED_TOOLS_ENV} has {malformed} entries that are not tool names "
+            "(use a comma-separated list such as read_course_file_text,list_users)"
+        )
+    return tuple(sorted(set(entries)))
+
+
 def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSettings:
     """Parse and validate every variable of the mode, reporting all problems at once."""
     source = os.environ if env is None else env
@@ -472,6 +508,7 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
     featured = _parse_featured_schools(get("CANVAS_FEATURED_SCHOOLS"), problems)
     school_search = _parse_bool("CANVAS_SCHOOL_SEARCH", get("CANVAS_SCHOOL_SEARCH"), problems)
     course_state = _parse_course_state(get(COURSE_STATE_ENV), problems)
+    disabled_tools = _parse_disabled_tools(get(DISABLED_TOOLS_ENV), problems)
 
     if problems or base is None:
         raise SelfhostConfigError(problems)
@@ -498,4 +535,5 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
         database=database,
         auto_migrate=auto_migrate,
         state_backend=state_backend,
+        disabled_tools=disabled_tools,
     )

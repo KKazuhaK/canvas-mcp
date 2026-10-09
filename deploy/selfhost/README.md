@@ -16,6 +16,7 @@ Image: `ghcr.io/kkazuhak/canvas-mcp` (linux/amd64 + linux/arm64, non-root, data 
 - [Step 5: Pull the image and start](#step-5-pull-the-image-and-start)
 - [Step 6: Connect claude.ai and Claude Code](#step-6-connect-claudeai-and-claude-code)
 - [Per-user enrollment (/account)](#per-user-enrollment-account)
+- [Disabling tools](#disabling-tools)
 - [Multiple schools (optional)](#multiple-schools-optional)
 - [Prompt-injection risk of write tools](#prompt-injection-risk-of-write-tools)
 - [Custody and privacy boundary](#custody-and-privacy-boundary)
@@ -458,6 +459,21 @@ Details:
 - To remove a user's write access immediately, the user can press **Turn all off**, or the operator can remove the tool from `ALLOWED_WRITE_TOOLS` and restart.
 
 > **React UI (in development).** `/account` is being rewritten as a React single-page app, with the source in `web/` in the repository (see `web/README.md`). `Dockerfile.selfhost` already builds it and puts the output in the image at `/app/web-dist`, but the server does **not** serve those files yet: what you see now is still the server-rendered page described above, and neither the deployment nor the runtime behavior has changed.
+
+## Disabling tools
+
+`SELFHOST_DISABLED_TOOLS` removes tools from the server at startup. It is a comma-separated list of tool names and works on any tool, read or write:
+
+```
+SELFHOST_DISABLED_TOOLS=read_course_file_text,read_course_file
+```
+
+- A disabled tool is gone from the registry: it is not in `tools/list`, not in `search_canvas_tools`, not on the **Write tools** list at `/account`, and a call to it by name fails as an unknown tool. Nobody can bring it back at runtime; the operator changes the list and restarts.
+- It can only remove. It never registers a tool, never overrides the tool profile (`CANVAS_ROLE`) and never widens `ALLOWED_WRITE_TOOLS` or what a user has switched on. A name that is already absent for those reasons is accepted and does nothing.
+- Names are matched exactly (case is ignored). **A name the server does not know stops the start**, and the message lists the unknown names only, so a typo cannot leave a tool you meant to remove still on. An entry that is not shaped like a tool name is counted in the message but not quoted back, so a value pasted into the wrong variable does not reach the log.
+- Unset or empty removes nothing. Use `--config` to see the list the server runs with, and the start-up log line for how many tools were removed.
+- Use it for things the allowlist cannot express, such as turning off a read tool that fetches file contents (`read_course_file_text`, `read_course_file`) on a host where that is not wanted. It applies to the whole server, to every user alike; per-user choices stay at `/account`.
+- This setting exists only in `MCP_AUTH_MODE=entra-oauth`; the other modes ignore it.
 
 ## Multiple schools (optional)
 
