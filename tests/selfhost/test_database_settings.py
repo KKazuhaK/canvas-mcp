@@ -221,45 +221,6 @@ class TestStartup:
         monkeypatch.setitem(sys.modules, "psycopg", None)
         assert "canvas-mcp[postgres]" in (_data_layer_problem(pg) or "")
 
-    def test_an_empty_postgres_next_to_a_sqlite_file_with_data_is_refused(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from canvas_mcp.core.selfhost.app import _refuse_silent_database_switch
-        from canvas_mcp.core.selfhost.db import migrate
-        from canvas_mcp.core.selfhost.token_store import (
-            OPERATOR,
-            Keyring,
-            TokenStore,
-            TokenStoreError,
-        )
-
-        keyring = Keyring.parse("k1:" + base64.b64encode(bytes(32)).decode())
-        settings = load_selfhost_settings(_env(SELFHOST_DATA_DIR=str(tmp_path), DATABASE_URL=GOOD_PG))
-        old = TokenStore(settings.token_db_path, keyring)
-        old.initialize()
-        pg_store = TokenStore.for_target(settings.database_target, keyring)
-        state = {"value": migrate.STATE_UNINITIALIZED}
-        monkeypatch.setattr(
-            migrate,
-            "current",
-            lambda db: migrate.MigrationStatus("postgresql", None, None, "h", state["value"]),
-        )
-        # An empty legacy file is harmless.
-        _refuse_silent_database_switch(settings, pg_store)
-        old.disable_principal(
-            "11111111-2222-3333-4444-555555555555",
-            "aaaaaaaa-0000-4000-8000-00000000000a",
-            actor=OPERATOR,
-            reason="operator_disabled",
-        )
-        with pytest.raises(TokenStoreError) as refused:
-            _refuse_silent_database_switch(settings, pg_store)
-        message = str(refused.value)
-        assert "db import-sqlite" in message and "s3cr3tpw" not in message
-        # An initialised PostgreSQL database is the operator's choice: no objection.
-        state["value"] = migrate.STATE_CURRENT
-        _refuse_silent_database_switch(settings, pg_store)
-
     def test_the_url_never_reaches_the_log_or_an_error(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:

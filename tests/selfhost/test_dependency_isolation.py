@@ -160,3 +160,22 @@ def test_the_self_hosted_start_reports_the_missing_extra_instead_of_crashing() -
     )
     assert result.returncode == 0, result.stderr
     assert "refused" in result.stdout
+
+
+def test_the_operator_cli_reports_the_missing_extra_in_one_line() -> None:
+    result = _run(
+        """
+        import base64, os, sys, tempfile
+        os.environ["SELFHOST_DATA_DIR"] = tempfile.mkdtemp()
+        os.environ["CANVAS_TOKEN_KEYS"] = "k1:" + base64.b64encode(bytes(32)).decode()
+        from canvas_mcp.core.selfhost import token_admin
+        for argv in (["list"], ["check"], ["db", "current"], ["db", "upgrade"]):
+            code = token_admin.main(argv)
+            assert code == token_admin.EXIT_CONFIG, (argv, code)
+        print("reported")
+        """
+    )
+    assert result.returncode == 0, result.stderr
+    assert "reported" in result.stdout
+    assert result.stderr.count("canvas-mcp[selfhost]") == 4
+    assert "Traceback" not in result.stderr

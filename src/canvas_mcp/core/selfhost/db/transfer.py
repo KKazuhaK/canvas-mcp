@@ -1,10 +1,11 @@
 """Moving an existing SQLite token database into PostgreSQL.
 
-Switching ``DATABASE_URL`` to an empty PostgreSQL database would silently drop
+Switching ``DATABASE_URL`` to an empty database would silently drop
 ``principal_status`` (the disablements) and re-activate disabled users, who could
-then enroll again. The server therefore refuses to start in that situation
-(``legacy_sqlite_has_rows``) and ``token_admin db import-sqlite`` is the way
-across: one transaction, ciphertexts copied unchanged (the AAD does not depend
+then enroll again. The server and the operator CLI therefore refuse to run in that
+situation (``refuse_silent_switch``: the target holds no rows while the default
+SQLite file does; an empty schema does not count as data) and
+``token_admin db import-sqlite`` is the way across: one transaction, ciphertexts copied unchanged (the AAD does not depend
 on the backend), and a check that the counts match and that every stored token
 still decrypts with the keyring. Anything wrong rolls the whole import back.
 """
@@ -61,6 +62,61 @@ def legacy_sqlite_has_rows(path: pathlib.Path) -> bool:
         return True
     finally:
         conn.close()
+
+
+def target_holds_rows(target: Database) -> bool:
+    """True if any copied table of ``target`` has a row.
+
+    Judged by data, not by schema: a schema that a failed import, ``db upgrade`` or
+    a read-only CLI command created is still an empty database.
+    """
+    from sqlalchemy import inspect
+
+    with target.guard(), target.read() as conn:
+        existing = set(inspect(conn).get_table_names())
+        for name in COPIED_TABLES:
+            if name in existing:
+                table = schema.metadata.tables[name]
+                if conn.execute(select(table).limit(1)).first() is not None:
+                    return True
+    return False
+
+
+def refuse_silent_switch(target: Database, legacy_path: pathlib.Path) -> None:
+    """Fail closed when ``target`` holds no data but the default SQLite file does.
+
+    Starting on such a target would drop the disablements stored in the SQLite file,
+    and a disabled user could enroll again. Does nothing when ``target`` is that
+    SQLite file itself, when the file holds nothing, or when the target is a
+    database this build refuses anyway (newer or unreadable: ``ensure_ready``
+    reports that with its own message). Raises :class:`TokenStoreError`.
+    """
+    sqlite_path = target.sqlite_path
+    if sqlite_path is not None:
+        try:
+            if sqlite_path.resolve() == legacy_path.resolve():
+                return
+        except OSError:
+            if sqlite_path == legacy_path:
+                return
+    if not legacy_sqlite_has_rows(legacy_path):
+        return
+    state = migrate.current(target).state
+    if state in (migrate.STATE_NEWER, migrate.STATE_UNREADABLE):
+        return
+    if state != migrate.STATE_UNINITIALIZED and target_holds_rows(target):
+        return
+    way_across = (
+        "Import it with: python -m canvas_mcp.core.selfhost.token_admin db import-sqlite PATH, "
+        "or move the SQLite file away if it is meant to be abandoned"
+        if target.kind == "postgresql"
+        else "Point DATABASE_URL back at it, or move the SQLite file away if it is meant "
+        "to be abandoned"
+    )
+    raise TokenStoreError(
+        "DATABASE_URL names a database that holds no data, but the SQLite token database "
+        f"in the data directory still holds data (including access decisions). {way_across}"
+    )
 
 
 def import_sqlite(target: Database, source: pathlib.Path, keyring: Any) -> ImportReport:

@@ -326,4 +326,4 @@ jobs:
         fi
         echo "## Canvas MCP test results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "Full suite passed on Ubuntu with Python 3.11, 3.12, 3.13 and 3.14, on Windows with Python 3.14, on Ubuntu with Python 3.14 against the exact dependency versions in uv.lock, and the self-hosted tests also passed against PostgreSQL 18 (the `test-postgres` job). The web UI (web/) passed lint, typecheck, tests, build and the dist checks." >> $GITHUB_STEP_SUMMARY
+        echo "Full suite passed on Ubuntu with Python 3.11, 3.12, 3.13 and 3.14, on Windows with Python 3.14, on Ubuntu with Python 3.14 against the exact dependency versions in uv.lock, and the self-hosted tests also passed against PostgreSQL 18 (the test-postgres job). The web UI (web/) passed lint, typecheck, tests, build and the dist checks." >> $GITHUB_STEP_SUMMARY

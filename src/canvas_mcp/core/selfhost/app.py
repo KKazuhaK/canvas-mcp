@@ -225,7 +225,7 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
 
     Raises :class:`SelfhostConfigError` when the keyring or the store is
     unusable (a key id missing, a wrong key, an unreadable or newer database,
-    an uninitialised PostgreSQL database next to a SQLite file that has data).
+    a database without data next to a SQLite file that has data).
     """
     from .token_store import (
         Keyring,
@@ -239,10 +239,12 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
     if missing:
         raise SelfhostConfigError([missing])
 
+    from .db.transfer import refuse_silent_switch
+
     try:
         keyring = Keyring.parse(settings.canvas_token_keys_raw)
         store = TokenStore.for_target(settings.database_target, keyring)
-        _refuse_silent_database_switch(settings, store)
+        refuse_silent_switch(store.database, settings.token_db_path)
         store.initialize(auto_migrate=settings.auto_migrate)
     except StoreUnavailable:
         # A corrupt file, not a database, locked, a failing disk, or an unreachable
@@ -271,29 +273,6 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         access=PrincipalAccessCache(store),
         limiters=build_rate_limiters(settings.state_backend),
     )
-
-
-def _refuse_silent_database_switch(settings: SelfhostSettings, store: TokenStore) -> None:
-    """Fail closed when PostgreSQL is empty but the old SQLite file still has data.
-
-    Starting on an empty PostgreSQL database would drop the disablements stored in
-    the SQLite file, and a disabled user could enroll again.
-    """
-    from .db import migrate
-    from .db.transfer import legacy_sqlite_has_rows
-    from .token_store import TokenStoreError
-
-    if settings.database_target.kind != "postgresql":
-        return
-    if migrate.current(store.database).state != migrate.STATE_UNINITIALIZED:
-        return
-    if legacy_sqlite_has_rows(settings.token_db_path):
-        raise TokenStoreError(
-            "DATABASE_URL names an empty PostgreSQL database, but the SQLite token database "
-            "in the data directory still holds data (including access decisions). Import it "
-            "with: python -m canvas_mcp.core.selfhost.token_admin db import-sqlite PATH, or "
-            "move the SQLite file away if it is meant to be abandoned"
-        )
 
 
 def install_selfhost(

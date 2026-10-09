@@ -36,6 +36,10 @@ changes nothing. ``db upgrade`` applies pending schema revisions (use
 database (``DATABASE_URL``) in one transaction and checks that every token still
 decrypts; the source file is not modified.
 
+Every command except ``db ...`` refuses to run (exit 2) on a database that holds no
+rows while the default SQLite file in the data directory still has data: using it
+would hide the disablements stored in that file. Import the file first.
+
 Reads ``CANVAS_TOKEN_KEYS``, ``SELFHOST_DATA_DIR`` (default ``/data``) and
 ``DATABASE_URL`` (unset: the SQLite file in the data directory) from the
 environment, like the server. Schema changes are applied before a command runs
@@ -60,6 +64,7 @@ from typing import TYPE_CHECKING
 from canvas_mcp.core.selfhost.db.url import (
     ALLOW_OUTSIDE_ENV,
     DATABASE_URL_ENV,
+    default_sqlite_path,
     parse_database_url,
 )
 from canvas_mcp.core.selfhost.settings import AUTO_MIGRATE_ENV, _parse_auto_migrate
@@ -154,11 +159,21 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _data_dir() -> pathlib.Path:
+    return pathlib.Path(os.environ.get(DATA_DIR_ENV) or DEFAULT_DATA_DIR)
+
+
 def _database() -> Database:
     """The configured database (``DATABASE_URL`` or the SQLite file), not yet opened."""
-    from canvas_mcp.core.selfhost.db.engine import Database
+    try:
+        from canvas_mcp.core.selfhost.db.engine import Database
+    except ImportError:
+        raise TokenStoreError(
+            "the self-hosted mode needs SQLAlchemy and Alembic: "
+            "pip install 'canvas-mcp[selfhost]'"
+        ) from None
 
-    data_dir = pathlib.Path(os.environ.get(DATA_DIR_ENV) or DEFAULT_DATA_DIR)
+    data_dir = _data_dir()
     problems: list[str] = []
     allow = (os.environ.get(ALLOW_OUTSIDE_ENV) or "").strip().lower() in ("true", "1", "yes")
     target = parse_database_url(
@@ -169,7 +184,13 @@ def _database() -> Database:
     )
     if problems:
         raise TokenStoreError("; ".join(problems))
-    return Database(target)
+    try:
+        return Database(target)
+    except ImportError:
+        raise TokenStoreError(
+            "DATABASE_URL names PostgreSQL, which needs the psycopg driver: "
+            "pip install 'canvas-mcp[postgres]'"
+        ) from None
 
 
 def _auto_migrate() -> bool:
@@ -183,17 +204,23 @@ def _auto_migrate() -> bool:
 def _open_store() -> TokenStore:
     """Open and initialize the store; raises TokenStoreError/OSError."""
     keyring = Keyring.parse(os.environ.get(KEYS_ENV, ""))
-    store = TokenStore(_database(), keyring)
+    database = _database()
+    from canvas_mcp.core.selfhost.db.transfer import refuse_silent_switch
+
+    # Before anything is created or written: a command that ran on an empty target
+    # next to a SQLite file with data would lose that file's disablements.
+    refuse_silent_switch(database, default_sqlite_path(_data_dir()))
+    store = TokenStore(database, keyring)
     store.initialize(auto_migrate=_auto_migrate())
     return store
 
 
 def _run_db(args: argparse.Namespace) -> int:
     """The ``db`` subcommands. ``current`` and ``upgrade`` need no keys."""
+    command: str = args.db_command
+    db = _database()  # first: reports a missing extra before anything imports SQLAlchemy
     from canvas_mcp.core.selfhost.db import migrate
 
-    command: str = args.db_command
-    db = _database()
     if command == "current":
         status = migrate.current(db)
         print(f"backend: {db.description}")
