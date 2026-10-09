@@ -205,6 +205,11 @@ CANVAS_ROLE=student
 TIMEZONE=America/Los_Angeles
 MCP_MAX_RESULT_CHARS=140000
 
+# Course state: request_local (the default) keeps nothing about a user's courses between
+# requests. To cache it per user across requests instead, remove the leading "# " from the
+# next line and run docker compose up -d (README.md, "Course state").
+# SELFHOST_COURSE_STATE=per_principal
+
 FASTMCP_HOME=/data/fastmcp
 EOF
   if [ "$ENABLE_WRITES" = true ]; then

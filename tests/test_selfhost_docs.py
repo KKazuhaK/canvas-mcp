@@ -239,7 +239,9 @@ REPO = Path(__file__).resolve().parents[1]
 def test_every_variable_the_selfhost_settings_read_is_documented(env_text):
     source = (SRC / "core" / "selfhost" / "settings.py").read_text(encoding="utf-8")
     read = set(re.findall(r'get\("([A-Z][A-Z0-9_]+)"\)', source))
-    read |= {"ACCOUNT_SESSION_TTL_SECONDS", "OAUTH_ALLOWED_REDIRECT_URIS", "MCP_AUTH_MODE"}
+    read |= {
+        "ACCOUNT_SESSION_TTL_SECONDS", "OAUTH_ALLOWED_REDIRECT_URIS", "MCP_AUTH_MODE", "SELFHOST_COURSE_STATE",
+    }
     assert len(read) >= 12  # the regex still finds the settings
     for name in sorted(read):
         assert re.search(rf"^#? ?{name}=", env_text, re.MULTILINE), f"{name} is not in env.example"
@@ -559,3 +561,19 @@ def test_readme_lists_every_setting_that_must_stay_unset(readme):
     section = readme[readme.index(marker) : readme.index(marker) + 1500]
     for name in MUST_BE_UNSET:
         assert name in section, f"README does not list {name} among the settings that must stay unset"
+
+
+def test_the_course_state_setting_ships_at_its_default_and_is_documented(env_text, readme):
+    from canvas_mcp.core.selfhost.settings import COURSE_STATES, DEFAULT_COURSE_STATE
+
+    assert _commented_assignments(env_text)["SELFHOST_COURSE_STATE"] == DEFAULT_COURSE_STATE
+    assert "SELFHOST_COURSE_STATE" not in _assignments(env_text)
+    for value in COURSE_STATES:
+        assert value in env_text, f"env.example does not explain {value}"
+    assert "## Course state: request-local or per user" in readme
+    section = readme[readme.index("## Course state: request-local or per user") :]
+    section = section[: section.index("\n## ", 5)]
+    assert "SELFHOST_COURSE_STATE" in section
+    for value in COURSE_STATES:
+        assert f"`{value}`" in section, f"README does not explain {value}"
+    assert "default" in section.lower() and "opt-in" in section.lower()

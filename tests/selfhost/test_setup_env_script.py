@@ -131,6 +131,21 @@ def test_defaults_are_read_only_and_anonymized(tmp_path):
         assert name not in values, f"{name} must stay unset without an explicit flag"
 
 
+def test_course_state_is_left_at_its_request_local_default_and_the_opt_in_is_shown_commented(tmp_path):
+    assert run_script(tmp_path, env=preset()).returncode == 0
+    path = tmp_path / ".env"
+    assert "SELFHOST_COURSE_STATE" not in read_env(path)
+    assert "# SELFHOST_COURSE_STATE=per_principal" in path.read_text(encoding="utf-8")
+    assert load(read_env(path), tmp_path).course_state == "request_local"
+
+    # Uncommenting the line is the whole opt-in.
+    text = path.read_text(encoding="utf-8").replace(
+        "# SELFHOST_COURSE_STATE=per_principal", "SELFHOST_COURSE_STATE=per_principal"
+    )
+    path.write_text(text, encoding="utf-8")
+    assert load(read_env(path), tmp_path).course_state == "per_principal"
+
+
 def test_read_only_file_turns_writes_on_by_uncommenting_not_regenerating(tmp_path):
     """Regenerating replaces CANVAS_TOKEN_KEYS and bricks enrolled tokens, so the
     file must offer the write lines in place and warn against rerunning."""

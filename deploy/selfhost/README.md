@@ -24,6 +24,7 @@ Image: `ghcr.io/kkazuhak/canvas-mcp` (linux/amd64 + linux/arm64, non-root, data 
 - [Backup and restore](#backup-and-restore)
 - [Revoking a user](#revoking-a-user)
 - [Canvas credential lifecycle](#canvas-credential-lifecycle)
+- [Course state: request-local or per user](#course-state-request-local-or-per-user)
 - [Troubleshooting](#troubleshooting)
 
 ## Architecture
@@ -520,7 +521,7 @@ Be honest with the people you invite: they are trusting **you** and **the host y
 | **`.env` itself** | The host file (mode 600) and the container environment. | Root on the host, the Docker group, anyone who can read the file or run `docker inspect`. | As listed above. | **Never in the same backup as `/data`.** A password manager is the right place. | Delete the file when you decommission the server. |
 | **Audit log** (optional) | `/data/audit/audit.jsonl` and container stderr when `LOG_ACCESS_EVENTS=true`. | Whoever can read the volume or the container logs. Holds principal keys, closed-set codes and sanitized endpoint paths; no tokens, names or Canvas content (endpoint paths mask numeric ids, page slugs, `sis_*:` ids and `by_path` folder paths). Free-form text is scrubbed of credentials and e-mail addresses and cut short. | n/a | In `/data` backups. | Rotating file (10 MB, six files in all), then overwritten. |
 
-State kept only in memory (lost on every restart, never written to disk): course caches, course-policy decisions, access and token-health verdicts, pending write confirmations, and the decrypted Canvas token of each running request.
+State kept only in memory (lost on every restart, never written to disk): access and token-health verdicts, pending write confirmations, the decrypted Canvas token of each running request and, only with `SELFHOST_COURSE_STATE=per_principal`, course caches, course-policy decisions, pseudonym maps and discussion hints (see [Course state](#course-state-request-local-or-per-user)).
 
 ### Retention and deletion
 
@@ -669,7 +670,7 @@ Each user has a **credential generation**, a number that only goes up. The token
 
 and when the user is **disabled** or **enabled**. Deleting a token does not reset the number, so a token enrolled later is never mistaken for an earlier one.
 
-What is bound to the generation (the key of each of these contains it, so a value learned under one generation is never read under another):
+What is bound to the generation (the key of each of these contains it, so a value learned under one generation is never read under another). The first four rows are kept between requests only with `SELFHOST_COURSE_STATE=per_principal`; by default (`request_local`) nothing about the courses outlives the request that learned it (see [Course state](#course-state-request-local-or-per-user)):
 
 | State | What happens when the generation changes |
 |---|---|
@@ -688,6 +689,25 @@ What this does and does not promise:
 - The upstream HTTP modes (`X-Canvas-Token`, access keys, Easy Auth) are unchanged: each request resolves everything under its own credential and keeps nothing between requests, so there is nothing to invalidate.
 - The generation is not a secret and appears in no token. It is only part of in-memory cache keys and of the token database.
 - Per-user write-tool switches are the user's own choice and are keyed by user, not by credential: replacing a token keeps them. If you want a replacement to start from "everything off", the user clears them with **Disable all** at `/account`.
+
+## Course state: request-local or per user
+
+`SELFHOST_COURSE_STATE` decides what the server remembers about a user's courses **between requests**. It affects only caches of data read from Canvas; the access decision, the Canvas token and the credential generation do not depend on it.
+
+| Value | Behaviour |
+|---|---|
+| `request_local` (default) | Nothing about a user's courses outlives the request. Each request reads the course list with the user's own token when a tool names a course by code or title, keeps course labels, course-policy decisions, anonymization pseudonyms and discussion hints only inside that request, and drops them when it ends. The in-memory course cache, the policy cache, the pseudonym maps and the discussion-hint map are never written to. This is how the upstream HTTP modes (`X-Canvas-Token`, access keys, Easy Auth) already work. |
+| `per_principal` (explicit opt-in) | The previous behaviour. The same four kinds of data are kept in memory across requests, per user, school and credential generation, and are dropped when the user's token changes (see [Canvas credential lifecycle](#canvas-credential-lifecycle)). Fewer Canvas calls, more per-user data in the process, and a larger surface for a cross-user mistake. Choose it only after you have measured that the extra requests of the default matter. |
+
+Any other value stops the server from starting.
+
+What does not change with the value:
+
+- **The credential generation and the access checks.** The generation is still read with the token on every request. The tool gate still refuses a call from a request whose token was replaced, a disabled user is still refused before any credential loads, and a pending write confirmation is still voided by a token change (previews have to outlive a request, so they are not course state).
+- Token-health verdicts, the per-user write-tool switches and the OAuth state.
+- The cost of the default is extra reads of `/courses` by tools that accept a course code or title. Numeric course ids need none.
+
+Use `--config` to see the value the server runs with.
 
 ## Troubleshooting
 
