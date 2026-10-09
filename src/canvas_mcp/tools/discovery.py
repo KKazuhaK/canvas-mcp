@@ -14,6 +14,8 @@ from typing import Any, Literal
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from ..core.credentials import get_request_tool_prefs
+from ..core.selfhost.tool_prefs import WriteDecision, decide
 from ..core.validation import validate_params
 
 DetailLevel = Literal["names", "signatures", "full"]
@@ -62,6 +64,16 @@ async def _search_mcp_tools(
     every registered tool's middleware on each search call would be pure overhead.
     """
     tools = await mcp.list_tools(run_middleware=False)
+    # In the self-hosted multi-user mode a write tool the caller has not switched
+    # on is hidden here as well, as it is from the tool list: the model could not
+    # call it anyway. Outside that mode no preferences are loaded and nothing is hidden.
+    prefs = get_request_tool_prefs()
+    if prefs is not None:
+        tools = [
+            tool
+            for tool in tools
+            if decide(tool.name, enabled=prefs.enabled, ceiling=None) is WriteDecision.ALLOWED
+        ]
 
     matches: list[str | dict[str, Any]] = []
     for tool in tools:

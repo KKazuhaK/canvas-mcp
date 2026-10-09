@@ -27,8 +27,10 @@ from .schools import SchoolPolicy, is_blocked_hostname
 from .settings import SelfhostConfigError, SelfhostSettings
 from .token_health import TokenHealth
 from .tool_gate import SelfhostCredentialGate
+from .tool_prefs import ToolPrefsCache, WriteToolCatalog
 
 if TYPE_CHECKING:
+    from ..tool_policy import ToolPolicy
     from .token_store import TokenStore
 
 HEALTH_PATH = "/healthz"
@@ -36,12 +38,17 @@ HEALTH_PATH = "/healthz"
 
 @dataclass(frozen=True)
 class SelfhostRuntime:
-    """What the running server shares: settings, token store, claim policy, token health."""
+    """What the running server shares: settings, token store, claim policy, token health.
+
+    ``tool_prefs`` caches each user's write-tool switches for the MCP side; the
+    account page drops a user's entry when they change a switch.
+    """
 
     settings: SelfhostSettings
     store: TokenStore
     policy: ClaimsPolicy
     health: TokenHealth
+    tool_prefs: ToolPrefsCache
 
 
 def _writable_directory_problem(name: str, path: Path) -> str | None:
@@ -187,21 +194,42 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         owner_role=settings.owner_role,
     )
     health = TokenHealth(store, account_url=settings.account_url)
-    return SelfhostRuntime(settings=settings, store=store, policy=policy, health=health)
+    return SelfhostRuntime(
+        settings=settings,
+        store=store,
+        policy=policy,
+        health=health,
+        tool_prefs=ToolPrefsCache(store),
+    )
 
 
 def install_selfhost(
-    mcp: FastMCP, runtime: SelfhostRuntime, config: Config, **account_options: Any
+    mcp: FastMCP,
+    runtime: SelfhostRuntime,
+    config: Config,
+    *,
+    tool_policy: ToolPolicy | None = None,
+    **account_options: Any,
 ) -> None:
     """Add the credential gate, the /account pages and /healthz to the server.
 
-    ``account_options`` are passed to the account routes (tests inject the school
-    directory, the host resolver and the HTTP client factory there).
+    ``tool_policy`` is the operator's resolved ``ALLOWED_WRITE_TOOLS``: the server
+    ceiling for the per-user write-tool switches. Without one (tests) the set of
+    registered tools is the ceiling. ``account_options`` are passed to the account
+    routes (tests inject the school directory, the host resolver and the HTTP
+    client factory there).
     """
     from .account_web import AccountConfig, register_account_routes
 
     settings = runtime.settings
-    mcp.add_middleware(SelfhostCredentialGate())
+    ceiling = tool_policy.allowed if tool_policy is not None and tool_policy.enforced else None
+
+    async def registered_tool_names() -> list[str]:
+        return [tool.name for tool in await mcp.list_tools(run_middleware=False)]
+
+    mcp.add_middleware(
+        SelfhostCredentialGate(account_url=settings.account_url, write_ceiling=ceiling)
+    )
     # The Canvas client confirms a suspected dead token through this service.
     set_token_health_monitor(runtime.health)
 
@@ -219,6 +247,8 @@ def install_selfhost(
         runtime.store,
         authorize_id_token_claims(runtime.policy),
         health=runtime.health,
+        write_tools=WriteToolCatalog(ceiling=ceiling, list_registered=registered_tool_names),
+        tool_prefs=runtime.tool_prefs,
         **account_options,
     )
 
@@ -253,6 +283,7 @@ def build_selfhost_asgi_app(
                 schools=selfhost_school_policy(settings, config),
                 account_url=settings.account_url,
                 health=runtime.health,
+                tool_prefs=runtime.tool_prefs,
             )
         ],
         host_origin_protection=True,

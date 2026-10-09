@@ -35,7 +35,7 @@ def server() -> FastMCP:
     mcp.add_middleware(SelfhostCredentialGate())
 
     @mcp.tool()
-    def whoami() -> str:
+    def get_my_profile() -> str:
         """Dummy tool."""
         Body.runs += 1
         return "ran"
@@ -76,7 +76,7 @@ def _enrol(oid: str = OID_A, token: str = "canvas-token-1234567890abcdef") -> No
 
 async def _call(server: FastMCP) -> Any:
     async with Client(server) as client:
-        return await client.call_tool("whoami", {}, raise_on_error=False)
+        return await client.call_tool("get_my_profile", {}, raise_on_error=False)
 
 
 def _text(result: Any) -> str:
@@ -175,6 +175,6 @@ class TestNotGated:
         async with Client(server) as client:
             tools = await client.list_tools()
             prompt = await client.get_prompt("instructions")
-        assert [t.name for t in tools] == ["whoami"]
+        assert [t.name for t in tools] == ["get_my_profile"]
         assert prompt.messages
         assert Body.runs == 0

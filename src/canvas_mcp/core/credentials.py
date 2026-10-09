@@ -60,6 +60,18 @@ class RequestTokenState:
     message: str | None = None
 
 
+@dataclass(frozen=True)
+class RequestToolPrefs:
+    """The write tools the caller has switched on at /account, for one request.
+
+    ``readable`` False means the preferences could not be read; ``enabled`` is
+    then empty, so every write tool stays off (fail closed).
+    """
+
+    enabled: frozenset[str] = frozenset()
+    readable: bool = True
+
+
 # Random per-process key: derives opaque cache keys from Canvas tokens in the
 # legacy HTTP mode without ever keeping or logging the token itself.
 _PROCESS_KEY = secrets.token_bytes(32)
@@ -86,6 +98,21 @@ _missing_credentials_message: ContextVar[str | None] = ContextVar(
 _request_token_state: ContextVar[RequestTokenState | None] = ContextVar(
     "request_token_state", default=None
 )
+
+
+_request_tool_prefs: ContextVar[RequestToolPrefs | None] = ContextVar(
+    "request_tool_prefs", default=None
+)
+
+
+def get_request_tool_prefs() -> RequestToolPrefs | None:
+    """The caller's write-tool preferences for this request; None if none were loaded."""
+    return _request_tool_prefs.get()
+
+
+def set_request_tool_prefs(prefs: RequestToolPrefs | None) -> Token[RequestToolPrefs | None]:
+    """Publish (or clear) the caller's write-tool preferences for this request."""
+    return _request_tool_prefs.set(prefs)
 
 
 def get_request_credentials() -> RequestCredentials | None:
@@ -178,3 +205,4 @@ def clear_http_request_context() -> None:
     _request_principal.set(None)
     _missing_credentials_message.set(None)
     _request_token_state.set(None)
+    _request_tool_prefs.set(None)

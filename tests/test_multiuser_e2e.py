@@ -574,6 +574,10 @@ class TestMcpAsTwoUsers:
     def test_write_confirmation_state_does_not_leak_between_users(self, enrolled):
         bearer_a = enrolled.browser.bearer_for(USER_A)
         bearer_b = enrolled.browser.bearer_for(USER_B)
+        # Write tools are off until each user turns them on; this test is about
+        # the confirmation state, so both users have switched the widget tool on.
+        for user in (USER_A, USER_B):
+            enrolled.runtime.store.set_tool_prefs(f"entra:{TENANT}:{user.oid}".lower(), ["delete_widget"])
         preview = text_of(call_tool(enrolled.client, bearer_a, "delete_widget", {"widget_id": "w1"}))
         token = re.search(r"Confirmation token: (\S+)", preview)
         assert token, preview
@@ -596,6 +600,42 @@ class TestMcpAsTwoUsers:
             "widget_id": "w1", "confirmation_token": fresh_token.group(1),
         }))
         assert "Deleted widget w1" in done and enrolled.deleted == ["w1"]
+
+    def test_a_write_tool_works_only_after_its_owner_turns_it_on_in_the_browser(self, enrolled):
+        bearer_a = enrolled.browser.bearer_for(USER_A)
+        bearer_b = enrolled.browser.bearer_for(USER_B)
+
+        def names(bearer: str) -> set[str]:
+            return {tool["name"] for tool in result_of(rpc(enrolled.client, bearer, "tools/list"))["tools"]}
+
+        assert "delete_widget" not in names(bearer_a)
+        refused = call_tool(enrolled.client, bearer_a, "delete_widget", {"widget_id": "w1"})
+        assert refused["isError"] is True
+        assert "turned off for your account" in text_of(refused)
+        assert "/account" in text_of(refused)
+
+        # The only way to turn it on: the signed-in /account page (session, CSRF, Origin).
+        assert enrolled.browser.account_sign_in(USER_A).status_code == 303
+        csrf = enrolled.browser.csrf()
+        saved = enrolled.client.post(
+            "/account/write-tools", data={"csrf": csrf, "tool.delete_widget": "1"},
+            headers=ORIGIN, follow_redirects=False,
+        )
+        assert saved.status_code == 200 and "Write-tool settings saved." in saved.text
+
+        assert "delete_widget" in names(bearer_a)
+        assert "Confirmation token" in text_of(call_tool(enrolled.client, bearer_a, "delete_widget", {"widget_id": "w1"}))
+        assert "delete_widget" not in names(bearer_b)
+        assert call_tool(enrolled.client, bearer_b, "delete_widget", {"widget_id": "w1"})["isError"] is True
+
+        # Turning it off again takes effect at once for the next request.
+        off = enrolled.client.post(
+            "/account/write-tools", data={"csrf": csrf, "disable_all": "1"},
+            headers=ORIGIN, follow_redirects=False,
+        )
+        assert off.status_code == 200
+        assert "delete_widget" not in names(bearer_a)
+        assert call_tool(enrolled.client, bearer_a, "delete_widget", {"widget_id": "w1"})["isError"] is True
 
     def test_the_last_used_time_is_recorded_for_the_caller_only(self, enrolled):
         call_tool(enrolled.client, enrolled.browser.bearer_for(USER_A), "list_courses")

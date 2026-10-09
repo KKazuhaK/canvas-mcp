@@ -679,7 +679,7 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
 
     register_all_tools(mcp, role=role)
     removed_tools = asyncio.run(apply_tool_policy(mcp, tool_policy))
-    install_selfhost(mcp, runtime, config)
+    install_selfhost(mcp, runtime, config, tool_policy=tool_policy)
 
     log_info(
         f"Starting Canvas MCP server in {AUTH_MODE_ENTRA} mode on {args.host}:{args.port}",

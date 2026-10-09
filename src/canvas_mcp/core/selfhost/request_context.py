@@ -14,6 +14,10 @@ with that token. Each request also starts a shared token-health object, so a
 token found dead part-way through (see :mod:`canvas_mcp.core.token_health`) stops
 the rest of that request's Canvas calls.
 
+The caller's own write-tool switches (what they turned on at ``/account``) are
+loaded into the request too, for the credential gate; if they cannot be read,
+no write tool is enabled for that request.
+
 The Canvas school comes only from the caller's own stored row, mapped through
 the operator's :class:`SchoolPolicy`. A host the current settings no longer
 allow is treated as "not enrolled": no Canvas call is ever made for it, and
@@ -34,12 +38,14 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from ..credentials import (
     RequestCredentials,
     RequestTokenState,
+    RequestToolPrefs,
     clear_http_request_context,
     set_http_request_active,
     set_missing_credentials_message,
     set_request_credentials,
     set_request_principal,
     set_request_token_state,
+    set_request_tool_prefs,
 )
 from ..logging import log_error, log_warning
 from .identity import ClaimsDenied, ClaimsPolicy, evaluate_entra_claims
@@ -74,6 +80,12 @@ class TokenInvalidator(Protocol):
     async def mark_invalid(
         self, principal_key: str, reason: str, *, expected_updated_at: int | None = None
     ) -> bool: ...
+
+
+class ToolPrefsReader(Protocol):
+    """The slice of the preferences cache the middleware uses (synchronous)."""
+
+    def enabled(self, principal_key: str) -> frozenset[str]: ...
 
 
 class CanvasTokenReader(Protocol):
@@ -157,6 +169,7 @@ class SelfhostRequestContextMiddleware:
         schools: SchoolPolicy,
         account_url: str,
         health: TokenInvalidator | None = None,
+        tool_prefs: ToolPrefsReader | None = None,
     ) -> None:
         self.app = app
         self.mcp_path = mcp_path
@@ -165,6 +178,7 @@ class SelfhostRequestContextMiddleware:
         self.schools = schools
         self.account_url = account_url
         self.health = health
+        self.tool_prefs = tool_prefs
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -205,12 +219,24 @@ class SelfhostRequestContextMiddleware:
 
             set_request_principal(verdict)
             set_request_token_state(RequestTokenState())
+            set_request_tool_prefs(await self._load_tool_prefs(verdict.key))
             await self._attach_canvas_credentials(
                 verdict.tenant_id, verdict.object_id, verdict.key
             )
             await self.app(scope, receive, send)
         finally:
             clear_http_request_context()
+
+    async def _load_tool_prefs(self, principal_key: str) -> RequestToolPrefs:
+        """The write tools this caller switched on; nothing enabled when they cannot be read."""
+        if self.tool_prefs is None:
+            return RequestToolPrefs()
+        try:
+            enabled = await anyio.to_thread.run_sync(self.tool_prefs.enabled, principal_key)
+        except Exception:  # noqa: BLE001 - fail closed; the error text is not logged
+            log_error("write-tool preferences unreadable")
+            return RequestToolPrefs(readable=False)
+        return RequestToolPrefs(enabled=enabled)
 
     async def _attach_canvas_credentials(
         self, tenant_id: str, object_id: str, principal_key: str

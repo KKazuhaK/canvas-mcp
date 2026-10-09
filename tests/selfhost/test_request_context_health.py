@@ -201,7 +201,7 @@ def server() -> FastMCP:
     mcp.add_middleware(SelfhostCredentialGate())
 
     @mcp.tool()
-    def whoami() -> str:
+    def get_my_profile() -> str:
         """Dummy tool."""
         Body.runs += 1
         return "ran"
@@ -220,7 +220,7 @@ def verified_oid(monkeypatch: pytest.MonkeyPatch) -> None:
 
 async def call(server: FastMCP) -> Any:
     async with Client(server) as client:
-        return await client.call_tool("whoami", {}, raise_on_error=False)
+        return await client.call_tool("get_my_profile", {}, raise_on_error=False)
 
 
 def text_of(result: Any) -> str:
