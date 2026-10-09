@@ -24,6 +24,11 @@ Security notes:
   or, with the opt-in search, Instructure's directory confirms that exact
   domain; its DNS answer must be public; only then is the token sent to it.
   The school search is a plain GET form, needs a session and is rate limited.
+* A token that Canvas rejected (or that cannot be decrypted, or that an owner
+  marked invalid) is shown with a banner and a "Check again" button (POST, CSRF,
+  once a minute per user) that probes Canvas once and can restore it. Replacing a
+  token with one that belongs to a different Canvas user at the same school needs
+  an explicit confirmation on the page and is logged.
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, tzinfo
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import anyio.to_thread
@@ -55,6 +60,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
+from canvas_mcp.core import audit
 from canvas_mcp.core.dates import output_timezone
 from canvas_mcp.core.selfhost.schools import (
     MAX_QUERY_CHARS,
@@ -70,7 +76,16 @@ from canvas_mcp.core.selfhost.schools import (
     parse_hostname,
     system_resolve,
 )
-from canvas_mcp.core.selfhost.token_store import EnrollmentInfo, TokenStore
+from canvas_mcp.core.selfhost.token_health import TokenHealth
+from canvas_mcp.core.selfhost.token_store import (
+    REASON_CANVAS_TOKEN_REJECTED,
+    REASON_DECRYPT_FAILED,
+    REASON_REVOKED_BY_ADMIN,
+    STATUS_INVALID,
+    EnrollmentInfo,
+    TokenDecryptionError,
+    TokenStore,
+)
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -82,9 +97,11 @@ ACCOUNT_CALLBACK_PATH = "/account/callback"
 _LOGIN_PATH = "/account/login"
 _TOKEN_PATH = "/account/token"
 _TOKEN_DELETE_PATH = "/account/token/delete"
+_TOKEN_RECHECK_PATH = "/account/token/recheck"
 _LOGOUT_PATH = "/account/logout"
 _ADMIN_PATH = "/account/admin"
 _ADMIN_REVOKE_PATH = "/account/admin/revoke"
+_ADMIN_INVALIDATE_PATH = "/account/admin/invalidate"
 _SCHOOLS_PATH = "/account/schools"
 
 LOGIN_COOKIE = "__Host-cmcp_login"
@@ -103,6 +120,11 @@ _FORM_CONTENT_TYPE = "application/x-www-form-urlencoded"
 _RATE_LIMIT_ATTEMPTS = 10
 _RATE_LIMIT_WINDOW_SECONDS = 600
 _RATE_LIMIT_MAX_KEYS = 1024
+_RECHECK_LIMIT_ATTEMPTS = 1
+_RECHECK_LIMIT_WINDOW_SECONDS = 60
+_EXPIRY_REMINDER_DAYS = 7
+_EXPIRY_MAX_YEARS = 10
+_FILTER_NEEDS_REENROLL = "needs_reenroll"
 _SEARCH_LIMIT_ATTEMPTS = 30
 _SEARCH_LIMIT_WINDOW_SECONDS = 600
 _SCOPE = "openid profile"
@@ -372,7 +394,7 @@ line-height:1.3;cursor:pointer;text-decoration:none;white-space:nowrap}
 .btn.danger{background:transparent;color:var(--bad);border-color:var(--bad)}
 .btn.sm{padding:.3rem .75rem;font-size:.9rem}
 label{display:block;font-weight:600;font-size:.92rem}
-input[type=password],input[type=search]{width:100%;padding:.6rem;border:1px solid var(--line);
+input[type=password],input[type=search],input[type=date]{width:100%;padding:.6rem;border:1px solid var(--line);
 border-radius:8px;background:var(--bg);color:var(--fg);font:inherit;margin:.4rem 0 .9rem}
 fieldset{border:0;padding:0;margin:0 0 .9rem;min-width:0}
 legend{font-weight:600;font-size:.92rem;padding:0;margin:0 0 .3rem}
@@ -383,6 +405,9 @@ ul.results{margin:0 0 1rem;padding-left:1.3rem}
 .notice.error{background:var(--bad-bg);color:var(--bad)}
 .notice.ok{background:var(--ok-bg);color:var(--ok)}
 .warn{background:var(--warn-bg);border-radius:8px;padding:.5rem .8rem}
+.banner{border-left:4px solid var(--bad)}
+.banner.soon{border-left-color:var(--accent)}
+.act form+form{margin-top:.4rem}
 ol{margin:0 0 1rem;padding-left:1.3rem}li{margin:0 0 .3rem}
 dl{display:grid;grid-template-columns:max-content 1fr;gap:.25rem 1rem;margin:0 0 1rem}
 dt{color:var(--muted)}dd{margin:0;word-break:break-word}
@@ -487,6 +512,46 @@ def _fmt_ts(value: int | None) -> str:
         return "-"
 
 
+def _fmt_date(value: int | None) -> str:
+    """e.g. ``2026-09-01`` in the configured TIMEZONE (UTC fallback)."""
+    if value is None:
+        return "-"
+    try:
+        moment = datetime.fromtimestamp(value, tz=UTC).astimezone(_display_tz())
+        return moment.strftime("%Y-%m-%d")
+    except (OverflowError, OSError, ValueError):
+        return "-"
+
+
+def _fmt_utc_date(value: int) -> str:
+    """The calendar date a user typed for a token expiry (stored as midnight UTC)."""
+    try:
+        return datetime.fromtimestamp(value, tz=UTC).strftime("%Y-%m-%d")
+    except (OverflowError, OSError, ValueError):
+        return "-"
+
+
+def _parse_expiry(raw: str, now: float) -> int | None | Literal["invalid"]:
+    """The expiry date from the optional form field as epoch seconds (midnight UTC).
+
+    ``None`` for an empty field; ``"invalid"`` for anything that is not a real
+    calendar date between today and ``_EXPIRY_MAX_YEARS`` years ahead.
+    """
+    text = raw.strip()
+    if not text:
+        return None
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return "invalid"
+    try:
+        day = date.fromisoformat(text)
+    except ValueError:
+        return "invalid"
+    today = datetime.fromtimestamp(now, tz=UTC).date()
+    if day < today or day > today + timedelta(days=365 * _EXPIRY_MAX_YEARS):
+        return "invalid"
+    return int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp())
+
+
 def _document(title: str, body: str, *, wide: bool = False) -> str:
     lang = "zh-CN" if _current_lang() == "zh" else "en"
     main_class = ' class="wide"' if wide else ""
@@ -555,6 +620,7 @@ class _AccountApp:
         clock: Callable[[], float],
         directory: SchoolDirectoryLike | None = None,
         resolve_host: HostResolver | None = None,
+        health: TokenHealth | None = None,
     ) -> None:
         self.cfg = cfg
         self.schools = cfg.schools
@@ -570,6 +636,13 @@ class _AccountApp:
             _RATE_LIMIT_MAX_KEYS,
             clock,
         )
+        self.recheck_limiter = _RateLimiter(
+            _RECHECK_LIMIT_ATTEMPTS,
+            _RECHECK_LIMIT_WINDOW_SECONDS,
+            _RATE_LIMIT_MAX_KEYS,
+            clock,
+        )
+        self.health = health or TokenHealth(store, account_url=self.base + ACCOUNT_PATH)
         self.search_limiter = _RateLimiter(
             _SEARCH_LIMIT_ATTEMPTS,
             _SEARCH_LIMIT_WINDOW_SECONDS,
@@ -595,9 +668,11 @@ class _AccountApp:
             (ACCOUNT_CALLBACK_PATH, {"GET": self.callback}),
             (_TOKEN_PATH, {"POST": self.save_token}),
             (_TOKEN_DELETE_PATH, {"POST": self.delete_token}),
+            (_TOKEN_RECHECK_PATH, {"POST": self.recheck_token}),
             (_LOGOUT_PATH, {"POST": self.logout}),
             (_ADMIN_PATH, {"GET": self.admin}),
             (_ADMIN_REVOKE_PATH, {"POST": self.admin_revoke}),
+            (_ADMIN_INVALIDATE_PATH, {"POST": self.admin_invalidate}),
             (_SCHOOLS_PATH, {"GET": self.schools_page}),
         ]
         return [
@@ -854,6 +929,7 @@ class _AccountApp:
         session: _Session,
         info: EnrollmentInfo | None = None,
         selected: str | None = None,
+        identity_change: tuple[str, str] | None = None,
     ) -> str:
         school_part = ""
         if self.schools.picker_enabled:
@@ -870,6 +946,20 @@ class _AccountApp:
                     f'<p class="muted small">{_bi("学校", "School")}: {_e(sole.name)}'
                     f' <span class="muted">({_e(sole.host)})</span></p>'
                 )
+        identity_part = ""
+        if identity_change is not None:
+            old_name, new_name = identity_change
+            identity_part = (
+                '<p class="warn">'
+                + _bi(
+                    "这个令牌属于另一个 Canvas 用户（{new}），而当前绑定的是 {old}。如果确实要换成这个用户，请勾选下方确认框后再保存。",
+                    "This token belongs to a different Canvas user ({new}) than the one enrolled now ({old}). If you really mean to switch, tick the box below and save again.",
+                ).format(new=_e(new_name), old=_e(old_name))
+                + "</p>"
+                '<label class="choice"><input type="checkbox" name="confirm_identity_change" '
+                'value="1" required>'
+                f"<span>{_bi('我确认要换成另一个 Canvas 用户的令牌', 'I confirm this is a different Canvas user')}</span></label>"
+            )
         return (
             f'<p class="warn"><strong>{_bi("绝不要把令牌粘贴到 Claude 对话里。", "Never paste the token into Claude.")}</strong></p>'
             f'<form method="post" action="{_TOKEN_PATH}">'
@@ -879,6 +969,10 @@ class _AccountApp:
             '<input id="canvas_token" name="canvas_token" type="password" '
             'autocomplete="off" spellcheck="false" autocapitalize="off" '
             'required minlength="20" maxlength="512">'
+            f'<label for="expires_on">{_bi("令牌到期日（可选）", "Token expires on (optional)")}</label>'
+            '<input id="expires_on" name="expires_on" type="date" autocomplete="off">'
+            f'<p class="muted small">{_bi("填写 Canvas 显示的到期日，到期前 7 天这里会提醒你。", "Enter the expiry date Canvas shows. This page reminds you 7 days before.")}</p>'
+            f"{identity_part}"
             f'<button class="btn" type="submit">{_bi("验证并保存", "Verify and save")}</button>'
             "</form>"
         )
@@ -921,6 +1015,89 @@ class _AccountApp:
             "</p>"
         )
 
+    @staticmethod
+    def _status_text(info: EnrollmentInfo) -> str:
+        if info.status == STATUS_INVALID:
+            return f"<strong>{_bi('需要新的令牌', 'Needs a new token')}</strong>"
+        return _bi("正常", "Active")
+
+    @staticmethod
+    def _expiry_row(info: EnrollmentInfo) -> str:
+        if info.expires_hint_at is None:
+            return ""
+        return (
+            f"<dt>{_bi('令牌到期日', 'Token expires')}</dt>"
+            f"<dd>{_e(_fmt_utc_date(info.expires_hint_at))}</dd>"
+        )
+
+    def _settings_link(self, info: EnrollmentInfo) -> str:
+        """A link to the school's own Canvas settings page, where tokens are made."""
+        school = self.schools.resolve_stored(info.canvas_host)
+        if school is None or not school.api_url.startswith("https://"):
+            return ""
+        base = re.sub(r"/api/v\d+/?$", "", school.api_url.rstrip("/"))
+        url = f"{base}/profile/settings"
+        return (
+            f'<p><a href="{_e(url)}" rel="noopener noreferrer" target="_blank">'
+            f"{_bi('打开学校的 Canvas 设置页', 'Open your school’s Canvas settings')}</a></p>"
+        )
+
+    def _health_banner(self, session: _Session, info: EnrollmentInfo) -> str:
+        """The banner for an invalid token, or the reminder shortly before an expiry date."""
+        if info.status == STATUS_INVALID:
+            return self._invalid_banner(session, info)
+        hint = info.expires_hint_at
+        now = self.clock()
+        if hint is None or hint - now > _EXPIRY_REMINDER_DAYS * 86400:
+            return ""
+        day = _e(_fmt_utc_date(hint))
+        if now < hint + 86400:
+            text = _bi(
+                "你的 Canvas 令牌将于 {date} 到期。请提前在 Canvas → 账户 → 设置 → 新建访问令牌 中生成新的令牌，并在下方替换。",
+                "Your Canvas token expires on {date}. Generate a new one before then in Canvas → Account → Settings → New Access Token and replace it below.",
+            )
+        else:
+            text = _bi(
+                "你的 Canvas 令牌已过了 {date} 的到期日。如果它已停止工作，请在 Canvas 中生成新的令牌，并在下方替换。",
+                "Your Canvas token passed its expiry date of {date}. If it has stopped working, generate a new one in Canvas and replace it below.",
+            )
+        return (
+            '<section class="card banner soon" role="status">'
+            f"<p>{text.format(date=day)}</p>{self._settings_link(info)}</section>"
+        )
+
+    def _invalid_banner(self, session: _Session, info: EnrollmentInfo) -> str:
+        since = _e(_fmt_date(info.invalid_since))
+        if info.invalid_reason == REASON_REVOKED_BY_ADMIN:
+            text = _bi(
+                "管理员已于 {date} 将你的 Canvas 令牌标记为失效。请在 Canvas → 账户 → 设置 → 新建访问令牌 中生成新的令牌，然后粘贴到下方。",
+                "An administrator marked your Canvas token as invalid on {date}. Generate a new one in Canvas → Account → Settings → New Access Token, then paste it below.",
+            )
+        elif info.invalid_reason == REASON_DECRYPT_FAILED:
+            text = _bi(
+                "服务器自 {date} 起无法读取你保存的 Canvas 令牌。请在 Canvas → 账户 → 设置 → 新建访问令牌 中生成新的令牌，然后粘贴到下方。",
+                "Since {date} the server cannot read your saved Canvas token. Generate a new one in Canvas → Account → Settings → New Access Token, then paste it below.",
+            )
+        else:
+            text = _bi(
+                "你的 Canvas 令牌已于 {date} 失效。请在 Canvas → 账户 → 设置 → 新建访问令牌 中生成新的令牌，然后粘贴到下方。",
+                "Your Canvas token stopped working on {date}. Generate a new one in Canvas → Account → Settings → New Access Token, then paste it below.",
+            )
+        recheck = ""
+        if info.invalid_reason != REASON_REVOKED_BY_ADMIN:
+            recheck = (
+                f'<form method="post" action="{_TOKEN_RECHECK_PATH}">'
+                f"{_csrf_field(session.csrf)}"
+                f'<button class="btn secondary sm" type="submit">{_bi("重新检测", "Check again")}</button>'
+                f' <span class="muted small">{_bi("如果这是误判（例如 Canvas 暂时出错），可以重新检测，每分钟一次。", "If this is a mistake (for example Canvas had a hiccup), check again. Once a minute.")}</span>'
+                "</form>"
+            )
+        return (
+            '<section class="card banner" role="alert">'
+            f"<p><strong>{text.format(date=since)}</strong></p>"
+            f"{self._settings_link(info)}{recheck}</section>"
+        )
+
     def account_page(
         self,
         session: _Session,
@@ -928,6 +1105,7 @@ class _AccountApp:
         notice: tuple[Literal["error", "ok"], str] | None = None,
         status: int = 200,
         selected: str | None = None,
+        identity_change: tuple[str, str] | None = None,
     ) -> Response:
         parts: list[str] = [
             _header(session),
@@ -936,6 +1114,8 @@ class _AccountApp:
         ]
         if notice is not None:
             parts.append(f'<div class="notice {notice[0]}" role="alert">{notice[1]}</div>')
+        if info is not None:
+            parts.append(self._health_banner(session, info))
 
         if info is None:
             parts.append(
@@ -955,7 +1135,10 @@ class _AccountApp:
                 f"<dd>{_e(info.canvas_user_name)} "
                 f'<span class="muted">(id {_e(info.canvas_user_id)})</span></dd>'
                 f"{self._school_status(info)}"
+                f"<dt>{_bi('状态', 'Status')}</dt><dd>{self._status_text(info)}</dd>"
                 f"<dt>{_bi('最近使用', 'Last used')}</dt><dd>{_e(_fmt_ts(info.last_used_at))}</dd>"
+                f"<dt>{_bi('最近验证', 'Last verified')}</dt><dd>{_e(_fmt_ts(info.last_verified_at))}</dd>"
+                f"{self._expiry_row(info)}"
                 f"<dt>{_bi('绑定时间', 'Enrolled')}</dt><dd>{_e(_fmt_ts(info.created_at))}</dd>"
                 f"<dt>{_bi('更新时间', 'Updated')}</dt><dd>{_e(_fmt_ts(info.updated_at))}</dd>"
                 "</dl>"
@@ -969,13 +1152,16 @@ class _AccountApp:
             # meet) or a school was just chosen from the search results.
             is_open = (
                 " open"
-                if (notice is not None and notice[0] == "error") or selected is not None
+                if (notice is not None and notice[0] == "error")
+                or selected is not None
+                or info.status == STATUS_INVALID
+                or identity_change is not None
                 else ""
             )
             parts.append(
                 f'<details class="card"{is_open}>'
                 f"<summary>{_bi('替换令牌', 'Replace token')}</summary>"
-                + self._token_form(session, info, selected)
+                + self._token_form(session, info, selected, identity_change)
                 + "</details>"
             )
         parts.append(self._search_section())
@@ -1451,6 +1637,16 @@ class _AccountApp:
                     "That does not look like a Canvas token. Copy the whole token.",
                 ),
             )
+        expiry = _parse_expiry(form.get("expires_on", ""), self.clock())
+        if isinstance(expiry, str):
+            return await self._token_error(
+                session,
+                400,
+                _bi(
+                    "到期日无效，请选择今天或之后的日期。",
+                    "That expiry date is not valid. Pick today or a later date.",
+                ),
+            )
         raw_school = form.get("school", "")
         chosen = await self._choose_school(raw_school)
         selected = self._selection(raw_school, session, posted=True)
@@ -1477,6 +1673,28 @@ class _AccountApp:
                 ),
                 selected=selected,
             )
+        existing = await anyio.to_thread.run_sync(self._safe_info, session)
+        if existing is not None and self._identity_changed(existing, school, identity):
+            principal_key = self._principal_key(session)
+            if form.get("confirm_identity_change") != "1":
+                logger.warning("account token identity change needs confirmation oid=%s", session.oid)
+                audit.log_token_event(
+                    "identity_change_detected", principal_key, outcome="confirmation_required"
+                )
+                return await self._token_error(
+                    session,
+                    409,
+                    _bi(
+                        "这个令牌属于另一个 Canvas 用户。请勾选下方的确认框后再保存。",
+                        "This token belongs to a different Canvas user. Tick the confirmation box below and save again.",
+                    ),
+                    selected=selected,
+                    identity_change=(existing.canvas_user_name, identity.name),
+                )
+            logger.warning("account token identity change confirmed oid=%s", session.oid)
+            audit.log_token_event(
+                "identity_change_confirmed", principal_key, outcome="confirmed"
+            )
         try:
             await anyio.to_thread.run_sync(
                 functools.partial(
@@ -1489,6 +1707,7 @@ class _AccountApp:
                     entra_display_name=session.name,
                     entra_upn=session.upn,
                     canvas_host=school.host,
+                    expires_hint_at=expiry,
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -1503,6 +1722,24 @@ class _AccountApp:
             "account token enrolled tid=%s oid=%s host=%s", session.tid, session.oid, school.host
         )
         return self.redirect(ACCOUNT_PATH, 303)
+
+    @staticmethod
+    def _principal_key(session: _Session) -> str:
+        return f"entra:{session.tid}:{session.oid}".lower()
+
+    def _identity_changed(
+        self, existing: EnrollmentInfo, school: School, identity: CanvasIdentity
+    ) -> bool:
+        """True when the token is for another Canvas user than the one enrolled, same school.
+
+        Canvas user ids are per school, so a different id at a different school
+        means nothing and is not a change.
+        """
+        default = self.schools.default
+        enrolled_host = existing.canvas_host or (default.host if default is not None else None)
+        if enrolled_host is None or enrolled_host != school.host:
+            return False
+        return existing.canvas_user_id != identity.user_id
 
     async def _choose_school(self, raw: str) -> School | tuple[int, str]:
         """The school to enroll at, or (status, message html) when it is refused.
@@ -1566,10 +1803,16 @@ class _AccountApp:
         message_html: str,
         *,
         selected: str | None = None,
+        identity_change: tuple[str, str] | None = None,
     ) -> Response:
         info = await anyio.to_thread.run_sync(self._safe_info, session)
         return self.account_page(
-            session, info, ("error", message_html), status, selected=selected
+            session,
+            info,
+            ("error", message_html),
+            status,
+            selected=selected,
+            identity_change=identity_change,
         )
 
     def _safe_info(self, session: _Session) -> EnrollmentInfo | None:
@@ -1587,6 +1830,97 @@ class _AccountApp:
         logger.info("account token deleted tid=%s oid=%s", session.tid, session.oid)
         return self.redirect(ACCOUNT_PATH, 303)
 
+    async def recheck_token(self, request: Request) -> Response:
+        """Probe Canvas once with the stored token and restore it if Canvas accepts it."""
+        guarded = await self._guard_post(request)
+        if isinstance(guarded, Response):
+            return guarded
+        session, _form = guarded
+        if not self.recheck_limiter.allow((session.tid, session.oid)):
+            return await self._token_error(
+                session,
+                429,
+                _bi(
+                    "每分钟只能重新检测一次，请稍后再试。",
+                    "You can check once a minute. Try again shortly.",
+                ),
+            )
+        info = await anyio.to_thread.run_sync(self._safe_info, session)
+        if (
+            info is None
+            or info.status != STATUS_INVALID
+            or info.invalid_reason == REASON_REVOKED_BY_ADMIN
+        ):
+            # Nothing to check, or an administrator's decision that only a new
+            # token can undo.
+            return self.redirect(ACCOUNT_PATH, 303)
+        principal_key = self._principal_key(session)
+        school = self.schools.resolve_stored(info.canvas_host)
+        if school is None:
+            return await self._token_error(
+                session,
+                400,
+                _bi(
+                    "服务器已不再支持你登记的学校，请重新登记。",
+                    "This server no longer offers your school. Enroll again.",
+                ),
+            )
+        try:
+            stored = await anyio.to_thread.run_sync(self.store.get, session.tid, session.oid)
+        except TokenDecryptionError:
+            audit.log_token_event("recheck", principal_key, outcome="unreadable")
+            return await self._token_error(
+                session,
+                400,
+                _bi(
+                    "仍然无法读取保存的令牌，请粘贴一个新的令牌。",
+                    "The saved token still cannot be read. Paste a new one.",
+                ),
+            )
+        if stored is None:
+            return self.redirect(ACCOUNT_PATH, 303)
+        try:
+            await self._canvas_whoami(stored.api_token, school.api_url)
+        except CanvasCheckError as exc:
+            if exc.kind == "invalid":
+                logger.info("account recheck still rejected oid=%s", session.oid)
+                audit.log_token_event("recheck", principal_key, outcome="still_rejected")
+                return await self._token_error(
+                    session,
+                    400,
+                    _bi(
+                        "Canvas 仍然拒绝这个令牌，请生成新的令牌并粘贴到下方。",
+                        "Canvas still rejects this token. Generate a new one and paste it below.",
+                    ),
+                )
+            audit.log_token_event("recheck", principal_key, outcome="unavailable")
+            return await self._token_error(
+                session,
+                503,
+                _bi(
+                    "暂时无法连接 Canvas，请稍后再试。",
+                    "Canvas is unavailable right now. Try again later.",
+                ),
+            )
+        restored = await anyio.to_thread.run_sync(
+            functools.partial(
+                self.store.restore_active,
+                principal_key,
+                expected_updated_at=info.updated_at,
+            )
+        )
+        if not restored:
+            # The token was replaced or removed while Canvas was being asked.
+            return self.redirect(ACCOUNT_PATH, 303)
+        logger.info("account recheck restored oid=%s", session.oid)
+        audit.log_token_event("recheck", principal_key, outcome="restored")
+        fresh = await anyio.to_thread.run_sync(self._safe_info, session)
+        return self.account_page(
+            session,
+            fresh,
+            ("ok", _bi("Canvas 接受了这个令牌，已恢复使用。", "Canvas accepts this token again. It is active.")),
+        )
+
     async def logout(self, request: Request) -> Response:
         guarded = await self._guard_post(request)
         if isinstance(guarded, Response):
@@ -1597,13 +1931,46 @@ class _AccountApp:
 
     # -- admin ---------------------------------------------------------------
 
+    @staticmethod
+    def _reason_label(reason: str | None) -> str:
+        if reason == REASON_CANVAS_TOKEN_REJECTED:
+            return _bi("Canvas 拒绝了令牌", "Rejected by Canvas")
+        if reason == REASON_DECRYPT_FAILED:
+            return _bi("无法解密", "Could not be decrypted")
+        if reason == REASON_REVOKED_BY_ADMIN:
+            return _bi("管理员标记为失效", "Marked invalid by an administrator")
+        return "-"
+
+    def _admin_status(self, row: EnrollmentInfo) -> str:
+        if row.status != STATUS_INVALID:
+            return _bi("正常", "Active")
+        return (
+            f"<strong>{_bi('需重新绑定', 'Needs re-enroll')}</strong><br>"
+            f'<span class="muted">{self._reason_label(row.invalid_reason)}</span><br>'
+            f'<span class="muted">{_bi("失效时间", "Invalid since")}: '
+            f"{_e(_fmt_ts(row.invalid_since))}</span>"
+        )
+
     async def admin(self, request: Request) -> Response:
         session = self.session_from(request)
         if session is None or not session.owner:
             return self.message_page(403, _bi("无权访问。", "Forbidden."))
-        rows = await anyio.to_thread.run_sync(self.store.list_enrollments)
+        all_rows = await anyio.to_thread.run_sync(self.store.list_enrollments)
+        needing = [row for row in all_rows if row.status == STATUS_INVALID]
+        only_needing = request.query_params.get("filter") == _FILTER_NEEDS_REENROLL
+        rows = needing if only_needing else all_rows
         lines: list[str] = []
         for row in rows:
+            invalidate = ""
+            if row.status != STATUS_INVALID:
+                invalidate = (
+                    f'<form method="post" action="{_ADMIN_INVALIDATE_PATH}">'
+                    f"{_csrf_field(session.csrf)}"
+                    f'<input type="hidden" name="tenant_id" value="{_e(row.tenant_id)}">'
+                    f'<input type="hidden" name="object_id" value="{_e(row.object_id)}">'
+                    f'<button class="btn secondary sm" type="submit">{_bi("标记为失效", "Mark as invalid")}</button>'
+                    "</form>"
+                )
             lines.append(
                 "<tr>"
                 f'<td data-label="{_e(_bi("Entra 用户", "Entra user"))}">'
@@ -1619,8 +1986,10 @@ class _AccountApp:
                 f'<td data-label="{_e(_bi("Canvas 用户", "Canvas user"))}">'
                 f'{_e(row.canvas_user_name)}<br><span class="muted">id {_e(row.canvas_user_id)}</span></td>'
                 f'<td data-label="{_e(_bi("学校", "School"))}">{self._admin_school(row)}</td>'
+                f'<td data-label="{_e(_bi("状态", "Status"))}">{self._admin_status(row)}</td>'
+                f'<td data-label="{_e(_bi("最近验证", "Last verified"))}">{_e(_fmt_ts(row.last_verified_at))}</td>'
                 f'<td data-label="{_e(_bi("最近使用", "Last used"))}">{_e(_fmt_ts(row.last_used_at))}</td>'
-                f'<td class="act"><form method="post" action="{_ADMIN_REVOKE_PATH}">'
+                f'<td class="act">{invalidate}<form method="post" action="{_ADMIN_REVOKE_PATH}">'
                 f"{_csrf_field(session.csrf)}"
                 f'<input type="hidden" name="tenant_id" value="{_e(row.tenant_id)}">'
                 f'<input type="hidden" name="object_id" value="{_e(row.object_id)}">'
@@ -1633,18 +2002,39 @@ class _AccountApp:
                 f"<th>{_bi('Entra 用户', 'Entra user')}</th>"
                 f"<th>{_bi('Canvas 用户', 'Canvas user')}</th>"
                 f"<th>{_bi('学校', 'School')}</th>"
+                f"<th>{_bi('状态', 'Status')}</th>"
+                f"<th>{_bi('最近验证', 'Last verified')}</th>"
                 f"<th>{_bi('最近使用', 'Last used')}</th>"
                 f'<th class="act"><span class="muted">{_bi("操作", "Actions")}</span></th>'
                 "</tr></thead><tbody>" + "".join(lines) + "</tbody></table></section>"
+            )
+        elif only_needing:
+            table = (
+                '<section class="card">'
+                f"<p>{_bi('没有需要重新绑定的用户。', 'No enrollments need a new token.')}</p></section>"
             )
         else:
             table = (
                 '<section class="card">'
                 f"<p>{_bi('还没有用户绑定令牌。', 'No enrollments yet.')}</p></section>"
             )
+        count_text = _bi(
+            "{count} 个绑定需要重新录入令牌（共 {total} 个）。",
+            "{count} of {total} enrollments need a new token.",
+        ).format(count=len(needing), total=len(all_rows))
+        if only_needing:
+            filter_link = (
+                f'<a href="{_ADMIN_PATH}">{_bi("显示全部", "Show all")}</a>'
+            )
+        else:
+            filter_link = (
+                f'<a href="{_ADMIN_PATH}?filter={_FILTER_NEEDS_REENROLL}">'
+                f'{_bi("只看需要重新绑定的", "Show only those that need re-enroll")}</a>'
+            )
         body = (
             _header(session)
             + f"<h1>{_bi('已绑定的用户', 'Enrollments')}</h1>"
+            + f'<p class="muted">{count_text} {filter_link}</p>'
             + table
             + f'<p><a href="{ACCOUNT_PATH}">{_bi("返回账户页", "Back to account")}</a></p>'
         )
@@ -1669,6 +2059,31 @@ class _AccountApp:
                 f"{_bi('当前设置不再允许', 'Not allowed by the current settings')}</span>"
             )
         return text
+
+    async def admin_invalidate(self, request: Request) -> Response:
+        """Owner action: mark one enrollment invalid so the user must enroll a new token."""
+        guarded = await self._guard_post(request, owner_only=True)
+        if isinstance(guarded, Response):
+            return guarded
+        session, form = guarded
+        tid = form.get("tenant_id", "")
+        oid = form.get("object_id", "")
+        if not _GUID_RE.fullmatch(tid) or not _GUID_RE.fullmatch(oid):
+            return self.message_page(
+                400, _bi("用户标识不正确。", "Invalid user identifier.")
+            )
+        target = f"entra:{tid}:{oid}".lower()
+        changed = await self.health.mark_invalid(
+            target, REASON_REVOKED_BY_ADMIN, actor=self._principal_key(session)
+        )
+        logger.info(
+            "account admin mark invalid by oid=%s target tid=%s oid=%s changed=%s",
+            session.oid,
+            tid.lower(),
+            oid.lower(),
+            changed,
+        )
+        return self.redirect(_ADMIN_PATH, 303)
 
     async def admin_revoke(self, request: Request) -> Response:
         guarded = await self._guard_post(request, owner_only=True)
@@ -1705,11 +2120,14 @@ def build_account_routes(
     clock: Callable[[], float] = time.time,
     directory: SchoolDirectoryLike | None = None,
     resolve_host: HostResolver | None = None,
+    health: TokenHealth | None = None,
 ) -> list[Route]:
     """Build the /account Starlette routes.
 
     ``directory`` and ``resolve_host`` replace the Instructure school directory
     and the system DNS resolver (tests inject fakes; no real network is needed).
+    ``health`` is the token-health service shared with the MCP side; the pages
+    build their own when none is given.
     """
     app = _AccountApp(
         cfg,
@@ -1721,6 +2139,7 @@ def build_account_routes(
         clock,
         directory,
         resolve_host,
+        health,
     )
     return app.routes()
 

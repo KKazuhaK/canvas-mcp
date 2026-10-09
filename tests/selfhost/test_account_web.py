@@ -1850,9 +1850,11 @@ class TestRegistration:
             "/account/callback",
             "/account/token",
             "/account/token/delete",
+            "/account/token/recheck",
             "/account/logout",
             "/account/admin",
             "/account/admin/revoke",
+            "/account/admin/invalidate",
             "/account/schools",
         }
         client = TestClient(mcp.http_app(), base_url=BASE, follow_redirects=False)
@@ -1860,3 +1862,100 @@ class TestRegistration:
         assert response.status_code == 200
         assert "Sign in with Microsoft" in response.text
         assert_security_headers(response)
+
+
+# -- token health pages in Chinese --------------------------------------------
+
+
+class TestTokenHealthChinese:
+    """The invalid-token banner, the reminder and the admin columns, in both languages."""
+
+    KEY = f"entra:{TID}:{OID}"
+
+    def seed(self, h: Harness, **kw: Any) -> None:
+        h.store.put(
+            tenant_id=TID, object_id=OID, api_token=CANVAS_TOKEN, canvas_user_id="42",
+            canvas_user_name="Ada Canvas", entra_display_name="Ada", entra_upn="ada@example.test",
+            canvas_host="canvas.example.test", **kw,
+        )
+
+    def test_the_banner_and_the_check_button(self, h: Harness) -> None:
+        self.seed(h)
+        h.store.mark_invalid(self.KEY, reason="canvas_token_rejected")
+        sign_in(h)
+        response = h.client.get(ACCOUNT_PATH, params=ZH)
+        text = response.text
+        assert "你的 Canvas 令牌已于 2027-01-15 失效。" in text
+        assert "Canvas → 账户 → 设置 → 新建访问令牌" in text
+        assert "重新检测" in text and "需要新的令牌" in text
+        assert "打开学校的 Canvas 设置页" in text
+        assert "stopped working" not in text and "Check again" not in text
+        english = h.client.get(ACCOUNT_PATH, params=EN).text
+        assert "Your Canvas token stopped working on 2027-01-15." in english
+        assert not CJK.search(strip_chrome(english))
+
+    def test_the_other_reasons(self, h: Harness) -> None:
+        self.seed(h)
+        sign_in(h)
+        h.store.mark_invalid(self.KEY, reason="revoked_by_admin")
+        text = h.client.get(ACCOUNT_PATH, params=ZH).text
+        assert "管理员已于 2027-01-15 将你的 Canvas 令牌标记为失效。" in text
+        assert "重新检测" not in text
+        self.seed(h)  # a fresh token clears the mark
+        h.store.mark_invalid(self.KEY, reason="decrypt_failed")
+        assert "服务器自 2027-01-15 起无法读取你保存的 Canvas 令牌。" in h.client.get(
+            ACCOUNT_PATH, params=ZH
+        ).text
+
+    def test_the_expiry_reminder_and_the_date_field(self, h: Harness) -> None:
+        self.seed(h, expires_hint_at=int(datetime(2027, 1, 20, tzinfo=UTC).timestamp()))
+        sign_in(h)
+        text = h.client.get(ACCOUNT_PATH, params=ZH).text
+        assert "你的 Canvas 令牌将于 2027-01-20 到期。" in text
+        assert "令牌到期日（可选）" in text and "令牌到期日" in text
+
+    def test_the_recheck_notices(self, h: Harness) -> None:
+        self.seed(h)
+        h.store.mark_invalid(self.KEY, reason="canvas_token_rejected")
+        sign_in(h)
+        use_lang(h, "zh")
+        csrf = csrf_of(h)
+        h.whoami_result = CanvasCheckError("invalid")
+        assert "Canvas 仍然拒绝这个令牌" in post_form(h, "/account/token/recheck", {"csrf": csrf}).text
+        h.now += 61
+        h.whoami_result = CanvasIdentity("42", "Ada Canvas")
+        restored = post_form(h, "/account/token/recheck", {"csrf": csrf})
+        assert "Canvas 接受了这个令牌，已恢复使用。" in restored.text
+
+    def test_the_identity_confirmation_and_the_bad_date(self, h: Harness) -> None:
+        self.seed(h)
+        sign_in(h)
+        use_lang(h, "zh")
+        csrf = csrf_of(h)
+        h.whoami_result = CanvasIdentity("99", "Grace")
+        changed = post_form(h, "/account/token", {"csrf": csrf, "canvas_token": CANVAS_TOKEN})
+        assert changed.status_code == 409
+        assert "这个令牌属于另一个 Canvas 用户" in changed.text
+        assert "我确认要换成另一个 Canvas 用户的令牌" in changed.text
+        bad = post_form(
+            h, "/account/token", {"csrf": csrf, "canvas_token": CANVAS_TOKEN, "expires_on": "2020-01-01"}
+        )
+        assert "到期日无效" in bad.text
+
+    def test_the_admin_columns_and_filter(self, h: Harness) -> None:
+        self.seed(h)
+        h.store.put(
+            tenant_id=TID, object_id=OID_2, api_token="9~" + "Q" * 62, canvas_user_id="77",
+            canvas_user_name="Bob", entra_display_name="Bob", entra_upn="bob@example.test",
+            canvas_host="canvas.example.test",
+        )
+        h.store.mark_invalid(f"entra:{TID}:{OID_2}", reason="canvas_token_rejected")
+        sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
+        text = h.client.get("/account/admin", params=ZH).text
+        assert "<th>状态</th>" in text and "<th>最近验证</th>" in text
+        assert "需重新绑定" in text and "Canvas 拒绝了令牌" in text and "失效时间" in text
+        assert "1 个绑定需要重新录入令牌（共 2 个）。" in text
+        assert "标记为失效" in text and "只看需要重新绑定的" in text
+        assert "Needs re-enroll" not in text and "Mark as invalid" not in text
+        filtered = h.client.get("/account/admin", params={"filter": "needs_reenroll", **ZH}).text
+        assert "显示全部" in filtered

@@ -378,7 +378,7 @@ class TestPicker:
     def test_resaving_a_legacy_row_reseals_it_with_the_default_host(self, tmp_path: pathlib.Path) -> None:
         r = rig(tmp_path)
         r.h.store.put(
-            tenant_id=TID, object_id=OID, api_token=CANVAS_TOKEN, canvas_user_id="1",
+            tenant_id=TID, object_id=OID, api_token=CANVAS_TOKEN, canvas_user_id="42",
             canvas_user_name="Old", entra_display_name="Old", entra_upn="o@example.test",
         )
         assert stored_host(r) is None

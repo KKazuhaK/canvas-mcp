@@ -218,6 +218,7 @@ def install_selfhost(
         ),
         runtime.store,
         authorize_id_token_claims(runtime.policy),
+        health=runtime.health,
         **account_options,
     )
 
