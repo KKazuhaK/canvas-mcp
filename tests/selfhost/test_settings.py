@@ -389,3 +389,47 @@ class TestCourseState:
         assert "SELFHOST_COURSE_STATE" in problems[0]
         assert "request_local" in problems[0] and "per_principal" in problems[0]
         assert value not in problems[0].replace("per_principal", "").replace("request_local", "")
+
+
+class TestAccountUi:
+    def test_the_default_is_the_legacy_pages_and_the_image_path(self):
+        settings = load_selfhost_settings(_env())
+        assert settings.account_ui == "legacy"
+        assert str(settings.account_web_dist).replace("\\", "/") == "/app/web-dist"
+
+    @pytest.mark.parametrize("value", ["", "legacy", "LEGACY", " legacy "])
+    def test_legacy_spellings(self, value):
+        assert load_selfhost_settings(_env(ACCOUNT_UI=value)).account_ui == "legacy"
+
+    @pytest.mark.parametrize("value", ["react", "React", " REACT "])
+    def test_react_is_an_explicit_opt_in(self, value):
+        assert load_selfhost_settings(_env(ACCOUNT_UI=value)).account_ui == "react"
+
+    @pytest.mark.parametrize("value", ["spa", "new", "true", "1", "reactt", "react,legacy", "x" * 80])
+    def test_anything_else_is_refused_without_echoing_the_value(self, value):
+        problems = _problems(ACCOUNT_UI=value)
+        assert len(problems) == 1
+        assert "ACCOUNT_UI" in problems[0]
+        assert "legacy" in problems[0] and "react" in problems[0]
+        assert value not in problems[0].replace("react", "").replace("legacy", "")
+
+    def test_the_directory_is_taken_as_given_and_must_be_absolute(self):
+        settings = load_selfhost_settings(_env(ACCOUNT_WEB_DIST="/srv/web/dist"))
+        assert str(settings.account_web_dist).replace("\\", "/") == "/srv/web/dist"
+        for value in ("web/dist", "./dist", "dist", "~/dist"):
+            problems = _problems(ACCOUNT_WEB_DIST=value)
+            assert problems == ["ACCOUNT_WEB_DIST must be an absolute path"]
+
+    def test_it_is_checked_in_every_mode_so_a_typo_is_found_early(self):
+        assert _problems(ACCOUNT_UI="bogus", ACCOUNT_WEB_DIST="relative") == [
+            "ACCOUNT_UI must be unset, 'legacy' or 'react'",
+            "ACCOUNT_WEB_DIST must be an absolute path",
+        ]
+
+    def test_the_names_are_the_documented_ones(self):
+        from canvas_mcp.core.selfhost.settings import (
+            ACCOUNT_UI_ENV,
+            ACCOUNT_WEB_DIST_ENV,
+        )
+
+        assert (ACCOUNT_UI_ENV, ACCOUNT_WEB_DIST_ENV) == ("ACCOUNT_UI", "ACCOUNT_WEB_DIST")

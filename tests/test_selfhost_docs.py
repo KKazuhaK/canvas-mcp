@@ -226,6 +226,17 @@ def test_smoke_test_script_is_wired_for_the_documented_contract():
         "Host: evil.example",
         "421",
         "MCP_ACCESS_KEYS",
+        # The React account UI boot: the strict CSP, caching, deep link and API checks.
+        "ACCOUNT_UI=react",
+        "script-src 'self'",
+        "/account/assets/",
+        "immutable",
+        "/account/token",
+        "/account/api/providers",
+        "not_authenticated",
+        # ...and the fallback to the legacy pages when the build is not usable.
+        "ACCOUNT_WEB_DIST=/nonexistent",
+        "serving the legacy /account pages",
     ):
         assert needle in script, f"smoke-test.sh is missing {needle!r}"
 
@@ -241,7 +252,7 @@ def test_every_variable_the_selfhost_settings_read_is_documented(env_text):
     read = set(re.findall(r'get\("([A-Z][A-Z0-9_]+)"\)', source))
     read |= {
         "ACCOUNT_SESSION_TTL_SECONDS", "OAUTH_ALLOWED_REDIRECT_URIS", "MCP_AUTH_MODE", "SELFHOST_COURSE_STATE",
-        "SELFHOST_DISABLED_TOOLS",
+        "SELFHOST_DISABLED_TOOLS", "ACCOUNT_UI", "ACCOUNT_WEB_DIST",
     }
     # The admission settings are read by the pure module (settings.py hands it the environment).
     accounts_source = (SRC / "core" / "selfhost" / "accounts.py").read_text(encoding="utf-8")
@@ -250,6 +261,29 @@ def test_every_variable_the_selfhost_settings_read_is_documented(env_text):
     assert len(read) >= 12  # the regex still finds the settings
     for name in sorted(read):
         assert re.search(rf"^#? ?{name}=", env_text, re.MULTILINE), f"{name} is not in env.example"
+
+
+def test_the_account_ui_settings_are_documented_with_their_default_and_fallback(env_text, readme):
+    commented = _commented_assignments(env_text)
+    assert commented["ACCOUNT_UI"] == "legacy"
+    assert commented["ACCOUNT_WEB_DIST"] == "/app/web-dist"
+    assert "ACCOUNT_UI" not in _assignments(env_text)
+    section = readme[readme.index("## Account UI (React or legacy)") : readme.index("## Accounts and admission")]
+    for needle in (
+        "ACCOUNT_UI",
+        "ACCOUNT_WEB_DIST",
+        "legacy",
+        "serving the legacy /account pages",
+        "script-src 'self'",
+        "Cache-Control: no-store",
+        "immutable",
+        "/account/api",
+        "X-CSRF-Token",
+        "Origin",
+        "Never cache",
+    ):
+        assert needle in section, needle
+    assert "(#account-ui-react-or-legacy)" in readme
 
 
 def test_student_write_tools_match_the_registered_allowlist(env_text):

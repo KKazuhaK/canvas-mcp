@@ -60,6 +60,13 @@ STATE_BACKEND_ENV = "SELFHOST_STATE_BACKEND"
 STATE_BACKEND_MEMORY = "memory"
 STATE_BACKEND_REDIS = "redis"
 
+ACCOUNT_UI_ENV = "ACCOUNT_UI"
+ACCOUNT_UI_LEGACY = "legacy"
+ACCOUNT_UI_REACT = "react"
+ACCOUNT_WEB_DIST_ENV = "ACCOUNT_WEB_DIST"
+#: Where the container image keeps the built account UI.
+DEFAULT_ACCOUNT_WEB_DIST = "/app/web-dist"
+
 _GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
@@ -128,6 +135,11 @@ class SelfhostSettings:
     # first release's behaviour: the two Entra app roles, nothing else.
     # ``None`` (a settings object built by hand) means that default.
     access_policy: AccessPolicy = field(default=None)  # type: ignore[assignment]
+    # Which /account UI is served: the server-rendered pages (the default) or the built
+    # single-page app found in ``account_web_dist`` (it falls back to the pages when that
+    # build is missing or unusable).
+    account_ui: Literal["legacy", "react"] = "legacy"
+    account_web_dist: Path = Path(DEFAULT_ACCOUNT_WEB_DIST)
 
     mcp_path: ClassVar[str] = "/mcp"
 
@@ -371,6 +383,17 @@ def _parse_auto_migrate(raw: str, problems: list[str]) -> bool:
     return True
 
 
+def _parse_account_ui(raw: str, problems: list[str]) -> Literal["legacy", "react"]:
+    """``ACCOUNT_UI``: unset or ``legacy`` (the default) or ``react``; the value is never echoed."""
+    word = raw.strip().lower()
+    if word in ("", ACCOUNT_UI_LEGACY):
+        return "legacy"
+    if word == ACCOUNT_UI_REACT:
+        return "react"
+    problems.append(f"{ACCOUNT_UI_ENV} must be unset, '{ACCOUNT_UI_LEGACY}' or '{ACCOUNT_UI_REACT}'")
+    return "legacy"
+
+
 def _parse_state_backend(raw: str, problems: list[str]) -> Literal["memory"]:
     word = raw.strip().lower()
     if word in ("", STATE_BACKEND_MEMORY):
@@ -504,6 +527,10 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
     )
     auto_migrate = _parse_auto_migrate(get(AUTO_MIGRATE_ENV), problems)
     state_backend = _parse_state_backend(get(STATE_BACKEND_ENV), problems)
+    account_ui = _parse_account_ui(get(ACCOUNT_UI_ENV), problems)
+    web_dist_raw = get(ACCOUNT_WEB_DIST_ENV) or DEFAULT_ACCOUNT_WEB_DIST
+    if not _is_absolute(web_dist_raw):
+        problems.append(f"{ACCOUNT_WEB_DIST_ENV} must be an absolute path")
 
     home_raw = get("FASTMCP_HOME")
     if not home_raw:
@@ -553,4 +580,6 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
         state_backend=state_backend,
         disabled_tools=disabled_tools,
         access_policy=access_policy,
+        account_ui=account_ui,
+        account_web_dist=Path(web_dist_raw),
     )

@@ -55,6 +55,17 @@ Security notes:
 * Every sign-in is written to ``auth_events`` (the page shows the last twenty); the
   client address is ``unknown`` (no proxy is trusted) and the user agent is only a
   keyed hash. Owners can read the audit log at ``/account/admin/audit``.
+
+Two UIs, one set of rules. With ``ACCOUNT_UI=react`` the built single-page app is served
+instead of the pages above and talks to the JSON API in :mod:`.account_api`; that API is
+built on the *same* application object, so it shares the session, the CSRF token, the
+rate limiters, the health service and the caches. The sequences that matter (enrolling a
+token, re-checking it, saving the write-tool switches, the owner's access actions) are
+the ``enroll_token``, ``recheck_own_token``, ``apply_write_tools``, ``change_access``,
+``invalidate_enrollment`` and ``remove_enrollment`` methods below: they return outcomes
+(:mod:`.account_ops`) and the pages only render them. In the react mode only the two
+server-side halves of the sign-in (``/account/login`` and ``/account/callback``) remain
+here; the callback then returns to the app and reports a failure as a fixed code.
 """
 
 from __future__ import annotations
@@ -87,9 +98,21 @@ from starlette.routing import Route
 
 from canvas_mcp.core import audit
 from canvas_mcp.core.dates import output_timezone
+from canvas_mcp.core.selfhost.account_ops import (
+    Rechecked,
+    Refusal,
+    WriteSaved,
+    WriteToolsSnapshot,
+)
 from canvas_mcp.core.selfhost.accounts import (
+    DENY_ACCESS_DENIED,
     DENY_ACCESS_DISABLED,
+    DENY_BAD_ROLES,
+    DENY_BAD_SUBJECT,
     DENY_SIGNUPS_PAUSED,
+    DENY_UNAVAILABLE,
+    DENY_WRONG_CLIENT,
+    DENY_WRONG_TENANT,
     PROVIDER_ENTRA,
     Denied,
     valid_account_key,
@@ -149,6 +172,8 @@ from canvas_mcp.core.tool_policy import TOOL_EFFECTS, Effect
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
+
+    from canvas_mcp.core.selfhost.account_spa import SpaBundle
 
 logger = logging.getLogger("canvas_mcp.selfhost.account")
 
@@ -213,6 +238,35 @@ _SEARCH_LIMIT_WINDOW_SECONDS = 600
 _SCOPE = "openid profile"
 _ALL_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 
+#: Where the built single-page UI starts (the sign-in page it shows on a failed login).
+SIGN_IN_PATH = "/account/sign-in"
+#: Sealed into the login cookie by the react UI: where to go after a successful sign-in.
+_RETURN_TO_KEY = "rt"
+_RETURN_TO_MAX_CHARS = 512
+_RETURN_TO_FORBIDDEN_PREFIXES = (
+    "/account/api",
+    "/account/login",
+    "/account/callback",
+)
+# The closed set of failure codes the react UI receives as ``?error=`` on the
+# sign-in page. Never an upstream message.
+SIGN_IN_ERROR_CODES = frozenset(
+    {
+        "state_invalid",
+        "provider_error",
+        "sign_in_incomplete",
+        "sign_in_unverified",
+        DENY_WRONG_TENANT,
+        DENY_WRONG_CLIENT,
+        DENY_BAD_SUBJECT,
+        DENY_BAD_ROLES,
+        DENY_ACCESS_DENIED,
+        DENY_ACCESS_DISABLED,
+        DENY_SIGNUPS_PAUSED,
+        "token_store_unavailable",
+    }
+)
+
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9~._-]{20,512}$")
 _ERROR_CODE_RE = re.compile(r"^[a-z_]{1,64}$")
 _GUID_RE = re.compile(
@@ -270,6 +324,43 @@ class AccountConfig:
     schools: SchoolPolicy
     session_ttl_seconds: int = 900
     authority_host: str = "login.microsoftonline.com"
+
+
+def sanitize_return_to(value: str | None) -> str | None:
+    """A same-site path below ``/account`` to return to after sign-in, else None.
+
+    Used only by the react UI, and the same rules as the page's own check: at most
+    512 ASCII characters; starts with ``/account``; not the API, the login or the
+    callback; no ``//``, backslash, control character, ``.`` or ``..`` segment; and
+    all of that again after percent-decoding (repeatedly, so a double-encoded trick
+    fails too). Anything else is dropped and the user lands on ``/account/``.
+    """
+    if not isinstance(value, str) or not value or len(value) > _RETURN_TO_MAX_CHARS:
+        return None
+    candidate = value
+    for _ in range(4):
+        if not _return_to_clean(candidate):
+            return None
+        decoded = urllib.parse.unquote(candidate)
+        if decoded == candidate:
+            return value
+        candidate = decoded
+    return None
+
+
+def _return_to_clean(text: str) -> bool:
+    if not text.isascii() or _has_control(text) or "\\" in text or "//" in text:
+        return False
+    path = re.split(r"[?#]", text, maxsplit=1)[0]
+    if path != ACCOUNT_PATH and not path.startswith(ACCOUNT_PATH + "/"):
+        return False
+    if any(segment in (".", "..") for segment in path.split("/")):
+        return False
+    lowered = path.lower()
+    return not any(
+        lowered == prefix or lowered.startswith(prefix + "/")
+        for prefix in _RETURN_TO_FORBIDDEN_PREFIXES
+    )
 
 
 # -- sealed cookies ----------------------------------------------------------
@@ -672,8 +763,13 @@ class _AccountApp:
         tool_prefs: ToolPrefsCache | None = None,
         access: PrincipalAccessCache | None = None,
         rate_limiters: RateLimiters | None = None,
+        ui: Literal["legacy", "react"] = "legacy",
     ) -> None:
         window = (rate_limiters or build_rate_limiters("memory")).sliding_window
+        # ``react`` only when the built single-page UI is really served: sign-in then
+        # returns to it (see :meth:`login` and :meth:`_callback`) and the HTML pages
+        # below are not registered. Otherwise the HTML pages are the account UI.
+        self.react = ui == "react"
         self.cfg = cfg
         self.write_tools = write_tools
         self.tool_prefs = tool_prefs
@@ -724,8 +820,9 @@ class _AccountApp:
 
     # -- routing -------------------------------------------------------------
 
-    def routes(self) -> list[Route]:
-        table: list[tuple[str, dict[str, Handler]]] = [
+    def route_table(self) -> list[tuple[str, dict[str, Handler]]]:
+        """Every (path, {method: handler}) of the HTML UI, whatever mode is active."""
+        return [
             (ACCOUNT_PATH, {"GET": self.page}),
             (_LOGIN_PATH, {"GET": self.login}),
             (ACCOUNT_CALLBACK_PATH, {"GET": self.callback}),
@@ -744,6 +841,13 @@ class _AccountApp:
             (_SCHOOLS_PATH, {"GET": self.schools_page}),
             (_WRITE_TOOLS_PATH, {"POST": self.save_write_tools}),
         ]
+
+    def routes(self) -> list[Route]:
+        table = self.route_table()
+        if self.react:
+            # One UI per mode: the single-page app owns every page, so only the two
+            # server-side halves of the sign-in stay.
+            table = [entry for entry in table if entry[0] in (_LOGIN_PATH, ACCOUNT_CALLBACK_PATH)]
         return [
             Route(path, self._endpoint(handlers), methods=_ALL_METHODS)
             for path, handlers in table
@@ -1164,13 +1268,19 @@ class _AccountApp:
             f"<dd>{_e(_fmt_utc_date(info.expires_hint_at))}</dd>"
         )
 
-    def _settings_link(self, info: EnrollmentInfo) -> str:
-        """A link to the school's own Canvas settings page, where tokens are made."""
+    def settings_url(self, info: EnrollmentInfo) -> str | None:
+        """The school's own Canvas settings page, where tokens are made (https only)."""
         school = self.schools.resolve_stored(info.canvas_host)
         if school is None or not school.api_url.startswith("https://"):
-            return ""
+            return None
         base = re.sub(r"/api/v\d+/?$", "", school.api_url.rstrip("/"))
-        url = f"{base}/profile/settings"
+        return f"{base}/profile/settings"
+
+    def _settings_link(self, info: EnrollmentInfo) -> str:
+        """A link to the school's own Canvas settings page, where tokens are made."""
+        url = self.settings_url(info)
+        if url is None:
+            return ""
         return (
             f'<p><a href="{_e(url)}" rel="noopener noreferrer" target="_blank">'
             f"{_bi('打开学校的 Canvas 设置页', 'Open your school’s Canvas settings')}</a></p>"
@@ -1509,15 +1619,17 @@ class _AccountApp:
         response = self.redirect(
             self._authority_url("oauth2/v2.0/authorize") + "?" + query, status=302
         )
-        sealed = self.codec.seal(
-            LOGIN_COOKIE,
-            {
-                "state": state,
-                "nonce": nonce,
-                "verifier": verifier,
-                "iat": int(self.clock()),
-            },
-        )
+        transaction: dict[str, Any] = {
+            "state": state,
+            "nonce": nonce,
+            "verifier": verifier,
+            "iat": int(self.clock()),
+        }
+        if self.react:
+            return_to = sanitize_return_to(request.query_params.get("return_to"))
+            if return_to is not None:
+                transaction[_RETURN_TO_KEY] = return_to
+        sealed = self.codec.seal(LOGIN_COOKIE, transaction)
         response.set_cookie(
             LOGIN_COOKIE, sealed, max_age=_LOGIN_TTL_SECONDS, **self._cookie_kwargs()
         )
@@ -1549,7 +1661,8 @@ class _AccountApp:
         if txn is None or not hmac.compare_digest(
             state.encode("utf-8"), txn["state"].encode("utf-8")
         ):
-            return self.message_page(
+            return self._sign_in_failure(
+                "state_invalid",
                 400,
                 _bi(
                     "登录请求已失效，请重新登录。",
@@ -1562,7 +1675,8 @@ class _AccountApp:
             code = error if _ERROR_CODE_RE.fullmatch(error) else None
             logger.info("account sign-in refused by Entra: %s", code or "unknown")
             detail = f" (<code>{_e(code)}</code>)" if code else ""
-            return self.message_page(
+            return self._sign_in_failure(
+                "provider_error",
                 403,
                 _bi(
                     "Microsoft 登录没有完成。",
@@ -1573,13 +1687,16 @@ class _AccountApp:
 
         code_param = request.query_params.get("code", "")
         if not code_param or len(code_param) > 4096:
-            return self.message_page(
-                400, _bi("登录响应不完整。", "The sign-in response is incomplete.")
+            return self._sign_in_failure(
+                "sign_in_incomplete",
+                400,
+                _bi("登录响应不完整。", "The sign-in response is incomplete."),
             )
 
         id_token = await self._exchange_code(code_param, txn["verifier"])
         if id_token is None:
-            return self.message_page(
+            return self._sign_in_failure(
+                "provider_error",
                 502,
                 _bi(
                     "无法与 Microsoft 完成登录，请稍后再试。",
@@ -1588,7 +1705,8 @@ class _AccountApp:
             )
 
         claims = await self._verify_id_token(id_token)
-        bad = self.message_page(
+        bad = self._sign_in_failure(
+            "sign_in_unverified",
             400,
             _bi(
                 "无法验证 Microsoft 返回的登录凭证。",
@@ -1616,7 +1734,8 @@ class _AccountApp:
             return bad
         tid = claims.get("tid")
         if not isinstance(tid, str) or tid.lower() != self.tenant:
-            return self.message_page(
+            return self._sign_in_failure(
+                DENY_WRONG_TENANT,
                 403,
                 _bi(
                     "此账号不属于允许的目录。",
@@ -1635,8 +1754,10 @@ class _AccountApp:
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("account sign-in status check failed: %s", type(exc).__name__)
-            return self.message_page(
-                503, _bi("暂时无法读取令牌库。", "The token store is unavailable.")
+            return self._sign_in_failure(
+                "token_store_unavailable",
+                503,
+                _bi("暂时无法读取令牌库。", "The token store is unavailable."),
             )
         if isinstance(outcome, Denied):
             return self._sign_in_refused(outcome)
@@ -1663,7 +1784,13 @@ class _AccountApp:
             },
         )
         logger.info("account sign-in ok account=%s pending=%s", sign_in_key, outcome.pending)
-        response = self.redirect(ACCOUNT_PATH, 303)
+        landing = ACCOUNT_PATH
+        if self.react:
+            landing = ACCOUNT_PATH + "/"
+            return_to = txn.get(_RETURN_TO_KEY)
+            if isinstance(return_to, str) and sanitize_return_to(return_to) is not None:
+                landing = return_to
+        response = self.redirect(landing, 303)
         response.set_cookie(
             SESSION_COOKIE,
             sealed,
@@ -1679,7 +1806,8 @@ class _AccountApp:
             logger.warning("account sign-in refused: account disabled account=%s", key)
             if key:
                 audit.log_principal_event("sign_in_refused", key, reason="access_disabled")
-            return self.message_page(
+            return self._sign_in_failure(
+                DENY_ACCESS_DISABLED,
                 403,
                 _bi(
                     "你的访问权限已被管理员停用。请联系服务器所有者恢复。",
@@ -1688,7 +1816,26 @@ class _AccountApp:
             )
         if denied.code == DENY_SIGNUPS_PAUSED:
             logger.warning("account sign-in refused: sign-ups paused")
-        return self.message_page(403, _denial_html(denied.message))
+        return self._sign_in_failure(
+            self._sign_in_error_code(denied), 403, _denial_html(denied.message)
+        )
+
+    @staticmethod
+    def _sign_in_error_code(denied: Denied) -> str:
+        """The identity layer's code for the react sign-in page (a closed set)."""
+        if denied.code == DENY_UNAVAILABLE:
+            return "token_store_unavailable"
+        return denied.code if denied.code in SIGN_IN_ERROR_CODES else DENY_ACCESS_DENIED
+
+    def _sign_in_failure(self, code: str, status: int, message_html: str) -> Response:
+        """A failed sign-in: the HTML message page, or (react UI) back to its sign-in page.
+
+        The react UI gets only the closed ``code`` in the query string, never a message.
+        """
+        if self.react:
+            assert code in SIGN_IN_ERROR_CODES, code
+            return self.redirect(f"{SIGN_IN_PATH}?{urllib.parse.urlencode({'error': code})}", 303)
+        return self.message_page(status, message_html)
 
     async def _exchange_code(self, code: str, verifier: str) -> str | None:
         form = {
@@ -1874,62 +2021,70 @@ class _AccountApp:
         if isinstance(guarded, Response):
             return guarded
         session, form = guarded
-
-        if not self.limiter.allow((session.acct,)):
-            return await self._token_error(
-                session,
-                429,
-                _bi(
-                    "尝试次数过多，请 10 分钟后再试。",
-                    "Too many attempts. Try again in 10 minutes.",
-                ),
-            )
-        token = form.get("canvas_token", "").strip()
-        if not _TOKEN_RE.fullmatch(token):
-            return await self._token_error(
-                session,
-                400,
-                _bi(
-                    "令牌格式不正确，请重新复制完整的令牌。",
-                    "That does not look like a Canvas token. Copy the whole token.",
-                ),
-            )
-        expiry = _parse_expiry(form.get("expires_on", ""), self.clock())
-        if isinstance(expiry, str):
-            return await self._token_error(
-                session,
-                400,
-                _bi(
-                    "到期日无效，请选择今天或之后的日期。",
-                    "That expiry date is not valid. Pick today or a later date.",
-                ),
-            )
         raw_school = form.get("school", "")
-        chosen = await self._choose_school(raw_school)
         selected = self._selection(raw_school, session, posted=True)
+        outcome = await self.enroll_token(
+            session,
+            token_raw=form.get("canvas_token", ""),
+            expires_raw=form.get("expires_on", ""),
+            school_raw=raw_school,
+            confirm_raw=form.get("confirm_identity_change", ""),
+        )
+        if isinstance(outcome, Refusal):
+            return await self._enroll_refusal_page(session, outcome, selected)
+        return self.redirect(ACCOUNT_PATH, 303)
+
+    async def enroll_token(
+        self,
+        session: _Session,
+        *,
+        token_raw: str,
+        expires_raw: str,
+        school_raw: str,
+        confirm_raw: str,
+        pick_signature: str | None = None,
+        require_pick_signature: bool = False,
+    ) -> School | Refusal:
+        """Verify a pasted Canvas token with Canvas and store it; the school, or why not.
+
+        The one sequence behind both ``POST /account/token`` and the JSON API, in
+        this order: rate limit, token shape, expiry date, the school (operator
+        list or directory, then DNS), Canvas itself, the identity-change
+        confirmation, and the store's own check that the account is still active.
+        Nothing is sent to a school before the school checks have passed.
+
+        ``require_pick_signature`` (the JSON API) additionally demands that a school
+        taken from the directory carries the signature of this session's own search
+        results (``pick_signature``); the HTML form has no such proof and keeps the
+        directory's confirmation as its only check.
+        """
+        if not self.limiter.allow((session.acct,)):
+            return Refusal("rate_limited", {"retry_after_s": _RATE_LIMIT_WINDOW_SECONDS})
+        token = token_raw.strip()
+        if not _TOKEN_RE.fullmatch(token):
+            return Refusal("token_invalid_format")
+        expiry = _parse_expiry(expires_raw, self.clock())
+        if isinstance(expiry, str):
+            return Refusal("validation_failed", {"field": "expires_on"})
+        if require_pick_signature:
+            enrolled = await anyio.to_thread.run_sync(self._safe_info, session)
+            needs_proof = self._directory_pick(school_raw, enrolled)
+            if needs_proof is not None and not (
+                pick_signature
+                and hmac.compare_digest(
+                    pick_signature.encode("utf-8"),
+                    self._pick_signature(session, needs_proof).encode("utf-8"),
+                )
+            ):
+                return Refusal("school_selection_unverified")
+        chosen = await self._choose_school(school_raw)
         if not isinstance(chosen, School):
-            status, message = chosen
-            return await self._token_error(session, status, message, selected=selected)
+            return Refusal(chosen)
         school = chosen
         try:
             identity = await self._canvas_whoami(token, school.api_url)
         except CanvasCheckError as exc:
-            if exc.kind == "invalid":
-                return await self._token_error(
-                    session,
-                    400,
-                    _bi("Canvas 拒绝了这个令牌。", "Canvas rejected this token."),
-                    selected=selected,
-                )
-            return await self._token_error(
-                session,
-                503,
-                _bi(
-                    "暂时无法连接 Canvas，请稍后再试。",
-                    "Canvas is unavailable right now. Try again later.",
-                ),
-                selected=selected,
-            )
+            return Refusal("token_rejected" if exc.kind == "invalid" else "canvas_unavailable")
         existing = await anyio.to_thread.run_sync(self._safe_info, session)
         if existing is not None and self._identity_changed(existing, school, identity):
             principal_key = self._principal_key(session)
@@ -1937,7 +2092,7 @@ class _AccountApp:
                 session, school.host, existing.canvas_user_id, identity.user_id
             )
             if not hmac.compare_digest(
-                form.get("confirm_identity_change", "").encode("utf-8"),
+                confirm_raw.encode("utf-8"),
                 confirmation.encode("utf-8"),
             ):
                 logger.warning(
@@ -1946,15 +2101,13 @@ class _AccountApp:
                 audit.log_token_event(
                     "identity_change_detected", principal_key, outcome="confirmation_required"
                 )
-                return await self._token_error(
-                    session,
-                    409,
-                    _bi(
-                        "这个令牌属于另一个 Canvas 用户。请勾选下方的确认框后再保存。",
-                        "This token belongs to a different Canvas user. Tick the confirmation box below and save again.",
-                    ),
-                    selected=selected,
-                    identity_change=(existing.canvas_user_name, identity.name, confirmation),
+                return Refusal(
+                    "identity_change_required",
+                    {
+                        "enrolled_user_name": existing.canvas_user_name,
+                        "new_user_name": identity.name,
+                        "confirmation": confirmation,
+                    },
                 )
             logger.warning("account token identity change confirmed account=%s", session.acct)
             audit.log_token_event(
@@ -1975,6 +2128,133 @@ class _AccountApp:
         except PrincipalDisabledError:
             # Disabled after the session was checked: the store refused the write.
             audit.log_principal_event("enroll_refused", self._principal_key(session))
+            return Refusal("access_disabled")
+        except PrincipalPendingError:
+            # Not approved (or no longer approved) when the write happened.
+            audit.log_principal_event("enroll_refused", self._principal_key(session), reason="pending")
+            return Refusal("pending_approval")
+        except PrincipalMissingError:
+            audit.log_principal_event("enroll_refused", self._principal_key(session), reason="missing")
+            return Refusal("forbidden")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("account token save failed: %s", type(exc).__name__)
+            return Refusal("token_store_unavailable")
+        self.health.forget(self._principal_key(session))
+        logger.info("account token enrolled account=%s host=%s", session.acct, school.host)
+        return school
+
+    def _directory_pick(self, raw: str, enrolled: EnrollmentInfo | None) -> str | None:
+        """The host that must carry a search signature, or None when no proof is needed.
+
+        Only a well-formed public host that would be confirmed by the directory
+        needs one: the operator's default, a featured school and the school the
+        account is enrolled at already are trusted, and anything malformed or
+        unoffered is refused by the school checks with its own code.
+        """
+        policy = self.schools
+        value = raw.strip().lower()
+        if not value or not policy.search_enabled:
+            return None
+        if policy.default is not None and value == policy.default.host:
+            return None
+        host = parse_hostname(value)
+        if host is None or is_blocked_hostname(host):
+            return None
+        if policy.featured_school(host) is not None:
+            return None
+        if (
+            enrolled is not None
+            and enrolled.canvas_host == host
+            and policy.resolve_stored(enrolled.canvas_host) is not None
+        ):
+            return None
+        return host
+
+    def _school_refusal(self, code: str) -> tuple[int, str]:
+        """The HTML status and message for a school refusal code."""
+        if code == "school_required":
+            return 400, _bi("请选择你的学校。", "Choose your school.")
+        if code == "school_not_offered":
+            return 400, _bi("此服务器不提供该学校。", "This server does not offer that school.")
+        if code == "directory_unavailable":
+            return 503, _bi("暂时无法连接学校目录。", "The school directory is unavailable right now.")
+        if code == "school_not_in_directory":
+            return 400, _bi("学校目录里没有这个地址。", "That address is not in the school directory.")
+        if code == "school_unresolvable":
+            return 400, _bi("找不到该学校的服务器。", "Could not find that school's server.")
+        if code == "school_address_blocked":
+            return 400, _bi("该学校的地址不被允许。", "That school's address is not allowed.")
+        return 400, _bi("学校地址无效。", "That school address is not valid.")
+
+    async def _enroll_refusal_page(
+        self, session: _Session, refusal: Refusal, selected: str | None
+    ) -> Response:
+        """The account page (or a message page) for a refused enrollment."""
+        code = refusal.code
+        if code == "rate_limited":
+            return await self._token_error(
+                session,
+                429,
+                _bi(
+                    "尝试次数过多，请 10 分钟后再试。",
+                    "Too many attempts. Try again in 10 minutes.",
+                ),
+            )
+        if code == "token_invalid_format":
+            return await self._token_error(
+                session,
+                400,
+                _bi(
+                    "令牌格式不正确，请重新复制完整的令牌。",
+                    "That does not look like a Canvas token. Copy the whole token.",
+                ),
+            )
+        if code == "validation_failed":
+            return await self._token_error(
+                session,
+                400,
+                _bi(
+                    "到期日无效，请选择今天或之后的日期。",
+                    "That expiry date is not valid. Pick today or a later date.",
+                ),
+            )
+        if code.startswith("school_") or code == "directory_unavailable":
+            status, message = self._school_refusal(code)
+            return await self._token_error(session, status, message, selected=selected)
+        if code == "token_rejected":
+            return await self._token_error(
+                session,
+                400,
+                _bi("Canvas 拒绝了这个令牌。", "Canvas rejected this token."),
+                selected=selected,
+            )
+        if code == "canvas_unavailable":
+            return await self._token_error(
+                session,
+                503,
+                _bi(
+                    "暂时无法连接 Canvas，请稍后再试。",
+                    "Canvas is unavailable right now. Try again later.",
+                ),
+                selected=selected,
+            )
+        if code == "identity_change_required":
+            params = refusal.params
+            return await self._token_error(
+                session,
+                409,
+                _bi(
+                    "这个令牌属于另一个 Canvas 用户。请勾选下方的确认框后再保存。",
+                    "This token belongs to a different Canvas user. Tick the confirmation box below and save again.",
+                ),
+                selected=selected,
+                identity_change=(
+                    str(params["enrolled_user_name"]),
+                    str(params["new_user_name"]),
+                    str(params["confirmation"]),
+                ),
+            )
+        if code == "access_disabled":
             return self.message_page(
                 403,
                 _bi(
@@ -1982,26 +2262,18 @@ class _AccountApp:
                     "Your access to this server was disabled by an administrator, so a token cannot be saved.",
                 ),
             )
-        except PrincipalPendingError:
-            # Not approved (or no longer approved) when the write happened.
-            audit.log_principal_event("enroll_refused", self._principal_key(session), reason="pending")
+        if code == "pending_approval":
             return self.message_page(403, self._pending_message())
-        except PrincipalMissingError:
-            audit.log_principal_event("enroll_refused", self._principal_key(session), reason="missing")
+        if code == "forbidden":
             return self.message_page(
                 403, _bi("此账号不可使用。", "This account cannot be used.")
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.error("account token save failed: %s", type(exc).__name__)
-            return await self._token_error(
-                session,
-                503,
-                _bi("暂时无法保存令牌。", "The token could not be saved right now."),
-                selected=selected,
-            )
-        self.health.forget(self._principal_key(session))
-        logger.info("account token enrolled account=%s host=%s", session.acct, school.host)
-        return self.redirect(ACCOUNT_PATH, 303)
+        return await self._token_error(
+            session,
+            503,
+            _bi("暂时无法保存令牌。", "The token could not be saved right now."),
+            selected=selected,
+        )
 
     @staticmethod
     def _principal_key(session: _Session) -> str:
@@ -2021,8 +2293,8 @@ class _AccountApp:
             return False
         return existing.canvas_user_id != identity.user_id
 
-    async def _choose_school(self, raw: str) -> School | tuple[int, str]:
-        """The school to enroll at, or (status, message html) when it is refused.
+    async def _choose_school(self, raw: str) -> School | str:
+        """The school to enroll at, or the code of the refusal.
 
         Nothing is sent to the school (or anywhere else) before every check has
         passed: syntax, the operator's list or the directory's confirmation, and
@@ -2036,33 +2308,28 @@ class _AccountApp:
                 return default
             sole = policy.sole_school
             if sole is None:
-                return 400, _bi("请选择你的学校。", "Choose your school.")
+                return "school_required"
             return await self._public_school_or_refusal(sole)
         if default is not None and value == default.host:
             # The operator's own pin: kept exactly as before, no DNS check.
             return default
-        invalid = (400, _bi("学校地址无效。", "That school address is not valid."))
         host = parse_hostname(value)
         if host is None or is_blocked_hostname(host):
-            return invalid
+            return "school_invalid"
         school = policy.featured_school(host)
         if school is None:
             if not policy.search_enabled:
-                return 400, _bi("此服务器不提供该学校。", "This server does not offer that school.")
+                return "school_not_offered"
             try:
                 entry = await self._directory.confirm(host)
             except DirectoryError:
-                return 503, _bi(
-                    "暂时无法连接学校目录。", "The school directory is unavailable right now."
-                )
+                return "directory_unavailable"
             if entry is None:
-                return 400, _bi(
-                    "学校目录里没有这个地址。", "That address is not in the school directory."
-                )
+                return "school_not_in_directory"
             school = School(host, f"https://{host}/api/v1", entry.name)
         return await self._public_school_or_refusal(school)
 
-    async def _public_school_or_refusal(self, school: School) -> School | tuple[int, str]:
+    async def _public_school_or_refusal(self, school: School) -> School | str:
         """Refuse a school whose name does not resolve, or resolves to a non-public address.
 
         The operator's default school is their own pin and is not checked.
@@ -2071,9 +2338,9 @@ class _AccountApp:
             return school
         verdict = await check_public_host(school.host, self._resolve_host)
         if verdict == "unresolvable":
-            return 400, _bi("找不到该学校的服务器。", "Could not find that school's server.")
+            return "school_unresolvable"
         if verdict == "blocked":
-            return 400, _bi("该学校的地址不被允许。", "That school's address is not allowed.")
+            return "school_address_blocked"
         return school
 
     async def _token_error(
@@ -2106,13 +2373,19 @@ class _AccountApp:
         if isinstance(guarded, Response):
             return guarded
         session, _form = guarded
-        # A self-disconnect: it removes the user's own token and nothing else. It is
-        # not an authorization decision, so it does not touch the access status.
-        removed = await anyio.to_thread.run_sync(self.store.delete, session.acct)
+        await self.delete_own_token(session)
+        return self.redirect(ACCOUNT_PATH, 303)
+
+    async def delete_own_token(self, session: _Session) -> bool:
+        """A self-disconnect: remove the user's own token and nothing else; True if one existed.
+
+        It is not an authorization decision, so it does not touch the access status.
+        """
+        removed = bool(await anyio.to_thread.run_sync(self.store.delete, session.acct))
         logger.info("account token deleted account=%s", session.acct)
         if removed:
             audit.log_principal_event("self_disconnected", self._principal_key(session))
-        return self.redirect(ACCOUNT_PATH, 303)
+        return removed
 
     async def recheck_token(self, request: Request) -> Response:
         """Probe Canvas once with the stored token and restore it if Canvas accepts it."""
@@ -2120,55 +2393,37 @@ class _AccountApp:
         if isinstance(guarded, Response):
             return guarded
         session, _form = guarded
-        if not self.recheck_limiter.allow((session.acct,)):
-            return await self._token_error(
-                session,
-                429,
-                _bi(
-                    "每分钟只能重新检测一次，请稍后再试。",
-                    "You can check once a minute. Try again shortly.",
-                ),
-            )
-        info = await anyio.to_thread.run_sync(self._safe_info, session)
-        if (
-            info is None
-            or info.status != STATUS_INVALID
-            or info.invalid_reason == REASON_REVOKED_BY_ADMIN
-        ):
-            # Nothing to check, or an administrator's decision that only a new
-            # token can undo.
-            return self.redirect(ACCOUNT_PATH, 303)
-        principal_key = self._principal_key(session)
-        school = self.schools.resolve_stored(info.canvas_host)
-        if school is None:
-            return await self._token_error(
-                session,
-                400,
-                _bi(
-                    "服务器已不再支持你登记的学校，请重新登记。",
-                    "This server no longer offers your school. Enroll again.",
-                ),
-            )
-        try:
-            stored = await anyio.to_thread.run_sync(self.store.get, session.acct)
-        except TokenDecryptionError:
-            audit.log_token_event("recheck", principal_key, outcome="unreadable")
-            return await self._token_error(
-                session,
-                400,
-                _bi(
-                    "仍然无法读取保存的令牌，请粘贴一个新的令牌。",
-                    "The saved token still cannot be read. Paste a new one.",
-                ),
-            )
-        if stored is None:
-            return self.redirect(ACCOUNT_PATH, 303)
-        try:
-            await self._canvas_whoami(stored.api_token, school.api_url)
-        except CanvasCheckError as exc:
-            if exc.kind == "invalid":
-                logger.info("account recheck still rejected account=%s", session.acct)
-                audit.log_token_event("recheck", principal_key, outcome="still_rejected")
+        outcome = await self.recheck_own_token(session)
+        if isinstance(outcome, Refusal):
+            code = outcome.code
+            if code == "rate_limited":
+                return await self._token_error(
+                    session,
+                    429,
+                    _bi(
+                        "每分钟只能重新检测一次，请稍后再试。",
+                        "You can check once a minute. Try again shortly.",
+                    ),
+                )
+            if code == "school_not_offered":
+                return await self._token_error(
+                    session,
+                    400,
+                    _bi(
+                        "服务器已不再支持你登记的学校，请重新登记。",
+                        "This server no longer offers your school. Enroll again.",
+                    ),
+                )
+            if code == "token_unreadable":
+                return await self._token_error(
+                    session,
+                    400,
+                    _bi(
+                        "仍然无法读取保存的令牌，请粘贴一个新的令牌。",
+                        "The saved token still cannot be read. Paste a new one.",
+                    ),
+                )
+            if code == "token_rejected":
                 return await self._token_error(
                     session,
                     400,
@@ -2177,15 +2432,65 @@ class _AccountApp:
                         "Canvas still rejects this token. Generate a new one and paste it below.",
                     ),
                 )
+            if code == "canvas_unavailable":
+                return await self._token_error(
+                    session,
+                    503,
+                    _bi(
+                        "暂时无法连接 Canvas，请稍后再试。",
+                        "Canvas is unavailable right now. Try again later.",
+                    ),
+                )
+            # Nothing to check, or an administrator's decision that only a new token
+            # can undo.
+            return self.redirect(ACCOUNT_PATH, 303)
+        if outcome.result != "restored":
+            # The token is not invalid, or was replaced or removed while Canvas was asked.
+            return self.redirect(ACCOUNT_PATH, 303)
+        fresh = await anyio.to_thread.run_sync(self._safe_info, session)
+        return await self.account_page(
+            session,
+            fresh,
+            ("ok", _bi("Canvas 接受了这个令牌，已恢复使用。", "Canvas accepts this token again. It is active.")),
+        )
+
+    async def recheck_own_token(self, session: _Session) -> Rechecked | Refusal:
+        """Probe Canvas once with the stored token; restore it if Canvas accepts it.
+
+        Once a minute per account. ``not_found`` (nothing stored) and
+        ``recheck_not_allowed`` (an administrator's decision) end the attempt
+        without asking Canvas; a token that is not invalid, or that was replaced
+        while Canvas was asked, is ``unchanged``.
+        """
+        if not self.recheck_limiter.allow((session.acct,)):
+            return Refusal("rate_limited", {"retry_after_s": _RECHECK_LIMIT_WINDOW_SECONDS})
+        info = await anyio.to_thread.run_sync(self._safe_info, session)
+        if info is None:
+            return Refusal("not_found")
+        if info.status != STATUS_INVALID:
+            return Rechecked("unchanged")
+        if info.invalid_reason == REASON_REVOKED_BY_ADMIN:
+            return Refusal("recheck_not_allowed")
+        principal_key = self._principal_key(session)
+        school = self.schools.resolve_stored(info.canvas_host)
+        if school is None:
+            return Refusal("school_not_offered")
+        try:
+            stored = await anyio.to_thread.run_sync(self.store.get, session.acct)
+        except TokenDecryptionError:
+            audit.log_token_event("recheck", principal_key, outcome="unreadable")
+            return Refusal("token_unreadable")
+        if stored is None:
+            return Refusal("not_found")
+        try:
+            await self._canvas_whoami(stored.api_token, school.api_url)
+        except CanvasCheckError as exc:
+            if exc.kind == "invalid":
+                logger.info("account recheck still rejected account=%s", session.acct)
+                audit.log_token_event("recheck", principal_key, outcome="still_rejected")
+                return Refusal("token_rejected")
             audit.log_token_event("recheck", principal_key, outcome="unavailable")
-            return await self._token_error(
-                session,
-                503,
-                _bi(
-                    "暂时无法连接 Canvas，请稍后再试。",
-                    "Canvas is unavailable right now. Try again later.",
-                ),
-            )
+            return Refusal("canvas_unavailable")
         restored = await anyio.to_thread.run_sync(
             functools.partial(
                 self.store.restore_active,
@@ -2198,16 +2503,11 @@ class _AccountApp:
         )
         if not restored:
             # The token was replaced or removed while Canvas was being asked.
-            return self.redirect(ACCOUNT_PATH, 303)
+            return Rechecked("unchanged")
         self.health.forget(principal_key)
         logger.info("account recheck restored account=%s", session.acct)
         audit.log_token_event("recheck", principal_key, outcome="restored")
-        fresh = await anyio.to_thread.run_sync(self._safe_info, session)
-        return await self.account_page(
-            session,
-            fresh,
-            ("ok", _bi("Canvas 接受了这个令牌，已恢复使用。", "Canvas accepts this token again. It is active.")),
-        )
+        return Rechecked("restored")
 
     # -- write tools ---------------------------------------------------------
 
@@ -2411,7 +2711,6 @@ class _AccountApp:
             return self.message_page(
                 404, _bi("此服务器没有写工具设置。", "This server has no write-tool settings.")
             )
-        key = self._principal_key(session)
 
         async def show(
             kind: Literal["error", "ok"], message: str, status: int
@@ -2429,8 +2728,7 @@ class _AccountApp:
             )
 
         try:
-            offered = await self.write_tools.offered()
-            prefs = await anyio.to_thread.run_sync(self.store.get_tool_prefs, key)
+            snapshot = await self.read_write_tools(session)
         except Exception as exc:  # noqa: BLE001
             logger.error("account write tools read failed: %s", type(exc).__name__)
             return await show(
@@ -2438,18 +2736,66 @@ class _AccountApp:
                 _bi("暂时无法读取写工具设置。", "Your write-tool settings cannot be read right now."),
                 503,
             )
-        current = prefs.enabled_write_tools if prefs is not None else frozenset()
+        # Only tools the server offers can be ticked; a submitted name outside
+        # "offered" is ignored, so this form can never widen the server's ceiling.
+        ticked = frozenset(
+            name
+            for name in snapshot.offered
+            if user_can_enable(name) and form.get(f"tool.{name}") == "1"
+        )
+        outcome = await self.apply_write_tools(
+            session, snapshot, ticked=ticked, disable_all=form.get("disable_all") == "1"
+        )
+        if isinstance(outcome, Refusal):
+            if outcome.code == "reauth_required":
+                return await show(
+                    "error",
+                    _bi(
+                        "为了安全，开启写工具需要最近 10 分钟内的登录。请退出后重新登录，再试一次。关闭写工具不受此限制。",
+                        "For your security, turning on a write tool needs a sign-in from the last 10 minutes. Sign out, sign in again and retry. Turning tools off is always allowed.",
+                    ),
+                    403,
+                )
+            return await show(
+                "error",
+                _bi("暂时无法保存写工具设置。", "The write-tool settings could not be saved right now."),
+                503,
+            )
+        if outcome.result == "unchanged":
+            return await show("ok", _bi("没有需要保存的更改。", "Nothing to change."), 200)
+        return await show("ok", _bi("写工具设置已保存。", "Write-tool settings saved."), 200)
 
-        if form.get("disable_all") == "1":
+    async def read_write_tools(self, session: _Session) -> WriteToolsSnapshot:
+        """What the server offers and what this account has on. Raises when unreadable."""
+        assert self.write_tools is not None
+        offered = await self.write_tools.offered()
+        prefs = await anyio.to_thread.run_sync(
+            self.store.get_tool_prefs, self._principal_key(session)
+        )
+        return WriteToolsSnapshot(offered, prefs)
+
+    async def apply_write_tools(
+        self,
+        session: _Session,
+        snapshot: WriteToolsSnapshot,
+        *,
+        ticked: frozenset[str],
+        disable_all: bool,
+    ) -> WriteSaved | Refusal:
+        """Store the new switches for the account; turning one on needs a recent sign-in.
+
+        ``ticked`` are the tools the user wants on (names the server does not offer are
+        dropped); names kept from an earlier choice that the server no longer offers
+        stay as they are, unless ``disable_all``. Behind both the HTML form and the JSON
+        API, this is the only place that writes the switches.
+        """
+        key = self._principal_key(session)
+        offered = snapshot.offered
+        current = snapshot.current
+        if disable_all:
             desired: frozenset[str] = frozenset()
         else:
-            # Only tools the server offers can be ticked; names that are kept but
-            # not offered stay as they are. A submitted name outside "offered" is
-            # ignored, so this form can never widen the server's ceiling.
-            ticked = frozenset(
-                name for name in offered if user_can_enable(name) and form.get(f"tool.{name}") == "1"
-            )
-            desired = ticked | (current - offered)
+            desired = frozenset(name for name in ticked if name in offered) | (current - offered)
         turned_on = desired - current
         turned_off = current - desired
 
@@ -2457,16 +2803,9 @@ class _AccountApp:
             audit.log_write_tools_event(
                 "refused", key, enabled=turned_on, disabled=(), outcome="sign_in_too_old"
             )
-            return await show(
-                "error",
-                _bi(
-                    "为了安全，开启写工具需要最近 10 分钟内的登录。请退出后重新登录，再试一次。关闭写工具不受此限制。",
-                    "For your security, turning on a write tool needs a sign-in from the last 10 minutes. Sign out, sign in again and retry. Turning tools off is always allowed.",
-                ),
-                403,
-            )
+            return Refusal("reauth_required", {"max_age_s": _FRESH_SIGN_IN_SECONDS})
         if not turned_on and not turned_off:
-            return await show("ok", _bi("没有需要保存的更改。", "Nothing to change."), 200)
+            return WriteSaved("unchanged")
 
         try:
             await anyio.to_thread.run_sync(
@@ -2474,11 +2813,7 @@ class _AccountApp:
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("account write tools save failed: %s", type(exc).__name__)
-            return await show(
-                "error",
-                _bi("暂时无法保存写工具设置。", "The write-tool settings could not be saved right now."),
-                503,
-            )
+            return Refusal("write_tools_unavailable")
         if self.tool_prefs is not None:
             self.tool_prefs.invalidate(key)
         audit.log_write_tools_event(
@@ -2493,7 +2828,7 @@ class _AccountApp:
             len(turned_on),
             len(turned_off),
         )
-        return await show("ok", _bi("写工具设置已保存。", "Write-tool settings saved."), 200)
+        return WriteSaved("saved")
 
     async def logout(self, request: Request) -> Response:
         guarded = await self._guard_post(request)
@@ -2801,16 +3136,32 @@ class _AccountApp:
         target = valid_principal_key(form.get("principal_key"))
         if target is None:
             return self._bad_target_page()
-        changed = await self.health.mark_invalid(
-            target, REASON_REVOKED_BY_ADMIN, actor=self._principal_key(session)
-        )
+        outcome = await self.invalidate_enrollment(session, target)
+        if isinstance(outcome, Refusal):
+            return self._refused_page(outcome.code)
+        return self.redirect(_ADMIN_PATH, 303)
+
+    async def invalidate_enrollment(self, session: _Session, target: str) -> bool | Refusal:
+        """Owner action: mark an enrollment invalid (``revoked_by_admin``); True if it changed.
+
+        The store re-checks inside the transaction that the acting account is still an
+        active owner.
+        """
+        actor = self._principal_key(session)
+        try:
+            changed = await self.health.mark_invalid(
+                target, REASON_REVOKED_BY_ADMIN, actor=actor
+            )
+        except AccessActionRefused as exc:
+            audit.log_principal_event("refused", target, actor=actor, outcome=exc.code)
+            return Refusal(self._access_refusal_code(exc.code))
         logger.info(
             "account admin mark invalid by account=%s target=%s changed=%s",
             session.acct,
             target,
             changed,
         )
-        return self.redirect(_ADMIN_PATH, 303)
+        return changed
 
     async def admin_remove(self, request: Request) -> Response:
         """Owner action: delete a user's stored token. Not an access decision.
@@ -2825,21 +3176,46 @@ class _AccountApp:
         target = valid_principal_key(form.get("principal_key"))
         if target is None:
             return self._bad_target_page()
-        removed = await anyio.to_thread.run_sync(
-            functools.partial(self.store.delete, target, actor=self._principal_key(session))
-        )
-        if removed:
-            audit.log_principal_event(
-                "enrollment_removed", target, actor=self._principal_key(session)
+        outcome = await self.remove_enrollment(session, target)
+        if isinstance(outcome, Refusal):
+            return self._refused_page(outcome.code)
+        return self.redirect(_ADMIN_PATH, 303)
+
+    async def remove_enrollment(self, session: _Session, target: str) -> bool | Refusal:
+        """Owner action: delete a user's stored token (nothing else); True if one existed.
+
+        The store re-checks inside the transaction that the acting account is still an
+        active owner.
+        """
+        actor = self._principal_key(session)
+        try:
+            removed = bool(
+                await anyio.to_thread.run_sync(
+                    functools.partial(self.store.delete, target, actor=actor)
+                )
             )
+        except AccessActionRefused as exc:
+            audit.log_principal_event("refused", target, actor=actor, outcome=exc.code)
+            return Refusal(self._access_refusal_code(exc.code))
+        if removed:
+            audit.log_principal_event("enrollment_removed", target, actor=actor)
         logger.info(
             "account admin remove enrollment by account=%s target=%s", session.acct, target
         )
-        return self.redirect(_ADMIN_PATH, 303)
+        return removed
+
+    @staticmethod
+    def _access_refusal_code(code: str) -> str:
+        """The closed code for an access change the store refused."""
+        if code == AccessActionRefused.LAST_OWNER:
+            return "last_owner"
+        if code == AccessActionRefused.SELF:
+            return "cannot_disable_self"
+        return "forbidden"
 
     def _refused_page(self, code: str) -> Response:
-        """The page for an access change the store refused."""
-        if code == AccessActionRefused.LAST_OWNER:
+        """The page for an access change the store refused (or could not save)."""
+        if code == "last_owner":
             return self.message_page(
                 409,
                 _bi(
@@ -2847,9 +3223,13 @@ class _AccountApp:
                     "You cannot disable the last active owner. Add or enable another owner first.",
                 ),
             )
-        if code == AccessActionRefused.SELF:
+        if code == "cannot_disable_self":
             return self.message_page(
                 400, _bi("你不能停用自己的账号。", "You cannot disable your own account.")
+            )
+        if code == "token_store_unavailable":
+            return self.message_page(
+                503, _bi("暂时无法保存这项更改。", "The change could not be saved right now.")
             )
         return self.message_page(403, _bi("无权访问。", "Forbidden."))
 
@@ -2858,112 +3238,95 @@ class _AccountApp:
         if self.access is not None:
             self.access.invalidate(key)
 
-    async def admin_disable(self, request: Request) -> Response:
-        """Owner action: disable a user. They are refused everywhere until re-enabled."""
-        guarded = await self._guard_post(request, owner_only=True)
-        if isinstance(guarded, Response):
-            return guarded
-        session, form = guarded
-        target = valid_principal_key(form.get("principal_key"))
-        if target is None:
-            return self._bad_target_page()
+    async def change_access(
+        self,
+        session: _Session,
+        target: str,
+        action: Literal["disable", "enable", "approve", "deny"],
+    ) -> bool | Refusal:
+        """Owner action on an account's access; True if it changed anything.
+
+        The store re-checks inside the transaction that the acting account is still an
+        active owner, and refuses to disable the actor or the last active owner. The
+        MCP side's access cache is dropped for the target afterwards.
+        """
         actor = self._principal_key(session)
         try:
-            changed = await anyio.to_thread.run_sync(
-                functools.partial(
-                    self.store.disable_principal,
+            if action == "disable":
+                changed = await anyio.to_thread.run_sync(
+                    functools.partial(
+                        self.store.disable_principal,
+                        target,
+                        actor=actor,
+                        reason=DISABLE_REASON_ADMIN,
+                    )
+                )
+            else:
+                method = {
+                    "enable": self.store.enable_principal,
+                    "approve": self.store.approve_account,
+                    "deny": self.store.deny_account,
+                }[action]
+                changed = await anyio.to_thread.run_sync(
+                    functools.partial(method, target, actor=actor)
+                )
+        except AccessActionRefused as exc:
+            audit.log_principal_event("refused", target, actor=actor, outcome=exc.code)
+            return Refusal(self._access_refusal_code(exc.code))
+        except Exception as exc:  # noqa: BLE001
+            logger.error("account admin %s failed: %s", action, type(exc).__name__)
+            return Refusal("token_store_unavailable")
+        self._access_changed(target)
+        if changed:
+            if action == "disable":
+                audit.log_principal_event(
+                    "disabled", target, actor=actor, reason=DISABLE_REASON_ADMIN
+                )
+            else:
+                audit.log_principal_event(
+                    {"enable": "enabled", "approve": "approved", "deny": "denied"}[action],
                     target,
                     actor=actor,
-                    reason=DISABLE_REASON_ADMIN,
                 )
-            )
-        except AccessActionRefused as exc:
-            audit.log_principal_event("refused", target, actor=actor, outcome=exc.code)
-            return self._refused_page(exc.code)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("account admin disable failed: %s", type(exc).__name__)
-            return self.message_page(
-                503, _bi("暂时无法保存这项更改。", "The change could not be saved right now.")
-            )
-        self._access_changed(target)
-        if changed:
-            audit.log_principal_event(
-                "disabled", target, actor=actor, reason=DISABLE_REASON_ADMIN
-            )
-        logger.info(
-            "account admin disable by account=%s target=%s changed=%s", session.acct, target, changed
-        )
-        return self.redirect(_ADMIN_PATH, 303)
-
-    async def admin_enable(self, request: Request) -> Response:
-        """Owner action: lift a disablement. The user signs in again to get a new session."""
-        guarded = await self._guard_post(request, owner_only=True)
-        if isinstance(guarded, Response):
-            return guarded
-        session, form = guarded
-        target = valid_principal_key(form.get("principal_key"))
-        if target is None:
-            return self._bad_target_page()
-        actor = self._principal_key(session)
-        try:
-            changed = await anyio.to_thread.run_sync(
-                functools.partial(self.store.enable_principal, target, actor=actor)
-            )
-        except AccessActionRefused as exc:
-            audit.log_principal_event("refused", target, actor=actor, outcome=exc.code)
-            return self._refused_page(exc.code)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("account admin enable failed: %s", type(exc).__name__)
-            return self.message_page(
-                503, _bi("暂时无法保存这项更改。", "The change could not be saved right now.")
-            )
-        self._access_changed(target)
-        if changed:
-            audit.log_principal_event("enabled", target, actor=actor)
-        logger.info(
-            "account admin enable by account=%s target=%s changed=%s", session.acct, target, changed
-        )
-        return self.redirect(_ADMIN_PATH, 303)
-
-    async def _decide_pending(self, request: Request, *, approve: bool) -> Response:
-        guarded = await self._guard_post(request, owner_only=True)
-        if isinstance(guarded, Response):
-            return guarded
-        session, form = guarded
-        target = valid_principal_key(form.get("principal_key"))
-        if target is None:
-            return self._bad_target_page()
-        actor = self._principal_key(session)
-        action = self.store.approve_account if approve else self.store.deny_account
-        try:
-            changed = await anyio.to_thread.run_sync(functools.partial(action, target, actor=actor))
-        except AccessActionRefused as exc:
-            audit.log_principal_event("refused", target, actor=actor, outcome=exc.code)
-            return self._refused_page(exc.code)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("account admin approval failed: %s", type(exc).__name__)
-            return self.message_page(
-                503, _bi("暂时无法保存这项更改。", "The change could not be saved right now.")
-            )
-        self._access_changed(target)
-        if changed:
-            audit.log_principal_event("approved" if approve else "denied", target, actor=actor)
         logger.info(
             "account admin %s by account=%s target=%s changed=%s",
-            "approve" if approve else "deny",
+            action,
             session.acct,
             target,
             changed,
         )
+        return bool(changed)
+
+    async def _owner_access_action(
+        self, request: Request, action: Literal["disable", "enable", "approve", "deny"]
+    ) -> Response:
+        guarded = await self._guard_post(request, owner_only=True)
+        if isinstance(guarded, Response):
+            return guarded
+        session, form = guarded
+        target = valid_principal_key(form.get("principal_key"))
+        if target is None:
+            return self._bad_target_page()
+        outcome = await self.change_access(session, target, action)
+        if isinstance(outcome, Refusal):
+            return self._refused_page(outcome.code)
         return self.redirect(_ADMIN_PATH, 303)
+
+    async def admin_disable(self, request: Request) -> Response:
+        """Owner action: disable a user. They are refused everywhere until re-enabled."""
+        return await self._owner_access_action(request, "disable")
+
+    async def admin_enable(self, request: Request) -> Response:
+        """Owner action: lift a disablement. The user signs in again to get a new session."""
+        return await self._owner_access_action(request, "enable")
 
     async def admin_approve(self, request: Request) -> Response:
         """Owner action: approve a pending account so it can enroll a token and use MCP."""
-        return await self._decide_pending(request, approve=True)
+        return await self._owner_access_action(request, "approve")
 
     async def admin_deny(self, request: Request) -> Response:
         """Owner action: deny a pending account (it becomes disabled and can be enabled again)."""
-        return await self._decide_pending(request, approve=False)
+        return await self._owner_access_action(request, "deny")
 
     # -- audit log -----------------------------------------------------------
 
@@ -3078,6 +3441,44 @@ class _AccountApp:
 # -- public builders ----------------------------------------------------------
 
 
+def build_account_app(
+    cfg: AccountConfig,
+    store: TokenStore,
+    identity: IdentityService,
+    *,
+    id_token_verifier: IdTokenVerifier | None = None,
+    canvas_whoami: CanvasWhoAmI | None = None,
+    http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
+    clock: Callable[[], float] = time.time,
+    directory: SchoolDirectoryLike | None = None,
+    resolve_host: HostResolver | None = None,
+    health: TokenHealth | None = None,
+    write_tools: WriteToolCatalog | None = None,
+    tool_prefs: ToolPrefsCache | None = None,
+    access: PrincipalAccessCache | None = None,
+    rate_limiters: RateLimiters | None = None,
+    ui: Literal["legacy", "react"] = "legacy",
+) -> _AccountApp:
+    """The account application behind the routes (the HTML pages and the JSON API share it)."""
+    return _AccountApp(
+        cfg,
+        store,
+        identity,
+        id_token_verifier,
+        canvas_whoami,
+        http_client_factory,
+        clock,
+        directory,
+        resolve_host,
+        health,
+        write_tools,
+        tool_prefs,
+        access,
+        rate_limiters,
+        ui,
+    )
+
+
 def build_account_routes(
     cfg: AccountConfig,
     store: TokenStore,
@@ -3094,6 +3495,8 @@ def build_account_routes(
     tool_prefs: ToolPrefsCache | None = None,
     access: PrincipalAccessCache | None = None,
     rate_limiters: RateLimiters | None = None,
+    ui: Literal["legacy", "react"] = "legacy",
+    spa: SpaBundle | None = None,
 ) -> list[Route]:
     """Build the /account Starlette routes.
 
@@ -3107,24 +3510,43 @@ def build_account_routes(
     ``access`` is the MCP side's access cache, dropped for a user whenever an owner
     disables, enables, approves or denies them (without it the MCP side notices within
     its TTL).
+
+    ``ui="legacy"`` (the default) registers the server-rendered pages only; no API
+    route exists. ``ui="react"`` registers the JSON API under ``/account/api`` (built on
+    the same session, CSRF and Origin checks, limiters and operations as the pages) and,
+    when ``spa`` is a loaded bundle of the built single-page UI, serves it at
+    ``/account/`` and keeps only the sign-in half of the pages. With ``ui="react"`` but
+    no usable bundle the pages stay as they are, so the account UI never breaks.
     """
-    app = _AccountApp(
+    serving_spa = ui == "react" and spa is not None
+    app = build_account_app(
         cfg,
         store,
         identity,
-        id_token_verifier,
-        canvas_whoami,
-        http_client_factory,
-        clock,
-        directory,
-        resolve_host,
-        health,
-        write_tools,
-        tool_prefs,
-        access,
-        rate_limiters,
+        id_token_verifier=id_token_verifier,
+        canvas_whoami=canvas_whoami,
+        http_client_factory=http_client_factory,
+        clock=clock,
+        directory=directory,
+        resolve_host=resolve_host,
+        health=health,
+        write_tools=write_tools,
+        tool_prefs=tool_prefs,
+        access=access,
+        rate_limiters=rate_limiters,
+        ui="react" if serving_spa else "legacy",
     )
-    return app.routes()
+    routes = app.routes()
+    if ui == "react":
+        # Imported here: the upstream modes and the legacy UI never load these modules.
+        from canvas_mcp.core.selfhost.account_api import build_api_routes
+
+        routes.extend(build_api_routes(app))
+        if spa is not None:
+            from canvas_mcp.core.selfhost.account_spa import build_spa_routes
+
+            routes.extend(build_spa_routes(spa))
+    return routes
 
 
 def register_account_routes(

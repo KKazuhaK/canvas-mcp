@@ -589,6 +589,8 @@ def _selfhost_summary(settings: SelfhostSettings) -> list[str]:
         f"  Public URL: {settings.public_base_url}",
         f"  MCP endpoint: {settings.mcp_url}",
         f"  Account page: {settings.account_url}",
+        f"  Account UI: {settings.account_ui}"
+        + (f" (built app from {settings.account_web_dist})" if settings.account_ui == "react" else ""),
         f"  Entra tenant: {settings.tenant_id}",
         f"  Entra client: {settings.client_id}",
         f"  API scope: {settings.api_scope}",
@@ -687,7 +689,7 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
     register_all_tools(mcp, role=role)
     removed_tools = asyncio.run(apply_tool_policy(mcp, tool_policy))
     disabled_tools = asyncio.run(apply_disabled_tools(mcp, settings.disabled_tools))
-    install_selfhost(mcp, runtime, config, tool_policy=tool_policy)
+    account_ui = install_selfhost(mcp, runtime, config, tool_policy=tool_policy)
 
     log_info(
         f"Starting Canvas MCP server in {AUTH_MODE_ENTRA} mode on {args.host}:{args.port}",
@@ -699,6 +701,7 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
         tool_policy=tool_policy.source,
         removed_tools=len(removed_tools),
         disabled_tools=len(disabled_tools),
+        account_ui=account_ui,
         token_store=settings.database_target.description,
         enrollments=runtime.store.count(),
     )

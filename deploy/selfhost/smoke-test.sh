@@ -20,11 +20,13 @@ MAIN="canvas-mcp-smoke-${SUFFIX}"
 LEGACY="canvas-mcp-smoke-legacy-${SUFFIX}"
 FAILCLOSED="canvas-mcp-smoke-fc-${SUFFIX}"
 GENERATED="canvas-mcp-smoke-gen-${SUFFIX}"
+REACT="canvas-mcp-smoke-react-${SUFFIX}"
+REACT_BAD="canvas-mcp-smoke-reactbad-${SUFFIX}"
 VOLUMES=()
 WORKDIR="$(mktemp -d)"
 
 cleanup() {
-  docker rm -f "$MAIN" "$LEGACY" "$FAILCLOSED" "$GENERATED" >/dev/null 2>&1 || true
+  docker rm -f "$MAIN" "$LEGACY" "$FAILCLOSED" "$GENERATED" "$REACT" "$REACT_BAD" >/dev/null 2>&1 || true
   local v
   for v in "${VOLUMES[@]:-}"; do
     [ -n "$v" ] && docker volume rm -f "$v" >/dev/null 2>&1 || true
@@ -35,7 +37,7 @@ trap cleanup EXIT
 
 dump_logs() {
   local c
-  for c in "$MAIN" "$LEGACY" "$FAILCLOSED" "$GENERATED"; do
+  for c in "$MAIN" "$LEGACY" "$FAILCLOSED" "$GENERATED" "$REACT" "$REACT_BAD"; do
     if docker inspect "$c" >/dev/null 2>&1; then
       echo "----- docker logs ${c} -----" >&2
       docker logs "$c" 2>&1 | tail -n 80 >&2 || true
@@ -255,5 +257,86 @@ for ((i = 0; i < 60; i++)); do
 done
 [ "$legacy_code" = "401" ] || fail "legacy POST /mcp without the key returned ${legacy_code}, expected 401"
 ok "legacy mode boots and rejects a missing access key (401)"
+
+# ------------------------------------- (k) ACCOUNT_UI=react serves the built app
+# The image ships the React build at /app/web-dist; with ACCOUNT_UI=react the server
+# must serve it at /account/ under the strict CSP, never cache the index, cache the
+# hashed assets for good, answer deep links with the index, and protect the JSON API.
+REACT_CSP="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+new_volume react
+REACT_VOL="$NEW_VOLUME"
+docker run -d --name "$REACT" \
+  --read-only --tmpfs /tmp \
+  -v "${REACT_VOL}:/data" \
+  "${ENTRA_ENV[@]}" \
+  -e CANVAS_TOKEN_KEYS="$TOKEN_KEYS" \
+  -e ACCOUNT_UI=react \
+  -p "127.0.0.1:${PORT}:8819" \
+  "$IMAGE" >/dev/null
+wait_for "$REACT" 60 "${BASE}/healthz"
+
+code="$(curl -s -o "$WORKDIR/spa.html" -D "$WORKDIR/spa.headers" -w '%{http_code}' "${BASE}/account/")"
+[ "$code" = "200" ] || fail "GET /account/ returned ${code}, expected 200 (react UI)"
+grep -i '^content-type:' "$WORKDIR/spa.headers" | grep -qi 'text/html' \
+  || fail "/account/ is not text/html"
+grep -i '^cache-control:' "$WORKDIR/spa.headers" | grep -qi 'no-store' \
+  || fail "/account/ (index.html) lacks Cache-Control: no-store"
+tr -d '\r' <"$WORKDIR/spa.headers" | grep -i '^content-security-policy:' | grep -qF "$REACT_CSP" \
+  || fail "/account/ lacks the exact CSP (script-src 'self', frame-ancestors 'none', ...)"
+grep -q 'id="root"' "$WORKDIR/spa.html" || fail "/account/ has no root element"
+grep -q '/account/assets/' "$WORKDIR/spa.html" || fail "/account/ does not load /account/assets/"
+ok "/account/ serves the built app with no-store and the strict CSP"
+
+ASSET="$(grep -o '/account/assets/[A-Za-z0-9._-]*\.js' "$WORKDIR/spa.html" | head -n 1 || true)"
+[ -n "$ASSET" ] || fail "the index does not reference a script asset"
+code="$(curl -s -o /dev/null -D "$WORKDIR/asset.headers" -w '%{http_code}' "${BASE}${ASSET}")"
+[ "$code" = "200" ] || fail "GET ${ASSET} returned ${code}, expected 200"
+grep -i '^cache-control:' "$WORKDIR/asset.headers" | grep -qi 'immutable' \
+  || fail "${ASSET} is not served immutable"
+grep -i '^content-type:' "$WORKDIR/asset.headers" | grep -qi 'text/javascript' \
+  || fail "${ASSET} is not text/javascript"
+code="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}/account/assets/does-not-exist.js")"
+[ "$code" = "404" ] || fail "an unknown asset returned ${code}, expected 404"
+ok "assets are immutable text/javascript; an unknown asset is 404"
+
+code="$(curl -s -o "$WORKDIR/deep.html" -w '%{http_code}' "${BASE}/account/token")"
+[ "$code" = "200" ] || fail "deep link /account/token returned ${code}, expected 200"
+cmp -s "$WORKDIR/spa.html" "$WORKDIR/deep.html" || fail "deep link did not return the index"
+ok "a deep link returns the index"
+
+code="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}/account/api/providers")"
+[ "$code" = "200" ] || fail "GET /account/api/providers returned ${code}, expected 200"
+code="$(curl -s -o "$WORKDIR/me.json" -D "$WORKDIR/me.headers" -w '%{http_code}' "${BASE}/account/api/me")"
+[ "$code" = "401" ] || fail "GET /account/api/me without a session returned ${code}, expected 401"
+grep -i '^cache-control:' "$WORKDIR/me.headers" | grep -qi 'no-store' \
+  || fail "/account/api/me lacks Cache-Control: no-store"
+grep -q 'not_authenticated' "$WORKDIR/me.json" || fail "/account/api/me did not answer not_authenticated"
+ok "the JSON API answers 401 not_authenticated with no-store"
+docker rm -f "$REACT" >/dev/null
+
+# ------------------- (l) ACCOUNT_UI=react with no usable build falls back to legacy
+new_volume reactbad
+REACT_BAD_VOL="$NEW_VOLUME"
+docker run -d --name "$REACT_BAD" \
+  --read-only --tmpfs /tmp \
+  -v "${REACT_BAD_VOL}:/data" \
+  "${ENTRA_ENV[@]}" \
+  -e CANVAS_TOKEN_KEYS="$TOKEN_KEYS" \
+  -e ACCOUNT_UI=react \
+  -e ACCOUNT_WEB_DIST=/nonexistent \
+  -p "127.0.0.1:${PORT}:8819" \
+  "$IMAGE" >/dev/null
+wait_for "$REACT_BAD" 60 "${BASE}/healthz"
+code="$(curl -s -o "$WORKDIR/fallback.html" -D "$WORKDIR/fallback.headers" -w '%{http_code}' "${BASE}/account")"
+[ "$code" = "200" ] || fail "GET /account with a missing build returned ${code}, expected 200"
+grep -q 'Sign in with Microsoft' "$WORKDIR/fallback.html" \
+  || fail "a missing build did not fall back to the legacy page"
+if grep -i '^content-security-policy:' "$WORKDIR/fallback.headers" | grep -qi 'script-src'; then
+  fail "the legacy fallback page was served with the app's CSP"
+fi
+docker logs "$REACT_BAD" 2>&1 | grep -q 'serving the legacy /account pages' \
+  || fail "the fallback was not logged"
+docker rm -f "$REACT_BAD" >/dev/null
+ok "ACCOUNT_UI=react with a missing build serves the legacy pages and logs it"
 
 echo "SMOKE TEST PASSED"

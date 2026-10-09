@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 
 import anyio.to_thread
@@ -18,7 +18,7 @@ from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp
 
 from ..config import Config, validate_canvas_url_scheme
-from ..logging import log_warning
+from ..logging import log_info, log_warning
 from ..token_health import set_token_health_monitor
 from .accounts import EntraClaimsPolicy
 from .edge_guard import SelfhostEdgeGuard
@@ -319,6 +319,25 @@ async def apply_disabled_tools(mcp: FastMCP, names: Collection[str]) -> list[str
     return sorted(removed)
 
 
+def load_account_spa(settings: SelfhostSettings) -> Any:
+    """The built account UI for ``ACCOUNT_UI=react``, or None (after one warning) if unusable.
+
+    A missing, partial or oversized build never reaches a user: the server-rendered
+    pages are served instead, so the account UI always works.
+    """
+    from .account_spa import SpaBundle, SpaBundleError
+
+    try:
+        return SpaBundle.load(settings.account_web_dist)
+    except SpaBundleError as exc:
+        log_warning(
+            "ACCOUNT_UI=react but no usable built account UI at ACCOUNT_WEB_DIST; "
+            "serving the legacy /account pages",
+            reason=exc.reason,
+        )
+        return None
+
+
 def install_selfhost(
     mcp: FastMCP,
     runtime: SelfhostRuntime,
@@ -326,7 +345,7 @@ def install_selfhost(
     *,
     tool_policy: ToolPolicy | None = None,
     **account_options: Any,
-) -> None:
+) -> Literal["legacy", "react"]:
     """Add the credential gate, the /account pages and /healthz to the server.
 
     ``tool_policy`` is the operator's resolved ``ALLOWED_WRITE_TOOLS``: the server
@@ -334,10 +353,14 @@ def install_selfhost(
     registered tools is the ceiling. ``account_options`` are passed to the account
     routes (tests inject the school directory, the host resolver and the HTTP
     client factory there).
+
+    Returns the account UI that is really served: ``"react"`` only when
+    ``ACCOUNT_UI=react`` and the built single-page app loaded, else ``"legacy"``.
     """
     from .account_web import AccountConfig, register_account_routes
 
     settings = runtime.settings
+    spa = load_account_spa(settings) if settings.account_ui == "react" else None
     ceiling = tool_policy.allowed if tool_policy is not None and tool_policy.enforced else None
 
     async def registered_tool_names() -> list[str]:
@@ -370,12 +393,27 @@ def install_selfhost(
         write_tools=WriteToolCatalog(ceiling=ceiling, list_registered=registered_tool_names),
         tool_prefs=runtime.tool_prefs,
         access=runtime.access,
-        **{"rate_limiters": runtime.limiters, **account_options},
+        **{
+            "rate_limiters": runtime.limiters,
+            "ui": settings.account_ui,
+            "spa": spa,
+            **account_options,
+        },
     )
 
     @mcp.custom_route(HEALTH_PATH, methods=["GET"])
     async def healthz(request: Request) -> PlainTextResponse:
         return PlainTextResponse("ok", headers={"Cache-Control": "no-store"})
+
+    effective: Literal["legacy", "react"] = "react" if spa is not None else "legacy"
+    if settings.account_ui == "react":
+        log_info(
+            "Account UI: "
+            + ("built single-page app" if spa is not None else "legacy pages (fallback)"),
+            account_ui_requested="react",
+            account_ui=effective,
+        )
+    return effective
 
 
 def build_selfhost_asgi_app(

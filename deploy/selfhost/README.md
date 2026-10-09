@@ -16,6 +16,7 @@ Image: `ghcr.io/kkazuhak/canvas-mcp` (linux/amd64 + linux/arm64, non-root, data 
 - [Step 5: Pull the image and start](#step-5-pull-the-image-and-start)
 - [Step 6: Connect claude.ai and Claude Code](#step-6-connect-claudeai-and-claude-code)
 - [Per-user enrollment (/account)](#per-user-enrollment-account)
+- [Account UI (React or legacy)](#account-ui-react-or-legacy)
 - [Accounts and admission](#accounts-and-admission)
 - [Disabling tools](#disabling-tools)
 - [Multiple schools (optional)](#multiple-schools-optional)
@@ -459,7 +460,43 @@ Details:
 - AI apps such as claude.ai may remember the tool list. The page tells users to start a new chat or reconnect the connector after a change. The server runs the MCP endpoint stateless, so it has no open session to send a `tools/list_changed` notification to; enforcement does not depend on the app refreshing its list.
 - To remove a user's write access immediately, the user can press **Turn all off**, or the operator can remove the tool from `ALLOWED_WRITE_TOOLS` and restart.
 
-> **React UI (in development).** `/account` is being rewritten as a React single-page app, with the source in `web/` in the repository (see `web/README.md`). `Dockerfile.selfhost` already builds it and puts the output in the image at `/app/web-dist`, but the server does **not** serve those files yet: what you see now is still the server-rendered page described above, and neither the deployment nor the runtime behavior has changed.
+## Account UI (React or legacy)
+
+`/account` has two interchangeable front ends. Both use the same sign-in, the same session cookie, the same rules and the same limits; only what the browser shows differs.
+
+| `ACCOUNT_UI` | What `/account` is |
+|---|---|
+| unset or `legacy` (default) | The server-rendered pages described above: no JavaScript, a CSP of `default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. No JSON API exists. |
+| `react` | The React single-page app built from `web/`, served at `/account/`, plus the JSON API under `/account/api`. Any other value stops the server from starting (the message names the variable, not the value). |
+
+`ACCOUNT_WEB_DIST` is the directory that holds the built app. It must be an absolute path and defaults to `/app/web-dist`, where `Dockerfile.selfhost` puts it; the image sets it explicitly. Developers running from a checkout point it at `<repo>/web/dist` after `npm run build` in `web/`. `--config` prints the requested UI.
+
+**Why `legacy` is the default for now.** An upgrade should not silently add an authenticated JSON API and client-side JavaScript to every deployment. The app's CSP has to be weaker than the pages' (it needs `script-src 'self'` and inline styles for its component library). A pip or `uv run` install has no build to serve. And the pages stay the known-good path until the API tests, the parity matrix and the image smoke test have been green through a release; switching the default is then one line. Set `ACCOUNT_UI=react` when you want the new UI.
+
+**It never serves a broken page.** At start the build is read into memory and checked: `index.html` is a small regular file that loads exactly one module script from `/account/assets/`, every file it references exists, asset names are plain, files stay inside the directory (a symlink that escapes it is refused) and sizes are bounded. If anything is missing or unusable, the server logs one warning,
+
+```
+ACCOUNT_UI=react but no usable built account UI at ACCOUNT_WEB_DIST; serving the legacy /account pages
+```
+
+(with a short reason code, never a path) and serves the full legacy pages. Look for that line, or for `account_ui=` in the start-up record, if you are not sure which UI is live. In that fallback the JSON API is still registered (it carries every protection described below), which also lets a Vite dev server proxy to a server with no build.
+
+**What the server sends with the app:**
+
+- `index.html` and every client-side route (any `GET` below `/account/` that is not `/account/api`): `Cache-Control: no-store`.
+- `/account/assets/*` (content-hashed files): `Cache-Control: public, max-age=31536000, immutable`, with an `ETag`. An unknown asset is a plain 404, never the index page.
+- `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`, plus `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and the cross-origin isolation headers, on every response (the SVG favicon included).
+- In this mode the old form endpoints (`POST /account/token`, `/account/admin/...` and so on) are not registered: one UI per mode. Only `/account/login` (the redirect to Microsoft) and `/account/callback` stay; after a sign-in the callback returns to the app (to the page the user came from when it is a safe path below `/account`, otherwise to `/account/`), and a failed sign-in goes to `/account/sign-in?error=<code>` with a fixed code, never a message from Microsoft.
+
+**The JSON API (`/account/api`)** serves what the pages do today, under the same protections:
+
+- Authentication is the `__Host-cmcp_session` cookie of the pages, re-checked against the stored account on every request (a disabled account, a changed session epoch or a deleted account is signed out).
+- Every change needs the session's CSRF token in an `X-CSRF-Token` header (read from `GET /account/api/me`, kept in memory only), an `Origin` equal to `PUBLIC_BASE_URL`, `Sec-Fetch-Site: same-origin` when the browser sends it, and a JSON body of at most 8 KiB. The school search is a `GET` that also needs the header, because it makes outbound calls and spends the search budget. There are no CORS headers and `OPTIONS` is refused.
+- Owner calls (including reads) need the stored owner role and a sign-in from the last 10 minutes, and the store re-checks inside its transaction that the acting account is still an active owner. Turning a write tool on needs a sign-in from the last 10 minutes (`403 reauth_required`); turning tools off never does.
+- Enrolling, re-checking, the write-tool switches and the owner actions are the very same operations the pages run, with the same rate limiters (10 token attempts per 10 minutes, one re-check a minute, 30 school searches per 10 minutes), audit events and cache invalidation.
+- Answers are `no-store` JSON; errors are `{"error": {"code": ..., "params": {...}}}` with a fixed code, and never contain Microsoft or Canvas text, a token or an exception message.
+
+**Reverse proxy notes.** Never cache `/account/api/*` or `index.html` (the app sends `no-store`; do not override it). Content-hashed files under `/account/assets/` may be cached as long as you like. If your proxy sets its own `Content-Security-Policy` for `/account`, drop that rule so it does not clash with the one above. The app and the API need the same public origin as `PUBLIC_BASE_URL` (the `__Host-` cookies and the `Origin` check assume HTTPS on that origin), so developing against a real server needs an HTTPS tunnel on that origin or the mock mode described in `web/README.md`; the check is never relaxed for development.
 
 ## Accounts and admission
 

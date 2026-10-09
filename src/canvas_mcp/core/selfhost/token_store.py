@@ -1113,12 +1113,16 @@ class TokenStore:
         active one may enroll again. It does raise the credential generation, so
         nothing remembered for the deleted token is served for a later one. ``actor``
         (an administrator or the operator) is recorded in the audit log; without one
-        the account itself is the actor.
+        the account itself is the actor. An administrator account is re-checked inside
+        the transaction (still an active owner), as for every other administrative
+        change; the operator needs no identity.
         """
         key = _validate_principal_key(principal_key)
         by = key if actor is None else self._actor_name(actor)
         generation: int | None = None
         with self._db.write() as conn:
+            if actor is not None:
+                self._require_owner_actor(conn, actor)
             removed = self._repos.tokens.delete(conn, key)
             if removed:
                 now = self._now()
@@ -1159,7 +1163,8 @@ class TokenStore:
         generation is still that one, so a token that Canvas rejected cannot
         invalidate the replacement the user enrolled in the meantime (the
         generation also catches a replacement within the same second). ``actor``
-        (an administrator) is recorded in the audit log.
+        (an administrator) is recorded in the audit log, and an administrator account
+        is re-checked inside the transaction (still an active owner).
         """
         if reason not in INVALID_REASONS:
             raise ValueError("unknown invalid reason")
@@ -1168,6 +1173,8 @@ class TokenStore:
         now = self._now()
         generation: int | None = None
         with self._db.write() as conn:
+            if actor is not None:
+                self._require_owner_actor(conn, actor)
             changed = self._repos.tokens.mark_invalid(
                 conn,
                 key,
