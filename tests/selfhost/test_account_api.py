@@ -299,6 +299,19 @@ class TestTransport:
         error_of(response, 405, "method_not_allowed")
         assert response.headers["allow"] == "GET"
 
+    @pytest.mark.parametrize("method", ["PROPFIND", "TRACE", "PURGE"])
+    def test_an_unlisted_http_verb_gets_the_json_405_with_the_security_headers(
+        self, user: Api, method: str
+    ) -> None:
+        for path in ("/me", "/me/canvas-token", "/admin/accounts", "/nothing"):
+            response = user.h.client.request(method, f"{P}{path}")
+            if path == "/nothing":
+                error_of(response, 404, "not_found")
+            else:
+                error_of(response, 405, "method_not_allowed")
+                assert response.headers["allow"]
+            assert_api_headers(response)
+
     def test_options_and_head_are_refused_and_nothing_is_cors(self, user: Api) -> None:
         for method in ("OPTIONS", "HEAD"):
             response = user.h.client.request(

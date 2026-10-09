@@ -376,13 +376,13 @@ class ApiApp:
 
     def routes(self) -> list[Route]:
         routes = [
-            Route(path, self._endpoint(endpoints), methods=web._ALL_METHODS)
+            web.any_method_route(path, self._endpoint(endpoints))
             for path, endpoints in self.route_table()
         ]
         # Registered after the real routes and before the single-page fallback, so an
         # unknown path below /account/api is a JSON 404, never the app's index page.
-        routes.append(Route(API_PREFIX, self._unknown, methods=web._ALL_METHODS))
-        routes.append(Route(API_PREFIX + "/{rest:path}", self._unknown, methods=web._ALL_METHODS))
+        routes.append(web.any_method_route(API_PREFIX, self._unknown))
+        routes.append(web.any_method_route(API_PREFIX + "/{rest:path}", self._unknown))
         return routes
 
     async def _unknown(self, request: Request) -> Response:

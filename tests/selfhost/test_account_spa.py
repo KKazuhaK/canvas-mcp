@@ -379,6 +379,18 @@ class TestServing:
             assert response.headers["cache-control"] == "no-store"
             assert_spa_headers(response)
 
+    @pytest.mark.parametrize("method", ["PROPFIND", "TRACE", "PURGE"])
+    def test_an_unlisted_verb_gets_the_spa_headers_not_a_bare_405(
+        self, spa: Harness, method: str
+    ) -> None:
+        for path in ("/account", "/account/", "/account/token", "/account/assets/index-abc123.js",
+                     "/account/assets/nope.js", "/account/favicon.svg"):
+            response = spa.client.request(method, path)
+            assert response.status_code == 405, (method, path)
+            assert response.headers["allow"] == "GET, HEAD"
+            assert response.headers["cache-control"] == "no-store"
+            assert_spa_headers(response)
+
     def test_the_html_form_posts_do_not_exist_in_this_mode(self, spa: Harness) -> None:
         sign_in(spa)
         for path in ("/account/token", "/account/token/delete", "/account/logout",
@@ -713,6 +725,23 @@ class TestWholeServer:
         assert error.json() == {"error": {"code": "not_authenticated"}}
         assert s.client.get("/account/login").status_code == 302
         assert s.client.post("/account/token").status_code == 405
+
+    @pytest.mark.parametrize("method", ["PROPFIND", "TRACE"])
+    def test_an_unlisted_verb_keeps_the_headers_through_the_real_registration(
+        self, stack_factory: Any, dist: pathlib.Path, method: str
+    ) -> None:
+        s = stack_factory({"ACCOUNT_UI": "react", "ACCOUNT_WEB_DIST": str(dist)})
+        api = s.client.request(method, "/account/api/me")
+        assert api.status_code == 405
+        assert api.json() == {"error": {"code": "method_not_allowed"}}
+        assert api.headers["cache-control"] == "no-store"
+        assert api.headers["x-content-type-options"] == "nosniff"
+        assert api.headers["content-security-policy"] == (
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+        )
+        page = s.client.request(method, "/account/")
+        assert page.status_code == 405
+        assert_spa_headers(page)
 
     def test_a_foreign_origin_is_stopped_by_the_outer_guard(
         self, stack_factory: Any, dist: pathlib.Path

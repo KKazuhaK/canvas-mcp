@@ -257,6 +257,7 @@ for ((i = 0; i < 60; i++)); do
 done
 [ "$legacy_code" = "401" ] || fail "legacy POST /mcp without the key returned ${legacy_code}, expected 401"
 ok "legacy mode boots and rejects a missing access key (401)"
+docker rm -f "$LEGACY" >/dev/null
 
 # ------------------------------------- (k) ACCOUNT_UI=react serves the built app
 # The image ships the React build at /app/web-dist; with ACCOUNT_UI=react the server

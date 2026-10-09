@@ -94,7 +94,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from starlette.requests import Request
 from starlette.responses import Response
-from starlette.routing import Route
+from starlette.routing import Route, request_response
+from starlette.types import Receive, Scope, Send
 
 from canvas_mcp.core import audit
 from canvas_mcp.core.dates import output_timezone
@@ -237,6 +238,28 @@ _SEARCH_LIMIT_ATTEMPTS = 30
 _SEARCH_LIMIT_WINDOW_SECONDS = 600
 _SCOPE = "openid profile"
 _ALL_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+
+
+class _AnyMethodApp:
+    """An ASGI app that hands a request of *any* HTTP method to ``handler``.
+
+    A ``Route`` with a method list answers every other verb (``PROPFIND``, ``TRACE``,
+    anything custom) with Starlette's own plain-text 405, which carries none of the
+    response headers the handler adds. A route without a method list lets the handler
+    produce the refusal itself, headers included.
+    """
+
+    def __init__(self, handler: Callable[[Request], Awaitable[Response]]) -> None:
+        self.handler = handler
+        self._app = request_response(handler)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        await self._app(scope, receive, send)
+
+
+def any_method_route(path: str, handler: Callable[[Request], Awaitable[Response]]) -> Route:
+    """A route for ``path`` that dispatches every HTTP method to ``handler``."""
+    return Route(path, _AnyMethodApp(handler), methods=None)
 
 #: Where the built single-page UI starts (the sign-in page it shows on a failed login).
 SIGN_IN_PATH = "/account/sign-in"
@@ -3558,6 +3581,9 @@ def register_account_routes(
 ) -> None:
     """Register the /account routes on a FastMCP server as custom routes."""
     for route in build_account_routes(cfg, store, identity, **kwargs):
-        mcp.custom_route(route.path, methods=sorted(route.methods or _ALL_METHODS))(
-            route.endpoint
-        )
+        if route.methods is None:
+            # An any-method route (the JSON API and the single-page app): ``custom_route``
+            # insists on a method list, which would bring back Starlette's bare 405.
+            mcp._additional_http_routes.append(route)
+            continue
+        mcp.custom_route(route.path, methods=sorted(route.methods))(route.endpoint)

@@ -241,6 +241,33 @@ def test_smoke_test_script_is_wired_for_the_documented_contract():
         assert needle in script, f"smoke-test.sh is missing {needle!r}"
 
 
+def test_smoke_test_frees_the_published_port_between_sections():
+    """Every section shares one host port, so a container must be removed before the next starts."""
+    lines = (SELFHOST / "smoke-test.sh").read_text(encoding="utf-8").splitlines()
+    running: str | None = None
+    started = 0
+    for number, line in enumerate(lines):
+        remove = re.search(r'docker rm -f "\$(\w+)"\s*>/dev/null', line)
+        if remove and remove.group(1) == running:
+            running = None
+        run = re.search(r'docker run -d --name "\$(\w+)"', line)
+        if not run:
+            continue
+        end = number
+        while lines[end].rstrip().endswith("\\"):
+            end += 1
+        if '-p "127.0.0.1:${PORT}:8819"' not in "\n".join(lines[number : end + 1]):
+            continue
+        assert running is None, (
+            f"smoke-test.sh line {number + 1} starts {run.group(1)} on the shared port "
+            f"while {running} is still running"
+        )
+        running = run.group(1)
+        started += 1
+    assert started >= 5
+
+
+
 # --- drift guards: the docs and packaging must match what the code really reads/serves ---
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "canvas_mcp"

@@ -28,6 +28,8 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
+from canvas_mcp.core.selfhost.account_web import any_method_route
+
 ASSETS_PREFIX = "/account/assets/"
 BASE_PATH = "/account"
 
@@ -272,17 +274,14 @@ class _SpaApp:
         return self._serve(request, file, ROOT_CACHE, etag=True)
 
 
-_ALL = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
-
-
 def build_spa_routes(bundle: SpaBundle) -> list[Route]:
     """The routes that serve ``bundle``. Register them after the ``/account/api`` routes."""
     app = _SpaApp(bundle)
     routes = [
-        Route("/account/assets", app.asset, methods=_ALL),
-        Route("/account/assets/{name:path}", app.asset, methods=_ALL),
+        any_method_route("/account/assets", app.asset),
+        any_method_route("/account/assets/{name:path}", app.asset),
     ]
-    routes.extend(Route(f"/account/{name}", app.extra, methods=_ALL) for name in bundle.extras)
-    routes.append(Route("/account", app.index, methods=_ALL))
-    routes.append(Route("/account/{path:path}", app.index, methods=_ALL))
+    routes.extend(any_method_route(f"/account/{name}", app.extra) for name in bundle.extras)
+    routes.append(any_method_route("/account", app.index))
+    routes.append(any_method_route("/account/{path:path}", app.index))
     return routes
