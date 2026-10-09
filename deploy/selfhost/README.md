@@ -16,6 +16,7 @@
 - [第 5 步：拉取镜像并启动](#第-5-步拉取镜像并启动)
 - [第 6 步：连接 claude.ai 与 Claude Code](#第-6-步连接-claudeai-与-claude-code)
 - [每个用户的登记（/account）](#每个用户的登记account)
+- [Multiple schools (optional)](#multiple-schools-optional)
 - [写入工具的提示词注入风险](#写入工具的提示词注入风险)
 - [升级](#升级)
 - [密钥轮换](#密钥轮换)
@@ -169,6 +170,7 @@ bash setup-env.sh
 
 - `--enable-writes`：开启全部学生写入工具，先读[写入工具的提示词注入风险](#写入工具的提示词注入风险)；
 - `--real-names`：显示真实姓名。
+- `--school-search`: let each user pick their own school. It writes `CANVAS_SCHOOL_SEARCH=true` and `CANVAS_FEATURED_SCHOOLS=<host of CANVAS_API_URL>` (see [Multiple schools](#multiple-schools-optional)). Without the flag, the same two lines are written commented out.
 
 公网地址、租户 ID、客户端 ID、Canvas 地址这四个不是机密。可以用同名环境变量预先给出，脚本就不再逐项询问，在手机上用 SSH 时更方便：
 
@@ -371,9 +373,35 @@ claude mcp add --transport http canvas https://canvas.mcp.kazuhahub.com/mcp
 
 **绝不要把 Canvas token 粘贴到和 AI 的对话里。** 令牌只通过 `/account` 的表单提交。
 
+If the server offers more than one school (see below), step 3 also has a school choice: pick a featured school or search for yours. The status card shows which school you are enrolled at.
+
 Owner 登录后会多一个 `/account/admin` 链接：列出所有人的登记情况（不含 token），并可撤销某人的登记。
 
 > **React 版界面（开发中）。** `/account` 正在改写成 React 单页应用，源码在仓库的 `web/`（说明见 `web/README.md`）。`Dockerfile.selfhost` 已经会构建它，并把产物放进镜像的 `/app/web-dist`，但服务器**还没有**提供这些文件：你现在看到的仍是上面描述的服务端渲染页面，部署方式和运行行为都没有变化。
+
+## Multiple schools (optional)
+
+By default every user is on the one Canvas in `CANVAS_API_URL` and `/account` has no school picker. Two optional
+settings let each user choose their own school instead, so you do not have to maintain a list of Canvas URLs:
+
+| Setting | Meaning |
+|---|---|
+| `CANVAS_FEATURED_SCHOOLS` | Quick picks shown on `/account`: comma-separated entries, each `host` or `host=Display Name`, for example `canvas.example.edu=Example University,canvas.other.example.edu`. Host names only: no `https://`, port or path. |
+| `CANVAS_SCHOOL_SEARCH` | `true` lets a signed-in user search Instructure's public school directory (the one the Canvas mobile app uses) for a school that is not featured. Default `false`. |
+
+How it behaves:
+
+- **Only `CANVAS_API_URL` set**: nothing changes. One pinned school, no picker.
+- **`CANVAS_API_URL` plus the settings above**: `CANVAS_API_URL` is the default school and is always offered as a quick pick. Enrollments saved before schools existed (the school is not recorded) belong to it, so changing `CANVAS_API_URL` later moves those users to the new host.
+- **No `CANVAS_API_URL`**: you must set at least one featured school or `CANVAS_SCHOOL_SEARCH=true`, or the server refuses to start.
+- **Enrolling**: the form sends the chosen host together with the token. The server accepts the host only if it is featured, or if search is on and the directory lists that exact domain (it re-queries the directory with the host itself and requires a case-insensitive exact match, never a partial one). It then checks the host name (a lowercase DNS name: no IP address, port, `localhost` or `.local`/`.internal`-style names), resolves it, and refuses it if any address is private, loopback, link-local, multicast, reserved or a cloud metadata address. Only after all of that is the token verified with `GET https://<host>/api/v1/users/self` and stored together with the host. The default school is trusted as configured and skips the DNS and address checks, so private or on-premises Canvas installs keep working.
+- **Every request** goes to the user's own school, and cached Canvas data is never shared across schools. If the stored school is no longer allowed by the current settings (removed from the featured list while search is off, or search turned off for a searched school), the user is treated as not enrolled and has to enroll again at `/account`. Turning search off therefore signs out everyone whose school came from a search.
+- **Integrity**: the Canvas host is part of the associated data of the AES-GCM encryption, so editing the host in the database makes the token undecryptable instead of sending it to another school. The token database schema is version 2; the first start after the upgrade migrates it in place. An older image refuses a version 2 database, so a rollback needs the backup you took before upgrading.
+- **Where to see it**: the status card on `/account`, the School column on `/account/admin`, and the last column of `python -m canvas_mcp.core.selfhost.token_admin list` (`-` means a legacy row on the default school).
+
+Privacy and reachability: with `CANVAS_SCHOOL_SEARCH=true`, what a user types into the school search is sent to Instructure (`canvas.instructure.com`), and enrolling at a searched school needs the server to reach `canvas.instructure.com` over HTTPS as well as the school itself. If the directory is unreachable, searching and enrolling at searched schools fail closed (featured schools still work). The address checks happen at enrollment; the server does not re-resolve the school on every request, so only list or accept schools you are comfortable sending your users' tokens to.
+
+`bash setup-env.sh --school-search` writes both settings for you, with the host of `CANVAS_API_URL` as the first featured school.
 
 ## 写入工具的提示词注入风险
 
@@ -396,6 +424,8 @@ docker compose pull && docker compose up -d
 ```
 
 `docker-compose.yml` 里设了 `pull_policy: always`，所以直接 `docker compose up -d` 也会重新拉取所选标签。想固定版本，把 `image:` 的 `:latest` 换成具体版本（例如 `:1.13.0-uci.1`）。升级会重启容器，用户保持登录和登记（状态保存在 `/data`）。
+
+Upgrading to the version with multiple schools migrates the token database (`/data/canvas-mcp/tokens.sqlite3`) to schema version 2 on first start. The migration is automatic and safe to repeat, existing enrollments keep working on the default school and are re-sealed with their school the next time the user saves a token, and key rotation works for both kinds of rows. Back up `/data` first: an older image refuses a version 2 database, so rolling back needs that backup.
 
 ## 密钥轮换
 

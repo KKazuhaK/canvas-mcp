@@ -355,3 +355,46 @@ def test_setup_script_is_documented_generic_and_secret_safe(readme):
         assert flag in readme and flag in script
     smoke = (SELFHOST / "smoke-test.sh").read_text(encoding="utf-8")
     assert "setup-env.sh" in smoke and "--env-file" in smoke
+
+
+# --- multiple schools ---
+
+
+def test_the_school_settings_ship_switched_off_and_documented(env_text):
+    commented = _commented_assignments(env_text)
+    assert "CANVAS_FEATURED_SCHOOLS" in commented
+    assert commented["CANVAS_SCHOOL_SEARCH"] == "true"
+    values = _assignments(env_text)
+    assert "CANVAS_FEATURED_SCHOOLS" not in values
+    assert "CANVAS_SCHOOL_SEARCH" not in values
+    block = env_text[env_text.index("# CANVAS_FEATURED_SCHOOLS=") :]
+    assert "canvas.instructure.com" in block and "Instructure" in block
+
+
+def test_the_documented_featured_example_parses(env_text):
+    from canvas_mcp.core.selfhost.settings import SelfhostConfigError, load_selfhost_settings
+
+    example = _commented_assignments(env_text)["CANVAS_FEATURED_SCHOOLS"]
+    env = {"CANVAS_FEATURED_SCHOOLS": example}
+    with pytest.raises(SelfhostConfigError) as info:
+        load_selfhost_settings(env)
+    # Only the unrelated required settings are missing; the example itself is valid.
+    assert "CANVAS_FEATURED_SCHOOLS" not in " ".join(info.value.problems)
+
+
+def test_readme_documents_the_school_settings_and_the_privacy_note(readme):
+    for needle in (
+        "CANVAS_FEATURED_SCHOOLS",
+        "CANVAS_SCHOOL_SEARCH",
+        "canvas.instructure.com",
+        "--school-search",
+        "schema version 2",
+    ):
+        assert needle in readme, f"README.md is missing {needle!r}"
+    assert "sent to Instructure" in readme
+
+
+def test_the_setup_script_has_the_school_search_flag_and_the_readme_names_it(readme):
+    script = (SELFHOST / "setup-env.sh").read_text(encoding="utf-8")
+    assert "--school-search" in script and "--school-search" in readme
+    assert "CANVAS_SCHOOL_SEARCH=true" in script and "CANVAS_FEATURED_SCHOOLS=" in script

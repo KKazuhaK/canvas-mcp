@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Self-hosted mode: each user picks their own school's Canvas.** `CANVAS_FEATURED_SCHOOLS` (comma-separated `host` or `host=Display Name` entries) adds quick picks to `/account`, and the opt-in `CANVAS_SCHOOL_SEARCH=true` lets a signed-in user search Instructure's public school directory. A chosen host is accepted only if it is featured or the directory confirms that exact domain; it must be a public DNS name that resolves only to public addresses, and the token is verified against that school before it is stored. Every request then goes to the user's own school, and cached data, write confirmations and file-origin checks are keyed per school. A deployment with only `CANVAS_API_URL` behaves as before (single pinned school, no picker); with the new settings `CANVAS_API_URL` is the default school and legacy enrollments belong to it. Without `CANVAS_API_URL` the server needs a featured school or search to start. A stored school that the settings no longer allow is treated as not enrolled. `/account` shows the current school, `/account/admin` and `token_admin list` show each user's school, and `deploy/selfhost/setup-env.sh --school-search` writes both settings. Search terms are sent to Instructure and enrolling at a searched school needs `canvas.instructure.com` to be reachable (see the deploy README).
 - **React account UI scaffold (`web/`, not served yet).** A Vite + React + TypeScript app for
   `/account`: sign-in, Canvas token enroll/replace/delete, write tools, linked sign-in methods,
   connected apps, recent sign-ins, MCP consent and owner admin pages, in English (default) and
@@ -103,6 +104,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Token database schema v2 binds the Canvas host into the AES-GCM associated data.** Editing the host of a row in the database makes the token undecryptable instead of redirecting it to another school. Opening a v1 database adds the nullable `canvas_host` column in place (idempotent); legacy rows keep decrypting with their original associated data and are re-sealed with their host the next time they are saved, and `token_admin rotate` handles both kinds of rows. An older image refuses the upgraded database, so back up `/data` before upgrading.
 - `read_course_file_text` follows download redirects one hop at a time and
   sends the Canvas token only to the configured Canvas origin; storage hops go
   out without credentials and must be HTTPS.
