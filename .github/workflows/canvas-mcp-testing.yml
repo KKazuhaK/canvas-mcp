@@ -60,6 +60,37 @@ jobs:
     - name: Build and test code API
       run: npm run build && npm test
 
+  # The React account UI (web/). Everything is pinned: Node by exact version, the
+  # action by commit SHA, the packages by package-lock.json. `npm ci` installs the
+  # lock file as written and --ignore-scripts keeps third-party install scripts
+  # from running. check:dist asserts the production build has no inline script, no
+  # remote URL, no eval and none of the dev-only mock server.
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up Node
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: '24.19.0'
+        cache: npm
+        cache-dependency-path: web/package-lock.json
+    - name: Install dependencies
+      run: npm ci --ignore-scripts
+    - name: Lint
+      run: npm run lint
+    - name: Typecheck
+      run: npm run typecheck
+    - name: Test
+      run: npm test
+    - name: Build
+      run: npm run build
+    - name: Check the production build
+      run: npm run check:dist
+
   verify-confirmation:
     runs-on: ubuntu-latest
     steps:
@@ -159,22 +190,23 @@ jobs:
   # "test-enhancements", and a matrix job publishes per-version names
   # ("test (3.11)"), which would leave the required check permanently pending
   # and block every PR. This gate keeps the required name while making it mean
-  # "the full suite passed on every supported Python, on Linux and Windows, and
-  # the code API passed".
+  # "the full suite passed on every supported Python, on Linux and Windows, the
+  # code API passed, and the web UI built and passed its checks".
   test-enhancements:
     runs-on: ubuntu-latest
-    needs: [test, test-windows, test-code-api, verify-confirmation]
+    needs: [test, test-windows, test-code-api, verify-confirmation, web]
     if: always()
 
     steps:
-    - name: Require Python (Linux and Windows), code API, and confirmation proofs to have succeeded
+    - name: Require Python (Linux and Windows), code API, web UI, and confirmation proofs to have succeeded
       run: |
         echo "matrix result: ${{ needs.test.result }}"
         echo "windows result: ${{ needs.test-windows.result }}"
-        if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.test-windows.result }}" != "success" ] || [ "${{ needs.test-code-api.result }}" != "success" ] || [ "${{ needs.verify-confirmation.result }}" != "success" ]; then
-          echo "::error::Python (Linux or Windows), code API, or confirmation verification did not succeed."
+        echo "web result: ${{ needs.web.result }}"
+        if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.test-windows.result }}" != "success" ] || [ "${{ needs.test-code-api.result }}" != "success" ] || [ "${{ needs.verify-confirmation.result }}" != "success" ] || [ "${{ needs.web.result }}" != "success" ]; then
+          echo "::error::Python (Linux or Windows), code API, web UI, or confirmation verification did not succeed."
           exit 1
         fi
         echo "## Canvas MCP test results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "Full suite passed on Ubuntu with Python 3.11, 3.12, 3.13 and 3.14, and on Windows with Python 3.14." >> $GITHUB_STEP_SUMMARY
+        echo "Full suite passed on Ubuntu with Python 3.11, 3.12, 3.13 and 3.14, and on Windows with Python 3.14. The web UI (web/) passed lint, typecheck, tests, build and the dist checks." >> $GITHUB_STEP_SUMMARY
