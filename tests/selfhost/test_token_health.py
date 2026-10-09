@@ -388,13 +388,22 @@ class TestShortCircuit:
     async def test_a_gathered_call_that_starts_late_is_short_circuited(self, env: Env) -> None:
         env.start_request()
         canvas_returns(env, 401, DEAD_BODY, DEAD_HEADERS)
+        first_done = asyncio.Event()
+
+        async def first() -> Any:
+            try:
+                return await get_courses()
+            finally:
+                first_done.set()
 
         async def later() -> Any:
-            await asyncio.sleep(0.01)
+            # Starts only once the verdict is known: no wall-clock guess.
+            await first_done.wait()
             return await get_courses()
 
-        first, second = await asyncio.gather(get_courses(), later())
-        assert first["error"] == second["error"] == EXPECTED_MESSAGE
+        first_result, second_result = await asyncio.gather(first(), later())
+        assert first_result["error"] == second_result["error"] == EXPECTED_MESSAGE
+        assert env.row().status == STATUS_INVALID
         # The late sibling never reached Canvas: one data call, one probe.
         assert len(env.canvas.calls) == 1 and len(env.canvas.probes) == 1
 
@@ -425,6 +434,55 @@ class TestSingleFlightAndCooldown:
         await get_courses()
         assert env.health.probe_count == 1
         assert env.row().status == STATUS_ACTIVE
+
+    async def test_a_restored_token_is_probed_again_instead_of_reusing_a_rejected_verdict(
+        self, env: Env
+    ) -> None:
+        env.start_request()
+        canvas_returns(env, 401, DEAD_BODY, DEAD_HEADERS)
+        await get_courses()
+        assert env.row().status == STATUS_INVALID
+        assert env.health.probe_count == 1
+
+        # "Check again" succeeds: the row is active again with the same version.
+        env.mono.now += 20
+        assert env.store.restore_active(PRINCIPAL_KEY, expected_updated_at=env.updated_at)
+        env.health.forget(PRINCIPAL_KEY)
+
+        env.mono.now += 20  # still inside the 60 s cooldown of the old verdict
+        env.start_request()
+        set_probe(env, lambda request: _json(200, {"id": 42}))
+        result = await get_courses()
+
+        assert env.health.probe_count == 2  # the old REJECTED verdict was not reused
+        assert result["error"].startswith("HTTP error: 401")  # a plain permission error
+        assert env.row().status == STATUS_ACTIVE
+
+    async def test_a_restored_token_that_died_again_is_marked_invalid_again(self, env: Env) -> None:
+        env.start_request()
+        canvas_returns(env, 401, DEAD_BODY, DEAD_HEADERS)
+        await get_courses()
+        env.mono.now += 20
+        assert env.store.restore_active(PRINCIPAL_KEY, expected_updated_at=env.updated_at)
+        env.health.forget(PRINCIPAL_KEY)
+
+        env.start_request()
+        result = await get_courses()
+
+        assert result["error"] == EXPECTED_MESSAGE
+        assert env.health.probe_count == 2
+        assert env.row().status == STATUS_INVALID
+
+    async def test_forget_only_drops_the_finished_verdicts_of_that_principal(self, env: Env) -> None:
+        env.start_request()
+        canvas_returns(env, 401, DEAD_BODY, DEAD_HEADERS)
+        await get_courses()
+        other = ("entra:other:principal", env.updated_at)
+        env.health._flights[other] = env.health._flights[(PRINCIPAL_KEY, env.updated_at)]
+
+        env.health.forget(PRINCIPAL_KEY)
+
+        assert list(env.health._flights) == [other]
 
     async def test_a_new_token_is_probed_even_inside_the_cooldown(self, env: Env) -> None:
         env.start_request()

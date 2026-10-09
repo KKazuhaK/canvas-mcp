@@ -122,6 +122,20 @@ class TokenHealth:
             )
         )
 
+    def forget(self, principal_key: str) -> None:
+        """Drop the finished probe verdicts of a principal.
+
+        Called when the user brings the stored token back to life (a successful
+        re-check, or a newly saved token): a REJECTED verdict cached for the same
+        token version must not keep calling a working token dead for the rest of
+        the cooldown. A probe still in flight is left alone.
+        """
+        self._flights = {
+            k: f
+            for k, f in self._flights.items()
+            if k[0] != principal_key or f.finished_at is None
+        }
+
     # -- recording -----------------------------------------------------------
 
     async def mark_invalid(

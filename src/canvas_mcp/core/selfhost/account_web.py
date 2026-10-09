@@ -859,6 +859,20 @@ class _AccountApp:
         message = b"school-pick|" + session.csrf.encode("utf-8") + b"|" + host.encode("ascii")
         return _b64url(hmac.new(self.cfg.session_secret, message, hashlib.sha256).digest())
 
+    def _identity_confirmation(
+        self, session: _Session, host: str, enrolled_user_id: str, new_user_id: str
+    ) -> str:
+        """Proof that this session was warned about switching to exactly this Canvas user.
+
+        Bound to the session, the school, the user enrolled now and the user the
+        pasted token belongs to, so a confirmation cannot be sent ahead of the
+        warning and does not carry over to a token for a third user.
+        """
+        message = "|".join(
+            ("identity-change", session.csrf, host, enrolled_user_id, new_user_id)
+        ).encode("utf-8")
+        return _b64url(hmac.new(self.cfg.session_secret, message, hashlib.sha256).digest())
+
     def _selection(
         self,
         raw: str | None,
@@ -962,7 +976,7 @@ class _AccountApp:
         session: _Session,
         info: EnrollmentInfo | None = None,
         selected: str | None = None,
-        identity_change: tuple[str, str] | None = None,
+        identity_change: tuple[str, str, str] | None = None,
     ) -> str:
         school_part = ""
         if self.schools.picker_enabled:
@@ -981,7 +995,7 @@ class _AccountApp:
                 )
         identity_part = ""
         if identity_change is not None:
-            old_name, new_name = identity_change
+            old_name, new_name, confirmation = identity_change
             identity_part = (
                 '<p class="warn">'
                 + _bi(
@@ -990,7 +1004,7 @@ class _AccountApp:
                 ).format(new=_e(new_name), old=_e(old_name))
                 + "</p>"
                 '<label class="choice"><input type="checkbox" name="confirm_identity_change" '
-                'value="1" required>'
+                f'value="{_e(confirmation)}" required>'
                 f"<span>{_bi('我确认要换成另一个 Canvas 用户的令牌', 'I confirm this is a different Canvas user')}</span></label>"
             )
         return (
@@ -1138,7 +1152,7 @@ class _AccountApp:
         notice: tuple[Literal["error", "ok"], str] | None = None,
         status: int = 200,
         selected: str | None = None,
-        identity_change: tuple[str, str] | None = None,
+        identity_change: tuple[str, str, str] | None = None,
         write_notice: tuple[Literal["error", "ok"], str] | None = None,
     ) -> Response:
         parts: list[str] = [
@@ -1713,7 +1727,13 @@ class _AccountApp:
         existing = await anyio.to_thread.run_sync(self._safe_info, session)
         if existing is not None and self._identity_changed(existing, school, identity):
             principal_key = self._principal_key(session)
-            if form.get("confirm_identity_change") != "1":
+            confirmation = self._identity_confirmation(
+                session, school.host, existing.canvas_user_id, identity.user_id
+            )
+            if not hmac.compare_digest(
+                form.get("confirm_identity_change", "").encode("utf-8"),
+                confirmation.encode("utf-8"),
+            ):
                 logger.warning("account token identity change needs confirmation oid=%s", session.oid)
                 audit.log_token_event(
                     "identity_change_detected", principal_key, outcome="confirmation_required"
@@ -1726,7 +1746,7 @@ class _AccountApp:
                         "This token belongs to a different Canvas user. Tick the confirmation box below and save again.",
                     ),
                     selected=selected,
-                    identity_change=(existing.canvas_user_name, identity.name),
+                    identity_change=(existing.canvas_user_name, identity.name, confirmation),
                 )
             logger.warning("account token identity change confirmed oid=%s", session.oid)
             audit.log_token_event(
@@ -1755,6 +1775,7 @@ class _AccountApp:
                 _bi("暂时无法保存令牌。", "The token could not be saved right now."),
                 selected=selected,
             )
+        self.health.forget(self._principal_key(session))
         logger.info(
             "account token enrolled tid=%s oid=%s host=%s", session.tid, session.oid, school.host
         )
@@ -1840,7 +1861,7 @@ class _AccountApp:
         message_html: str,
         *,
         selected: str | None = None,
-        identity_change: tuple[str, str] | None = None,
+        identity_change: tuple[str, str, str] | None = None,
     ) -> Response:
         info = await anyio.to_thread.run_sync(self._safe_info, session)
         return await self.account_page(
@@ -1949,6 +1970,7 @@ class _AccountApp:
         if not restored:
             # The token was replaced or removed while Canvas was being asked.
             return self.redirect(ACCOUNT_PATH, 303)
+        self.health.forget(principal_key)
         logger.info("account recheck restored oid=%s", session.oid)
         audit.log_token_event("recheck", principal_key, outcome="restored")
         fresh = await anyio.to_thread.run_sync(self._safe_info, session)
@@ -2076,7 +2098,7 @@ class _AccountApp:
         if self.write_tools is None:
             return ""
         notice_html = (
-            f'<div class="notice {notice[0]}" role="alert">{notice[1]}</div>'
+            f'<div class="notice {notice[0]}" role="status">{notice[1]}</div>'
             if notice is not None
             else ""
         )
@@ -2146,7 +2168,7 @@ class _AccountApp:
         return (
             f'<section class="card" id="write-tools"><h2>{_bi("写工具", "Write tools")}</h2>'
             f"{notice_html}{intro}"
-            f'<form method="post" action="{_WRITE_TOOLS_PATH}">'
+            f'<form method="post" action="{_WRITE_TOOLS_PATH}#write-tools">'
             f"{_csrf_field(session.csrf)}{fieldsets}{kept_line}{buttons}</form></section>"
         )
 
@@ -2166,8 +2188,15 @@ class _AccountApp:
             kind: Literal["error", "ok"], message: str, status: int
         ) -> Response:
             info = await anyio.to_thread.run_sync(self._safe_info, session)
+            # The result is shown at the top of the page too, like every other
+            # form: the card is the last section and the response starts at the
+            # top, so a user on a small screen would otherwise see no feedback.
             return await self.account_page(
-                session, info, status=status, write_notice=(kind, message)
+                session,
+                info,
+                (kind, message),
+                status=status,
+                write_notice=(kind, message),
             )
 
         try:

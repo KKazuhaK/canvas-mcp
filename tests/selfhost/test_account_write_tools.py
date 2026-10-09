@@ -428,6 +428,46 @@ class TestSaving:
         assert stored(r2) == set(many)
 
 
+class TestFeedbackPlacement:
+    """The result of a save is visible without scrolling to the last card."""
+
+    @staticmethod
+    def top_notice_precedes_the_card(text: str, message: str) -> bool:
+        top = text.find(message)
+        card = text.find('<section class="card" id="write-tools">')
+        return 0 <= top < card
+
+    def test_the_form_returns_the_user_to_the_card(self, r: Rig) -> None:
+        sign_in(r.h)
+        text = r.h.client.get(ACCOUNT_PATH).text
+        assert f'<form method="post" action="{PATH}#write-tools">' in text
+
+    def test_a_saved_change_is_reported_above_the_cards(self, r: Rig) -> None:
+        sign_in(r.h)
+        response = save(r, "send_message")
+        assert self.top_notice_precedes_the_card(response.text, "Write-tool settings saved.")
+        assert "Write-tool settings saved." in response.text.split('id="write-tools"')[1]
+
+    def test_nothing_to_change_is_reported_above_the_cards(self, r: Rig) -> None:
+        sign_in(r.h)
+        save(r, "send_message")
+        response = save(r, "send_message")
+        assert self.top_notice_precedes_the_card(response.text, "Nothing to change.")
+
+    def test_the_sign_in_refusal_is_reported_above_the_cards(self, r: Rig) -> None:
+        sign_in(r.h)
+        csrf = csrf_of(r.h)
+        advance(r, 601)
+        response = post_form(r.h, PATH, {"csrf": csrf, "tool.send_message": "1"})
+        assert response.status_code == 403
+        assert self.top_notice_precedes_the_card(
+            response.text, "needs a sign-in from the last 10 minutes"
+        )
+        assert re.search(
+            r'<div class="notice error" role="alert">[^<]*needs a sign-in', response.text
+        )
+
+
 class TestSignInAge:
     """Turning something ON needs a sign-in from the last 10 minutes; OFF never does."""
 

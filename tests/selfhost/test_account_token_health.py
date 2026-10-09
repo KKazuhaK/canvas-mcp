@@ -425,6 +425,59 @@ class TestEnrollmentFields:
         assert "stopped working" not in page(h)
 
 
+def confirmation_of(response: httpx.Response) -> str:
+    """The value of the identity-change checkbox on the page that warned the user."""
+    found = re.search(r'name="confirm_identity_change" value="([^"]+)"', response.text)
+    assert found is not None
+    return found.group(1)
+
+
+class SpyHealth:
+    """Stands in for the shared TokenHealth: records which principals were forgotten."""
+
+    def __init__(self) -> None:
+        self.forgotten: list[str] = []
+
+    def forget(self, principal_key: str) -> None:
+        self.forgotten.append(principal_key)
+
+
+class TestProbeVerdictIsForgotten:
+    """A cached "Canvas rejected it" verdict must not outlive a restored or replaced token."""
+
+    def spy_harness(self, tmp_path: pathlib.Path) -> tuple[Harness, SpyHealth]:
+        spy = SpyHealth()
+        return build_harness(tmp_path, health=spy), spy
+
+    def test_a_successful_recheck_drops_the_cached_verdict(self, tmp_path: pathlib.Path) -> None:
+        h, spy = self.spy_harness(tmp_path)
+        seed(h)
+        h.store.mark_invalid(KEY, reason=REASON_CANVAS_TOKEN_REJECTED)
+        sign_in(h)
+        assert post_form(h, RECHECK, {"csrf": csrf_of(h)}).status_code == 200
+        assert spy.forgotten == [KEY]
+
+    def test_a_recheck_that_changes_nothing_keeps_it(self, tmp_path: pathlib.Path) -> None:
+        h, spy = self.spy_harness(tmp_path)
+        seed(h)
+        h.store.mark_invalid(KEY, reason=REASON_CANVAS_TOKEN_REJECTED)
+        sign_in(h)
+        h.whoami_result = CanvasCheckError("invalid")
+        assert post_form(h, RECHECK, {"csrf": csrf_of(h)}).status_code == 400
+        assert spy.forgotten == []
+
+    def test_saving_a_token_drops_the_cached_verdict(self, tmp_path: pathlib.Path) -> None:
+        h, spy = self.spy_harness(tmp_path)
+        seed(h)
+        h.store.mark_invalid(KEY, reason=REASON_CANVAS_TOKEN_REJECTED)
+        sign_in(h)
+        response = post_form(
+            h, "/account/token", {"csrf": csrf_of(h), "canvas_token": "7~" + "N" * 62}
+        )
+        assert response.status_code == 303
+        assert spy.forgotten == [KEY]
+
+
 class TestIdentityChange:
     def test_a_token_for_another_canvas_user_needs_an_explicit_confirmation(
         self, h: Harness, events: list[str]
@@ -455,7 +508,11 @@ class TestIdentityChange:
 
         confirmed = post_form(
             h, "/account/token",
-            {"csrf": csrf, "canvas_token": new_token, "confirm_identity_change": "1"},
+            {
+                "csrf": csrf,
+                "canvas_token": new_token,
+                "confirm_identity_change": confirmation_of(response),
+            },
         )
         assert confirmed.status_code == 303
         row = info(h)
@@ -469,17 +526,62 @@ class TestIdentityChange:
         blob = json.dumps(tokens_events(events))
         assert "Grace" not in blob and "Ada" not in blob and new_token not in blob
 
-    def test_the_confirmation_must_be_exactly_one(self, h: Harness) -> None:
+    def test_a_confirmation_sent_with_the_first_post_does_not_skip_the_warning(
+        self, h: Harness
+    ) -> None:
         seed(h, user_id="42")
         sign_in(h)
         h.whoami_result = CanvasIdentity("99", "Grace")
         csrf = csrf_of(h)
-        for value in ("", "0", "yes", "true"):
+        for value in ("1", "", "0", "yes", "true", "x" * 43):
             response = post_form(
                 h, "/account/token",
                 {"csrf": csrf, "canvas_token": CANVAS_TOKEN, "confirm_identity_change": value},
             )
             assert response.status_code == 409, value
+        assert info(h).canvas_user_id == "42"
+
+    def test_a_confirmation_for_one_user_does_not_accept_a_token_for_another(
+        self, h: Harness
+    ) -> None:
+        seed(h, user_id="42")
+        sign_in(h)
+        csrf = csrf_of(h)
+        h.whoami_result = CanvasIdentity("99", "Grace")
+        warned = post_form(h, "/account/token", {"csrf": csrf, "canvas_token": CANVAS_TOKEN})
+        assert warned.status_code == 409
+        confirmation_for_grace = confirmation_of(warned)
+
+        # The user pastes a token for a third Canvas user and keeps the box ticked.
+        h.whoami_result = CanvasIdentity("123", "Heidi")
+        again = post_form(
+            h, "/account/token",
+            {
+                "csrf": csrf,
+                "canvas_token": "7~" + "H" * 62,
+                "confirm_identity_change": confirmation_for_grace,
+            },
+        )
+
+        assert again.status_code == 409
+        assert "Heidi" in again.text and "Grace" not in again.text  # warned about the new user
+        assert confirmation_of(again) != confirmation_for_grace
+        assert info(h).canvas_user_id == "42"
+
+    def test_a_confirmation_from_another_session_is_refused(self, h: Harness) -> None:
+        seed(h, user_id="42")
+        sign_in(h)
+        h.whoami_result = CanvasIdentity("99", "Grace")
+        warned = post_form(h, "/account/token", {"csrf": csrf_of(h), "canvas_token": CANVAS_TOKEN})
+        stolen = confirmation_of(warned)
+
+        h.client.cookies.clear()
+        sign_in(h)  # a new session has its own CSRF value
+        response = post_form(
+            h, "/account/token",
+            {"csrf": csrf_of(h), "canvas_token": CANVAS_TOKEN, "confirm_identity_change": stolen},
+        )
+        assert response.status_code == 409
         assert info(h).canvas_user_id == "42"
 
     def test_the_same_canvas_user_needs_no_confirmation(self, h: Harness) -> None:
