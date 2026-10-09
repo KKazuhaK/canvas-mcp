@@ -372,7 +372,10 @@ def test_the_school_settings_ship_switched_off_and_documented(env_text):
 
 
 def test_the_documented_featured_example_parses(env_text):
-    from canvas_mcp.core.selfhost.settings import SelfhostConfigError, load_selfhost_settings
+    from canvas_mcp.core.selfhost.settings import (
+        SelfhostConfigError,
+        load_selfhost_settings,
+    )
 
     example = _commented_assignments(env_text)["CANVAS_FEATURED_SCHOOLS"]
     env = {"CANVAS_FEATURED_SCHOOLS": example}
