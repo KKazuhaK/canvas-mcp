@@ -157,7 +157,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy cache, anonymization map and discussion routing hints are now keyed by the
   caller (a keyed hash of the `X-Canvas-Token` in legacy HTTP mode, `local` on stdio),
   so callers with different tokens no longer share course data. Confirmation tokens
-  are bound to the verified caller identity in `entra-oauth` mode.
+  are bound to the verified caller identity in `entra-oauth` mode. Course aliases and
+  labels follow the upstream HTTP boundary: in the `X-Canvas-Token`, access-key and
+  Easy Auth modes they are resolved per request under that request's own credential
+  and never stored; only a verified `entra-oauth` principal keeps a course cache
+  across its requests (per school), and stdio keeps its single local cache.
 
 ## [1.14.0] — 2026-10-07
 

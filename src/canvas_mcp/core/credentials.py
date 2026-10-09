@@ -115,6 +115,17 @@ def set_request_tool_prefs(prefs: RequestToolPrefs | None) -> Token[RequestToolP
     return _request_tool_prefs.set(prefs)
 
 
+# Initialized per HTTP request, never a shared mutable ContextVar default.
+_request_course_labels: ContextVar[dict[str, str] | None] = ContextVar(
+    "request_course_labels", default=None
+)
+
+
+def get_request_course_labels() -> dict[str, str] | None:
+    """Course labels read under the current request's Canvas credential."""
+    return _request_course_labels.get()
+
+
 def get_request_credentials() -> RequestCredentials | None:
     """Get the current request's Canvas credentials, or None for stdio mode."""
     return _request_credentials.get()
@@ -123,11 +134,13 @@ def get_request_credentials() -> RequestCredentials | None:
 def set_request_credentials(creds: RequestCredentials) -> None:
     """Set Canvas credentials for the current async context."""
     _request_credentials.set(creds)
+    _request_course_labels.set({})
 
 
 def clear_request_credentials() -> None:
     """Clear credentials after request completes."""
     _request_credentials.set(None)
+    _request_course_labels.set(None)
 
 
 def is_http_request_active() -> bool:
@@ -142,6 +155,21 @@ def is_http_request_active() -> bool:
 def set_http_request_active(active: bool = True) -> None:
     """Mark whether the current async context is handling an HTTP request."""
     _http_request_active.set(active)
+    _request_course_labels.set({} if active else None)
+
+
+def uses_request_local_course_state() -> bool:
+    """True when course metadata must live and die with the current request.
+
+    That is every HTTP request without a verified principal: the upstream
+    ``X-Canvas-Token`` / access-key / Easy Auth modes. Each such request
+    resolves course aliases and labels under its own Canvas credential and
+    publishes nothing into process-wide state. Only the self-hosted
+    ``entra-oauth`` mode (a verified ``RequestPrincipal``) keeps a per-principal
+    course cache across requests, and stdio (no HTTP request) keeps its single
+    process-wide cache.
+    """
+    return _http_request_active.get() and _request_principal.get() is None
 
 
 def get_request_principal() -> RequestPrincipal | None:
@@ -206,3 +234,4 @@ def clear_http_request_context() -> None:
     _missing_credentials_message.set(None)
     _request_token_state.set(None)
     _request_tool_prefs.set(None)
+    _request_course_labels.set(None)

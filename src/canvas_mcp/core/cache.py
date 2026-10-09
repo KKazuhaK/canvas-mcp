@@ -2,14 +2,20 @@
 
 import asyncio
 import re
+import sys
 import time
+import types
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from .client import fetch_all_paginated_results, make_canvas_request
-from .credentials import current_principal_key
+from .credentials import (
+    current_principal_key,
+    get_request_course_labels,
+    uses_request_local_course_state,
+)
 from .logging import log_error, log_info
 from .untrusted_content import fence_untrusted_inline
 from .validation import coerce_canvas_id, validate_params
@@ -54,8 +60,21 @@ _STATES: OrderedDict[str, CourseCacheState] = OrderedDict()
 
 
 def current_cache_state() -> CourseCacheState:
-    """The course cache of whoever is making the current request."""
-    key = current_principal_key()
+    """The course cache of whoever is making the current request.
+
+    An HTTP request without a verified principal (the upstream token, access-key
+    and Easy Auth modes) gets a throwaway state that is never registered:
+    its course metadata must not outlive the request, so nothing written to
+    it can be read by a later request. Only stdio (``"local"``) and the
+    self-hosted ``entra-oauth`` principals have a registered, persistent one.
+    """
+    if uses_request_local_course_state():
+        return CourseCacheState()
+    return _registered_state(current_principal_key())
+
+
+def _registered_state(key: str) -> CourseCacheState:
+    """The persistent cache state stored under ``key``, created on first use."""
     state = _STATES.get(key)
     if state is not None:
         _STATES.move_to_end(key)
@@ -66,6 +85,18 @@ def current_cache_state() -> CourseCacheState:
         oldest = next(k for k in _STATES if k != key)
         del _STATES[oldest]
     return state
+
+
+def _legacy_state() -> CourseCacheState:
+    """The state behind the legacy global names.
+
+    Those names were the process-wide stdio cache, so a request-local HTTP
+    request (which has no persistent state of its own) sees that one rather
+    than a throwaway: it can read it but never has a reason to fill it.
+    """
+    if uses_request_local_course_state():
+        return _registered_state("local")
+    return current_cache_state()
 
 
 def reset_course_cache(principal_key: str | None = None) -> None:
@@ -90,20 +121,63 @@ def remember_course_code(course_id: str, course_code: str) -> None:
     quarter's COMPSCI 161, say) must not take over a code that already names
     one of the caller's own courses.
     """
+    if uses_request_local_course_state():
+        return
     state = current_cache_state()
     state.id_to_code[str(course_id)] = course_code
     state.code_to_id.setdefault(course_code, str(course_id))
 
 
-def __getattr__(name: str) -> Any:
-    """Legacy read-only names, resolved to the current principal's live objects."""
-    if name == "course_code_to_id_cache":
-        return current_cache_state().code_to_id
-    if name == "id_to_course_code_cache":
-        return current_cache_state().id_to_code
-    if name == "course_records_cache":
-        return current_cache_state().records
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+class _LegacyCacheNames(types.ModuleType):
+    """Module type that keeps the pre-principal global names working.
+
+    ``course_code_to_id_cache`` and friends used to be plain module globals.
+    They now read (and, so tests and callers that seed or restore them keep
+    working, assign) the *current caller's* cache state, never a shared object.
+    """
+
+    @property
+    def course_code_to_id_cache(self) -> dict[str, str]:
+        return _legacy_state().code_to_id
+
+    @course_code_to_id_cache.setter
+    def course_code_to_id_cache(self, value: dict[str, str]) -> None:
+        _legacy_state().code_to_id = value
+
+    @property
+    def id_to_course_code_cache(self) -> dict[str, str]:
+        return _legacy_state().id_to_code
+
+    @id_to_course_code_cache.setter
+    def id_to_course_code_cache(self, value: dict[str, str]) -> None:
+        _legacy_state().id_to_code = value
+
+    @property
+    def course_records_cache(self) -> list[CourseRecord]:
+        return _legacy_state().records
+
+    @course_records_cache.setter
+    def course_records_cache(self, value: list[CourseRecord]) -> None:
+        _legacy_state().records = value
+
+    @property
+    def _last_refresh_at(self) -> float | None:
+        return _legacy_state().last_refresh_at
+
+    @_last_refresh_at.setter
+    def _last_refresh_at(self, value: float | None) -> None:
+        _legacy_state().last_refresh_at = value
+
+    @property
+    def _refresh_task(self) -> asyncio.Task[bool] | None:
+        return _legacy_state().refresh_task
+
+    @_refresh_task.setter
+    def _refresh_task(self, value: asyncio.Task[bool] | None) -> None:
+        _legacy_state().refresh_task = value
+
+
+sys.modules[__name__].__class__ = _LegacyCacheNames
 
 
 async def refresh_course_cache() -> bool:
@@ -116,6 +190,11 @@ async def refresh_course_cache() -> bool:
     if isinstance(courses, dict) and "error" in courses:
         log_error("Error building course cache", error=courses.get("error"))
         return False
+
+    # HTTP course metadata belongs to the requesting credential. Never publish
+    # it into a cache that outlives the request.
+    if uses_request_local_course_state():
+        return isinstance(courses, list)
 
     # Build caches for bidirectional lookups, then swap them in whole.
     code_to_id: dict[str, str] = {}
@@ -202,10 +281,11 @@ async def get_course_id(course_identifier: str | int) -> str:
 
     A course code (spaces allowed), name or bare SIS ID of one of the caller's
     courses resolves as in ``resolve_numeric_course_id``. An identifier that
-    matches none of them, or several, is passed through as before (an
+    matches none of them is passed through as before (an
     underscore code as ``sis_course_id:<code>``), so the result may not be
     numeric; code that puts it in a path or compares it should use
-    ``resolve_numeric_course_id`` instead.
+    ``resolve_numeric_course_id`` instead. Ambiguous aliases raise ValueError
+    before a tool can dispatch a request against an arbitrary course.
 
     Returns:
         The course ID as a string
@@ -221,22 +301,29 @@ async def get_course_id(course_identifier: str | int) -> str:
     if course_str.startswith("sis_course_id:"):
         return course_str
 
-    # If it's in our cache, return the ID
-    cached_id = current_cache_state().code_to_id.get(course_str)
-    if cached_id is not None:
-        return cached_id
+    if uses_request_local_course_state():
+        courses = await fetch_all_paginated_results("/courses", {"per_page": 100})
+        if isinstance(courses, list):
+            found, error = match_course(course_str, courses)
+            if error is not None:
+                raise ValueError(error)
+            if found is not None:
+                return found
+        # Preserve the legacy pass-through contract, without using another
+        # caller's aliases. Canvas still authorizes the eventual request.
+        return f"sis_course_id:{course_str}" if "_" in course_str else course_str
 
     # One of the caller's courses by code (spaces allowed, as in 'COMPSCI
     # 161'), name or SIS ID, ignoring case and surrounding whitespace. On a
     # miss the course list is re-read once (shared and rate-limited, see
     # _refresh_after_miss) and searched again. An ambiguous match is not
-    # retried; it falls through like a miss.
+    # retried; it is refused before any target request.
     found, ambiguous = _match_cached(course_str)
     if found is None and ambiguous is None and await _refresh_after_miss():
-        cached_id = current_cache_state().code_to_id.get(course_str)
-        if cached_id is not None:
-            return cached_id
-        found, _ = _match_cached(course_str)
+        found, ambiguous = _match_cached(course_str)
+    if ambiguous is not None:
+        # Refuse ambiguity rather than reinterpret it as a SIS target.
+        raise ValueError(ambiguous)
     if found is not None:
         return found
 
@@ -257,6 +344,18 @@ async def get_course_code(course_id: str | int) -> str | None:
 
     # If it's already a code-like string with underscores
     if "_" in course_id:
+        return course_id
+
+    if uses_request_local_course_state():
+        labels = get_request_course_labels()
+        if labels is not None and course_id in labels:
+            return labels[course_id]
+        response = await make_canvas_request("get", f"/courses/{course_id}")
+        if isinstance(response, dict) and "error" not in response:
+            http_code = response.get("course_code") or course_id
+            if labels is not None:
+                labels[course_id] = http_code
+            return http_code
         return course_id
 
     # If it's in our cache, return the code
@@ -423,6 +522,14 @@ async def resolve_numeric_course_id(
     numeric = coerce_canvas_id(raw)
     if numeric is not None:
         return numeric, None
+
+    # No shared aliases, throttling or in-flight tasks in HTTP mode: each
+    # request must resolve against the courses visible to its own credential.
+    if courses is None and uses_request_local_course_state():
+        response = await fetch_all_paginated_results("/courses", {"per_page": 100})
+        if not isinstance(response, list):
+            return None, f"{not_found}: your course list could not be loaded from Canvas."
+        courses = response
 
     if raw.startswith(SIS_COURSE_PREFIX):
         # A course already listed is found by its SIS ID with no request; the
