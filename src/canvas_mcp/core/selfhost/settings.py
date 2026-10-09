@@ -18,6 +18,7 @@ from typing import ClassVar, Literal
 from urllib.parse import urlsplit
 
 from ..tool_policy import TOOL_EFFECTS
+from .accounts import AccessPolicy, default_policy, parse_access_settings
 from .db.url import (
     ALLOW_OUTSIDE_ENV,
     DATABASE_URL_ENV,
@@ -123,12 +124,20 @@ class SelfhostSettings:
     # It can only remove tools: it never registers one and never widens what
     # ``ALLOWED_WRITE_TOOLS`` or a user's own switches allow.
     disabled_tools: tuple[str, ...] = ()
+    # Who is admitted and who is an owner (see :mod:`.accounts`). The default is the
+    # first release's behaviour: the two Entra app roles, nothing else.
+    # ``None`` (a settings object built by hand) means that default.
+    access_policy: AccessPolicy = field(default=None)  # type: ignore[assignment]
 
     mcp_path: ClassVar[str] = "/mcp"
 
     def __post_init__(self) -> None:
         if self.database is None:
             object.__setattr__(self, "database", sqlite_target(default_sqlite_path(self.data_dir)))
+        if getattr(self, "access_policy", None) is None:
+            object.__setattr__(
+                self, "access_policy", default_policy(self.required_role, self.owner_role)
+            )
 
     @property
     def mcp_url(self) -> str:
@@ -509,6 +518,13 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
     school_search = _parse_bool("CANVAS_SCHOOL_SEARCH", get("CANVAS_SCHOOL_SEARCH"), problems)
     course_state = _parse_course_state(get(COURSE_STATE_ENV), problems)
     disabled_tools = _parse_disabled_tools(get(DISABLED_TOOLS_ENV), problems)
+    access_policy = parse_access_settings(
+        source,
+        tenant_id=tenant_id,
+        required_role=required_role,
+        owner_role=owner_role,
+        problems=problems,
+    )
 
     if problems or base is None:
         raise SelfhostConfigError(problems)
@@ -536,4 +552,5 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
         auto_migrate=auto_migrate,
         state_backend=state_backend,
         disabled_tools=disabled_tools,
+        access_policy=access_policy,
     )

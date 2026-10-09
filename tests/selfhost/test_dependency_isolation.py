@@ -57,6 +57,7 @@ def test_the_server_and_every_non_database_module_import_without_the_extras() ->
         """
         import canvas_mcp.server
         import canvas_mcp.tools.discovery
+        import canvas_mcp.core.selfhost.accounts
         import canvas_mcp.core.selfhost.settings
         import canvas_mcp.core.selfhost.token_store
         import canvas_mcp.core.selfhost.tool_prefs
