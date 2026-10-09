@@ -14,6 +14,8 @@ from starlette.testclient import TestClient
 pytest.importorskip("canvas_mcp.core.selfhost.token_store")
 pytest.importorskip("canvas_mcp.core.selfhost.account_web")
 
+from dbbackend import stack_env
+
 from canvas_mcp.core.selfhost.app import (  # noqa: E402
     build_selfhost_asgi_app,
     install_selfhost,
@@ -42,6 +44,7 @@ def _settings(tmp_path: Path, **overrides: str) -> SelfhostSettings:
         "CANVAS_TOKEN_KEYS": "k1:" + base64.b64encode(bytes(32)).decode(),
         "FASTMCP_HOME": str(tmp_path / "fastmcp"),
         "SELFHOST_DATA_DIR": str(tmp_path / "data"),
+        **stack_env(),
     }
     env.update(overrides)
     return load_selfhost_settings(env)

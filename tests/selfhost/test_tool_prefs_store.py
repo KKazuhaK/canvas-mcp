@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import pathlib
-import sqlite3
 
 import pytest
+from dbbackend import make_store, raw_connection
+from sqlalchemy import inspect
 
 from canvas_mcp.core.selfhost.token_store import SCHEMA_VERSION, TokenStore
 
@@ -22,14 +23,13 @@ def clock() -> Clock:
 
 @pytest.fixture
 def store(tmp_path: pathlib.Path, clock: Clock) -> TokenStore:
-    s = TokenStore(tmp_path / "data" / "tokens.sqlite3", _ring(("k1", 1)), clock=clock)
+    s = make_store(tmp_path / "data" / "tokens.sqlite3", _ring(("k1", 1)), clock=clock)
     s.initialize()
     return s
 
 
-def _tables(path: pathlib.Path) -> set[str]:
-    with sqlite3.connect(path) as conn:
-        return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+def _tables(store: TokenStore) -> set[str]:
+    return set(inspect(store.database.engine).get_table_names())
 
 
 class TestDefaultsAndRoundTrip:
@@ -154,7 +154,7 @@ class TestIndependenceFromTheToken:
 class TestFailClosed:
     def _corrupt(self, store: TokenStore, tmp_path: pathlib.Path, names: str, at: str) -> None:
         store.set_tool_prefs(PK_A, ["send_message"])
-        with sqlite3.connect(tmp_path / "data" / "tokens.sqlite3") as conn:
+        with raw_connection(store) as conn:
             conn.execute(
                 "UPDATE user_tool_prefs SET enabled_write_tools = ?, enabled_at = ?",
                 (names, at),
@@ -180,25 +180,27 @@ class TestMigration:
     def test_a_fresh_database_has_the_table_and_the_same_schema_version(
         self, store: TokenStore, tmp_path: pathlib.Path
     ) -> None:
-        assert "user_tool_prefs" in _tables(tmp_path / "data" / "tokens.sqlite3")
+        assert "user_tool_prefs" in _tables(store)
         # The table was added without a version change; version 3 added the access
         # tables, and this table must still be there.
         assert SCHEMA_VERSION == 4
+
+    @pytest.mark.sqlite_only
 
     def test_opening_a_database_without_the_table_adds_it_and_keeps_the_rows(
         self, tmp_path: pathlib.Path, clock: Clock
     ) -> None:
         path = tmp_path / "data" / "tokens.sqlite3"
-        first = TokenStore(path, _ring(("k1", 1)), clock=clock)
+        first = make_store(path, _ring(("k1", 1)), clock=clock)
         first.initialize()
         _put(first, canvas_host="canvas.example.edu")
-        with sqlite3.connect(path) as conn:
+        with raw_connection(first) as conn:
             conn.execute("DROP TABLE user_tool_prefs")
-        assert "user_tool_prefs" not in _tables(path)
+        assert "user_tool_prefs" not in _tables(first)
 
-        reopened = TokenStore(path, _ring(("k1", 1)), clock=clock)
+        reopened = make_store(path, _ring(("k1", 1)), clock=clock)
         reopened.initialize()
-        assert "user_tool_prefs" in _tables(path)
+        assert "user_tool_prefs" in _tables(reopened)
         assert reopened.count() == 1
         assert reopened.get_tool_prefs(PK_A) is None
 
@@ -206,7 +208,7 @@ class TestMigration:
         self, store: TokenStore, tmp_path: pathlib.Path, clock: Clock
     ) -> None:
         store.set_tool_prefs(PK_A, ["send_message"])
-        again = TokenStore(tmp_path / "data" / "tokens.sqlite3", _ring(("k1", 1)), clock=clock)
+        again = make_store(tmp_path / "data" / "tokens.sqlite3", _ring(("k1", 1)), clock=clock)
         again.initialize()
         again.initialize()
         got = again.get_tool_prefs(PK_A)

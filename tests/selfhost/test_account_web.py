@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
+from dbbackend import make_store
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
@@ -121,7 +122,7 @@ def build_harness(
 ) -> Harness:
     """A signed-out harness; ``route_kwargs`` (directory, resolve_host, ...) go to the routes."""
     keyring = Keyring.parse("k1:" + base64.b64encode(b"\x01" * 32).decode())
-    store = TokenStore(tmp_path / "tokens.sqlite3", keyring, clock=lambda: 1_800_000_000)
+    store = make_store(tmp_path / "tokens.sqlite3", keyring, clock=lambda: 1_800_000_000)
     store.initialize()
     harness = Harness(client=None, store=store)  # type: ignore[arg-type]
 
@@ -1041,7 +1042,7 @@ class TestDefaultCanvasCheck:
         seen: list[httpx.Request],
     ) -> tuple[TestClient, TokenStore, Harness]:
         keyring = Keyring.parse("k1:" + base64.b64encode(b"\x01" * 32).decode())
-        store = TokenStore(tmp_path / "t.sqlite3", keyring)
+        store = make_store(tmp_path / "t.sqlite3", keyring)
         store.initialize()
         harness = Harness(client=None, store=store)  # type: ignore[arg-type]
 

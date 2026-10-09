@@ -13,7 +13,41 @@ import pytest
 # canvas_mcp import below.
 os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 
+import dbbackend  # noqa: E402
+
 from canvas_mcp.core.config import reset_config  # noqa: E402
+
+# PostgreSQL requested but unusable fails the run here instead of skipping tests.
+dbbackend.require_backend()
+if dbbackend.PG_URL:
+    dbbackend.install_tracking()
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "sqlite_only: needs a SQLite file (skipped when the backend is PostgreSQL)"
+    )
+    config.addinivalue_line(
+        "markers", "postgres: needs CANVAS_MCP_TEST_DATABASE_URL (skipped without it)"
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if dbbackend.IS_POSTGRES and item.get_closest_marker("sqlite_only"):
+            item.add_marker(pytest.mark.skip(reason="SQLite-specific; backend is postgres"))
+        if item.get_closest_marker("postgres") and not dbbackend.pg_available():
+            item.add_marker(
+                pytest.mark.skip(reason="set CANVAS_MCP_TEST_DATABASE_URL to run PostgreSQL tests")
+            )
+
+
+@pytest.fixture(autouse=True)
+def drop_postgres_test_schemas():
+    """Leave the scratch PostgreSQL database empty after each test."""
+    yield
+    if dbbackend.PG_URL:
+        dbbackend.drop_test_schemas()
 
 
 @pytest.fixture(autouse=True)

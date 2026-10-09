@@ -5,6 +5,7 @@ from __future__ import annotations
 import pathlib
 
 import pytest
+from dbbackend import make_store
 
 from canvas_mcp.core.selfhost.token_store import (
     INVALID_REASONS,
@@ -30,7 +31,7 @@ def clock() -> Clock:
 
 @pytest.fixture
 def store(tmp_path: pathlib.Path, clock: Clock) -> TokenStore:
-    s = TokenStore(tmp_path / "data" / "tokens.sqlite3", _ring(("k1", 1)), clock=clock)
+    s = make_store(tmp_path / "data" / "tokens.sqlite3", _ring(("k1", 1)), clock=clock)
     s.initialize()
     return s
 

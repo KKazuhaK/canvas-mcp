@@ -4,7 +4,6 @@ the encrypted store and the real Canvas client. Only Entra and Canvas are faked.
 from __future__ import annotations
 
 import base64
-import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +13,7 @@ import fastmcp
 import httpx
 import pytest
 import respx
+from dbbackend import raw_connection, stack_env
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from starlette.testclient import TestClient
@@ -114,6 +114,7 @@ def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNam
         "CANVAS_TOKEN_KEYS": "k1:" + base64.b64encode(bytes(32)).decode(),
         "FASTMCP_HOME": str(tmp_path / "fastmcp"),
         "SELFHOST_DATA_DIR": str(tmp_path / "data"),
+        **stack_env(),
     })
     runtime = prepare_selfhost(settings)
 
@@ -222,7 +223,7 @@ class TestDeadTokenEndToEnd:
         before = status_of(stack).last_verified_at
         assert before is not None
         # Make the stored time old enough for the rate limit to allow a write.
-        with sqlite3.connect(stack.runtime.settings.token_db_path) as conn:
+        with raw_connection(stack.runtime.store) as conn:
             conn.execute("UPDATE canvas_tokens SET last_verified_at = 1")
         call_tool(stack, "bearer-A", "list_courses")
         assert status_of(stack).last_verified_at > 1
@@ -257,7 +258,7 @@ class TestMarkedInvalidBeforeTheCall:
 
 class TestDecryptFailure:
     def test_an_unreadable_row_is_marked_invalid_and_stays_that_way(self, stack):
-        with sqlite3.connect(stack.runtime.settings.token_db_path) as conn:
+        with raw_connection(stack.runtime.store) as conn:
             conn.execute("UPDATE canvas_tokens SET ciphertext = ? WHERE object_id = ?", (b"x" * 40, OID_A))
 
         first = call_tool(stack, "bearer-A", "list_courses")
@@ -274,7 +275,7 @@ class TestDecryptFailure:
         assert stack.canvas.seen == []
 
     def test_saving_a_new_token_clears_the_mark(self, stack):
-        with sqlite3.connect(stack.runtime.settings.token_db_path) as conn:
+        with raw_connection(stack.runtime.store) as conn:
             conn.execute("UPDATE canvas_tokens SET ciphertext = ? WHERE object_id = ?", (b"x" * 40, OID_A))
         call_tool(stack, "bearer-A", "list_courses")
         stack.enroll(OID_A, NEW_TOKEN_A)

@@ -19,6 +19,7 @@ import fastmcp
 import httpx
 import pytest
 import respx
+from dbbackend import stack_env
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from starlette.testclient import TestClient
@@ -73,6 +74,7 @@ def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNam
         "CANVAS_TOKEN_KEYS": "k1:" + base64.b64encode(bytes(32)).decode(),
         "FASTMCP_HOME": str(tmp_path / "fastmcp"),
         "SELFHOST_DATA_DIR": str(tmp_path / "data"),
+        **stack_env(),
     })
     runtime = prepare_selfhost(settings)
     for oid, token in TOKEN.items():

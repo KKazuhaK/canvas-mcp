@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from dbbackend import make_store
 
 from canvas_mcp.core import audit, course_files
 from canvas_mcp.core import client as cm
@@ -131,7 +132,7 @@ def env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Env
         monkeypatch.setattr(cm, name, None)
 
     store_clock = StoreClock()
-    store = TokenStore(tmp_path / "tokens.sqlite3", _ring(("k1", 1)), clock=store_clock)
+    store = make_store(tmp_path / "tokens.sqlite3", _ring(("k1", 1)), clock=store_clock)
     store.initialize()
     info = store.put(
         tenant_id=TENANT,

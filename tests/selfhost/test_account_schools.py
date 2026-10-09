@@ -5,13 +5,13 @@ from __future__ import annotations
 import html
 import pathlib
 import re
-import sqlite3
 import urllib.parse
 from collections.abc import Sequence
 from typing import Any
 
 import httpx
 import pytest
+from dbbackend import raw_connection
 
 from canvas_mcp.core.selfhost.account_web import (
     ACCOUNT_PATH,
@@ -385,7 +385,7 @@ class TestPicker:
         sign_in(r.h)
         assert enroll(r, DEFAULT_HOST).status_code == 303
         assert stored_host(r) == DEFAULT_HOST
-        with sqlite3.connect(str(r.h.store._path)) as conn:
+        with raw_connection(r.h.store) as conn:
             conn.execute("UPDATE canvas_tokens SET canvas_host = NULL")
         with pytest.raises(TokenDecryptionError):
             r.h.store.get(TID, OID)

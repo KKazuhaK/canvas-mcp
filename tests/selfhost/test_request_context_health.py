@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import pathlib
-import sqlite3
 from typing import Any
 
 import pytest
+from dbbackend import make_store, raw_connection
 from fastmcp import Client, FastMCP
 from fastmcp.server.auth import AccessToken
 
@@ -201,7 +201,7 @@ class TestDecryptFailure:
     async def test_a_token_saved_while_the_old_row_was_unreadable_stays_active(
         self, tmp_path: pathlib.Path
     ) -> None:
-        store = TokenStore(tmp_path / "tokens.sqlite3", _ring(("k1", 1)), clock=StoreClock())
+        store = make_store(tmp_path / "tokens.sqlite3", _ring(("k1", 1)), clock=StoreClock())
         store.initialize()
         put_args: dict[str, Any] = {
             "tenant_id": TENANT,
@@ -212,7 +212,7 @@ class TestDecryptFailure:
             "entra_upn": "ada@example.test",
         }
         store.put(api_token=SECRET_TOKEN, **put_args)
-        with sqlite3.connect(str(store._path), isolation_level=None) as conn:
+        with raw_connection(store) as conn:
             conn.execute("UPDATE canvas_tokens SET ciphertext = x'00'")
         key = f"entra:{TENANT}:{OID_A}"
 
@@ -228,7 +228,7 @@ class TestDecryptFailure:
                     self.put(api_token="7~" + "R" * 62, **put_args)
 
         store_clock = StoreClock()
-        racing = RacingStore(store._path, _ring(("k1", 1)), clock=store_clock)
+        racing = RacingStore(store.database, _ring(("k1", 1)), clock=store_clock)
         health = TokenHealth(racing, account_url=ACCOUNT_URL)
         probe = StateProbe()
         middleware = _middleware(probe, racing)  # type: ignore[arg-type]

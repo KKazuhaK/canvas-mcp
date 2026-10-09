@@ -13,6 +13,7 @@ import threading
 import pytest
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from dbbackend import make_store, raw_connection
 
 from canvas_mcp.core.selfhost import token_store as token_store_module
 from canvas_mcp.core.selfhost.token_store import (
@@ -61,7 +62,7 @@ def clock() -> Clock:
 
 @pytest.fixture
 def store(tmp_path: pathlib.Path, clock: Clock) -> TokenStore:
-    s = TokenStore(tmp_path / "data" / "tokens.sqlite3", _ring(("k1", 1)), clock=clock)
+    s = make_store(tmp_path / "data" / "tokens.sqlite3", _ring(("k1", 1)), clock=clock)
     s.initialize()
     return s
 
@@ -80,8 +81,8 @@ def _put(store: TokenStore, oid: str = OID_A, token: str = TOKEN_A, **kw):
     return store.put(**args)
 
 
-def _raw(store: TokenStore) -> sqlite3.Connection:
-    return sqlite3.connect(str(store._path), isolation_level=None)
+def _raw(store: TokenStore):  # type: ignore[no-untyped-def]
+    return raw_connection(store)
 
 
 # -- Keyring -----------------------------------------------------------------
@@ -159,6 +160,8 @@ class TestRoundtrip:
         assert got.canvas_user_name == "Ada Lovelace"
         assert got.entra_upn == "ada@example.test"
         assert store.get(TID, OID_B) is None
+
+    @pytest.mark.sqlite_only
 
     def test_raw_database_does_not_contain_token(self, store: TokenStore) -> None:
         _put(store)
@@ -297,7 +300,7 @@ class TestTamperResistance:
 
     def test_editing_key_id_fails(self, tmp_path: pathlib.Path) -> None:
         ring = _ring(("k1", 1), ("k2", 2))
-        store = TokenStore(tmp_path / "t.sqlite3", ring)
+        store = make_store(tmp_path / "t.sqlite3", ring)
         store.initialize()
         _put(store)
         with _raw(store) as conn:
@@ -309,20 +312,20 @@ class TestTamperResistance:
 class TestInitialize:
     def test_missing_kid_refused(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
-        old = TokenStore(path, _ring(("k1", 1)))
+        old = make_store(path, _ring(("k1", 1)))
         old.initialize()
         _put(old)
         with pytest.raises(KeyringError) as exc:
-            TokenStore(path, _ring(("k2", 2))).initialize()
+            make_store(path, _ring(("k2", 2))).initialize()
         assert str(exc.value) == "CANVAS_TOKEN_KEYS is missing key id(s): k1"
 
     def test_wrong_key_under_same_kid_refused(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
-        old = TokenStore(path, _ring(("k1", 1)))
+        old = make_store(path, _ring(("k1", 1)))
         old.initialize()
         _put(old)
         with pytest.raises(KeyringError) as exc:
-            TokenStore(path, _ring(("k1", 9))).initialize()
+            make_store(path, _ring(("k1", 9))).initialize()
         assert str(exc.value) == (
             "CANVAS_TOKEN_KEYS key k1 does not match the stored data"
         )
@@ -331,11 +334,11 @@ class TestInitialize:
         self, tmp_path: pathlib.Path
     ) -> None:
         path = tmp_path / "t.sqlite3"
-        s = TokenStore(path, _ring(("k1", 1)))
+        s = make_store(path, _ring(("k1", 1)))
         s.initialize()
         _put(s)
         s.initialize()
-        TokenStore(path, _ring(("k1", 1))).initialize()
+        make_store(path, _ring(("k1", 1))).initialize()
         assert s.count() == 1
 
     def test_schema_version_present_and_future_refused(
@@ -353,6 +356,8 @@ class TestInitialize:
         with pytest.raises(TokenStoreError):
             store.initialize()
 
+    @pytest.mark.sqlite_only
+
     def test_wal_mode_enabled(self, store: TokenStore) -> None:
         with _raw(store) as conn:
             assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
@@ -360,7 +365,7 @@ class TestInitialize:
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
     def test_posix_permissions(self, tmp_path: pathlib.Path) -> None:
         path = token_db_path(tmp_path / "state")
-        s = TokenStore(path, _ring(("k1", 1)))
+        s = make_store(path, _ring(("k1", 1)))
         s.initialize()
         _put(s)
         assert stat.S_IMODE(os.stat(path.parent).st_mode) == 0o700
@@ -376,29 +381,29 @@ class TestRotation:
         self, tmp_path: pathlib.Path
     ) -> None:
         path = tmp_path / "t.sqlite3"
-        old = TokenStore(path, _ring(("k1", 1)))
+        old = make_store(path, _ring(("k1", 1)))
         old.initialize()
         _put(old, oid=OID_A, token=TOKEN_A)
         _put(old, oid=OID_B, token=TOKEN_B)
-        both = TokenStore(path, _ring(("k2", 2), ("k1", 1)))
+        both = make_store(path, _ring(("k2", 2), ("k1", 1)))
         both.initialize()
         assert both.rotate() == 2
         assert both.rotate() == 0
         with _raw(both) as conn:
             kids = {r[0] for r in conn.execute("SELECT key_id FROM canvas_tokens")}
         assert kids == {"k2"}
-        only_new = TokenStore(path, _ring(("k2", 2)))
+        only_new = make_store(path, _ring(("k2", 2)))
         only_new.initialize()  # proves no row needs k1
         got = only_new.get(TID, OID_B)
         assert got is not None and got.api_token == TOKEN_B
         with pytest.raises(KeyringError):
-            TokenStore(path, _ring(("k1", 1))).initialize()
+            make_store(path, _ring(("k1", 1))).initialize()
 
     def test_rotate_rolls_back_when_a_row_is_corrupt(
         self, tmp_path: pathlib.Path
     ) -> None:
         path = tmp_path / "t.sqlite3"
-        old = TokenStore(path, _ring(("k1", 1)))
+        old = make_store(path, _ring(("k1", 1)))
         old.initialize()
         _put(old, oid=OID_A)
         _put(old, oid=OID_B)
@@ -407,7 +412,7 @@ class TestRotation:
                 "UPDATE canvas_tokens SET ciphertext = X'00' WHERE object_id = ?",
                 (OID_B,),
             )
-        both = TokenStore(path, _ring(("k2", 2), ("k1", 1)))
+        both = make_store(path, _ring(("k2", 2), ("k1", 1)))
         with pytest.raises(TokenDecryptionError):
             both.rotate()
         with _raw(both) as conn:
@@ -442,7 +447,7 @@ class TestTouch:
     def test_touch_swallows_sqlite_errors(
         self, tmp_path: pathlib.Path, clock: Clock
     ) -> None:
-        s = TokenStore(tmp_path / "missing" / "t.sqlite3", _ring(("k1", 1)))
+        s = make_store(tmp_path / "missing" / "t.sqlite3", _ring(("k1", 1)))
         s.touch(TID, OID_A)  # directory and database do not exist
 
 
@@ -628,30 +633,31 @@ class TestHostTamper:
 
     def test_a_tampered_probe_row_is_a_keyring_error_at_open(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
-        s = TokenStore(path, _ring(("k1", 1)))
+        s = make_store(path, _ring(("k1", 1)))
         s.initialize()
         _put(s, canvas_host=HOST_A)
         with _raw(s) as conn:
             conn.execute("UPDATE canvas_tokens SET canvas_host = ?", (HOST_B,))
         with pytest.raises(KeyringError):
-            TokenStore(path, _ring(("k1", 1))).initialize()
+            make_store(path, _ring(("k1", 1))).initialize()
 
     def test_wrong_key_with_v2_rows_is_a_keyring_error(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
-        s = TokenStore(path, _ring(("k1", 1)))
+        s = make_store(path, _ring(("k1", 1)))
         s.initialize()
         _put(s, canvas_host=HOST_A)
-        TokenStore(path, _ring(("k1", 1))).initialize()
+        make_store(path, _ring(("k1", 1))).initialize()
         with pytest.raises(KeyringError):
-            TokenStore(path, _ring(("k1", 9))).initialize()
+            make_store(path, _ring(("k1", 9))).initialize()
 
 
 class TestMigration:
+    @pytest.mark.sqlite_only
     def test_version_1_database_is_migrated_in_place(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
         ring = _ring(("k1", 1))
         _make_v1_database(path, ring, OID_A, TOKEN_A)
-        s = TokenStore(path, ring, clock=lambda: 1_700_000_000)
+        s = make_store(path, ring, clock=lambda: 1_700_000_000)
         s.initialize()
         with _raw(s) as conn:
             assert conn.execute(
@@ -663,18 +669,22 @@ class TestMigration:
         assert got is not None and got.api_token == TOKEN_A and got.canvas_host is None
         assert s.info(TID, OID_A).canvas_host is None  # type: ignore[union-attr]
 
+    @pytest.mark.sqlite_only
+
     def test_migration_is_idempotent(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
         ring = _ring(("k1", 1))
         _make_v1_database(path, ring, OID_A, TOKEN_A)
         for _ in range(3):
-            TokenStore(path, ring).initialize()
-        s = TokenStore(path, ring)
+            make_store(path, ring).initialize()
+        s = make_store(path, ring)
         s.initialize()
         with _raw(s) as conn:
             columns = [r[1] for r in conn.execute("PRAGMA table_info(canvas_tokens)")]
         assert columns.count("canvas_host") == 1
         assert s.get(TID, OID_A).api_token == TOKEN_A  # type: ignore[union-attr]
+
+    @pytest.mark.sqlite_only
 
     def test_a_half_migrated_database_is_completed(self, tmp_path: pathlib.Path) -> None:
         """Column present but version still 1 (e.g. an interrupted manual step)."""
@@ -683,7 +693,7 @@ class TestMigration:
         _make_v1_database(path, ring, OID_A, TOKEN_A)
         with sqlite3.connect(str(path)) as conn:
             conn.execute("ALTER TABLE canvas_tokens ADD COLUMN canvas_host TEXT")
-        s = TokenStore(path, ring)
+        s = make_store(path, ring)
         s.initialize()
         assert s.get(TID, OID_A).api_token == TOKEN_A  # type: ignore[union-attr]
 
@@ -691,7 +701,7 @@ class TestMigration:
         path = tmp_path / "t.sqlite3"
         ring = _ring(("k1", 1))
         _make_v1_database(path, ring, OID_A, TOKEN_A)
-        s = TokenStore(path, ring)
+        s = make_store(path, ring)
         s.initialize()
         s.put(
             tenant_id=TID, object_id=OID_A, api_token=TOKEN_A, canvas_user_id="7",
@@ -715,22 +725,22 @@ class TestMigration:
 class TestMixedRotation:
     def test_rotation_keeps_hosts_and_both_aad_kinds(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
-        old = TokenStore(path, _ring(("k1", 1)))
+        old = make_store(path, _ring(("k1", 1)))
         old.initialize()
         _seal_v1(old, OID_A, TOKEN_A)
         _put(old, oid=OID_B, token=TOKEN_B, canvas_host=HOST_B)
-        both = TokenStore(path, _ring(("k2", 2), ("k1", 1)))
+        both = make_store(path, _ring(("k2", 2), ("k1", 1)))
         both.initialize()
         assert both.rotate() == 2
         assert both.rotate() == 0
-        only_new = TokenStore(path, _ring(("k2", 2)))
+        only_new = make_store(path, _ring(("k2", 2)))
         only_new.initialize()
         a = only_new.get(TID, OID_A)
         b = only_new.get(TID, OID_B)
         assert a is not None and (a.api_token, a.canvas_host, a.key_id) == (TOKEN_A, None, "k2")
         assert b is not None and (b.api_token, b.canvas_host, b.key_id) == (TOKEN_B, HOST_B, "k2")
         with pytest.raises(KeyringError):
-            TokenStore(path, _ring(("k1", 1))).initialize()
+            make_store(path, _ring(("k1", 1))).initialize()
 
 
 # -- principal keys, AAD v2 layout, status columns (identity-ready store) -------------------
@@ -919,13 +929,13 @@ class TestAadV2Binding:
 
     def test_a_tampered_principal_key_is_a_keyring_error_at_open(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
-        s = TokenStore(path, _ring(("k1", 1)))
+        s = make_store(path, _ring(("k1", 1)))
         s.initialize()
         _put(s, canvas_host=HOST_A)
         with _raw(s) as conn:
             conn.execute("UPDATE canvas_tokens SET principal_key = ?", (pk(OID_B),))
         with pytest.raises(KeyringError):
-            TokenStore(path, _ring(("k1", 1))).initialize()
+            make_store(path, _ring(("k1", 1))).initialize()
 
     def test_a_non_entra_principal_roundtrips_and_is_bound(self, store: TokenStore) -> None:
         _put_pk(store, "google:111", token=TOKEN_A)
@@ -956,6 +966,8 @@ class TestStatusColumns:
                 "SELECT status, invalid_reason, invalid_since, last_verified_at, expires_hint_at"
                 " FROM canvas_tokens"
             ).fetchone()
+
+    @pytest.mark.sqlite_only
 
     def test_a_new_database_has_every_column(self, store: TokenStore) -> None:
         columns = _columns(store._path)
@@ -988,11 +1000,12 @@ class TestStatusColumns:
 
 
 class TestPrincipalMigration:
+    @pytest.mark.sqlite_only
     def test_a_version_1_database_gets_keys_and_status_columns(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
         ring = _ring(("k1", 1))
         _make_v1_database(path, ring, OID_A, TOKEN_A)
-        s = TokenStore(path, ring)
+        s = make_store(path, ring)
         s.initialize()
         columns = _columns(path)
         for name in TestStatusColumns.NEW_COLUMNS:
@@ -1007,22 +1020,26 @@ class TestPrincipalMigration:
         assert got is not None and got.api_token == TOKEN_A and got.canvas_host is None
         assert s.get(TID, OID_A).api_token == TOKEN_A  # type: ignore[union-attr]
 
+    @pytest.mark.sqlite_only
+
     def test_a_migrated_database_has_the_same_columns_as_a_new_one(self, tmp_path: pathlib.Path) -> None:
         ring = _ring(("k1", 1))
         _make_v1_database(tmp_path / "old.sqlite3", ring, OID_A, TOKEN_A)
-        TokenStore(tmp_path / "old.sqlite3", ring).initialize()
-        TokenStore(tmp_path / "new.sqlite3", ring).initialize()
+        make_store(tmp_path / "old.sqlite3", ring).initialize()
+        make_store(tmp_path / "new.sqlite3", ring).initialize()
         assert sorted(_columns(tmp_path / "old.sqlite3")) == sorted(_columns(tmp_path / "new.sqlite3"))
+
+    @pytest.mark.sqlite_only
 
     def test_the_migration_is_idempotent(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
         ring = _ring(("k1", 1))
         _make_v1_database(path, ring, OID_A, TOKEN_A)
         for _ in range(3):
-            TokenStore(path, ring).initialize()
+            make_store(path, ring).initialize()
         columns = _columns(path)
         assert len(columns) == len(set(columns))
-        s = TokenStore(path, ring)
+        s = make_store(path, ring)
         s.initialize()
         assert s.count() == 1 and s.get(PK_A).api_token == TOKEN_A  # type: ignore[union-attr]
         with _raw(s) as conn:
@@ -1034,6 +1051,8 @@ class TestPrincipalMigration:
             ).fetchone()
         assert index is not None and "UNIQUE" in index[0]
 
+    @pytest.mark.sqlite_only
+
     def test_a_database_with_only_the_host_column_is_completed(self, tmp_path: pathlib.Path) -> None:
         """The shape the previous, unreleased schema left: host column, no principal key."""
         path = tmp_path / "t.sqlite3"
@@ -1042,10 +1061,12 @@ class TestPrincipalMigration:
         with sqlite3.connect(str(path)) as conn:
             conn.execute("ALTER TABLE canvas_tokens ADD COLUMN canvas_host TEXT")
             conn.execute("UPDATE meta SET value = '2'")
-        s = TokenStore(path, ring)
+        s = make_store(path, ring)
         s.initialize()
         assert s.get(PK_A).api_token == TOKEN_A  # type: ignore[union-attr]
         assert "principal_key" in _columns(path)
+
+    @pytest.mark.sqlite_only
 
     def test_every_existing_row_is_backfilled_and_stays_unique(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
@@ -1058,17 +1079,19 @@ class TestPrincipalMigration:
                 "INSERT INTO canvas_tokens VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)",
                 (TID, OID_B, kid, nonce, ct, "8", "Other", "O", "o@example.test", 2, 2),
             )
-        s = TokenStore(path, ring)
+        s = make_store(path, ring)
         s.initialize()
         assert sorted(r.principal_key for r in s.list_enrollments()) == sorted([PK_A, PK_B])
         with _raw(s) as conn, pytest.raises(sqlite3.IntegrityError):
             conn.execute("UPDATE canvas_tokens SET principal_key = ?", (PK_A,))
 
+    @pytest.mark.sqlite_only
+
     def test_saving_reseals_a_legacy_row_as_v2_under_its_principal(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
         ring = _ring(("k1", 1))
         _make_v1_database(path, ring, OID_A, TOKEN_A)
-        s = TokenStore(path, ring)
+        s = make_store(path, ring)
         s.initialize()
         before = s.get(PK_A)
         assert before is not None and before.canvas_host is None
@@ -1084,15 +1107,15 @@ class TestPrincipalMigration:
 
     def test_rotation_keeps_v1_and_v2_rows_and_a_non_entra_row(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
-        old = TokenStore(path, _ring(("k1", 1)))
+        old = make_store(path, _ring(("k1", 1)))
         old.initialize()
         _seal_v1(old, OID_A, TOKEN_A)
         _put(old, oid=OID_B, token=TOKEN_B, canvas_host=HOST_B)
         _put_pk(old, "google:777", token="G" * 30)
-        both = TokenStore(path, _ring(("k2", 2), ("k1", 1)))
+        both = make_store(path, _ring(("k2", 2), ("k1", 1)))
         both.initialize()
         assert both.rotate() == 3
-        only_new = TokenStore(path, _ring(("k2", 2)))
+        only_new = make_store(path, _ring(("k2", 2)))
         only_new.initialize()
         assert only_new.get(PK_A).api_token == TOKEN_A  # type: ignore[union-attr]
         assert only_new.get(PK_A).canvas_host is None  # type: ignore[union-attr]

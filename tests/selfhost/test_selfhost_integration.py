@@ -19,6 +19,8 @@ from starlette.testclient import TestClient
 pytest.importorskip("canvas_mcp.core.selfhost.token_store")
 pytest.importorskip("canvas_mcp.core.selfhost.account_web")
 
+from dbbackend import raw_connection, stack_env
+
 from canvas_mcp.core.selfhost.app import (  # noqa: E402
     build_selfhost_asgi_app,
     install_selfhost,
@@ -81,6 +83,7 @@ def stack(
         "FASTMCP_HOME": str(tmp_path / "fastmcp"),
         "SELFHOST_DATA_DIR": str(tmp_path / "data"),
         "SELFHOST_COURSE_STATE": request.param,
+        **stack_env(),
     })
     runtime = prepare_selfhost(settings)
     for oid, token in CANVAS_TOKEN.items():
@@ -177,9 +180,7 @@ class TestEnrollment:
         assert f"{BASE}/account" in text_of(result)
 
     def test_an_unreadable_stored_token_gets_the_enroll_again_message(self, stack):
-        import sqlite3
-
-        with sqlite3.connect(stack.runtime.settings.token_db_path) as conn:
+        with raw_connection(stack.runtime.store) as conn:
             conn.execute("UPDATE canvas_tokens SET ciphertext = ? WHERE object_id = ?", (b"x" * 40, OID_A))
         result = call_tool(stack, "bearer-A", "list_courses")
         assert result["isError"] is True

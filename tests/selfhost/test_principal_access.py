@@ -13,6 +13,7 @@ import pathlib
 from typing import Any
 
 import pytest
+from dbbackend import make_store as backend_store
 from fastmcp import Client, FastMCP
 
 from canvas_mcp.core.credentials import (
@@ -85,7 +86,7 @@ class CountingSource:
 
 def make_store(tmp_path: pathlib.Path, name: str = "t.sqlite3") -> TokenStore:
     ring = Keyring.parse("k1:" + base64.b64encode(b"\x01" * 32).decode())
-    store = TokenStore(tmp_path / name, ring, clock=lambda: 1_800_000_000)
+    store = backend_store(tmp_path / name, ring, clock=lambda: 1_800_000_000)
     store.initialize()
     return store
 

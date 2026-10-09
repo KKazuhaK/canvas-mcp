@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import base64
 import pathlib
-import sqlite3
 import threading
 from dataclasses import replace
 
 import pytest
+from dbbackend import make_store, raw_connection
 
 from canvas_mcp.core.selfhost.token_store import (
     DISABLE_REASON_ADMIN,
@@ -59,7 +59,7 @@ def clock() -> Clock:
 
 @pytest.fixture
 def store(tmp_path: pathlib.Path, clock: Clock) -> TokenStore:
-    s = TokenStore(tmp_path / "data" / "tokens.sqlite3", make_ring(), clock=clock)
+    s = make_store(tmp_path / "data" / "tokens.sqlite3", make_ring(), clock=clock)
     s.initialize()
     return s
 
@@ -274,7 +274,7 @@ class TestLastOwner:
         self, tmp_path: pathlib.Path
     ) -> None:
         for round_ in range(15):
-            s = TokenStore(tmp_path / f"r{round_}.sqlite3", make_ring())
+            s = make_store(tmp_path / f"r{round_}.sqlite3", make_ring())
             s.initialize()
             make_owner(s, OWNER_1)
             make_owner(s, OWNER_2)
@@ -397,31 +397,33 @@ class TestHistory:
 class TestRestartAndMigration:
     def test_the_decision_survives_a_restart(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
-        first = TokenStore(path, make_ring())
+        first = make_store(path, make_ring())
         first.initialize()
         enroll(first)
         first.disable_principal(USER, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)
-        second = TokenStore(path, make_ring())
+        second = make_store(path, make_ring())
         second.initialize()
         st = second.get_principal_status(USER)
         assert st.disabled and st.session_epoch == 1
         with pytest.raises(PrincipalDisabledError):
             enroll(second)
 
+    @pytest.mark.sqlite_only
+
     def test_opening_a_version_2_database_adds_the_tables_and_keeps_the_rows(
         self, tmp_path: pathlib.Path
     ) -> None:
         path = tmp_path / "t.sqlite3"
-        first = TokenStore(path, make_ring())
+        first = make_store(path, make_ring())
         first.initialize()
         enroll(first)
-        with sqlite3.connect(path) as conn:
+        with raw_connection(first) as conn:
             conn.execute("DROP TABLE principal_status")
             conn.execute("DROP TABLE principal_status_events")
             conn.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
-        migrated = TokenStore(path, make_ring())
+        migrated = make_store(path, make_ring())
         migrated.initialize()
-        with sqlite3.connect(path) as conn:
+        with raw_connection(migrated) as conn:
             version = conn.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()[0]
@@ -435,19 +437,20 @@ class TestRestartAndMigration:
 
     def test_the_migration_is_idempotent(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
-        s = TokenStore(path, make_ring())
+        s = make_store(path, make_ring())
         s.initialize()
         s.disable_principal(USER, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)
         for _ in range(3):
-            TokenStore(path, make_ring()).initialize()
-        assert TokenStore(path, make_ring()).get_principal_status(USER).session_epoch == 1
+            make_store(path, make_ring()).initialize()
+        assert make_store(path, make_ring()).get_principal_status(USER).session_epoch == 1
 
     def test_an_older_server_refuses_the_new_database(self, tmp_path: pathlib.Path) -> None:
         # The reason for the version bump: a version 2 server would ignore the
         # tables and serve a disabled user. It must refuse the file instead.
         path = tmp_path / "t.sqlite3"
-        TokenStore(path, make_ring()).initialize()
-        with sqlite3.connect(path) as conn:
+        older = make_store(path, make_ring())
+        older.initialize()
+        with raw_connection(older) as conn:
             version = int(
                 conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
             )
@@ -459,7 +462,7 @@ class TestConcurrentEnrollmentAndDisable:
         self, tmp_path: pathlib.Path
     ) -> None:
         for round_ in range(20):
-            s = TokenStore(tmp_path / f"race{round_}.sqlite3", make_ring())
+            s = make_store(tmp_path / f"race{round_}.sqlite3", make_ring())
             s.initialize()
             barrier = threading.Barrier(2)
             saved: list[bool] = []

@@ -33,6 +33,7 @@ import httpx
 import httpx2
 import pytest
 import respx
+from dbbackend import raw_connection, stack_env
 from fastmcp import FastMCP
 from joserfc import jwt
 from joserfc.jwk import RSAKey
@@ -459,6 +460,7 @@ def world(
         "FASTMCP_HOME": str(tmp_path / "fastmcp"),
         "SELFHOST_DATA_DIR": str(tmp_path / "data"),
         "SELFHOST_COURSE_STATE": request.param,
+        **stack_env(),
     })
     runtime = prepare_selfhost(settings)
     config: Any = SimpleNamespace(canvas_api_url=f"{CANVAS}/api/v1")
@@ -533,7 +535,15 @@ class TestEnrollmentThroughAccount:
         assert stored_a is not None and stored_a.api_token == USER_A.canvas_token
         assert stored_b is not None and stored_b.api_token == USER_B.canvas_token
         assert store.count() == 2
-        raw = world.runtime.settings.token_db_path.read_bytes()
+        if world.runtime.settings.database_target.kind == "sqlite":
+            raw = world.runtime.settings.token_db_path.read_bytes()
+        else:
+            with raw_connection(store) as conn:
+                raw = b"".join(
+                    bytes(value)
+                    for row in conn.execute("SELECT nonce, ciphertext FROM canvas_tokens")
+                    for value in row
+                )
         assert USER_A.canvas_token.encode() not in raw and USER_B.canvas_token.encode() not in raw
         # The token was checked against the pinned Canvas with the user's own token.
         assert world.canvas.calls_with("/api/v1/users/self") == [USER_A.canvas_token, USER_B.canvas_token]

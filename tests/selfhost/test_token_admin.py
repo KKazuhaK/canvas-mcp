@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 import pytest
+from dbbackend import IS_POSTGRES, make_store, raw_connection, stack_env
 
 from canvas_mcp.core.selfhost import token_admin
 from canvas_mcp.core.selfhost.token_store import Keyring, TokenStore, token_db_path
@@ -32,11 +33,13 @@ KEY2 = _k(2)
 def env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
     monkeypatch.setenv("SELFHOST_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("CANVAS_TOKEN_KEYS", f"k1:{KEY1}")
+    for name, value in stack_env().items():
+        monkeypatch.setenv(name, value)
     return tmp_path
 
 
 def _seed(data_dir: pathlib.Path, keys: str = f"k1:{KEY1}") -> TokenStore:
-    store = TokenStore(token_db_path(data_dir), Keyring.parse(keys), clock=lambda: 1_800_000_000)
+    store = make_store(token_db_path(data_dir), Keyring.parse(keys), clock=lambda: 1_800_000_000, public=True)
     store.initialize()
     store.put(
         tenant_id=TID, object_id=OID_A, api_token=TOKEN_A, canvas_user_id="1",
@@ -60,7 +63,8 @@ def test_check_on_empty_store_creates_it(env, capsys) -> None:
     assert token_admin.main(["check"]) == 0
     out = capsys.readouterr().out
     assert "rows: 0" in out and "(none)" in out
-    assert token_db_path(env).exists()
+    if not IS_POSTGRES:  # the SQLite file is created; PostgreSQL has no file
+        assert token_db_path(env).exists()
 
 
 def test_check_reports_rows_and_key_ids(env, capsys) -> None:
@@ -150,6 +154,7 @@ def test_bad_or_missing_keys_exit_2_without_echoing_them(env, monkeypatch, capsy
         assert value not in captured.err and value not in captured.out
 
 
+@pytest.mark.sqlite_only
 def test_unwritable_data_dir_is_a_config_error(
     env, tmp_path, monkeypatch, capsys
 ) -> None:
@@ -161,10 +166,8 @@ def test_unwritable_data_dir_is_a_config_error(
 
 
 def test_corrupt_row_in_rotate_is_exit_2(env, monkeypatch, capsys) -> None:
-    import sqlite3
-
     store = _seed(env)
-    with sqlite3.connect(str(store._path)) as conn:
+    with raw_connection(store) as conn:
         conn.execute("UPDATE canvas_tokens SET ciphertext = X'00' WHERE object_id = ?", (OID_B,))
     monkeypatch.setenv("CANVAS_TOKEN_KEYS", f"k2:{KEY2},k1:{KEY1}")
     # initialize() only probe-decrypts one row per key; make the probe row good.
@@ -235,6 +238,9 @@ def test_rotate_with_mixed_rows_keeps_working(env, monkeypatch, capsys) -> None:
     assert token_admin.main(["list"]) == 0
     out = capsys.readouterr().out
     assert "canvas.school-b.edu" in out
+
+
+@pytest.mark.sqlite_only
 
 
 def test_a_version_1_database_is_migrated_by_the_cli_and_stays_manageable(env, monkeypatch, capsys) -> None:

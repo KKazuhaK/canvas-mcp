@@ -13,12 +13,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import pathlib
-import sqlite3
 import threading
 from typing import Any
 
 import httpx
 import pytest
+from dbbackend import make_store as backend_store
+from dbbackend import raw_connection
 from fastmcp import Client, FastMCP
 from fastmcp.server.auth import AccessToken
 
@@ -83,7 +84,7 @@ API_URL = f"https://{HOST}/api/v1"
 
 def make_store(tmp_path: pathlib.Path, name: str = "t.sqlite3") -> TokenStore:
     ring = Keyring.parse("k1:" + base64.b64encode(b"\x01" * 32).decode())
-    store = TokenStore(tmp_path / name, ring, clock=lambda: 1_800_000_000)
+    store = backend_store(tmp_path / name, ring, clock=lambda: 1_800_000_000)
     store.initialize()
     return store
 
@@ -228,16 +229,17 @@ class TestStoreGenerations:
 
 
 class TestMigration:
+    @pytest.mark.sqlite_only
     def test_a_version_3_database_gains_the_table_and_starts_at_zero(
         self, tmp_path: pathlib.Path
     ) -> None:
         store = make_store(tmp_path)
         put(store)
-        with sqlite3.connect(tmp_path / "t.sqlite3") as conn:
+        with raw_connection(store) as conn:
             conn.execute("DROP TABLE credential_generations")
             conn.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
         migrated = make_store(tmp_path)
-        with sqlite3.connect(tmp_path / "t.sqlite3") as conn:
+        with raw_connection(migrated) as conn:
             version = conn.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()[0]
@@ -250,8 +252,7 @@ class TestMigration:
 
     def test_an_older_server_refuses_the_new_database(self, tmp_path: pathlib.Path) -> None:
         # A version 3 server would save tokens without raising any generation.
-        make_store(tmp_path)
-        with sqlite3.connect(tmp_path / "t.sqlite3") as conn:
+        with raw_connection(make_store(tmp_path)) as conn:
             version = int(conn.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()[0])
@@ -647,7 +648,7 @@ class TestTokenHealthVerdicts:
     ) -> None:
         clock = [1_800_000_000]
         ring = Keyring.parse("k1:" + base64.b64encode(b"\x01" * 32).decode())
-        store = TokenStore(tmp_path / "c.sqlite3", ring, clock=lambda: clock[0])
+        store = backend_store(tmp_path / "c.sqlite3", ring, clock=lambda: clock[0])
         store.initialize()
         put(store)
         put(store, TOKEN_2, user="2")

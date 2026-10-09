@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import pathlib
 import re
-import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 import pytest
+from dbbackend import raw_connection
 
 from canvas_mcp.core import audit
 from canvas_mcp.core.selfhost.account_web import (
@@ -327,7 +327,7 @@ class TestRecheck:
     ) -> None:
         seed(h)
         h.store.mark_invalid(KEY, reason=REASON_DECRYPT_FAILED)
-        with sqlite3.connect(str(h.store._path)) as conn:
+        with raw_connection(h.store) as conn:
             conn.execute("UPDATE canvas_tokens SET ciphertext = ?", (b"x" * 40,))
         sign_in(h)
         response = post_form(h, RECHECK, {"csrf": csrf_of(h)})
