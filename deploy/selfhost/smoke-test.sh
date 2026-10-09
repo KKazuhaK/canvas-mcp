@@ -304,6 +304,22 @@ code="$(curl -s -o "$WORKDIR/deep.html" -w '%{http_code}' "${BASE}/account/token
 cmp -s "$WORKDIR/spa.html" "$WORKDIR/deep.html" || fail "deep link did not return the index"
 ok "a deep link returns the index"
 
+# A failed sign-in lands on the app's own sign-in page (a client-side route), which the
+# server answers with the index too; the error code in the query is for the app alone.
+code="$(curl -s -o "$WORKDIR/signin.html" -w '%{http_code}' "${BASE}/account/sign-in?error=provider_error")"
+[ "$code" = "200" ] || fail "/account/sign-in returned ${code}, expected 200"
+cmp -s "$WORKDIR/spa.html" "$WORKDIR/signin.html" || fail "/account/sign-in did not return the index"
+ok "/account/sign-in returns the index"
+
+# The sign-in itself stays a server-side redirect: /account/login is not the app's.
+code="$(curl -s -o /dev/null -D "$WORKDIR/login.headers" -w '%{http_code}' "${BASE}/account/login?return_to=%2Faccount%2Ftoken")"
+[ "$code" = "302" ] || fail "GET /account/login returned ${code}, expected 302"
+tr -d '\r' <"$WORKDIR/login.headers" | grep -i '^location:' | grep -q '/oauth2/v2.0/authorize' \
+  || fail "/account/login did not redirect to the identity provider"
+grep -i '^set-cookie:' "$WORKDIR/login.headers" | grep -qi 'HttpOnly' \
+  || fail "/account/login did not set the sealed HttpOnly login cookie"
+ok "/account/login still redirects to the identity provider"
+
 code="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}/account/api/providers")"
 [ "$code" = "200" ] || fail "GET /account/api/providers returned ${code}, expected 200"
 code="$(curl -s -o "$WORKDIR/me.json" -D "$WORKDIR/me.headers" -w '%{http_code}' "${BASE}/account/api/me")"
