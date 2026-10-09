@@ -14,6 +14,8 @@ from .client import fetch_all_paginated_results, make_canvas_request
 from .credentials import (
     current_principal_key,
     get_request_course_labels,
+    register_credential_purge_listener,
+    request_credential_is_stale,
     uses_request_local_course_state,
 )
 from .logging import log_error, log_info
@@ -66,9 +68,16 @@ def current_cache_state() -> CourseCacheState:
     and Easy Auth modes) gets a throwaway state that is never registered:
     its course metadata must not outlive the request, so nothing written to
     it can be read by a later request. Only stdio (``"local"``) and the
-    self-hosted ``entra-oauth`` principals have a registered, persistent one.
+    self-hosted ``entra-oauth`` principals have a registered, persistent one,
+    keyed by the principal, the school and the credential generation (see
+    ``current_principal_key``): replacing or removing the Canvas token starts an
+    empty cache. A request that is still running on a token that has since been
+    replaced (a stale generation) gets a throwaway state too, so it can neither
+    read nor write what the new token's requests share.
     """
     if uses_request_local_course_state():
+        return CourseCacheState()
+    if request_credential_is_stale():
         return CourseCacheState()
     return _registered_state(current_principal_key())
 
@@ -112,6 +121,13 @@ def reset_course_cache(principal_key: str | None = None) -> None:
     prefix = principal_key + "|"
     for key in [k for k in _STATES if k.startswith(prefix)]:
         del _STATES[key]
+
+
+# When a principal's credential generation rises (token replaced, removed, found
+# dead, principal disabled or enabled) every cache it has, in any school or
+# generation, is dropped. Correctness does not depend on this (the generation is
+# part of the key); it only frees the memory and ends the old caches' lives.
+register_credential_purge_listener(reset_course_cache)
 
 
 def remember_course_code(course_id: str, course_code: str) -> None:
@@ -181,11 +197,21 @@ sys.modules[__name__].__class__ = _LegacyCacheNames
 
 
 async def refresh_course_cache() -> bool:
-    """Refresh the current caller's course cache."""
+    """Refresh the current caller's course cache.
+
+    In the self-hosted mode the refresh runs under one credential generation.
+    If the Canvas token is replaced (or removed, or found dead) while it is
+    reading, the result belongs to the old credential and is discarded: it is
+    not published, and the call reports failure.
+    """
     state = current_cache_state()
 
     log_info("Refreshing course cache")
     courses = await fetch_all_paginated_results("/courses", {"per_page": 100})
+
+    if request_credential_is_stale():
+        log_info("Discarding course list read under a superseded Canvas credential")
+        return False
 
     if isinstance(courses, dict) and "error" in courses:
         log_error("Error building course cache", error=courses.get("error"))

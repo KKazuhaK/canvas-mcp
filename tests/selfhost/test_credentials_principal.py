@@ -59,7 +59,7 @@ class TestPrincipalKey:
         principal = make_principal(OID_A)
         set_request_principal(principal)
         _use_token("some-canvas-token-1234567890")
-        assert current_principal_key() == principal.key + "|https://canvas.example.test/api/v1"
+        assert current_principal_key() == principal.key + "|https://canvas.example.test/api/v1|g0"
         assert "some-canvas-token" not in current_principal_key()
 
     def test_the_same_principal_at_two_schools_has_two_keys(self):

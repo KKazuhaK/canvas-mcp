@@ -120,11 +120,14 @@ class ConfirmationGuard:
         Hosted deployments pass a per-user Canvas token on every request; in
         stdio mode there is a single user and the constant is fine. With a
         verified identity (the self-hosted Entra mode) the handle is bound to
-        that identity and the Canvas school instead of the token, so
-        re-enrolling a Canvas token at the same school does not void a pending
-        preview, one user's preview cannot be redeemed by another, and a
-        preview made at one school cannot be redeemed after switching to
-        another.
+        that identity, the Canvas school and the *credential generation* (see
+        ``current_principal_key``). The generation is raised whenever the stored
+        Canvas credential is saved, replaced, removed, found dead or restored, or
+        the user is disabled or enabled. So a pending preview does not survive
+        re-enrolling a token, even at the same school and even if the new token
+        is for another Canvas account or has fewer permissions; one user's
+        preview cannot be redeemed by another; and a preview made at one school
+        cannot be redeemed after switching to another. The user previews again.
         """
         principal = get_request_principal()
         if principal is not None:
@@ -222,9 +225,10 @@ class ConfirmationGuard:
                 self._burned.add(nonce)
             return (
                 "❌ This confirmation does not match. Either the request changed "
-                "since the preview, or the preview was handled by a different "
-                f"server process. {self.nothing_done} Preview again and confirm "
-                "the new token."
+                "since the preview, your Canvas connection changed since the "
+                "preview (a token was replaced or removed), or the preview was "
+                f"handled by a different server process. {self.nothing_done} "
+                "Preview again and confirm the new token."
             )
         if expiry < now:
             return "❌ That confirmation expired. Run the preview again."

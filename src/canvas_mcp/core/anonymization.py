@@ -20,7 +20,7 @@ import re
 from collections import OrderedDict
 from typing import Any
 
-from .credentials import current_principal_key
+from .credentials import current_principal_key, register_credential_purge_listener
 
 # Pseudonym cache, one dict per principal (keyed by current_principal_key())
 # and each keyed by (prefix, real_id). Per principal so that one user's count
@@ -575,3 +575,13 @@ def get_anonymization_stats() -> dict[str, Any]:
 def clear_anonymization_cache() -> None:
     """Clear the current principal's anonymization cache (use when switching courses/contexts)."""
     _anonymization_cache.pop(current_principal_key(), None)
+
+
+def _forget_principal_pseudonyms(principal_key: str) -> None:
+    """Drop the pseudonym maps of one principal (every school and credential generation)."""
+    prefix = principal_key + "|"
+    for key in [k for k in list(_anonymization_cache) if k == principal_key or k.startswith(prefix)]:
+        _anonymization_cache.pop(key, None)
+
+
+register_credential_purge_listener(_forget_principal_pseudonyms)

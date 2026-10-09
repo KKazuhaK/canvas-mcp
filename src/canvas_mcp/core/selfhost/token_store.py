@@ -91,7 +91,9 @@ from typing import Any, Literal
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-SCHEMA_VERSION = 3
+from ..credentials import note_credential_generation
+
+SCHEMA_VERSION = 4
 
 STATUS_ACTIVE = "active"
 STATUS_INVALID = "invalid"
@@ -127,6 +129,14 @@ class _Operator:
 #: Pass as ``actor`` for a change made through the operator CLI.
 OPERATOR = _Operator()
 Actor = str | _Operator
+
+# Why a credential generation was raised: a closed set, stored in ``reason``.
+GENERATION_ENROLLED = "enrolled"
+GENERATION_REMOVED = "removed"
+GENERATION_INVALIDATED = "invalidated"
+GENERATION_RESTORED = "restored"
+GENERATION_DISABLED = "disabled"
+GENERATION_ENABLED = "enabled"
 
 EVENT_DISABLED = "disabled"
 EVENT_ENABLED = "enabled"
@@ -219,6 +229,20 @@ _SCHEMA_STATUS_EVENTS_INDEX = (
     "CREATE INDEX IF NOT EXISTS principal_status_events_principal"
     " ON principal_status_events (principal_key, id)"
 )
+_SCHEMA_CREDENTIAL_GENERATIONS = (
+    "CREATE TABLE IF NOT EXISTS credential_generations ("
+    " principal_key TEXT PRIMARY KEY,"
+    " generation INTEGER NOT NULL,"
+    " reason TEXT NOT NULL DEFAULT '',"
+    " updated_at INTEGER NOT NULL"
+    ") WITHOUT ROWID"
+)
+# The generation of the credential that belongs to ``canvas_tokens.principal_key``,
+# read in the same statement as the row so a token and its generation always match.
+_GENERATION_OF_TOKEN_ROW = (
+    "COALESCE((SELECT g.generation FROM credential_generations g"
+    " WHERE g.principal_key = canvas_tokens.principal_key), 0)"
+)
 _PRINCIPAL_STATUS_COLUMNS = (
     "principal_key, status, disabled_reason, disabled_at, disabled_by,"
     " display_name, upn, session_epoch, is_owner, owner_seen_at, updated_at"
@@ -243,7 +267,7 @@ _INFO_COLUMNS = (
     "tenant_id, object_id, canvas_user_id, canvas_user_name, entra_display_name,"
     " entra_upn, key_id, created_at, updated_at, last_used_at, canvas_host,"
     " principal_key, status, invalid_reason, invalid_since, last_verified_at,"
-    " expires_hint_at"
+    " expires_hint_at, " + _GENERATION_OF_TOKEN_ROW
 )
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _MAX_PREF_TOOLS = 256
@@ -276,6 +300,7 @@ class TokenDecryptionError(TokenStoreError):
     """
 
     updated_at: int | None = None
+    credential_generation: int | None = None
 
 
 class PrincipalDisabledError(TokenStoreError):
@@ -316,6 +341,10 @@ class StoredToken:
     invalid_since: int | None = None
     last_verified_at: int | None = None
     expires_hint_at: int | None = None
+    # Raised every time this principal's credential lifecycle changes (token
+    # saved or replaced, removed, found dead, restored, principal disabled or
+    # enabled). Read in the same statement as the row, so it describes this token.
+    credential_generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -339,6 +368,7 @@ class EnrollmentInfo:
     invalid_since: int | None = None
     last_verified_at: int | None = None
     expires_hint_at: int | None = None
+    credential_generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -381,6 +411,9 @@ class PrincipalStatus:
     owner_seen_at: int | None = None
     updated_at: int = 0
     stored: bool = False
+    # The newest credential generation of the principal (0 until the credential
+    # has changed once). Read with the status, in one snapshot.
+    credential_generation: int = 0
     # Set only on the value returned by ``record_sign_in`` when that call changed the
     # owner flag: ``EVENT_OWNER_GAINED`` or ``EVENT_OWNER_LOST``. Not stored.
     owner_change: str | None = None
@@ -710,6 +743,7 @@ def _info_from_row(row: tuple[Any, ...]) -> EnrollmentInfo:
         invalid_since=row[14],
         last_verified_at=row[15],
         expires_hint_at=row[16],
+        credential_generation=int(row[17]),
     )
 
 
@@ -820,6 +854,7 @@ class TokenStore:
         conn.execute(_SCHEMA_PRINCIPAL_STATUS)
         conn.execute(_SCHEMA_STATUS_EVENTS)
         conn.execute(_SCHEMA_STATUS_EVENTS_INDEX)
+        conn.execute(_SCHEMA_CREDENTIAL_GENERATIONS)
 
     @staticmethod
     def _migrate_columns(conn: sqlite3.Connection) -> None:
@@ -888,7 +923,7 @@ class TokenStore:
                 " canvas_user_name, entra_display_name, entra_upn,"
                 " created_at, updated_at, last_used_at, canvas_host,"
                 " tenant_id, object_id, status, invalid_reason, invalid_since,"
-                " last_verified_at, expires_hint_at"
+                " last_verified_at, expires_hint_at, " + _GENERATION_OF_TOKEN_ROW +
                 " FROM canvas_tokens WHERE principal_key = ?",
                 (key,),
             ).fetchone()
@@ -909,6 +944,7 @@ class TokenStore:
                 raise TokenDecryptionError("stored token could not be decrypted") from None
         except TokenDecryptionError as exc:
             exc.updated_at = row[8] if isinstance(row[8], int) else None
+            exc.credential_generation = int(row[18])
             raise
         return StoredToken(
             tenant_id=row[11],
@@ -929,6 +965,7 @@ class TokenStore:
             invalid_since=row[15],
             last_verified_at=row[16],
             expires_hint_at=row[17],
+            credential_generation=int(row[18]),
         )
 
     def info(self, principal_key: str, object_id: str | None = None) -> EnrollmentInfo | None:
@@ -976,7 +1013,8 @@ class TokenStore:
         belongs to (None only for the legacy single-school layout, which needs an
         ``entra:`` principal); it is bound into the encryption together with the
         principal. Saving marks the row ``active`` and verified now, and clears any
-        invalid reason. ``expires_hint_at`` is the optional expiry date the user
+        invalid reason, and raises the principal's credential generation.
+        ``expires_hint_at`` is the optional expiry date the user
         gave for the token (epoch seconds, used only for a reminder): an integer
         sets it, ``None`` clears it, and leaving it out keeps the stored value (the
         account page always passes it, so replacing a token replaces the hint).
@@ -1061,10 +1099,14 @@ class TokenStore:
                     1 if keep_hint else 0,
                 ),
             )
+            # Saving a token is always a new credential lifecycle, even for the
+            # same token text: state learned under the old one is not reused.
+            generation = self._bump_generation(conn, key, GENERATION_ENROLLED, now)
             row = conn.execute(
                 f"SELECT {_INFO_COLUMNS} FROM canvas_tokens WHERE principal_key = ?",
                 (key,),
             ).fetchone()
+        self._publish_generation(key, generation)
         return _info_from_row(row)
 
     def delete(self, principal_key: str, object_id: str | None = None) -> bool:
@@ -1072,14 +1114,24 @@ class TokenStore:
 
         This is housekeeping or a self-disconnect, never an authorization decision:
         it does not touch ``principal_status``, so a disabled principal stays
-        disabled and an active one may enroll again.
+        disabled and an active one may enroll again. It does raise the credential
+        generation, so nothing remembered for the deleted token is served for a
+        later one.
         """
         key = _resolve_principal(principal_key, object_id)
+        generation: int | None = None
         with self._write() as conn:
             cur = conn.execute(
                 "DELETE FROM canvas_tokens WHERE principal_key = ?", (key,)
             )
-            return cur.rowcount > 0
+            removed = cur.rowcount > 0
+            if removed:
+                # The generation outlives the row: a token enrolled afterwards
+                # is a later one, never a reuse of the deleted one's number.
+                generation = self._bump_generation(conn, key, GENERATION_REMOVED, self._now())
+        if generation is not None:
+            self._publish_generation(key, generation)
+        return removed
 
     def touch(
         self,
@@ -1109,13 +1161,16 @@ class TokenStore:
         *,
         reason: str,
         expected_updated_at: int | None = None,
+        expected_generation: int | None = None,
     ) -> bool:
         """Mark an active row invalid; True only if this call changed it.
 
         An already invalid row is left as it is (the first reason wins). With
         ``expected_updated_at`` the row is changed only if it still has that
-        ``updated_at``, so a token that Canvas rejected cannot invalidate the
-        replacement the user enrolled in the meantime.
+        ``updated_at``, and with ``expected_generation`` only if the credential
+        generation is still that one, so a token that Canvas rejected cannot
+        invalidate the replacement the user enrolled in the meantime (the
+        generation also catches a replacement within the same second).
         """
         if reason not in INVALID_REASONS:
             raise ValueError("unknown invalid reason")
@@ -1124,12 +1179,22 @@ class TokenStore:
             "UPDATE canvas_tokens SET status = ?, invalid_reason = ?, invalid_since = ?"
             " WHERE principal_key = ? AND status = ?"
         )
-        args: list[Any] = [STATUS_INVALID, reason, self._now(), key, STATUS_ACTIVE]
+        now = self._now()
+        args: list[Any] = [STATUS_INVALID, reason, now, key, STATUS_ACTIVE]
         if expected_updated_at is not None:
             sql += " AND updated_at = ?"
             args.append(expected_updated_at)
+        if expected_generation is not None:
+            sql += " AND " + _GENERATION_OF_TOKEN_ROW + " = ?"
+            args.append(expected_generation)
+        generation: int | None = None
         with self._write() as conn:
-            return conn.execute(sql, args).rowcount > 0
+            changed = conn.execute(sql, args).rowcount > 0
+            if changed:
+                generation = self._bump_generation(conn, key, GENERATION_INVALIDATED, now)
+        if generation is not None:
+            self._publish_generation(key, generation)
+        return changed
 
     def restore_active(
         self,
@@ -1137,11 +1202,12 @@ class TokenStore:
         object_id: str | None = None,
         *,
         expected_updated_at: int | None = None,
+        expected_generation: int | None = None,
     ) -> bool:
         """Mark an invalid row active again after a successful check; True if changed.
 
-        The stored token is untouched. ``expected_updated_at`` works as in
-        :meth:`mark_invalid`.
+        The stored token is untouched. ``expected_updated_at`` and
+        ``expected_generation`` work as in :meth:`mark_invalid`.
         """
         key = _resolve_principal(principal_key, object_id)
         now = self._now()
@@ -1154,8 +1220,17 @@ class TokenStore:
         if expected_updated_at is not None:
             sql += " AND updated_at = ?"
             args.append(expected_updated_at)
+        if expected_generation is not None:
+            sql += " AND " + _GENERATION_OF_TOKEN_ROW + " = ?"
+            args.append(expected_generation)
+        generation: int | None = None
         with self._write() as conn:
-            return conn.execute(sql, args).rowcount > 0
+            changed = conn.execute(sql, args).rowcount > 0
+            if changed:
+                generation = self._bump_generation(conn, key, GENERATION_RESTORED, now)
+        if generation is not None:
+            self._publish_generation(key, generation)
+        return changed
 
     def mark_verified(
         self,
@@ -1163,23 +1238,69 @@ class TokenStore:
         object_id: str | None = None,
         *,
         min_interval_seconds: int = 600,
+        expected_generation: int | None = None,
     ) -> None:
         """Record a successful Canvas call on an active row, at most once per interval.
 
-        Never raises, and never touches an invalid row.
+        Never raises, and never touches an invalid row. With ``expected_generation``
+        the success is recorded only while that is still the credential generation:
+        a call made with a token that was replaced meanwhile says nothing about the
+        replacement.
         """
         try:
             key = _resolve_principal(principal_key, object_id)
             now = self._now()
+            sql = (
+                "UPDATE canvas_tokens SET last_verified_at = ?"
+                " WHERE principal_key = ? AND status = ?"
+                " AND (last_verified_at IS NULL OR last_verified_at < ?)"
+            )
+            args: list[Any] = [now, key, STATUS_ACTIVE, now - max(0, min_interval_seconds)]
+            if expected_generation is not None:
+                sql += " AND " + _GENERATION_OF_TOKEN_ROW + " = ?"
+                args.append(expected_generation)
             with self._connection() as conn:
-                conn.execute(
-                    "UPDATE canvas_tokens SET last_verified_at = ?"
-                    " WHERE principal_key = ? AND status = ?"
-                    " AND (last_verified_at IS NULL OR last_verified_at < ?)",
-                    (now, key, STATUS_ACTIVE, now - max(0, min_interval_seconds)),
-                )
+                conn.execute(sql, args)
         except (sqlite3.Error, ValueError, OSError):
             return
+
+    # -- credential generation --------------------------------------------------
+
+    @staticmethod
+    def _bump_generation(conn: sqlite3.Connection, key: str, reason: str, now: int) -> int:
+        """Raise a principal's credential generation inside the caller's transaction."""
+        conn.execute(
+            "INSERT INTO credential_generations (principal_key, generation, reason, updated_at)"
+            " VALUES (?, 1, ?, ?)"
+            " ON CONFLICT (principal_key) DO UPDATE SET"
+            " generation = credential_generations.generation + 1,"
+            " reason = excluded.reason, updated_at = excluded.updated_at",
+            (key, reason, now),
+        )
+        return int(
+            conn.execute(
+                "SELECT generation FROM credential_generations WHERE principal_key = ?",
+                (key,),
+            ).fetchone()[0]
+        )
+
+    @staticmethod
+    def _publish_generation(key: str, generation: int) -> None:
+        """Tell this process a change was committed (it only records; see credentials)."""
+        try:
+            note_credential_generation(key, generation)
+        except Exception:  # noqa: BLE001 - bookkeeping must never fail a write
+            return
+
+    def credential_generation(self, principal_key: str, object_id: str | None = None) -> int:
+        """The current credential generation of a principal (0 if it never changed)."""
+        key = _resolve_principal(principal_key, object_id)
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT generation FROM credential_generations WHERE principal_key = ?",
+                (key,),
+            ).fetchone()
+        return 0 if row is None else int(row[0])
 
     # -- access status: the authorization decision ------------------------------
 
@@ -1232,11 +1353,25 @@ class TokenStore:
     def get_principal_status(
         self, principal_key: str, object_id: str | None = None
     ) -> PrincipalStatus:
-        """The access status of a principal; active at epoch 0 when nothing is stored."""
+        """The access status of a principal; active at epoch 0 when nothing is stored.
+
+        Carries the credential generation, read in the same snapshot as the status.
+        """
         key = _resolve_principal(principal_key, object_id)
         with self._connection() as conn:
-            found = self._fetch_status(conn, key)
-        return found if found is not None else PrincipalStatus(key)
+            conn.execute("BEGIN")
+            try:
+                found = self._fetch_status(conn, key)
+                gen_row = conn.execute(
+                    "SELECT generation FROM credential_generations WHERE principal_key = ?",
+                    (key,),
+                ).fetchone()
+            finally:
+                conn.execute("COMMIT")
+        generation = 0 if gen_row is None else int(gen_row[0])
+        if found is None:
+            return PrincipalStatus(key, credential_generation=generation)
+        return replace(found, credential_generation=generation)
 
     def list_principal_statuses(self) -> list[PrincipalStatus]:
         """Every stored status row (disabled principals and known owners)."""
@@ -1398,6 +1533,8 @@ class TokenStore:
                 ).fetchone()[0]
             )
             self._record_event(conn, key, EVENT_DISABLED, by, reason, epoch, now)
+            generation = self._bump_generation(conn, key, GENERATION_DISABLED, now)
+        self._publish_generation(key, generation)
         return True
 
     def enable_principal(
@@ -1426,6 +1563,8 @@ class TokenStore:
                 (STATUS_ACTIVE, now, key),
             )
             self._record_event(conn, key, EVENT_ENABLED, by, None, row.session_epoch + 1, now)
+            generation = self._bump_generation(conn, key, GENERATION_ENABLED, now)
+        self._publish_generation(key, generation)
         return True
 
     def list_status_events(

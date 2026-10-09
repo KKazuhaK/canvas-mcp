@@ -345,7 +345,7 @@ class TestInitialize:
             assert conn.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone() == (str(SCHEMA_VERSION),)
-            conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+            conn.execute("UPDATE meta SET value = '5' WHERE key = 'schema_version'")
         with pytest.raises(TokenStoreError, match="newer"):
             store.initialize()
         with _raw(store) as conn:
@@ -707,7 +707,7 @@ class TestMigration:
 
     def test_future_versions_are_still_refused(self, store: TokenStore) -> None:
         with _raw(store) as conn:
-            conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+            conn.execute("UPDATE meta SET value = '5' WHERE key = 'schema_version'")
         with pytest.raises(TokenStoreError, match="newer"):
             store.initialize()
 

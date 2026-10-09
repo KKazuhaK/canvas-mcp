@@ -189,7 +189,7 @@ class TestEntraOauthKeepsThePrincipalCache:
             )
             assert result == ("101", None)
         assert canvas.await_count == 1
-        assert list(cache._STATES) == [f"{make_principal(OID_A).key}|{CANVAS_URL}"]
+        assert list(cache._STATES) == [f"{make_principal(OID_A).key}|{CANVAS_URL}|g0"]
 
     async def test_principals_do_not_share_it(self, canvas):
         await fresh_request(lambda: cache.resolve_numeric_course_id("ICS 33"), token="a", oid=OID_A)

@@ -22,6 +22,13 @@ refreshed token buys nothing. If the status cannot be read, the request is refus
 made by another process is noticed within that time; a request already past the
 check is not interrupted.
 
+The credential generation the token was read under (see
+:func:`canvas_mcp.core.credentials.note_credential_generation`) travels with the
+request: every cache, health verdict and pending write confirmation is keyed by it,
+so state learned under one stored token is never used under another, and a request
+still running on a token that has since been replaced cannot publish into the
+state of the new one.
+
 The caller's own write-tool switches (what they turned on at ``/account``) are
 loaded into the request too, for the credential gate; if they cannot be read,
 no write tool is enabled for that request.
@@ -50,8 +57,11 @@ from ..credentials import (
     RequestTokenState,
     RequestToolPrefs,
     clear_http_request_context,
+    note_credential_generation,
+    run_pending_credential_purges,
     set_http_request_active,
     set_missing_credentials_message,
+    set_request_credential_generation,
     set_request_credentials,
     set_request_principal,
     set_request_token_state,
@@ -85,12 +95,20 @@ class StoredTokenLike(Protocol):
     @property
     def canvas_host(self) -> str | None: ...
 
+    @property
+    def credential_generation(self) -> int: ...
+
 
 class TokenInvalidator(Protocol):
     """The slice of the token-health service the middleware uses."""
 
     async def mark_invalid(
-        self, principal_key: str, reason: str, *, expected_updated_at: int | None = None
+        self,
+        principal_key: str,
+        reason: str,
+        *,
+        expected_updated_at: int | None = None,
+        expected_generation: int | None = None,
     ) -> bool: ...
 
 
@@ -329,19 +347,26 @@ class SelfhostRequestContextMiddleware:
             # The exception text is never logged: it can sit next to key or
             # token material.
             log_error("stored Canvas token unreadable", entra_oid=object_id)
+            generation: int | None = None
             if isinstance(exc, TokenDecryptionError):
                 # Only a failed decryption invalidates the row; a locked or
                 # failing database says nothing about the token.
-                await self._record_unreadable(principal_key, exc.updated_at)
+                generation = self._publish_generation(principal_key, exc.credential_generation)
+                await self._record_unreadable(
+                    principal_key, exc.updated_at, exc.credential_generation
+                )
             message = unreadable_token_message(self.account_url)
             set_missing_credentials_message(message)
-            self._mark_request_dead(message)
+            self._mark_request_dead(message, generation)
             return
 
         if row is None:
             set_missing_credentials_message(not_enrolled_message(self.account_url))
             return
 
+        generation = self._publish_generation(
+            principal_key, getattr(row, "credential_generation", None)
+        )
         if getattr(row, "status", None) == STATUS_INVALID:
             # Canvas rejected this token, an administrator revoked it, or it
             # could not be decrypted before: mount no credentials, so this
@@ -350,7 +375,7 @@ class SelfhostRequestContextMiddleware:
                 self.account_url, getattr(row, "invalid_reason", None)
             )
             set_missing_credentials_message(message)
-            self._mark_request_dead(message)
+            self._mark_request_dead(message, generation)
             return
 
         school = self.schools.resolve_stored(getattr(row, "canvas_host", None))
@@ -367,14 +392,34 @@ class SelfhostRequestContextMiddleware:
         )
         version = getattr(row, "updated_at", None)
         set_request_token_state(
-            RequestTokenState(token_version=version if isinstance(version, int) else None)
+            RequestTokenState(
+                token_version=version if isinstance(version, int) else None,
+                credential_generation=generation,
+            )
         )
         try:
             await anyio.to_thread.run_sync(self.store.touch, tenant_id, object_id)
         except Exception:
             pass  # last-used bookkeeping must never fail a request
 
-    async def _record_unreadable(self, principal_key: str, version: int | None) -> None:
+    @staticmethod
+    def _publish_generation(principal_key: str, value: object) -> int | None:
+        """Make the credential generation of this request known; returns it (None if absent).
+
+        Raising the process's view drops what other requests of this principal
+        cached under an older generation. Runs on the event loop, never on the
+        store's worker threads.
+        """
+        if not isinstance(value, int) or isinstance(value, bool):
+            return None
+        note_credential_generation(principal_key, value)
+        run_pending_credential_purges()
+        set_request_credential_generation(value)
+        return value
+
+    async def _record_unreadable(
+        self, principal_key: str, version: int | None, generation: int | None = None
+    ) -> None:
         """A stored token that cannot be decrypted is marked invalid (decrypt_failed).
 
         Only the exact row that failed is marked (``version`` is its
@@ -386,11 +431,16 @@ class SelfhostRequestContextMiddleware:
             return
         try:
             await self.health.mark_invalid(
-                principal_key, REASON_DECRYPT_FAILED, expected_updated_at=version
+                principal_key,
+                REASON_DECRYPT_FAILED,
+                expected_updated_at=version,
+                expected_generation=generation,
             )
         except Exception:  # noqa: BLE001 - recording must never change the answer
             pass
 
     @staticmethod
-    def _mark_request_dead(message: str) -> None:
-        set_request_token_state(RequestTokenState(dead=True, message=message))
+    def _mark_request_dead(message: str, generation: int | None = None) -> None:
+        set_request_token_state(
+            RequestTokenState(dead=True, message=message, credential_generation=generation)
+        )

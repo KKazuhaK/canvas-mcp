@@ -22,6 +22,7 @@ Image: `ghcr.io/kkazuhak/canvas-mcp` (linux/amd64 + linux/arm64, non-root, data 
 - [Secret rotation](#secret-rotation)
 - [Backup and restore](#backup-and-restore)
 - [Revoking a user](#revoking-a-user)
+- [Canvas credential lifecycle](#canvas-credential-lifecycle)
 - [Troubleshooting](#troubleshooting)
 
 ## Architecture
@@ -470,6 +471,8 @@ The version with **access control** (disable and enable users, see [Revoking a u
 - **Open `/account` sessions are replaced.** The session cookie format changed (it now carries the user's session epoch), so everyone signs in again once after the upgrade, which takes seconds. MCP connections are not affected.
 - **An older image refuses a version 3 database on purpose.** It would not know about disablements and would serve users you disabled. Roll back only together with the backup taken before the upgrade, and expect disabled users to be active again in the old version.
 
+The version with **credential generations** (see [Canvas credential lifecycle](#canvas-credential-lifecycle)) moves the token database to **schema version 4**: one more table, `credential_generations`, holding a counter per user. The migration is automatic and safe to repeat; every user starts at generation 0 and nothing is invalidated by the upgrade itself. An older image refuses a version 4 database on purpose: it would save and replace tokens without raising the counter, so a newer process would keep serving state learned under the old token. Roll back only together with the backup taken before the upgrade. Pending write confirmations (previews waiting for their confirmation token) are lost on every restart anyway; nothing else the user sees changes.
+
 `/account/admin` no longer has a **Revoke** button: it was a deletion of the enrollment row, which is not an access decision (the user could simply enroll again). It is now **Remove enrollment** (same effect, honest name) next to the new **Disable user**; the form posts to `/account/admin/remove`. The CLI command `token_admin revoke` still works as an alias of `remove`.
 
 ## Secret rotation
@@ -520,6 +523,8 @@ docker compose start
 
 A restore brings back the **access decisions as they were in the backup**: a user you disabled after the backup was taken is active again after restoring it. After any restore, run `token_admin access` and disable again whoever should still be disabled (`token_admin history` shows what the restored database knows).
 
+A restore also rewinds the **credential generations** (see [Canvas credential lifecycle](#canvas-credential-lifecycle)). Always restart the server after a restore, and never restore underneath a running one: a running process remembers the highest generation it has seen, so it would treat requests that read the older, lower numbers as superseded and refuse their tool calls until it is restarted.
+
 If you do not want to stop the service, you can back up just the token store: `sqlite3 /data/canvas-mcp/tokens.sqlite3 '.backup /backup/tokens.sqlite3'` (run it in an environment that can reach that volume).
 
 Restore: first run `docker volume inspect canvas-mcp-data` (the volume must be the one the service is using; on a fresh deployment, create it first with `docker compose up --no-start`), stop the service, extract the archive into that volume (`docker run --rm -v canvas-mcp-data:/data -v "$PWD":/backup alpine tar xzf /backup/<file>.tgz -C /data`), then confirm the directory owner is uid 10001 (`chown -R 10001:10001 /data`, run in the same temporary container), and then `docker compose up -d`.
@@ -566,6 +571,38 @@ Who may do what:
 | A user losing the Entra role, `/account` | Their open session lasts at most `ACCOUNT_SESSION_TTL_SECONDS` (default 15 minutes, never renewed); signing in again is refused by Entra's role check. | The session is a sealed cookie with a fixed lifetime. |
 
 Every change is recorded: the transitions (disabled, enabled, owner gained or lost, with who did it) are written in the same database transaction to `principal_status_events` (read them with `token_admin history`; this also covers the CLI, which has no audit log of its own), and with `LOG_ACCESS_EVENTS=true` they are emitted as audit events of type `principal_status` (the principal key, the actor's key or `operator`, and a short code; never a name, e-mail address or token). Refused attempts (a disabled user trying to sign in or enroll, an owner trying to disable themselves) are audited too.
+
+## Canvas credential lifecycle
+
+A user's stored Canvas token can be saved, **replaced** (possibly with a token for a different Canvas account, or with fewer permissions), removed, found dead, restored, or its owner disabled and enabled again. An Entra role authorizes access to *this server*; it never confers any Canvas permission, and the server cannot tell from the Entra identity which Canvas account a token belongs to. So everything the server remembers on a user's behalf is tied to the **credential**, not to the Entra identity alone.
+
+Each user has a **credential generation**, a number that only goes up. The token store raises it, inside the same database transaction as the change, when a token is:
+
+- saved or replaced (even the very same token text, or a token at the same school),
+- removed (by the user, by an owner with **Remove enrollment**, or with `token_admin remove`),
+- marked invalid (Canvas rejected it, it could not be decrypted, or an owner marked it) or restored by **Check again**,
+
+and when the user is **disabled** or **enabled**. Deleting a token does not reset the number, so a token enrolled later is never mistaken for an earlier one.
+
+What is bound to the generation (the key of each of these contains it, so a value learned under one generation is never read under another):
+
+| State | What happens when the generation changes |
+|---|---|
+| Course list and course-code aliases | Start empty again; the old list is dropped. |
+| Course-policy decisions (`agent_writes` and the like) | Read again with the new token; an "allow" learned with a more privileged token is not served to a token with fewer permissions. |
+| Pseudonyms of the data-anonymization cache and the discussion "unservable topic" hints | Dropped. |
+| Pending write confirmations (the preview/confirmation-token step) | Void. A preview made before the change cannot be redeemed after it; the user previews again. The refusal says the Canvas connection changed. |
+| Token-health verdicts (the cooldown that reuses the result of a recent `/users/self` probe) | A verdict about the old token is never reused for the new one, even when it was saved within the same second. |
+| Background work started under the old token: a course-list refresh, a dead-token probe, a "last verified" write, the re-check on `/account` | Its result is **discarded**. A refresh that finishes after the replacement does not publish into the new generation, and a probe that finishes late cannot mark the new token invalid or verified (the store refuses the write because the generation is no longer the one the probe started under). |
+
+How the server notices: every MCP request reads the user's token **and** its generation from the database in one statement and carries them for its whole life (a request never mixes one token with another's state). This process hears about every change it makes itself at once; a change made by another process (a second worker, the `token_admin` CLI) is noticed at that user's next request. The tool gate additionally compares the request's generation with the user's current one (through the same 5-second access cache as the disablement check) before every tool call and resource read, and refuses a call from a request whose token has been replaced since it began: "Nothing was sent to Canvas for this call. Try again."
+
+What this does and does not promise:
+
+- A Canvas call that was **already dispatched** is never cancelled; it may complete at Canvas with the token it was sent with, and a request that is mid-way keeps the token it started with until its next tool call. State that such a request learns is kept apart from the new generation or thrown away.
+- The upstream HTTP modes (`X-Canvas-Token`, access keys, Easy Auth) are unchanged: each request resolves everything under its own credential and keeps nothing between requests, so there is nothing to invalidate.
+- The generation is not a secret and appears in no token. It is only part of in-memory cache keys and of the token database.
+- Per-user write-tool switches are the user's own choice and are keyed by user, not by credential: replacing a token keeps them. If you want a replacement to start from "everything off", the user clears them with **Disable all** at `/account`.
 
 ## Troubleshooting
 

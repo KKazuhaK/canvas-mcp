@@ -49,12 +49,14 @@ def isolated_course_cache(monkeypatch):
     courses, so a test that does not supply a list never reaches a real Canvas;
     tests that need one patch ``canvas_mcp.core.cache.fetch_all_paginated_results``.
     """
-    from canvas_mcp.core import cache
+    from canvas_mcp.core import cache, credentials
 
     cache.reset_course_cache()
+    credentials.reset_credential_generations()
     monkeypatch.setattr(cache, "fetch_all_paginated_results", AsyncMock(return_value=[]))
     yield cache
     cache.reset_course_cache()
+    credentials.reset_credential_generations()
 
 
 @pytest.fixture

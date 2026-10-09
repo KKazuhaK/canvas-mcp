@@ -16,6 +16,12 @@ at the moment of each tool call, so a request that is already running cannot sta
 further tool call after the change (the cache bounds how late another process's
 change is noticed). A call whose Canvas requests were already sent is not
 cancelled.
+
+The same check refuses a call from a request whose Canvas credential was replaced,
+removed, found dead or restored after the request began (the credential generation
+the store reports is newer than the one the request was authorized under). Such a
+request holds the old token; it is told to retry rather than start a further tool
+call, which matters most for a write that was previewed under the old credential.
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import Tool, ToolResult
 
 from ..credentials import (
+    get_request_credential_generation,
     get_request_credentials,
     get_request_principal,
     get_request_token_state,
@@ -50,6 +57,10 @@ from .tool_prefs import (
 )
 
 _NOT_SIGNED_IN = "Not signed in."
+_CREDENTIAL_CHANGED = (
+    "Your Canvas connection changed while this request was running. "
+    "Nothing was sent to Canvas for this call. Try again."
+)
 _IDENTITY_MISMATCH = "Identity check failed; reconnect the connector."
 
 
@@ -73,6 +84,11 @@ async def _check_access(access: AccessChecker | None, error_type: type[Exception
         raise error_type(access_unavailable_message()) from None
     if status.disabled:
         raise error_type(access_disabled_message())
+    held = get_request_credential_generation()
+    # Only a store that is *ahead* of the request counts: a cached answer older than
+    # the request's own read says nothing against it.
+    if held is not None and status.credential_generation > held:
+        raise error_type(_CREDENTIAL_CHANGED)
 
 
 def _check_identity(error_type: type[Exception]) -> None:

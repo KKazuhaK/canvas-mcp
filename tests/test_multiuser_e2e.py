@@ -38,6 +38,7 @@ from joserfc import jwt
 from joserfc.jwk import RSAKey
 from starlette.testclient import TestClient
 
+from canvas_mcp.core import cache
 from canvas_mcp.core.config import reset_config
 from canvas_mcp.core.selfhost.app import (
     build_selfhost_asgi_app,
@@ -854,6 +855,134 @@ class TestRefreshAndRevocation:
         assert refreshed.status_code >= 400
         assert rpc(enrolled.client, bearer, "tools/list").status_code == 401
         assert enrolled.canvas.seen == []
+
+
+class TestCredentialLifecycle:
+    """State is bound to the Canvas credential, not to the Entra identity alone."""
+
+    USER_E = EntraUser(
+        "Eve", "aaaaaaaa-0000-4000-8000-00000000000a",  # the same Entra identity as Alice
+        canvas_token="canvas-pat-for-eve-0123456789abcdefghij",
+        courses=({"id": 303, "name": "Linear Algebra", "course_code": "MATH 3A"},),
+    )
+
+    def _replace_token_through_account(self, world, new_token: str) -> None:
+        """Alice saves another Canvas user's token, confirming the identity change."""
+        assert world.browser.account_sign_in(USER_A).status_code == 303
+        first = world.client.post(
+            "/account/token",
+            data={"csrf": world.browser.csrf(), "canvas_token": new_token},
+            headers=ORIGIN, follow_redirects=False,
+        )
+        assert first.status_code == 409, first.text
+        confirmation = re.search(r'name="confirm_identity_change" value="([^"]+)"', first.text)
+        assert confirmation
+        second = world.client.post(
+            "/account/token",
+            data={
+                "csrf": world.browser.csrf(), "canvas_token": new_token,
+                "confirm_identity_change": confirmation.group(1),
+            },
+            headers=ORIGIN, follow_redirects=False,
+        )
+        assert second.status_code == 303, second.text
+
+    def test_replacing_the_token_with_another_canvas_users_serves_nothing_of_the_old_one(
+        self, enrolled, monkeypatch
+    ):
+        monkeypatch.setitem(ENROLLED_TOKENS, self.USER_E.canvas_token, self.USER_E)
+        bearer_a = enrolled.browser.bearer_for(USER_A)
+        assert "ICS 33" in text_of(call_tool(enrolled.client, bearer_a, "list_courses"))
+        mine = call_tool(enrolled.client, bearer_a, "get_course_details", {"course_identifier": "ICS 33"})
+        assert "Intermediate Python" in text_of(mine)  # now cached under the first credential
+        generation = enrolled.runtime.store.credential_generation(f"entra:{TENANT}:{USER_A.oid}")
+
+        self._replace_token_through_account(enrolled, self.USER_E.canvas_token)
+        assert enrolled.runtime.store.credential_generation(
+            f"entra:{TENANT}:{USER_A.oid}"
+        ) == generation + 1
+        enrolled.canvas.seen.clear()
+
+        # The very same MCP bearer, the same Entra identity, the same Canvas host.
+        listing = text_of(call_tool(enrolled.client, bearer_a, "list_courses"))
+        assert "MATH 3A" in listing and "ICS 33" not in listing
+        stale = call_tool(enrolled.client, bearer_a, "get_course_details", {"course_identifier": "ICS 33"})
+        assert "Intermediate Python" not in text_of(stale)
+        assert enrolled.canvas.tokens_used() == {self.USER_E.canvas_token}
+        assert not any(path.startswith("/api/v1/courses/101") for path, _ in enrolled.canvas.seen)
+        # Bob is untouched.
+        bearer_b = enrolled.browser.bearer_for(USER_B)
+        assert "MATH 2B" in text_of(call_tool(enrolled.client, bearer_b, "list_courses"))
+
+    def _preview(self, world, bearer: str) -> str:
+        world.runtime.store.set_tool_prefs(f"entra:{TENANT}:{USER_A.oid}", ["delete_widget"])
+        preview = text_of(call_tool(world.client, bearer, "delete_widget", {"widget_id": "w1"}))
+        token = re.search(r"Confirmation token: (\S+)", preview)
+        assert token, preview
+        return token.group(1)
+
+    def test_a_pending_confirmation_does_not_survive_re_enrolling_the_same_token(self, enrolled):
+        bearer_a = enrolled.browser.bearer_for(USER_A)
+        token = self._preview(enrolled, bearer_a)
+
+        assert enrolled.browser.enroll(USER_A).status_code == 303  # same token, same school
+        redeemed = text_of(call_tool(enrolled.client, bearer_a, "delete_widget", {
+            "widget_id": "w1", "confirmation_token": token,
+        }))
+        assert enrolled.deleted == [] and "Deleted widget" not in redeemed
+        assert "does not match" in redeemed
+
+        # Previewing again under the new credential works as usual.
+        fresh = text_of(call_tool(enrolled.client, bearer_a, "delete_widget", {"widget_id": "w1"}))
+        fresh_token = re.search(r"Confirmation token: (\S+)", fresh)
+        assert fresh_token
+        done = text_of(call_tool(enrolled.client, bearer_a, "delete_widget", {
+            "widget_id": "w1", "confirmation_token": fresh_token.group(1),
+        }))
+        assert enrolled.deleted == ["w1"] and "Deleted widget w1" in done
+
+    def test_a_pending_confirmation_does_not_survive_a_disable_and_enable(self, enrolled):
+        user_a_key = f"entra:{TENANT}:{USER_A.oid}"
+        bearer_a = enrolled.browser.bearer_for(USER_A)
+        token = self._preview(enrolled, bearer_a)
+
+        assert enrolled.browser.account_sign_in(OWNER).status_code == 303
+        csrf = enrolled.browser.csrf("/account/admin")
+        for action in ("disable", "enable"):
+            response = enrolled.client.post(f"/account/admin/{action}", data={
+                "csrf": csrf, "principal_key": user_a_key,
+            }, headers=ORIGIN, follow_redirects=False)
+            assert response.status_code == 303
+
+        redeemed = text_of(call_tool(enrolled.client, bearer_a, "delete_widget", {
+            "widget_id": "w1", "confirmation_token": token,
+        }))
+        assert enrolled.deleted == [] and "Deleted widget" not in redeemed
+
+    def test_removing_the_token_then_enrolling_a_new_one_starts_with_empty_caches(self, enrolled):
+        user_a_key = f"entra:{TENANT}:{USER_A.oid}"
+        bearer_a = enrolled.browser.bearer_for(USER_A)
+        call_tool(enrolled.client, bearer_a, "list_courses")  # learns the alias under this credential
+        mine = call_tool(enrolled.client, bearer_a, "get_course_details", {"course_identifier": "ICS 33"})
+        assert "Intermediate Python" in text_of(mine)
+        assert any(key.startswith(user_a_key) for key in cache._STATES)
+        before = enrolled.runtime.store.credential_generation(user_a_key)
+
+        assert enrolled.browser.account_sign_in(USER_A).status_code == 303
+        assert enrolled.client.post(
+            "/account/token/delete", data={"csrf": enrolled.browser.csrf()},
+            headers=ORIGIN, follow_redirects=False,
+        ).status_code == 303
+        assert enrolled.browser.enroll(USER_A).status_code == 303
+        assert enrolled.runtime.store.credential_generation(user_a_key) == before + 2
+
+        # The alias learned under the old credential is gone: it is not served again.
+        stale = call_tool(enrolled.client, bearer_a, "get_course_details", {"course_identifier": "ICS 33"})
+        assert "Intermediate Python" not in text_of(stale)
+        # The new credential learns it for itself.
+        call_tool(enrolled.client, bearer_a, "list_courses")
+        again = call_tool(enrolled.client, bearer_a, "get_course_details", {"course_identifier": "ICS 33"})
+        assert "Intermediate Python" in text_of(again)
 
 
 class TestHostProtection:

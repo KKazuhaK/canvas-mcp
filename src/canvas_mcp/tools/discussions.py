@@ -12,7 +12,7 @@ from mcp.types import ToolAnnotations
 from ..core.cache import get_course_code, get_course_id
 from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.config import get_config
-from ..core.credentials import current_principal_key
+from ..core.credentials import current_principal_key, register_credential_purge_listener
 from ..core.dates import format_date, parse_date, truncate_text
 from ..core.guarded_edit import (
     BodyGuard,
@@ -391,6 +391,19 @@ async def _read_discussion_via_graphql(
 _UNSERVABLE_TOPIC_TTL_SECONDS = 600
 # Keyed by caller too: the hint was learned with one user's token.
 _unservable_topics: dict[tuple[str, str, str], float] = {}
+
+
+def _forget_principal_unservable(principal_key: str) -> None:
+    """Drop the hints learned with one principal's earlier credential generations."""
+    prefix = principal_key + "|"
+    for key in [
+        k for k in list(_unservable_topics)
+        if k[0] == principal_key or k[0].startswith(prefix)
+    ]:
+        _unservable_topics.pop(key, None)
+
+
+register_credential_purge_listener(_forget_principal_unservable)
 
 
 def _is_known_unservable(prefix: str, topic_id: str | int) -> bool:

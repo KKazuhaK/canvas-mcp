@@ -12,6 +12,7 @@ import base64
 import pathlib
 import sqlite3
 import threading
+from dataclasses import replace
 
 import pytest
 
@@ -142,8 +143,12 @@ class TestDisableAndEnable:
     def test_the_enrollment_row_is_kept_untouched_by_a_disable(self, store: TokenStore) -> None:
         enroll(store)
         before = store.info(USER)
+        assert before is not None
         store.disable_principal(USER, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)
-        assert store.info(USER) == before
+        # Only the credential generation moves: the row itself is untouched.
+        assert store.info(USER) == replace(
+            before, credential_generation=before.credential_generation + 1
+        )
         assert store.get(USER) is not None  # still decryptable, just never used
 
 
@@ -423,7 +428,7 @@ class TestRestartAndMigration:
             tables = {
                 r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             }
-        assert version == str(SCHEMA_VERSION) == "3"
+        assert version == str(SCHEMA_VERSION) == "4"
         assert {"principal_status", "principal_status_events", "user_tool_prefs"} <= tables
         assert migrated.get(USER) is not None  # the enrollment is untouched
         assert not migrated.get_principal_status(USER).disabled  # no row: active

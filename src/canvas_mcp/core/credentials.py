@@ -16,6 +16,9 @@ marker distinguishes "HTTP request with no token" (must fail closed) from
 import hashlib
 import hmac
 import secrets
+import threading
+from collections import OrderedDict
+from collections.abc import Callable
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 
@@ -58,6 +61,9 @@ class RequestTokenState:
     token_version: int | None = None
     dead: bool = False
     message: str | None = None
+    # The credential generation the request's token was read under (see
+    # ``note_credential_generation``); None outside the self-hosted mode.
+    credential_generation: int | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +103,12 @@ _missing_credentials_message: ContextVar[str | None] = ContextVar(
 
 _request_token_state: ContextVar[RequestTokenState | None] = ContextVar(
     "request_token_state", default=None
+)
+
+# The generation of the stored Canvas credential this request was authorized
+# with (self-hosted mode only). None for stdio and the upstream HTTP modes.
+_request_credential_generation: ContextVar[int | None] = ContextVar(
+    "request_credential_generation", default=None
 )
 
 
@@ -140,6 +152,7 @@ def set_request_credentials(creds: RequestCredentials) -> None:
 def clear_request_credentials() -> None:
     """Clear credentials after request completes."""
     _request_credentials.set(None)
+    _request_credential_generation.set(None)
     _request_course_labels.set(None)
 
 
@@ -202,12 +215,128 @@ def set_request_token_state(state: RequestTokenState | None) -> Token[RequestTok
     return _request_token_state.set(state)
 
 
+# -- credential generations (self-hosted mode) ----------------------------------
+#
+# A principal's *credential generation* is a number the token store raises every
+# time the lifecycle of that principal's Canvas credential changes: a token is
+# saved or replaced, removed, found dead, restored, or the principal is disabled
+# or enabled again. Everything the server remembers on behalf of a principal
+# (course lists, course-policy decisions, pseudonyms, health verdicts, pending
+# write confirmations) is keyed by it, so state learned under one credential can
+# never be served under another, even for the same Entra identity at the same
+# school. The number only ever grows; the store keeps it when a token is deleted.
+#
+# This registry is the *process's* view of the newest generation it has heard of.
+# The store reports into it after each committed change (from any thread, so it
+# only records), and the request middleware reports what it read from the
+# database. A request that holds an older generation than the registry knows is
+# *stale*: it still runs with the credential it started with, but it must not
+# publish anything into shared state.
+
+_MAX_TRACKED_GENERATIONS = 8192
+_generation_lock = threading.Lock()
+_known_generations: OrderedDict[str, int] = OrderedDict()
+_pending_purges: list[str] = []
+_purge_listeners: list[Callable[[str], None]] = []
+
+
+def register_credential_purge_listener(listener: Callable[[str], None]) -> None:
+    """Call ``listener(principal_key)`` when a principal's credential generation rises.
+
+    Listeners drop in-memory state for that principal (all of its generations'
+    keys start with the principal key). They run on the thread that calls
+    :func:`run_pending_credential_purges`, which the request middleware does on the
+    event loop, never on the store's worker threads.
+    """
+    if listener not in _purge_listeners:
+        _purge_listeners.append(listener)
+
+
+def note_credential_generation(principal_key: str, generation: int) -> bool:
+    """Record that ``principal_key`` has reached ``generation``; True if it rose.
+
+    Safe from any thread. Only ever raises the recorded value. When it rises
+    above an earlier value, the principal is queued for
+    :func:`run_pending_credential_purges`.
+    """
+    with _generation_lock:
+        known = _known_generations.get(principal_key)
+        if known is not None and generation <= known:
+            _known_generations.move_to_end(principal_key)
+            return False
+        _known_generations[principal_key] = generation
+        _known_generations.move_to_end(principal_key)
+        while len(_known_generations) > _MAX_TRACKED_GENERATIONS:
+            _known_generations.popitem(last=False)
+        # A first sighting is not a change: there is nothing older to drop.
+        if known is not None:
+            _pending_purges.append(principal_key)
+        return known is not None
+
+
+def run_pending_credential_purges() -> None:
+    """Let every listener drop the state of principals whose generation rose."""
+    with _generation_lock:
+        keys = list(dict.fromkeys(_pending_purges))
+        _pending_purges.clear()
+    for key in keys:
+        for listener in list(_purge_listeners):
+            try:
+                listener(key)
+            except Exception:  # noqa: BLE001 - hygiene must never fail a request
+                continue
+
+
+def known_credential_generation(principal_key: str) -> int | None:
+    """The newest generation this process has heard of for a principal, if any."""
+    with _generation_lock:
+        return _known_generations.get(principal_key)
+
+
+def reset_credential_generations() -> None:
+    """Forget every recorded generation (tests, and after restoring a database)."""
+    with _generation_lock:
+        _known_generations.clear()
+        _pending_purges.clear()
+
+
+def get_request_credential_generation() -> int | None:
+    """The credential generation the current request was authorized under."""
+    return _request_credential_generation.get()
+
+
+def set_request_credential_generation(
+    generation: int | None,
+) -> Token[int | None]:
+    """Publish (or clear) the credential generation of the current request."""
+    return _request_credential_generation.set(generation)
+
+
+def request_credential_is_stale() -> bool:
+    """True if the credential generation of this request has been superseded.
+
+    Only meaningful with a verified principal and a known generation; everything
+    else (stdio, the upstream HTTP modes) is never stale. A stale request keeps
+    the credential it started with, but must not write to state that later
+    requests share.
+    """
+    principal = _request_principal.get()
+    generation = _request_credential_generation.get()
+    if principal is None or generation is None:
+        return False
+    known = known_credential_generation(principal.key)
+    return known is not None and generation < known
+
+
 def current_principal_key() -> str:
     """An opaque key for whoever is making the current request.
 
     With a verified principal (the self-hosted mode) this is the principal key
-    plus the Canvas API URL the request is routed to, so one user's cached
-    Canvas data can never be served after a switch to another school. For a
+    plus the Canvas API URL the request is routed to plus the credential
+    generation (``g<n>``), so one user's cached Canvas data can never be served
+    after a switch to another school, after the Canvas token is replaced (it may
+    belong to a different Canvas account or carry other permissions), removed or
+    found dead, or after the principal is disabled and enabled again. For a
     legacy HTTP request it is a keyed hash of the caller's Canvas token (stable
     within this process, never containing the token); otherwise ``"local"``
     (stdio). Every process-global cache that holds user-derived data is keyed
@@ -218,7 +347,8 @@ def current_principal_key() -> str:
         creds = _request_credentials.get()
         if creds is None:
             return principal.key
-        return f"{principal.key}|{creds.api_url.rstrip('/').lower()}"
+        generation = _request_credential_generation.get() or 0
+        return f"{principal.key}|{creds.api_url.rstrip('/').lower()}|g{generation}"
     creds = _request_credentials.get()
     if creds is not None:
         digest = hmac.new(_PROCESS_KEY, creds.api_token.encode(), hashlib.sha256)
@@ -234,4 +364,5 @@ def clear_http_request_context() -> None:
     _missing_credentials_message.set(None)
     _request_token_state.set(None)
     _request_tool_prefs.set(None)
+    _request_credential_generation.set(None)
     _request_course_labels.set(None)

@@ -434,3 +434,19 @@ def test_every_operator_facing_write_tool_text_mentions_the_per_user_opt_in(read
     assert "Once enabled, the AI can do these things" not in flat
     assert flat.count("#write-tools-each-user-opts-in") >= 3
 
+
+
+def test_readme_documents_the_credential_lifecycle(readme):
+    assert "(#canvas-credential-lifecycle)" in readme
+    section = readme.split("## Canvas credential lifecycle", 1)[1].split("\n## ", 1)[0]
+    for needle in (
+        "credential generation",
+        "never confers any Canvas permission",
+        "Pending write confirmations",
+        "already dispatched",
+        "never cancelled",
+        "X-Canvas-Token",
+    ):
+        assert needle in section, f"credential lifecycle section is missing {needle!r}"
+    assert "schema version 4" in readme
+    assert "restart the server after a restore" in readme.lower()

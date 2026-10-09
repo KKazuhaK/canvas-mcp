@@ -2091,6 +2091,9 @@ class _AccountApp:
                 self.store.restore_active,
                 principal_key,
                 expected_updated_at=info.updated_at,
+                # The token that Canvas just accepted is the one that was read
+                # above; a replacement saved meanwhile has another generation.
+                expected_generation=stored.credential_generation,
             )
         )
         if not restored:

@@ -42,7 +42,7 @@ from typing import Any, NamedTuple
 
 from .client import make_canvas_request
 from .config import get_config
-from .credentials import current_principal_key
+from .credentials import current_principal_key, register_credential_purge_listener
 from .logging import log_warning
 
 _KEY_AGENT_WRITES = "agent_writes"
@@ -80,6 +80,21 @@ _policy_cache: dict[tuple[str, str], tuple[float, CoursePolicy]] = {}
 def reset_policy_cache() -> None:
     """Discard cached course policies (tests, and immediate policy re-read)."""
     _policy_cache.clear()
+
+
+def _forget_principal_policies(principal_key: str) -> None:
+    """Drop every cached policy decision of one principal (all schools and generations).
+
+    The cache key is ``(<principal>|<school>|g<generation>, course)``; the
+    generation in it already keeps a decision from being served under another
+    Canvas credential, this frees the old entries.
+    """
+    prefix = principal_key + "|"
+    for key in [k for k in list(_policy_cache) if k[0] == principal_key or k[0].startswith(prefix)]:
+        _policy_cache.pop(key, None)
+
+
+register_credential_purge_listener(_forget_principal_policies)
 
 
 def _evict_expired_policies() -> None:

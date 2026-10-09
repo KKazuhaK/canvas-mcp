@@ -88,7 +88,12 @@ class Recorder:
         self.fail = False
 
     async def mark_invalid(
-        self, principal_key: str, reason: str, *, expected_updated_at: int | None = None
+        self,
+        principal_key: str,
+        reason: str,
+        *,
+        expected_updated_at: int | None = None,
+        expected_generation: int | None = None,
     ) -> bool:
         if self.fail:
             raise RuntimeError("store exploded")

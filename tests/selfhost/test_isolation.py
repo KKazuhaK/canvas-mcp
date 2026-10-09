@@ -39,8 +39,8 @@ async def as_user(oid: str, fn: Callable[[], Awaitable[Any]]) -> Any:
 
 
 def school_key(oid: str, api_url: str = CANVAS_URL) -> str:
-    """The cache key of a principal at a school (the principal key plus the API URL)."""
-    return f"{make_principal(oid).key}|{api_url.rstrip('/').lower()}"
+    """The cache key of a principal at a school and credential generation (``g0`` here)."""
+    return f"{make_principal(oid).key}|{api_url.rstrip('/').lower()}|g0"
 
 
 def as_user_sync(oid: str) -> None:

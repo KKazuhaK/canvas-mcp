@@ -257,7 +257,7 @@ class TestEnrolled:
         assert probe.seen["creds"].api_token == SECRET_TOKEN
         assert probe.seen["creds"].api_url == CANVAS_URL
         assert probe.seen["principal"].key == f"entra:{TENANT}:{OID_A}"
-        assert probe.seen["key"] == f"entra:{TENANT}:{OID_A}|{CANVAS_URL}"
+        assert probe.seen["key"] == f"entra:{TENANT}:{OID_A}|{CANVAS_URL}|g0"
         assert store.gets == [(TENANT, OID_A)]
         assert store.touches == [(TENANT, OID_A)]
 
@@ -288,7 +288,7 @@ class TestSchoolRouting:
         await _run(_middleware(probe, store, schools), user=_user(_claims()))
         assert probe.seen["creds"].api_url == "https://canvas.school-b.edu/api/v1"
         assert probe.seen["creds"].api_token == SECRET_TOKEN
-        assert probe.seen["key"].endswith("|https://canvas.school-b.edu/api/v1")
+        assert probe.seen["key"].endswith("|https://canvas.school-b.edu/api/v1|g0")
         assert store.touches == [(TENANT, OID_A)]
 
     async def test_a_legacy_row_goes_to_the_default_school(self):

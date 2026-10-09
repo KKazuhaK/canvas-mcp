@@ -14,7 +14,12 @@ made with the very token that was rejected:
 
 Probes are single-flight per stored token: at most one is in flight for a token
 (concurrent callers wait for it and share its verdict), and for 60 seconds after
-a probe finishes its verdict is reused instead of probing again. The state is
+a probe finishes its verdict is reused instead of probing again. A "token" here is
+one credential generation of one principal: replacing the token starts a new
+generation, so a verdict (rejected or ok) about the old token is never served for
+the new one, and a probe of the old token that finishes late cannot mark the new
+row invalid or verified (the store refuses the write for a generation that is no
+longer current). The state is
 process-local, so with several server processes each may probe once.
 
 The verdict lives in the token store (shared by every process); this class keeps
@@ -84,6 +89,9 @@ class TokenHealth:
         )
         self._cooldown = cooldown_seconds
         self._verified_interval = verified_interval_seconds
+        # Keyed by (principal, credential generation); a request that carries no
+        # generation (outside the self-hosted server) falls back to the token's
+        # ``updated_at``.
         self._flights: dict[tuple[str, int | None], _Flight] = {}
         self._verified_at: dict[str, float] = {}
         self.probe_count = 0
@@ -95,15 +103,24 @@ class TokenHealth:
         principal_key: str,
         credentials: RequestCredentials,
         token_version: int | None,
+        credential_generation: int | None = None,
     ) -> str | None:
         """The re-enroll message if the rejected token is confirmed dead, else None."""
-        verdict = await self._single_flight(principal_key, credentials, token_version)
+        verdict = await self._single_flight(
+            principal_key, credentials, token_version, credential_generation
+        )
         if verdict != REJECTED:
             return None
         return token_rejected_message(self._account_url)
 
-    async def note_success(self, principal_key: str) -> None:
-        """Record "last verified" for a successful call, at most once per interval."""
+    async def note_success(
+        self, principal_key: str, credential_generation: int | None = None
+    ) -> None:
+        """Record "last verified" for a successful call, at most once per interval.
+
+        With ``credential_generation`` the store records it only while that is still
+        the principal's current generation.
+        """
         now = self._clock()
         last = self._verified_at.get(principal_key)
         if last is not None and now - last < self._verified_interval:
@@ -119,6 +136,7 @@ class TokenHealth:
                 self._store.mark_verified,
                 principal_key,
                 min_interval_seconds=int(self._verified_interval),
+                expected_generation=credential_generation,
             )
         )
 
@@ -144,6 +162,7 @@ class TokenHealth:
         reason: str,
         *,
         expected_updated_at: int | None = None,
+        expected_generation: int | None = None,
         actor: str | None = None,
     ) -> bool:
         """Mark a row invalid and audit it; False if it was not active (or was replaced)."""
@@ -153,6 +172,7 @@ class TokenHealth:
                 principal_key,
                 reason=reason,
                 expected_updated_at=expected_updated_at,
+                expected_generation=expected_generation,
             )
         )
         if changed:
@@ -168,9 +188,16 @@ class TokenHealth:
     # -- single flight -------------------------------------------------------
 
     async def _single_flight(
-        self, principal_key: str, credentials: RequestCredentials, token_version: int | None
+        self,
+        principal_key: str,
+        credentials: RequestCredentials,
+        token_version: int | None,
+        credential_generation: int | None = None,
     ) -> str:
-        key = (principal_key, token_version)
+        key = (
+            principal_key,
+            credential_generation if credential_generation is not None else token_version,
+        )
         now = self._clock()
         flight = self._flights.get(key)
         if flight is not None:
@@ -180,9 +207,15 @@ class TokenHealth:
                 return await asyncio.shield(flight.future)
             if flight.verdict is not None and now - flight.finished_at < self._cooldown:
                 return flight.verdict
-        return await self._lead(key, credentials)
+        return await self._lead(key, credentials, token_version, credential_generation)
 
-    async def _lead(self, key: tuple[str, int | None], credentials: RequestCredentials) -> str:
+    async def _lead(
+        self,
+        key: tuple[str, int | None],
+        credentials: RequestCredentials,
+        token_version: int | None = None,
+        credential_generation: int | None = None,
+    ) -> str:
         self._prune()
         flight = _Flight(future=asyncio.get_running_loop().create_future())
         self._flights[key] = flight
@@ -190,9 +223,9 @@ class TokenHealth:
         try:
             verdict = await self._probe(credentials)
             if verdict == REJECTED:
-                verdict = await self._record_rejected(key)
+                verdict = await self._record_rejected(key, token_version, credential_generation)
             elif verdict == OK:
-                await self.note_success(key[0])
+                await self.note_success(key[0], credential_generation)
         except asyncio.CancelledError:
             verdict = UNKNOWN
             raise
@@ -205,11 +238,20 @@ class TokenHealth:
                 flight.future.set_result(verdict)
         return verdict
 
-    async def _record_rejected(self, key: tuple[str, int | None]) -> str:
+    async def _record_rejected(
+        self,
+        key: tuple[str, int | None],
+        token_version: int | None,
+        credential_generation: int | None,
+    ) -> str:
         """Invalidate after a 401 probe; REJECTED only if that row is (now) invalid."""
-        principal_key, version = key
+        principal_key = key[0]
+        version = token_version if token_version is not None else key[1]
         changed = await self.mark_invalid(
-            principal_key, REASON_CANVAS_TOKEN_REJECTED, expected_updated_at=version
+            principal_key,
+            REASON_CANVAS_TOKEN_REJECTED,
+            expected_updated_at=version,
+            expected_generation=credential_generation,
         )
         if changed:
             return REJECTED
@@ -220,6 +262,11 @@ class TokenHealth:
             info is not None
             and info.status == STATUS_INVALID
             and (version is None or info.updated_at == version)
+            and (
+                credential_generation is None
+                # The invalidation itself raised the generation by one.
+                or info.credential_generation in (credential_generation, credential_generation + 1)
+            )
         ):
             return REJECTED
         return UNKNOWN

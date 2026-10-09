@@ -183,7 +183,7 @@ class TestMigration:
         assert "user_tool_prefs" in _tables(tmp_path / "data" / "tokens.sqlite3")
         # The table was added without a version change; version 3 added the access
         # tables, and this table must still be there.
-        assert SCHEMA_VERSION == 3
+        assert SCHEMA_VERSION == 4
 
     def test_opening_a_database_without_the_table_adds_it_and_keeps_the_rows(
         self, tmp_path: pathlib.Path, clock: Clock
