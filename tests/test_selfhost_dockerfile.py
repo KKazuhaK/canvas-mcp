@@ -182,6 +182,18 @@ def test_dockerignore_keeps_env_and_key_files_out_at_any_depth():
     assert "uv.lock" not in patterns and "pyproject.toml" not in patterns and "src/" not in patterns
 
 
+def test_the_image_points_the_server_at_the_built_account_ui(instructions):
+    env = " ".join(args for name, args in instructions if name == "ENV")
+    assert "ACCOUNT_WEB_DIST=/app/web-dist" in env
+    # The copy target and the setting agree, and the default UI is not changed here.
+    copies = [args for name, args in instructions if name == "COPY" and "--from=web" in args]
+    assert copies == ["--from=web /web/dist /app/web-dist"]
+    assert "ACCOUNT_UI" not in env
+    from canvas_mcp.core.selfhost.settings import DEFAULT_ACCOUNT_WEB_DIST
+
+    assert DEFAULT_ACCOUNT_WEB_DIST == "/app/web-dist"
+
+
 def test_data_volume_port_and_command(instructions):
     by_name = dict(instructions)
     assert by_name["VOLUME"] == '["/data"]'

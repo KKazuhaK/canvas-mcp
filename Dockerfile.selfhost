@@ -10,7 +10,8 @@
 # Python stages use the same digest-pinned base, so the venv's interpreter
 # symlink resolves.
 #
-# The built UI lands in /app/web-dist. Nothing serves it yet: the server still
+# The built UI lands in /app/web-dist and ACCOUNT_WEB_DIST points there. The
+# server serves it at /account/ only when ACCOUNT_UI=react; by default it still
 # renders the legacy /account pages, so runtime behaviour is unchanged.
 #
 # The image holds NO secrets. Everything sensitive (Entra client secret, JWT
@@ -74,8 +75,8 @@ RUN groupadd --gid 10001 mcp \
 
 COPY --from=build /opt/venv /opt/venv
 
-# The React account UI (not served yet): static files, root-owned and read-only to
-# the service user. See web/README.md.
+# The React account UI (served when ACCOUNT_UI=react): static files, root-owned and
+# read-only to the service user. See web/README.md.
 COPY --from=web /web/dist /app/web-dist
 
 # Non-secret defaults only. Never add a Canvas token, client secret, signing
@@ -88,6 +89,7 @@ ENV PATH=/opt/venv/bin:$PATH \
     EXECUTE_TYPESCRIPT_ENABLED=false \
     FASTMCP_HOME=/data/fastmcp \
     SELFHOST_DATA_DIR=/data \
+    ACCOUNT_WEB_DIST=/app/web-dist \
     AUDIT_LOG_DIR=/data/audit \
     FASTMCP_CHECK_FOR_UPDATES=off \
     FASTMCP_SHOW_SERVER_BANNER=false
