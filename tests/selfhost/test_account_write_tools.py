@@ -17,6 +17,7 @@ from canvas_mcp.core.selfhost.account_web import ACCOUNT_PATH, SESSION_COOKIE
 from canvas_mcp.core.selfhost.token_store import ToolPrefs
 from canvas_mcp.core.selfhost.tool_prefs import ToolPrefsCache, WriteToolCatalog
 
+from .conftest import acct_key, store_put
 from .test_account_web import (
     CANVAS_TOKEN,
     CJK,
@@ -34,8 +35,8 @@ from .test_account_web import (
 )
 
 PATH = "/account/write-tools"
-KEY = f"entra:{TID}:{OID}"
-KEY_2 = f"entra:{TID}:{OID_2}"
+KEY = acct_key(OID)
+KEY_2 = acct_key(OID_2)
 
 REGISTERED = [
     "list_courses",
@@ -378,14 +379,14 @@ class TestSaving:
 
     def test_replacing_or_deleting_the_canvas_token_does_not_change_the_switches(self, r: Rig) -> None:
         sign_in(r.h)
-        r.h.store.put(
+        store_put(r.h.store,
             tenant_id=TID, object_id=OID, api_token=CANVAS_TOKEN, canvas_user_id="42",
             canvas_user_name="Ada", entra_display_name="Ada", entra_upn="a@example.test",
             canvas_host="canvas.example.test",
         )
         save(r, "send_message")
         post_form(r.h, "/account/token/delete", {"csrf": csrf_of(r.h)})
-        assert r.h.store.info(TID, OID) is None
+        assert r.h.store.info(acct_key(OID)) is None
         assert stored(r) == {"send_message"}
 
     def test_a_save_that_fails_is_reported_and_changes_nothing(
@@ -541,7 +542,7 @@ class TestSignInAge:
         old_style = codec.seal(
             SESSION_COOKIE,
             {
-                "v": 2, "ep": 0, "tid": TID, "oid": OID, "name": "Ada", "upn": "a@example.test",
+                "v": 3, "ep": 0, "acct": acct_key(OID), "pid": "entra", "name": "Ada", "upn": "a@example.test",
                 "owner": False, "exp": int(r.h.now) + 900, "csrf": csrf,
             },
         )
@@ -557,7 +558,7 @@ class TestSignInAge:
         forged = codec.seal(
             SESSION_COOKIE,
             {
-                "v": 2, "ep": 0, "tid": TID, "oid": OID, "name": "Ada", "upn": "a@example.test",
+                "v": 3, "ep": 0, "acct": acct_key(OID), "pid": "entra", "name": "Ada", "upn": "a@example.test",
                 "owner": False, "iat": int(r.h.now) + 100_000, "exp": int(r.h.now) + 900, "csrf": csrf,
             },
         )

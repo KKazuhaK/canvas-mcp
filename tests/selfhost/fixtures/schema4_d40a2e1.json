@@ -1,0 +1,579 @@
+{
+ "active_key": "k2",
+ "generated_with": "d40a2e1",
+ "host": "canvas.example.edu",
+ "keys": {
+  "k1": 1,
+  "k2": 2
+ },
+ "other_key": "google:111",
+ "plaintexts": {
+  "entra:11111111-2222-3333-4444-555555555555:01010101-0000-4000-8000-000000000001": "6~OWNERONEOWNERONEOWNERONEOWNERONEOWNERONEOWNERONEOWNERONE",
+  "entra:11111111-2222-3333-4444-555555555555:03030303-0000-4000-8000-000000000003": "9~DISABLEDDISABLEDDISABLEDDISABLEDDISABLEDDISABLEDDISABLED",
+  "entra:11111111-2222-3333-4444-555555555555:06060606-0000-4000-8000-000000000006": "8~LEGACYK2LEGACYK2LEGACYK2LEGACYK2LEGACYK2LEGACYK2LEGACYK2",
+  "entra:11111111-2222-3333-4444-555555555555:aaaaaaaa-0000-4000-8000-00000000000a": "1~LEGACYXXLEGACYXXLEGACYXXLEGACYXXLEGACYXXLEGACYXXLEGACYXX",
+  "entra:11111111-2222-3333-4444-555555555555:bbbbbbbb-0000-4000-8000-00000000000b": "2~SCHOOLK1SCHOOLK1SCHOOLK1SCHOOLK1SCHOOLK1SCHOOLK1SCHOOLK1",
+  "entra:11111111-2222-3333-4444-555555555555:cccccccc-0000-4000-8000-00000000000c": "7~SCHOOLK2SCHOOLK2SCHOOLK2SCHOOLK2SCHOOLK2SCHOOLK2SCHOOLK2",
+  "entra:11111111-2222-3333-4444-555555555555:dddddddd-0000-4000-8000-00000000000d": "3~REJECTEDREJECTEDREJECTEDREJECTEDREJECTEDREJECTEDREJECTED",
+  "entra:11111111-2222-3333-4444-555555555555:eeeeeeee-0000-4000-8000-00000000000e": "4~REVOKEDXREVOKEDXREVOKEDXREVOKEDXREVOKEDXREVOKEDXREVOKEDX",
+  "google:111": "9~OTHERKEYOTHERKEYOTHERKEYOTHERKEYOTHERKEYOTHERKEYOTHERKEY"
+ },
+ "principals": {
+  "corrupt": "entra:11111111-2222-3333-4444-555555555555:ffffffff-0000-4000-8000-00000000000f",
+  "deleted": "entra:11111111-2222-3333-4444-555555555555:05050505-0000-4000-8000-000000000005",
+  "disabled_bare": "entra:11111111-2222-3333-4444-555555555555:04040404-0000-4000-8000-000000000004",
+  "disabled_row": "entra:11111111-2222-3333-4444-555555555555:03030303-0000-4000-8000-000000000003",
+  "legacy": "entra:11111111-2222-3333-4444-555555555555:aaaaaaaa-0000-4000-8000-00000000000a",
+  "legacy_k2": "entra:11111111-2222-3333-4444-555555555555:06060606-0000-4000-8000-000000000006",
+  "owner_one": "entra:11111111-2222-3333-4444-555555555555:01010101-0000-4000-8000-000000000001",
+  "owner_two": "entra:11111111-2222-3333-4444-555555555555:02020202-0000-4000-8000-000000000002",
+  "rejected": "entra:11111111-2222-3333-4444-555555555555:dddddddd-0000-4000-8000-00000000000d",
+  "revoked": "entra:11111111-2222-3333-4444-555555555555:eeeeeeee-0000-4000-8000-00000000000e",
+  "school_k1": "entra:11111111-2222-3333-4444-555555555555:bbbbbbbb-0000-4000-8000-00000000000b",
+  "school_k2": "entra:11111111-2222-3333-4444-555555555555:cccccccc-0000-4000-8000-00000000000c"
+ },
+ "tables": {
+  "canvas_tokens": {
+   "columns": [
+    "tenant_id",
+    "object_id",
+    "key_id",
+    "nonce",
+    "ciphertext",
+    "canvas_user_id",
+    "canvas_user_name",
+    "entra_display_name",
+    "entra_upn",
+    "created_at",
+    "updated_at",
+    "last_used_at",
+    "canvas_host",
+    "principal_key",
+    "status",
+    "invalid_reason",
+    "invalid_since",
+    "last_verified_at",
+    "expires_hint_at"
+   ],
+   "rows": [
+    [
+     "",
+     "google:111",
+     "k2",
+     {
+      "b64": "6d+hn+PlQhRjgi7C"
+     },
+     {
+      "b64": "l23CgnVR4EqP6mSxB8TNQv69yf0B/Y92hb7Eh7KNnzECblT3iIuoZDPAu5vBj/pjjKfqePKhxdb+W7i/UilaIgRTCbuiwSf+f1w="
+     },
+     "999",
+     "Opaque",
+     "",
+     "",
+     1700000100,
+     1700000100,
+     null,
+     "canvas.example.edu",
+     "google:111",
+     "active",
+     null,
+     null,
+     1700000100,
+     null
+    ],
+    [
+     "11111111-2222-3333-4444-555555555555",
+     "01010101-0000-4000-8000-000000000001",
+     "k1",
+     {
+      "b64": "ezawCzKIbpOEvHfe"
+     },
+     {
+      "b64": "X2x3UlPy6P6pDgg93WEEVOekS/299CSFERM6NeKCYsTSBE5GpdoKVkx5t0d71FlKK62FBHatdLh8QNRMSO0PijMFEY1kRLPRANo="
+     },
+     "106",
+     "Canvas owner_one",
+     "Entra owner_one",
+     "owner_one@example.test",
+     1700000050,
+     1700000050,
+     null,
+     "canvas.example.edu",
+     "entra:11111111-2222-3333-4444-555555555555:01010101-0000-4000-8000-000000000001",
+     "active",
+     null,
+     null,
+     1700000050,
+     null
+    ],
+    [
+     "11111111-2222-3333-4444-555555555555",
+     "03030303-0000-4000-8000-000000000003",
+     "k2",
+     {
+      "b64": "IaUjCsJ7hhRiNbxF"
+     },
+     {
+      "b64": "YEs9m+iKxy7pSKnJ3laeBYx06w8hoG/DdvLZ6u9qvugqo/ipfVLEsRruSWy6kL9NUxQBc+kT8nESf3ueH11epy9mThkNJgEOrOE="
+     },
+     "109",
+     "Canvas disabled_row",
+     "Entra disabled_row",
+     "disabled_row@example.test",
+     1700000080,
+     1700000080,
+     null,
+     "canvas.example.edu",
+     "entra:11111111-2222-3333-4444-555555555555:03030303-0000-4000-8000-000000000003",
+     "active",
+     null,
+     null,
+     1700000080,
+     null
+    ],
+    [
+     "11111111-2222-3333-4444-555555555555",
+     "06060606-0000-4000-8000-000000000006",
+     "k2",
+     {
+      "b64": "QwV3q9x3PqeWBdLI"
+     },
+     {
+      "b64": "K5zkY+UzvKEMXyvsrIgCMVQ8u2vCWFP0EFF27IT90EaxGdyvTX+mEEGkROvlMdcWHL8CeHj36mdC0DHi7yhPupNW953iRbXYipo="
+     },
+     "108",
+     "Canvas legacy_k2",
+     "Entra legacy_k2",
+     "legacy_k2@example.test",
+     1700000070,
+     1700000070,
+     null,
+     null,
+     "entra:11111111-2222-3333-4444-555555555555:06060606-0000-4000-8000-000000000006",
+     "active",
+     null,
+     null,
+     1700000070,
+     null
+    ],
+    [
+     "11111111-2222-3333-4444-555555555555",
+     "aaaaaaaa-0000-4000-8000-00000000000a",
+     "k1",
+     {
+      "b64": "dSvVeA6Fss74gBpR"
+     },
+     {
+      "b64": "QLYd98CfSz1BBcpHNdG8As3LIGA9JHplU9Gjsp/MgaD3Yukl5BO6lkT5uqV8C3cnuRiF4yYGmKZjh3v9k+zWU87aUVd32nmGt08="
+     },
+     "101",
+     "Canvas legacy",
+     "Entra legacy",
+     "legacy@example.test",
+     1700000000,
+     1700000000,
+     null,
+     null,
+     "entra:11111111-2222-3333-4444-555555555555:aaaaaaaa-0000-4000-8000-00000000000a",
+     "active",
+     null,
+     null,
+     1700000000,
+     null
+    ],
+    [
+     "11111111-2222-3333-4444-555555555555",
+     "bbbbbbbb-0000-4000-8000-00000000000b",
+     "k1",
+     {
+      "b64": "m0kX6vjCNSB9DdZE"
+     },
+     {
+      "b64": "hW29RkMJtMEKx5aqNqnIvCHP9tILd7jKbL18b8BD43bg6g87GbHHtfSVQ5d8vKnDyZczhJ+Opy7RhBwr4WuiJCRGmNMbbQ71bcA="
+     },
+     "102",
+     "Canvas school_k1",
+     "Entra school_k1",
+     "school_k1@example.test",
+     1700000010,
+     1700000010,
+     null,
+     "canvas.example.edu",
+     "entra:11111111-2222-3333-4444-555555555555:bbbbbbbb-0000-4000-8000-00000000000b",
+     "active",
+     null,
+     null,
+     1700000010,
+     null
+    ],
+    [
+     "11111111-2222-3333-4444-555555555555",
+     "cccccccc-0000-4000-8000-00000000000c",
+     "k2",
+     {
+      "b64": "NU/PENSg9/TvQPgH"
+     },
+     {
+      "b64": "KGsI76NjFDWXdA686bpuFD5zsf9xrZ995zI/qGd/R6AnC0RyqdAlUnZYZ/FjaEDuIWTaZhIbS4WbEwiys7RErP4DBn4Z4ZmdQwk="
+     },
+     "107",
+     "Canvas school_k2",
+     "Entra school_k2",
+     "school_k2@example.test",
+     1700000060,
+     1700000060,
+     null,
+     "canvas.example.edu",
+     "entra:11111111-2222-3333-4444-555555555555:cccccccc-0000-4000-8000-00000000000c",
+     "active",
+     null,
+     null,
+     1700000060,
+     4000000000
+    ],
+    [
+     "11111111-2222-3333-4444-555555555555",
+     "dddddddd-0000-4000-8000-00000000000d",
+     "k1",
+     {
+      "b64": "/M9LP1Hy3rtrkdDD"
+     },
+     {
+      "b64": "qYoFYKz5QDFRPXRl5H4A7vJLcMpEZOnZv5/EVIYbTRZND63r/SFk1YvZ54AaLK9zDut0cJ1HnIQ3ZC8/zk7TfQMACV2dGps0jJo="
+     },
+     "103",
+     "Canvas rejected",
+     "Entra rejected",
+     "rejected@example.test",
+     1700000020,
+     1700000020,
+     null,
+     "canvas.example.edu",
+     "entra:11111111-2222-3333-4444-555555555555:dddddddd-0000-4000-8000-00000000000d",
+     "invalid",
+     "canvas_token_rejected",
+     1700000110,
+     1700000020,
+     null
+    ],
+    [
+     "11111111-2222-3333-4444-555555555555",
+     "eeeeeeee-0000-4000-8000-00000000000e",
+     "k1",
+     {
+      "b64": "j2hxPRG4dyqLmEzf"
+     },
+     {
+      "b64": "s1uC8HsPavGSvDhDcTeI+hi490MSvFHMuS11shCmLqvpMfOFUQj9sxUUKqCsUsTOR0Or3T/ucYCUJoDNpJjfcF4MWhrgZdba0Po="
+     },
+     "104",
+     "Canvas revoked",
+     "Entra revoked",
+     "revoked@example.test",
+     1700000030,
+     1700000030,
+     null,
+     "canvas.example.edu",
+     "entra:11111111-2222-3333-4444-555555555555:eeeeeeee-0000-4000-8000-00000000000e",
+     "invalid",
+     "revoked_by_admin",
+     1700000120,
+     1700000030,
+     null
+    ],
+    [
+     "11111111-2222-3333-4444-555555555555",
+     "ffffffff-0000-4000-8000-00000000000f",
+     "k1",
+     {
+      "b64": "qBxMW3wTf7b6Kusj"
+     },
+     {
+      "b64": "ABEiM0RVZneImaq7zN3u/wA="
+     },
+     "105",
+     "Canvas corrupt",
+     "Entra corrupt",
+     "corrupt@example.test",
+     1700000040,
+     1700000040,
+     null,
+     "canvas.example.edu",
+     "entra:11111111-2222-3333-4444-555555555555:ffffffff-0000-4000-8000-00000000000f",
+     "invalid",
+     "decrypt_failed",
+     1700000130,
+     1700000040,
+     null
+    ]
+   ]
+  },
+  "credential_generations": {
+   "columns": [
+    "principal_key",
+    "generation",
+    "reason",
+    "updated_at"
+   ],
+   "rows": [
+    [
+     "entra:11111111-2222-3333-4444-555555555555:01010101-0000-4000-8000-000000000001",
+     1,
+     "enrolled",
+     1700000050
+    ],
+    [
+     "entra:11111111-2222-3333-4444-555555555555:03030303-0000-4000-8000-000000000003",
+     4,
+     "disabled",
+     1700000180
+    ],
+    [
+     "entra:11111111-2222-3333-4444-555555555555:04040404-0000-4000-8000-000000000004",
+     1,
+     "disabled",
+     1700000190
+    ],
+    [
+     "entra:11111111-2222-3333-4444-555555555555:05050505-0000-4000-8000-000000000005",
+     2,
+     "removed",
+     1700000200
+    ],
+    [
+     "entra:11111111-2222-3333-4444-555555555555:06060606-0000-4000-8000-000000000006",
+     1,
+     "enrolled",
+     1700000070
+    ],
+    [
+     "entra:11111111-2222-3333-4444-555555555555:aaaaaaaa-0000-4000-8000-00000000000a",
+     1,
+     "enrolled",
+     1700000000
+    ],
+    [
+     "entra:11111111-2222-3333-4444-555555555555:bbbbbbbb-0000-4000-8000-00000000000b",
+     1,
+     "enrolled",
+     1700000010
+    ],
+    [
+     "entra:11111111-2222-3333-4444-555555555555:cccccccc-0000-4000-8000-00000000000c",
+     1,
+     "enrolled",
+     1700000060
+    ],
+    [
+     "entra:11111111-2222-3333-4444-555555555555:dddddddd-0000-4000-8000-00000000000d",
+     2,
+     "invalidated",
+     1700000110
+    ],
+    [
+     "entra:11111111-2222-3333-4444-555555555555:eeeeeeee-0000-4000-8000-00000000000e",
+     2,
+     "invalidated",
+     1700000120
+    ],
+    [
+     "entra:11111111-2222-3333-4444-555555555555:ffffffff-0000-4000-8000-00000000000f",
+     2,
+     "invalidated",
+     1700000130
+    ],
+    [
+     "google:111",
+     1,
+     "enrolled",
+     1700000100
+    ]
+   ]
+  },
+  "meta": {
+   "columns": [
+    "key",
+    "value"
+   ],
+   "rows": [
+    [
+     "schema_version",
+     "4"
+    ]
+   ]
+  },
+  "principal_status": {
+   "columns": [
+    "principal_key",
+    "status",
+    "disabled_reason",
+    "disabled_at",
+    "disabled_by",
+    "display_name",
+    "upn",
+    "session_epoch",
+    "is_owner",
+    "owner_seen_at",
+    "updated_at"
+   ],
+   "rows": [
+    [
+     "entra:11111111-2222-3333-4444-555555555555:01010101-0000-4000-8000-000000000001",
+     "active",
+     null,
+     null,
+     null,
+     "",
+     "",
+     0,
+     1,
+     1700000140,
+     1700000140
+    ],
+    [
+     "entra:11111111-2222-3333-4444-555555555555:02020202-0000-4000-8000-000000000002",
+     "active",
+     null,
+     null,
+     null,
+     "",
+     "",
+     0,
+     1,
+     1700000220,
+     1700000220
+    ],
+    [
+     "entra:11111111-2222-3333-4444-555555555555:03030303-0000-4000-8000-000000000003",
+     "disabled",
+     "admin_disabled",
+     1700000180,
+     "entra:11111111-2222-3333-4444-555555555555:01010101-0000-4000-8000-000000000001",
+     "Entra disabled_row",
+     "disabled_row@example.test",
+     3,
+     0,
+     null,
+     1700000180
+    ],
+    [
+     "entra:11111111-2222-3333-4444-555555555555:04040404-0000-4000-8000-000000000004",
+     "disabled",
+     "operator_disabled",
+     1700000190,
+     "operator",
+     "",
+     "",
+     1,
+     0,
+     null,
+     1700000190
+    ]
+   ]
+  },
+  "principal_status_events": {
+   "columns": [
+    "id",
+    "principal_key",
+    "action",
+    "actor",
+    "reason",
+    "session_epoch",
+    "at"
+   ],
+   "rows": [
+    [
+     1,
+     "entra:11111111-2222-3333-4444-555555555555:01010101-0000-4000-8000-000000000001",
+     "owner_gained",
+     null,
+     "sign_in",
+     0,
+     1700000140
+    ],
+    [
+     2,
+     "entra:11111111-2222-3333-4444-555555555555:02020202-0000-4000-8000-000000000002",
+     "owner_gained",
+     null,
+     "sign_in",
+     0,
+     1700000150
+    ],
+    [
+     3,
+     "entra:11111111-2222-3333-4444-555555555555:03030303-0000-4000-8000-000000000003",
+     "disabled",
+     "entra:11111111-2222-3333-4444-555555555555:01010101-0000-4000-8000-000000000001",
+     "admin_disabled",
+     1,
+     1700000160
+    ],
+    [
+     4,
+     "entra:11111111-2222-3333-4444-555555555555:03030303-0000-4000-8000-000000000003",
+     "enabled",
+     "entra:11111111-2222-3333-4444-555555555555:01010101-0000-4000-8000-000000000001",
+     null,
+     2,
+     1700000170
+    ],
+    [
+     5,
+     "entra:11111111-2222-3333-4444-555555555555:03030303-0000-4000-8000-000000000003",
+     "disabled",
+     "entra:11111111-2222-3333-4444-555555555555:01010101-0000-4000-8000-000000000001",
+     "admin_disabled",
+     3,
+     1700000180
+    ],
+    [
+     6,
+     "entra:11111111-2222-3333-4444-555555555555:04040404-0000-4000-8000-000000000004",
+     "disabled",
+     "operator",
+     "operator_disabled",
+     1,
+     1700000190
+    ],
+    [
+     7,
+     "entra:11111111-2222-3333-4444-555555555555:02020202-0000-4000-8000-000000000002",
+     "owner_lost",
+     null,
+     "sign_in",
+     0,
+     1700000210
+    ],
+    [
+     8,
+     "entra:11111111-2222-3333-4444-555555555555:02020202-0000-4000-8000-000000000002",
+     "owner_gained",
+     null,
+     "sign_in",
+     0,
+     1700000220
+    ]
+   ]
+  },
+  "user_tool_prefs": {
+   "columns": [
+    "principal_key",
+    "enabled_write_tools",
+    "enabled_at",
+    "updated_at",
+    "updated_via"
+   ],
+   "rows": [
+    [
+     "entra:11111111-2222-3333-4444-555555555555:01010101-0000-4000-8000-000000000001",
+     "[\"create_announcement\", \"send_message\"]",
+     "{\"create_announcement\": 1700000230, \"send_message\": 1700000230}",
+     1700000230,
+     "account_web"
+    ]
+   ]
+  }
+ },
+ "tenant_id": "11111111-2222-3333-4444-555555555555"
+}

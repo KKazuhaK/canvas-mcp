@@ -19,9 +19,10 @@ from canvas_mcp.core.selfhost.token_store import (
     TokenStore,
 )
 
-from .test_token_store import OID_A, OID_B, TID, TOKEN_A, TOKEN_B, Clock, _put, _ring
+from .conftest import acct_key, make_account
+from .test_token_store import OID_A, OID_B, TOKEN_A, TOKEN_B, Clock, _put, _ring
 
-PK_A = f"entra:{TID}:{OID_A}"
+PK_A = acct_key(OID_A)
 
 
 @pytest.fixture
@@ -33,6 +34,8 @@ def clock() -> Clock:
 def store(tmp_path: pathlib.Path, clock: Clock) -> TokenStore:
     s = make_store(tmp_path / "data" / "tokens.sqlite3", _ring(("k1", 1)), clock=clock)
     s.initialize()
+    make_account(s, OID_A)
+    make_account(s, OID_B)
     return s
 
 
@@ -73,8 +76,8 @@ class TestMarkInvalid:
 
     def test_the_adapter_form_names_the_entra_principal(self, store: TokenStore) -> None:
         _put(store, canvas_host="canvas.example.edu")
-        assert store.mark_invalid(TID, OID_A, reason=REASON_REVOKED_BY_ADMIN) is True
-        info = store.info(TID, OID_A)
+        assert store.mark_invalid(acct_key(OID_A), reason=REASON_REVOKED_BY_ADMIN) is True
+        info = store.info(acct_key(OID_A))
         assert info is not None and info.status == STATUS_INVALID
 
     def test_a_replaced_token_is_not_invalidated_by_the_old_one(
@@ -95,9 +98,9 @@ class TestMarkInvalid:
 
     def test_only_the_named_row_changes(self, store: TokenStore) -> None:
         _put(store, canvas_host="canvas.example.edu")
-        _put(store, oid=OID_B, canvas_host="canvas.example.edu")
+        _put(store, principal_key=acct_key(OID_B), canvas_host="canvas.example.edu")
         store.mark_invalid(PK_A, reason=REASON_REVOKED_BY_ADMIN)
-        other = store.info(TID, OID_B)
+        other = store.info(acct_key(OID_B))
         assert other is not None and other.status == STATUS_ACTIVE
 
 
@@ -182,8 +185,8 @@ class TestVerifiedAndHint:
 
     def test_status_columns_come_back_on_list_and_info(self, store: TokenStore) -> None:
         _put(store, canvas_host="canvas.example.edu")
-        _put(store, oid=OID_B, canvas_host="canvas.example.edu")
+        _put(store, principal_key=acct_key(OID_B), canvas_host="canvas.example.edu")
         store.mark_invalid(PK_A, reason=REASON_REVOKED_BY_ADMIN)
-        listed = {row.object_id: row for row in store.list_enrollments()}
-        assert listed[OID_A].status == STATUS_INVALID
-        assert listed[OID_B].status == STATUS_ACTIVE
+        listed = {row.principal_key: row for row in store.list_enrollments()}
+        assert listed[PK_A].status == STATUS_INVALID
+        assert listed[acct_key(OID_B)].status == STATUS_ACTIVE

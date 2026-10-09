@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.server.auth import AccessToken
+from selfhost.conftest import acct_key
 
 import canvas_mcp.core.config as config_module
 from canvas_mcp.core.config import STUDENT_WRITE_TOOL_NAMES
@@ -59,7 +60,7 @@ def _request(monkeypatch: pytest.MonkeyPatch):
     )
     set_request_principal(
         RequestPrincipal(
-            key=f"entra:{TENANT}:{OID}", tenant_id=TENANT, object_id=OID, display_name="",
+            key=acct_key(OID), tenant_id=TENANT, object_id=OID, display_name="",
             upn="", roles=frozenset({"Canvas.User"}), is_owner=False,
         )
     )

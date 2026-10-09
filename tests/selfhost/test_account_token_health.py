@@ -26,6 +26,7 @@ from canvas_mcp.core.selfhost.token_store import (
     STATUS_INVALID,
 )
 
+from .conftest import acct_key, store_put
 from .test_account_schools import DEFAULT_HOST, HOST_A, enroll, rig
 from .test_account_web import (
     CANVAS_TOKEN,
@@ -44,8 +45,8 @@ from .test_account_web import (
 )
 
 HOST = "canvas.example.test"  # the pinned default school of the test harness
-KEY = f"entra:{TID}:{OID}"
-KEY_2 = f"entra:{TID}:{OID_2}"
+KEY = acct_key(OID)
+KEY_2 = acct_key(OID_2)
 RECHECK = "/account/token/recheck"
 SETTINGS_URL = f"https://{HOST}/profile/settings"
 # The harness clock and the store clock both read 2027-01-15 08:00 UTC.
@@ -66,7 +67,7 @@ def seed(
     name: str = "Ada Canvas",
     expires: int | None = None,
 ) -> None:
-    h.store.put(
+    store_put(h.store,
         tenant_id=TID, object_id=oid, api_token=token, canvas_user_id=user_id,
         canvas_user_name=name, entra_display_name="Ada", entra_upn="ada@example.test",
         canvas_host=host, expires_hint_at=expires,
@@ -105,7 +106,7 @@ def page(h: Harness) -> str:
 
 
 def info(h: Harness, oid: str = OID) -> Any:
-    row = h.store.info(TID, oid)
+    row = h.store.info(acct_key(oid))
     assert row is not None
     return row
 
@@ -353,7 +354,7 @@ class TestRecheck:
         real = h.store.restore_active
 
         def replaced_meanwhile(*args: Any, **kwargs: Any) -> bool:
-            h.store.put(
+            store_put(h.store,
                 tenant_id=TID, object_id=OID, api_token="the-replacement-token-0123456789",
                 canvas_user_id="42", canvas_user_name="Ada Canvas", entra_display_name="Ada",
                 entra_upn="ada@example.test", canvas_host=HOST, expires_hint_at=None,
@@ -365,7 +366,7 @@ class TestRecheck:
         assert response.status_code == 303
         row = info(h)
         assert row.status == STATUS_ACTIVE
-        got = h.store.get(TID, OID)
+        got = h.store.get(acct_key(OID))
         assert got is not None and got.api_token == "the-replacement-token-0123456789"
 
 
@@ -500,7 +501,7 @@ class TestIdentityChange:
         # Nothing was saved.
         row = info(h)
         assert row.canvas_user_id == "42"
-        got = h.store.get(TID, OID)
+        got = h.store.get(acct_key(OID))
         assert got is not None and got.api_token == CANVAS_TOKEN
         assert [(e["action"], e["principal"]) for e in tokens_events(events)] == [
             ("identity_change_detected", KEY)
@@ -517,7 +518,7 @@ class TestIdentityChange:
         assert confirmed.status_code == 303
         row = info(h)
         assert row.canvas_user_id == "99" and row.status == STATUS_ACTIVE
-        got = h.store.get(TID, OID)
+        got = h.store.get(acct_key(OID))
         assert got is not None and got.api_token == new_token
         assert [e["action"] for e in tokens_events(events)] == [
             "identity_change_detected",
@@ -617,7 +618,7 @@ class TestIdentityChange:
         self, tmp_path: pathlib.Path
     ) -> None:
         r = rig(tmp_path)
-        r.h.store.put(
+        store_put(r.h.store,
             tenant_id=TID, object_id=OID, api_token=CANVAS_TOKEN, canvas_user_id="7",
             canvas_user_name="Old", entra_display_name="Old", entra_upn="o@example.test",
             canvas_host=HOST_A,
@@ -625,7 +626,7 @@ class TestIdentityChange:
         sign_in(r.h)
         # Canvas user ids are per school: id 42 at another school is not a change.
         assert enroll(r, DEFAULT_HOST).status_code == 303
-        row = r.h.store.info(TID, OID)
+        row = r.h.store.info(acct_key(OID))
         assert row is not None and row.canvas_host == DEFAULT_HOST and row.canvas_user_id == "42"
 
 
@@ -641,7 +642,7 @@ class TestAdminHealth:
         h.store.mark_invalid(KEY_2, reason=REASON_CANVAS_TOKEN_REJECTED)
         seed(h, oid="cccccccc-1111-2222-3333-444444444444", name="Gone Gus", token="9~" + "G" * 62)
         h.store.mark_invalid(
-            f"entra:{TID}:cccccccc-1111-2222-3333-444444444444", reason=REASON_REVOKED_BY_ADMIN
+            acct_key("cccccccc-1111-2222-3333-444444444444"), reason=REASON_REVOKED_BY_ADMIN
         )
 
     def test_columns_for_status_reason_since_and_last_verified(self, h: Harness) -> None:
@@ -695,7 +696,7 @@ class TestAdminHealth:
 
     def test_marking_invalid_needs_an_owner_origin_and_csrf(self, h: Harness) -> None:
         seed(h)
-        target = {"tenant_id": TID, "object_id": OID}
+        target = {"principal_key": KEY}
         url = "/account/admin/invalidate"
         assert post_form(h, url, {"csrf": "x", **target}).status_code == 403  # signed out
         sign_in(h, oid=OID_2)
@@ -713,7 +714,7 @@ class TestAdminHealth:
         seed(h)
         sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
         response = post_form(
-            h, "/account/admin/invalidate", {"csrf": csrf_of(h), "tenant_id": TID, "object_id": OID}
+            h, "/account/admin/invalidate", {"csrf": csrf_of(h), "principal_key": KEY}
         )
         assert response.status_code == 303 and response.headers["location"] == "/account/admin"
 
@@ -723,7 +724,7 @@ class TestAdminHealth:
         assert len(recorded) == 1
         assert recorded[0]["action"] == "admin_marked_invalid"
         assert recorded[0]["principal"] == KEY  # the target, not the administrator
-        assert recorded[0]["actor"] == f"entra:{TID}:{OID_OWNER}"
+        assert recorded[0]["actor"] == acct_key(OID_OWNER)
         assert recorded[0]["reason"] == REASON_REVOKED_BY_ADMIN
 
         # The user now sees the administrator's banner and must enroll again.
@@ -735,16 +736,22 @@ class TestAdminHealth:
     def test_marking_twice_audits_once(self, h: Harness, events: list[str]) -> None:
         seed(h)
         sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
-        fields = {"csrf": csrf_of(h), "tenant_id": TID, "object_id": OID}
+        fields = {"csrf": csrf_of(h), "principal_key": KEY}
         post_form(h, "/account/admin/invalidate", fields)
         post_form(h, "/account/admin/invalidate", fields)
         assert len(tokens_events(events)) == 1
 
     @pytest.mark.parametrize(
         "fields",
-        [{"tenant_id": "x", "object_id": OID}, {"tenant_id": TID, "object_id": "../../etc"}, {}],
+        [
+            {"principal_key": "x"},
+            {"principal_key": "acct:../../etc"},
+            {"principal_key": f"entra:{TID}:{OID}"},
+            {"tenant_id": TID, "object_id": OID},
+            {},
+        ],
     )
-    def test_marking_validates_the_identifiers(self, h: Harness, fields: dict[str, str]) -> None:
+    def test_marking_validates_the_account_key(self, h: Harness, fields: dict[str, str]) -> None:
         seed(h)
         sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
         response = post_form(h, "/account/admin/invalidate", {"csrf": csrf_of(h), **fields})
@@ -754,7 +761,7 @@ class TestAdminHealth:
     def test_marking_an_unknown_user_is_harmless(self, h: Harness) -> None:
         sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
         response = post_form(
-            h, "/account/admin/invalidate", {"csrf": csrf_of(h), "tenant_id": TID, "object_id": OID_2}
+            h, "/account/admin/invalidate", {"csrf": csrf_of(h), "principal_key": KEY_2}
         )
         assert response.status_code == 303
         assert h.store.count() == 0

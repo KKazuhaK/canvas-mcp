@@ -23,6 +23,7 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from canvas_mcp.core.selfhost import account_web
+from canvas_mcp.core.selfhost import accounts as acc
 from canvas_mcp.core.selfhost.account_web import (
     ACCOUNT_CALLBACK_PATH,
     ACCOUNT_PATH,
@@ -34,8 +35,12 @@ from canvas_mcp.core.selfhost.account_web import (
     build_account_routes,
     register_account_routes,
 )
+from canvas_mcp.core.selfhost.accounts import EntraClaimsPolicy, default_policy
+from canvas_mcp.core.selfhost.identity import IdentityService
 from canvas_mcp.core.selfhost.schools import SchoolPolicy
 from canvas_mcp.core.selfhost.token_store import Keyring, TokenStore
+
+from .conftest import acct_key, make_account
 
 BASE = "https://canvas.example.test"
 TID = "11111111-2222-3333-4444-555555555555"
@@ -44,34 +49,43 @@ CLIENT_SECRET = "client-secret-value-0123456789"
 OID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 OID_2 = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
 OID_OWNER = "cccccccc-dddd-eeee-ffff-000000000000"
+KEY = acct_key(OID)
+KEY_2 = acct_key(OID_2)
+KEY_OWNER = acct_key(OID_OWNER)
 CANVAS_TOKEN = "7~" + "T" * 62
 SESSION_SECRET = bytes(range(32))
 ORIGIN = {"Origin": BASE}
 
 
-@dataclass(frozen=True)
-class FakePrincipal:
-    tenant_id: str
-    object_id: str
-    display_name: str
-    upn: str
-    is_owner: bool
+POLICY = default_policy("Canvas.User", "Canvas.Owner")
 
 
-def fake_authorize(claims: Mapping[str, Any]) -> tuple[FakePrincipal | None, str]:
-    roles = claims.get("roles") or []
-    if "Canvas.Owner" in roles or "Canvas.User" in roles:
-        return (
-            FakePrincipal(
-                tenant_id=claims["tid"],
-                object_id=claims["oid"],
-                display_name=claims.get("name", ""),
-                upn=claims.get("preferred_username", ""),
-                is_owner="Canvas.Owner" in roles,
-            ),
-            "",
-        )
-    return None, "Your account is <b>not assigned</b> to this app."
+def make_identity(store: TokenStore, policy: Any = POLICY, access: Any = None) -> IdentityService:
+    """The real identity service over ``store`` (new accounts get the key the tests expect)."""
+    store._new_account_id = lambda ext: acct_key(ext.subject).removeprefix("acct:")  # type: ignore[attr-defined]
+    return IdentityService(store, EntraClaimsPolicy(TID, CLIENT_ID), policy, access=access)
+
+
+def put_row(
+    store: TokenStore,
+    oid: str,
+    *,
+    token: str,
+    name: str,
+    upn: str = "",
+    display: str | None = None,
+    canvas_user_id: str = "77",
+    **kw: Any,
+) -> Any:
+    """Create the account of ``oid`` (if need be) and save a Canvas token for it."""
+    key = make_account(store, oid, name=display if display is not None else name, username=upn)
+    return store.put(
+        principal_key=key,
+        api_token=token,
+        canvas_user_id=canvas_user_id,
+        canvas_user_name=name,
+        **kw,
+    )
 
 
 @dataclass
@@ -118,6 +132,7 @@ def build_harness(
     tmp_path: pathlib.Path,
     *,
     cfg: AccountConfig | None = None,
+    identity: Any = None,
     **route_kwargs: Any,
 ) -> Harness:
     """A signed-out harness; ``route_kwargs`` (directory, resolve_host, ...) go to the routes."""
@@ -125,6 +140,7 @@ def build_harness(
     store = make_store(tmp_path / "tokens.sqlite3", keyring, clock=lambda: 1_800_000_000)
     store.initialize()
     harness = Harness(client=None, store=store)  # type: ignore[arg-type]
+    identity = identity or make_identity(store)
 
     async def verify(_token: str) -> Mapping[str, Any] | None:
         if harness.verifier_result == "raise":
@@ -150,7 +166,7 @@ def build_harness(
     routes = build_account_routes(
         cfg or make_cfg(),
         store,
-        fake_authorize,
+        identity,
         id_token_verifier=verify,
         canvas_whoami=whoami,
         http_client_factory=factory,
@@ -521,22 +537,22 @@ class TestCallback:
     def test_authorize_denial_is_403_without_session(self, h: Harness) -> None:
         response = sign_in(h, roles=())
         assert response.status_code == 403
-        # the (escaped) denial message is shown
-        assert "&lt;b&gt;not assigned&lt;/b&gt;" in response.text
-        assert "<b>not assigned</b>" not in response.text
+        # the closed denial message is shown, and nothing is created for the visitor
+        assert "is not allowed to use this server" in response.text
+        assert h.store.list_principal_statuses() == []
         assert SESSION_COOKIE not in "".join(set_cookie_headers(response))
         assert h.client.get(ACCOUNT_PATH).text.count("Sign in with Microsoft") >= 1
 
-    def test_principal_for_another_tenant_is_refused(self, h: Harness) -> None:
-        def sneaky(claims: Mapping[str, Any]) -> tuple[FakePrincipal | None, str]:
-            return FakePrincipal("00000000-0000-0000-0000-000000000000", OID, "x", "x", False), ""
+    def test_a_refusal_from_the_identity_service_is_403_without_a_session(self, h: Harness) -> None:
+        class Refusing:
+            def sign_in(self, claims: Mapping[str, Any], **kw: Any) -> acc.Denied:
+                return acc.denied(acc.DENY_WRONG_TENANT)
 
-        # Rebuild the app with the sneaky authorizer, reusing the harness fakes.
         async def verify(_t: str) -> Mapping[str, Any] | None:
             return dict(h.claims)
 
         routes = build_account_routes(
-            make_cfg(), h.store, sneaky, id_token_verifier=verify,
+            make_cfg(), h.store, Refusing(), id_token_verifier=verify,  # type: ignore[arg-type]
             http_client_factory=lambda: httpx.AsyncClient(
                 transport=httpx.MockTransport(
                     lambda r: httpx.Response(200, json={"id_token": "x"})
@@ -555,6 +571,7 @@ class TestCallback:
             ACCOUNT_CALLBACK_PATH, params={"code": "c", "state": q["state"][0]}
         )
         assert response.status_code == 403
+        assert "different directory" in response.text
         assert SESSION_COOKIE not in "".join(set_cookie_headers(response))
 
     def test_happy_path(self, h: Harness) -> None:
@@ -614,12 +631,34 @@ class TestSession:
         forged = other.seal(
             SESSION_COOKIE,
             {
-                "v": 2, "ep": 0, "tid": TID, "oid": OID, "name": "x", "upn": "x",
+                "v": 3, "ep": 0, "acct": KEY, "pid": "entra", "name": "x", "upn": "x",
                 "owner": True, "iat": int(h.now), "exp": int(h.now) + 600, "csrf": "c",
             },
         )
         h.client.cookies.set(SESSION_COOKIE, forged, domain="canvas.example.test", path="/")
         assert "Sign in with Microsoft" in h.client.get(ACCOUNT_PATH).text
+
+    def test_a_cookie_of_the_previous_version_is_signed_out(self, h: Harness) -> None:
+        # Version 2 named the Entra tenant and object id; it is refused, so everyone
+        # signs in once after the account-model upgrade.
+        codec = account_web._CookieCodec(SESSION_SECRET)
+        old = codec.seal(
+            SESSION_COOKIE,
+            {
+                "v": 2, "ep": 0, "tid": TID, "oid": OID, "name": "x", "upn": "x",
+                "owner": False, "iat": int(h.now), "exp": int(h.now) + 600, "csrf": "c",
+            },
+        )
+        h.client.cookies.set(SESSION_COOKIE, old, domain="canvas.example.test", path="/")
+        assert "Sign in with Microsoft" in h.client.get(ACCOUNT_PATH).text
+
+    def test_the_session_names_the_account_not_the_tenant_and_object(self, h: Harness) -> None:
+        sign_in(h)
+        codec = account_web._CookieCodec(SESSION_SECRET)
+        opened = codec.unseal(SESSION_COOKIE, h.client.cookies.get(SESSION_COOKIE))
+        assert opened is not None
+        assert opened["v"] == 3 and opened["acct"] == KEY and opened["pid"] == "entra"
+        assert "tid" not in opened and "oid" not in opened
 
     def test_cookie_for_another_cookie_name_is_rejected(self, h: Harness) -> None:
         # A sealed login cookie cannot be replayed as a session (AAD = name).
@@ -646,7 +685,7 @@ class TestSession:
             return dict(h.claims)
 
         routes = build_account_routes(
-            make_cfg(session_ttl_seconds=120), h.store, fake_authorize,
+            make_cfg(session_ttl_seconds=120), h.store, make_identity(h.store),
             id_token_verifier=verify,
             http_client_factory=lambda: httpx.AsyncClient(
                 transport=httpx.MockTransport(
@@ -828,13 +867,15 @@ class TestSaveToken:
         assert response.headers["location"] == "/account"
         assert CANVAS_TOKEN not in response.text
         assert CANVAS_TOKEN not in str(response.headers)
-        stored = signed_in.store.get(TID, OID)
+        stored = signed_in.store.get(KEY)
         assert stored is not None
         assert stored.api_token == CANVAS_TOKEN
         assert stored.canvas_user_id == "42"
         assert stored.canvas_user_name == "Ada Canvas"
-        assert stored.entra_display_name == "Ada Lovelace"
-        assert stored.entra_upn == "ada@example.test"
+        # The person's name and sign-in name belong to the account, not to the token row.
+        assert signed_in.store.get_principal_status(KEY).display_name == "Ada Lovelace"
+        (account,) = [a for a in signed_in.store.list_accounts() if a.principal_key == KEY]
+        assert account.username == "ada@example.test"
         page = signed_in.client.get(ACCOUNT_PATH)
         assert "Ada Canvas" in page.text and "id 42" in page.text
         assert "2027-01-15 08:00 UTC" in page.text  # enrolled, no seconds, no T/Z
@@ -848,7 +889,7 @@ class TestSaveToken:
         signed_in.now += 60
         newer = "8~" + "N" * 62
         post_form(signed_in, "/account/token", {"csrf": csrf, "canvas_token": newer})
-        stored = signed_in.store.get(TID, OID)
+        stored = signed_in.store.get(KEY)
         assert stored is not None and stored.api_token == newer
         assert signed_in.store.count() == 1
 
@@ -912,18 +953,15 @@ class TestSaveToken:
 
 class TestDeleteAndLogout:
     def test_delete_removes_only_my_row(self, h: Harness) -> None:
-        h.store.put(
-            tenant_id=TID, object_id=OID_2, api_token="x" * 30, canvas_user_id="9",
-            canvas_user_name="Bob", entra_display_name="Bob", entra_upn="bob@example.test",
-        )
+        put_row(h.store, OID_2, token="x" * 30, name="Bob", upn="bob@example.test", canvas_user_id="9")
         sign_in(h)
         csrf = csrf_of(h)
         post_form(h, "/account/token", {"csrf": csrf, "canvas_token": CANVAS_TOKEN})
         assert h.store.count() == 2
         response = post_form(h, "/account/token/delete", {"csrf": csrf})
         assert response.status_code == 303 and response.headers["location"] == "/account"
-        assert h.store.get(TID, OID) is None
-        assert h.store.get(TID, OID_2) is not None
+        assert h.store.get(KEY) is None
+        assert h.store.get(KEY_2) is not None
         assert "Delete my token" not in h.client.get(ACCOUNT_PATH).text
 
     def test_delete_checks_csrf_and_origin(self, h: Harness) -> None:
@@ -957,10 +995,7 @@ class TestDeleteAndLogout:
 
 class TestAdmin:
     def _enroll(self, h: Harness, oid: str, upn: str, name: str, token: str) -> None:
-        h.store.put(
-            tenant_id=TID, object_id=oid, api_token=token, canvas_user_id="77",
-            canvas_user_name=name, entra_display_name=name, entra_upn=upn,
-        )
+        put_row(h.store, oid, token=token, name=name, upn=upn)
 
     def test_non_owner_and_signed_out_are_403(self, h: Harness) -> None:
         assert h.client.get("/account/admin").status_code == 403
@@ -981,14 +1016,14 @@ class TestAdmin:
         assert "bob@example.test" in text
         assert "Bob &lt;img src=x&gt;" in text and "<img src=x>" not in text
         assert "2027-01-15 08:00 UTC" in text
-        assert f'name="object_id" value="{OID_2}"' in text
-        assert f'name="tenant_id" value="{TID}"' in text
+        assert f'name="principal_key" value="{KEY_2}"' in text
+        assert 'name="tenant_id"' not in text and 'name="object_id"' not in text
         assert 'action="/account/admin/remove"' in text
         assert re.search(r'name="csrf" value="[^"]+"', text)
 
     def test_revoke_requires_owner_origin_and_csrf(self, h: Harness) -> None:
         self._enroll(h, OID_2, "bob@example.test", "Bob", "9~" + "S" * 60)
-        target = {"tenant_id": TID, "object_id": OID_2}
+        target = {"principal_key": KEY_2}
         # signed out
         assert post_form(h, "/account/admin/remove", {"csrf": "x", **target}).status_code == 403
         # regular user
@@ -1011,13 +1046,15 @@ class TestAdmin:
     @pytest.mark.parametrize(
         "fields",
         [
-            {"tenant_id": "x", "object_id": OID_2},
-            {"tenant_id": TID, "object_id": "../../etc"},
-            {"tenant_id": TID},
+            {"principal_key": "x"},
+            {"principal_key": "acct:../../etc"},
+            {"principal_key": f"entra:{TID}:{OID_2}"},
+            {"principal_key": KEY_2.upper()},
+            {"tenant_id": TID, "object_id": OID_2},
             {},
         ],
     )
-    def test_revoke_validates_guids(self, h: Harness, fields: dict[str, str]) -> None:
+    def test_revoke_validates_the_account_key(self, h: Harness, fields: dict[str, str]) -> None:
         self._enroll(h, OID_2, "bob@example.test", "Bob", "9~" + "S" * 60)
         sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
         csrf = csrf_of(h)
@@ -1030,7 +1067,7 @@ class TestAdmin:
         csrf = csrf_of(h)
         response = post_form(h, "/account/token", {"csrf": csrf, "canvas_token": CANVAS_TOKEN})
         assert response.status_code == 303
-        assert h.store.get(TID, OID_OWNER) is not None
+        assert h.store.get(KEY_OWNER) is not None
 
 
 # -- defaults: Canvas check ---------------------------------------------------
@@ -1056,7 +1093,7 @@ class TestDefaultCanvasCheck:
             return handler(request)
 
         routes = build_account_routes(
-            make_cfg(), store, fake_authorize, id_token_verifier=verify,
+            make_cfg(), store, make_identity(store), id_token_verifier=verify,
             http_client_factory=lambda: httpx.AsyncClient(
                 transport=httpx.MockTransport(recording)
             ),
@@ -1083,7 +1120,7 @@ class TestDefaultCanvasCheck:
         assert str(request.url) == "https://canvas.example.test/api/v1/users/self"
         assert request.headers["authorization"] == f"Bearer {CANVAS_TOKEN}"
         assert request.headers["accept"] == "application/json"
-        stored = store.get(TID, OID)
+        stored = store.get(KEY)
         assert stored is not None
         assert (stored.canvas_user_id, stored.canvas_user_name) == ("4242", "Real Name")
 
@@ -1093,7 +1130,7 @@ class TestDefaultCanvasCheck:
             tmp_path, lambda r: httpx.Response(200, json={"id": 1, "short_name": "S" * 300}), seen
         )
         self._enroll(harness)
-        stored = store.get(TID, OID)
+        stored = store.get(KEY)
         assert stored is not None and stored.canvas_user_name == "S" * 200
 
     @pytest.mark.parametrize("status", [401, 403])
@@ -1376,15 +1413,15 @@ class TestLanguageChoice:
         assert session_cookie
         real_info = h.store.info
 
-        def slow_info(tenant_id: str, object_id: str) -> Any:
+        def slow_info(key: str) -> Any:
             time.sleep(0.05)  # keep many requests in flight at once
-            return real_info(tenant_id, object_id)
+            return real_info(key)
 
         h.store.info = slow_info  # type: ignore[method-assign]
         routes = build_account_routes(
             make_cfg(),
             h.store,
-            fake_authorize,
+            make_identity(h.store),
             clock=h.clock,
         )
         app = Starlette(routes=routes)
@@ -1459,10 +1496,7 @@ class TestSingleLanguageRendering:
             h.client.get(ACCOUNT_CALLBACK_PATH),
             h.client.put(ACCOUNT_PATH),
         ]
-        h.store.put(
-            tenant_id=TID, object_id=OID_2, api_token="x" * 30, canvas_user_id="9",
-            canvas_user_name="Bob", entra_display_name="Bob", entra_upn="bob@example.test",
-        )
+        put_row(h.store, OID_2, token="x" * 30, name="Bob", upn="bob@example.test", canvas_user_id="9")
         sign_in(h)
         csrf = csrf_of(h)
         pages.append(h.client.get(ACCOUNT_PATH))  # not enrolled
@@ -1704,17 +1738,17 @@ class TestLayout:
         assert "<i>x</i>" not in text and "&lt;i&gt;x&lt;/i&gt;@example.test" in text
 
     def test_denial_messages_have_chinese_translations(self) -> None:
-        from canvas_mcp.core.selfhost import identity
-
-        assert set(account_web._DENIAL_ZH) == set(identity._MESSAGES.values())
+        # Every refusal a sign-in can end in has a translation; the disabled-account and
+        # waiting-for-approval pages have their own wording.
+        own_pages = {acc.DENY_ACCESS_DISABLED, acc.DENY_PENDING_APPROVAL, acc.DENY_UNAVAILABLE}
+        expected = {m for code, m in acc.DENIAL_MESSAGES.items() if code not in own_pages}
+        assert set(account_web._DENIAL_ZH) == expected
         for message, zh in account_web._DENIAL_ZH.items():
             assert CJK.search(zh) and message not in zh
 
     def test_denial_zh_maps_known_and_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from canvas_mcp.core.selfhost import identity
-
         monkeypatch.setattr(account_web, "_current_lang", lambda: "zh")
-        known = identity._MESSAGES["missing_role"]
+        known = acc.DENIAL_MESSAGES[acc.DENY_ACCESS_DENIED]
         assert account_web._denial_html(known) == account_web._DENIAL_ZH[known]
         generic = account_web._denial_html("<b>something new</b>")
         assert CJK.search(generic) and "<b>" not in generic and "something new" not in generic
@@ -1729,9 +1763,9 @@ class TestLayout:
 
 class TestAdminLayout:
     def _enroll(self, h: Harness) -> None:
-        h.store.put(
-            tenant_id=TID, object_id=OID_2, api_token="9~" + "S" * 60, canvas_user_id="77",
-            canvas_user_name="Bob C", entra_display_name="Bob E", entra_upn="bob@example.test",
+        put_row(
+            h.store, OID_2, token="9~" + "S" * 60, name="Bob C", display="Bob E",
+            upn="bob@example.test",
         )
 
     def test_rows_keep_ids_and_timestamps_inside_technical_details(self, h: Harness) -> None:
@@ -1755,8 +1789,7 @@ class TestAdminLayout:
         assert "Bob C" in after and "id 77" in after
         # The Remove enrollment form (POST + CSRF + the two ids) is outside the details.
         assert 'method="post" action="/account/admin/remove"' in after
-        assert 'name="csrf"' in after and f'name="object_id" value="{OID_2}"' in after
-        assert f'name="tenant_id" value="{TID}"' in after
+        assert 'name="csrf"' in after and f'name="principal_key" value="{KEY_2}"' in after
         assert "Remove enrollment" in after
 
     def test_stacked_card_labels_come_from_the_page_language(self, h: Harness) -> None:
@@ -1768,9 +1801,9 @@ class TestAdminLayout:
 
     def test_one_details_block_per_row(self, h: Harness) -> None:
         self._enroll(h)
-        h.store.put(
-            tenant_id=TID, object_id=OID, api_token="8~" + "R" * 60, canvas_user_id="78",
-            canvas_user_name="Ada", entra_display_name="Ada", entra_upn="ada@example.test",
+        put_row(
+            h.store, OID, token="8~" + "R" * 60, name="Ada", upn="ada@example.test",
+            canvas_user_id="78",
         )
         sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
         text = h.client.get("/account/admin").text
@@ -1842,7 +1875,7 @@ class TestRegistration:
 
         mcp = FastMCP("account-test")
         register_account_routes(
-            mcp, make_cfg(), h.store, fake_authorize, clock=h.clock
+            mcp, make_cfg(), h.store, make_identity(h.store), clock=h.clock
         )
         paths = {route.path for route in mcp._additional_http_routes}  # type: ignore[attr-defined]
         assert paths == {
@@ -1858,6 +1891,9 @@ class TestRegistration:
             "/account/admin/disable",
             "/account/admin/enable",
             "/account/admin/invalidate",
+            "/account/admin/approve",
+            "/account/admin/deny",
+            "/account/admin/audit",
             "/account/schools",
             "/account/write-tools",
         }
@@ -1874,13 +1910,12 @@ class TestRegistration:
 class TestTokenHealthChinese:
     """The invalid-token banner, the reminder and the admin columns, in both languages."""
 
-    KEY = f"entra:{TID}:{OID}"
+    KEY = KEY
 
     def seed(self, h: Harness, **kw: Any) -> None:
-        h.store.put(
-            tenant_id=TID, object_id=OID, api_token=CANVAS_TOKEN, canvas_user_id="42",
-            canvas_user_name="Ada Canvas", entra_display_name="Ada", entra_upn="ada@example.test",
-            canvas_host="canvas.example.test", **kw,
+        put_row(
+            h.store, OID, token=CANVAS_TOKEN, canvas_user_id="42", name="Ada Canvas",
+            display="Ada", upn="ada@example.test", canvas_host="canvas.example.test", **kw,
         )
 
     def test_the_banner_and_the_check_button(self, h: Harness) -> None:
@@ -1948,12 +1983,11 @@ class TestTokenHealthChinese:
 
     def test_the_admin_columns_and_filter(self, h: Harness) -> None:
         self.seed(h)
-        h.store.put(
-            tenant_id=TID, object_id=OID_2, api_token="9~" + "Q" * 62, canvas_user_id="77",
-            canvas_user_name="Bob", entra_display_name="Bob", entra_upn="bob@example.test",
+        put_row(
+            h.store, OID_2, token="9~" + "Q" * 62, name="Bob", upn="bob@example.test",
             canvas_host="canvas.example.test",
         )
-        h.store.mark_invalid(f"entra:{TID}:{OID_2}", reason="canvas_token_rejected")
+        h.store.mark_invalid(KEY_2, reason="canvas_token_rejected")
         sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
         text = h.client.get("/account/admin", params=ZH).text
         assert "<th>状态</th>" in text and "<th>最近验证</th>" in text

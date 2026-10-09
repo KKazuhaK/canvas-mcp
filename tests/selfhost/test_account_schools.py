@@ -26,6 +26,7 @@ from canvas_mcp.core.selfhost.schools import (
 )
 from canvas_mcp.core.selfhost.token_store import TokenDecryptionError
 
+from .conftest import acct_key, store_put
 from .test_account_web import (
     CANVAS_TOKEN,
     CJK,
@@ -136,7 +137,7 @@ def enroll(r: Rig, school: str | None, token: str = CANVAS_TOKEN, *, csrf: str |
 
 
 def stored_host(r: Rig, oid: str = OID) -> str | None:
-    info = r.h.store.info(TID, oid)
+    info = r.h.store.info(acct_key(oid))
     assert info is not None
     return info.canvas_host
 
@@ -248,7 +249,7 @@ class TestPicker:
         assert r.h.whoami_urls == [f"https://{HOST_B}/api/v1"]
         assert r.h.whoami_calls == [CANVAS_TOKEN]
         assert stored_host(r) == HOST_B
-        assert r.h.store.get(TID, OID).api_token == CANVAS_TOKEN  # type: ignore[union-attr]
+        assert r.h.store.get(acct_key(OID)).api_token == CANVAS_TOKEN  # type: ignore[union-attr]
         assert r.directory.calls == 0  # featured schools need no directory
 
     def test_the_default_school_needs_no_dns_check(self, tmp_path: pathlib.Path) -> None:
@@ -377,7 +378,7 @@ class TestPicker:
 
     def test_resaving_a_legacy_row_reseals_it_with_the_default_host(self, tmp_path: pathlib.Path) -> None:
         r = rig(tmp_path)
-        r.h.store.put(
+        store_put(r.h.store,
             tenant_id=TID, object_id=OID, api_token=CANVAS_TOKEN, canvas_user_id="42",
             canvas_user_name="Old", entra_display_name="Old", entra_upn="o@example.test",
         )
@@ -388,7 +389,7 @@ class TestPicker:
         with raw_connection(r.h.store) as conn:
             conn.execute("UPDATE canvas_tokens SET canvas_host = NULL")
         with pytest.raises(TokenDecryptionError):
-            r.h.store.get(TID, OID)
+            r.h.store.get(acct_key(OID))
 
     def test_two_users_two_schools(self, tmp_path: pathlib.Path) -> None:
         r = rig(tmp_path)
@@ -740,7 +741,7 @@ class TestStatusAndAdmin:
 
     def test_a_legacy_row_shows_the_default_school(self, tmp_path: pathlib.Path) -> None:
         r = rig(tmp_path)
-        r.h.store.put(
+        store_put(r.h.store,
             tenant_id=TID, object_id=OID, api_token=CANVAS_TOKEN, canvas_user_id="1",
             canvas_user_name="Old", entra_display_name="O", entra_upn="o@example.test",
         )
@@ -750,7 +751,7 @@ class TestStatusAndAdmin:
 
     def test_a_legacy_row_without_a_default_says_no_school_recorded(self, tmp_path: pathlib.Path) -> None:
         r = rig(tmp_path, default="")
-        r.h.store.put(
+        store_put(r.h.store,
             tenant_id=TID, object_id=OID, api_token=CANVAS_TOKEN, canvas_user_id="1",
             canvas_user_name="Old", entra_display_name="O", entra_upn="o@example.test",
         )
@@ -760,7 +761,7 @@ class TestStatusAndAdmin:
 
     def test_a_school_the_server_no_longer_offers_gets_a_notice(self, tmp_path: pathlib.Path) -> None:
         r = rig(tmp_path)
-        r.h.store.put(
+        store_put(r.h.store,
             tenant_id=TID, object_id=OID, api_token=CANVAS_TOKEN, canvas_user_id="1",
             canvas_user_name="Old", entra_display_name="O", entra_upn="o@example.test",
             canvas_host="canvas.gone.edu",
@@ -772,7 +773,7 @@ class TestStatusAndAdmin:
 
     def test_a_searched_school_is_fine_while_search_is_on(self, tmp_path: pathlib.Path) -> None:
         r = rig(tmp_path, search=True)
-        r.h.store.put(
+        store_put(r.h.store,
             tenant_id=TID, object_id=OID, api_token=CANVAS_TOKEN, canvas_user_id="1",
             canvas_user_name="Old", entra_display_name="O", entra_upn="o@example.test",
             canvas_host=FOUND,
@@ -783,7 +784,9 @@ class TestStatusAndAdmin:
 
     def test_the_admin_page_shows_each_users_school(self, tmp_path: pathlib.Path) -> None:
         r = rig(tmp_path, search=False)
-        put = r.h.store.put
+        def put(**kw: Any) -> None:
+            store_put(r.h.store, **kw)
+
         base = {
             "api_token": CANVAS_TOKEN, "canvas_user_id": "1",
             "entra_display_name": "N", "entra_upn": "n@example.test",
@@ -803,7 +806,7 @@ class TestStatusAndAdmin:
 
     def test_the_admin_page_in_a_server_without_a_default(self, tmp_path: pathlib.Path) -> None:
         r = rig(tmp_path, default="")
-        r.h.store.put(
+        store_put(r.h.store,
             tenant_id=TID, object_id=OID, api_token=CANVAS_TOKEN, canvas_user_id="1",
             canvas_user_name="Legacy", entra_display_name="N", entra_upn="n@example.test",
         )
@@ -831,7 +834,7 @@ class TestLanguages:
         pages.append(enroll(r, "canvas.nowhere.edu"))  # directory refuses -> 400
         enroll(r, HOST_A)
         pages.append(r.h.client.get(ACCOUNT_PATH))  # status card with School
-        r.h.store.put(
+        store_put(r.h.store,
             tenant_id=TID, object_id=OID, api_token=CANVAS_TOKEN, canvas_user_id="1",
             canvas_user_name="Old", entra_display_name="O", entra_upn="o@example.test",
             canvas_host="canvas.gone.edu",

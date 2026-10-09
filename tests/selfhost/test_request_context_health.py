@@ -38,7 +38,7 @@ from canvas_mcp.core.selfhost.token_store import (
 )
 from canvas_mcp.core.selfhost.tool_gate import SelfhostCredentialGate
 
-from .conftest import OID_A, TENANT, make_principal
+from .conftest import OID_A, TENANT, acct_key, make_account, make_principal
 from .test_request_context import (
     ACCOUNT_URL,
     SECRET_TOKEN,
@@ -74,8 +74,8 @@ class RowStore(FakeStore):
         super().__init__(fail=fail)
         self.row = row
 
-    def get(self, tenant_id: str, object_id: str) -> Any:  # type: ignore[override]
-        self.gets.append((tenant_id, object_id))
+    def get(self, principal_key: str) -> Any:  # type: ignore[override]
+        self.gets.append(principal_key)
         if self.fail is not None:
             raise self.fail
         return self.row
@@ -184,7 +184,7 @@ class TestDecryptFailure:
     async def test_a_failed_decryption_marks_the_failing_row_invalid(self) -> None:
         health = Recorder()
         probe = await serve(RowStore(None, fail=_decrypt_error(4321)), health)
-        assert health.calls == [(f"entra:{TENANT}:{OID_A}", REASON_DECRYPT_FAILED)]
+        assert health.calls == [(acct_key(OID_A), REASON_DECRYPT_FAILED)]
         # Only the row version that failed to decrypt may be marked.
         assert health.versions == [4321]
         assert probe.seen["creds"] is None
@@ -204,24 +204,21 @@ class TestDecryptFailure:
         store = make_store(tmp_path / "tokens.sqlite3", _ring(("k1", 1)), clock=StoreClock())
         store.initialize()
         put_args: dict[str, Any] = {
-            "tenant_id": TENANT,
-            "object_id": OID_A,
+            "principal_key": make_account(store, OID_A, name="Ada", username="ada@example.test"),
             "canvas_user_id": "42",
             "canvas_user_name": "Ada",
-            "entra_display_name": "Ada",
-            "entra_upn": "ada@example.test",
         }
         store.put(api_token=SECRET_TOKEN, **put_args)
         with raw_connection(store) as conn:
             conn.execute("UPDATE canvas_tokens SET ciphertext = x'00'")
-        key = f"entra:{TENANT}:{OID_A}"
+        key = acct_key(OID_A)
 
         class RacingStore(TokenStore):
             """The user saves a new token right after the read of the old row failed."""
 
-            def get(self, principal_key: str, object_id: str | None = None) -> Any:
+            def get(self, principal_key: str) -> Any:
                 try:
-                    return super().get(principal_key, object_id)
+                    return super().get(principal_key)
                 finally:
                     # The fresh row gets a newer updated_at than the failed read.
                     store_clock.now += 5
@@ -284,7 +281,7 @@ def verified_oid(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         tool_gate,
         "get_access_token",
-        lambda: AccessToken(token="t", client_id="c", scopes=[], claims={"oid": OID_A}),
+        lambda: AccessToken(token="t", client_id="c", scopes=[], claims={"tid": TENANT, "oid": OID_A}),
     )
 
 

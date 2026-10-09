@@ -1,7 +1,8 @@
 """Schema management with Alembic, run programmatically.
 
-* ``meta.schema_version`` stays the cross-release compatibility marker (still
-  ``4``): a server refuses a database whose marker is newer than it supports.
+* ``meta.schema_version`` stays the cross-release compatibility marker (``5``
+  since the account model): a server refuses a database whose marker is newer than
+  it supports.
   Alembic keeps its own table (``canvas_mcp_alembic_version``). Rule for
   future revisions: one that an older server would misread must raise the marker
   by declaring a higher ``COMPAT_SCHEMA_VERSION``; this module writes the head
@@ -15,6 +16,13 @@
   ``BEGIN IMMEDIATE`` (a crash leaves the file unchanged). PostgreSQL: DDL is
   transactional; a session-level advisory lock serialises concurrent starters
   (one migrates, the others wait and find the schema current).
+* Revision ``0002_accounts`` re-encrypts every stored Canvas token under its new
+  principal, so it needs the keyring (``keyring=``), takes a private copy of a
+  populated SQLite file inside the same ``BEGIN IMMEDIATE`` before it writes
+  anything (deleted again if the migration fails), and can run as a dry run that
+  rolls everything back after reporting. On PostgreSQL it runs in the one write
+  transaction under the writer lock, with raised lock and statement timeouts; take
+  a ``pg_dump`` first.
 * There is no downgrade. Back up first (``token_admin db upgrade --backup``).
 """
 
@@ -27,6 +35,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any
 
@@ -39,6 +48,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection
 
 from . import baseline_v4, schema
+from .accounts_v5 import AccountMigrationReport, MigrationOptions
 from .engine import MIGRATION_LOCK_KEY, Database
 from .errors import StoreUnavailable, TokenStoreError
 from .repos import SqlMetaRepo
@@ -47,6 +57,18 @@ from .repos import SqlMetaRepo
 BASELINE_REVISION = "0001_baseline_v4"
 
 MIGRATION_LOCK_WAIT_SECONDS = 30.0
+#: The migration transaction on PostgreSQL waits this long for a lock (the DROP of the
+#: old tables needs an exclusive one) and for any statement, then rolls back.
+PG_MIGRATION_LOCK_TIMEOUT = "30s"
+PG_MIGRATION_STATEMENT_TIMEOUT = "120s"
+#: Tables that hold data a schema 4 server stored (any row counts as "has data").
+_DATA_TABLES = (
+    "canvas_tokens",
+    "principal_status",
+    "user_tool_prefs",
+    "credential_generations",
+    "principal_status_events",
+)
 
 STATE_UNINITIALIZED = "uninitialized"  # an empty database
 STATE_LEGACY = "legacy"  # tables from before Alembic, not yet recorded
@@ -67,13 +89,29 @@ class MigrationStatus:
     state: str
 
 
-def _config(connection: Connection | None = None, dialect: str | None = None) -> Config:
+class _DryRun(Exception):
+    """Raised inside the migration transaction to roll it back after a dry run."""
+
+
+def _config(
+    connection: Connection | None = None,
+    dialect: str | None = None,
+    *,
+    keyring: Any = None,
+    options: MigrationOptions | None = None,
+    report: AccountMigrationReport | None = None,
+) -> Config:
     cfg = Config()
     cfg.set_main_option("script_location", str(_MIGRATIONS_DIR).replace("%", "%%"))
     if connection is not None:
         cfg.attributes["connection"] = connection
     if dialect is not None:
         cfg.attributes["dialect"] = dialect
+    # Handed to revisions that re-encrypt data (0002): the keyring, how to run, and
+    # where to report. Never written to a file or logged.
+    cfg.attributes["keyring"] = keyring
+    cfg.attributes["options"] = options
+    cfg.attributes["report"] = report
     return cfg
 
 
@@ -168,9 +206,16 @@ def _needs_migration_error() -> TokenStoreError:
     )
 
 
-def _apply(conn: Connection, status: MigrationStatus) -> None:
+def _apply(
+    conn: Connection,
+    status: MigrationStatus,
+    *,
+    keyring: Any = None,
+    options: MigrationOptions | None = None,
+    report: AccountMigrationReport | None = None,
+) -> None:
     """Upgrade to head on a connection that is inside the caller's transaction."""
-    cfg = _config(connection=conn)
+    cfg = _config(connection=conn, keyring=keyring, options=options, report=report)
     if status.alembic_revision == BASELINE_REVISION and conn.dialect.name == "sqlite":
         # Always repair at baseline level: a half-migrated or tampered file is
         # completed, exactly as the pre-Alembic code did at every start.
@@ -183,27 +228,123 @@ def _apply(conn: Connection, status: MigrationStatus) -> None:
         meta.set_schema_version(conn, str(target))
 
 
-def ensure_ready(db: Database, *, auto: bool = True) -> None:
-    """Make the database current, or refuse. Used at every start of the server."""
+def _pending_revisions(status: MigrationStatus) -> list[Any]:
+    """The revisions an upgrade of this database would run, oldest first."""
+    revisions = list(reversed(list(_script().walk_revisions())))
+    if status.alembic_revision is None:
+        return revisions
+    names = [rev.revision for rev in revisions]
+    if status.alembic_revision not in names:
+        return revisions
+    return revisions[names.index(status.alembic_revision) + 1 :]
+
+
+def _backup_revision(status: MigrationStatus) -> str | None:
+    """The first pending revision that asks for a backup (``BACKUP_BEFORE``), if any."""
+    for rev in _pending_revisions(status):
+        if getattr(rev.module, "BACKUP_BEFORE", False):
+            return str(rev.revision)
+    return None
+
+
+def _holds_rows(conn: Connection) -> bool:
+    """True if any table a schema 4 server wrote to holds a row."""
+    existing = set(inspect(conn).get_table_names())
+    for name in _DATA_TABLES:
+        if name in existing and conn.execute(text(f"SELECT 1 FROM {name} LIMIT 1")).first():
+            return True
+    return False
+
+
+def _auto_backup(
+    db: Database, conn: Connection, status: MigrationStatus, options: MigrationOptions
+) -> pathlib.Path | None:
+    """Copy a populated SQLite file next to itself before a destructive revision runs.
+
+    Called inside the migration's own ``BEGIN IMMEDIATE`` and before it writes
+    anything, so the copy is the committed state as it was. If the copy cannot be
+    made the upgrade is refused (the transaction rolls back).
+    """
+    revision = _backup_revision(status)
+    source = db.sqlite_path
+    if revision is None or source is None or options.dry_run or not _holds_rows(conn):
+        return None
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    tag = revision.replace("_", "-")
+    destination = source.with_name(f"{source.name}.pre-{tag}-{stamp}.bak")
+    backup_sqlite(db, destination)
+    return destination
+
+
+def ensure_ready(
+    db: Database,
+    *,
+    auto: bool = True,
+    keyring: Any = None,
+    options: MigrationOptions | None = None,
+    report: AccountMigrationReport | None = None,
+    auto_backup: bool = True,
+) -> None:
+    """Make the database current, or refuse. Used at every start of the server.
+
+    ``keyring`` is needed when the upgrade re-encrypts tokens (schema 4 -> 5) and the
+    database holds some. ``options.dry_run`` runs the upgrade and rolls it back;
+    ``report`` collects what happened. ``auto_backup=False`` skips the SQLite copy
+    (the caller already made one).
+    """
+    opts = options or MigrationOptions()
     with db.guard():
         if db.kind == "sqlite":
-            _ensure_sqlite(db, auto)
+            _ensure_sqlite(db, auto, keyring, opts, report, auto_backup)
         else:
-            _ensure_postgresql(db, auto)
+            _ensure_postgresql(db, auto, keyring, opts, report)
 
 
-def _ensure_sqlite(db: Database, auto: bool) -> None:
-    with db.write() as conn:
-        status = read_status(conn)
-        _refuse_unusable(status)
-        if not auto:
-            if status.state != STATE_CURRENT:
-                raise _needs_migration_error()
-            return
-        _apply(conn, status)
+def _ensure_sqlite(
+    db: Database,
+    auto: bool,
+    keyring: Any,
+    options: MigrationOptions,
+    report: AccountMigrationReport | None,
+    auto_backup: bool,
+) -> None:
+    backup: pathlib.Path | None = None
+    try:
+        with db.write() as conn:
+            status = read_status(conn)
+            _refuse_unusable(status)
+            if not auto:
+                if status.state != STATE_CURRENT:
+                    raise _needs_migration_error()
+                return
+            if auto_backup:
+                backup = _auto_backup(db, conn, status, options)
+                if backup is not None and report is not None:
+                    report.backup_path = str(backup)
+            try:
+                _apply(conn, status, keyring=keyring, options=options, report=report)
+                if options.dry_run and status.state != STATE_CURRENT:
+                    raise _DryRun
+            except BaseException:
+                # The original file is intact (the transaction rolls back), so the
+                # copy only adds another place the ciphertexts live.
+                if backup is not None:
+                    with suppress(OSError):
+                        backup.unlink()
+                    if report is not None:
+                        report.backup_path = None
+                raise
+    except _DryRun:
+        return
 
 
-def _ensure_postgresql(db: Database, auto: bool) -> None:
+def _ensure_postgresql(
+    db: Database,
+    auto: bool,
+    keyring: Any,
+    options: MigrationOptions,
+    report: AccountMigrationReport | None,
+) -> None:
     with db.read() as conn:
         status = read_status(conn)
     _refuse_unusable(status)
@@ -211,12 +352,26 @@ def _ensure_postgresql(db: Database, auto: bool) -> None:
         return
     if not auto:
         raise _needs_migration_error()
-    with _postgres_migration_lock(db):
-        with db.write() as conn:
+    try:
+        with _postgres_migration_lock(db), db.write() as conn:
             status = read_status(conn)
             _refuse_unusable(status)
             if status.state != STATE_CURRENT:
-                _apply(conn, status)
+                conn.execute(text(f"SET LOCAL lock_timeout = '{PG_MIGRATION_LOCK_TIMEOUT}'"))
+                conn.execute(
+                    text(f"SET LOCAL statement_timeout = '{PG_MIGRATION_STATEMENT_TIMEOUT}'")
+                )
+                conn.execute(
+                    text(
+                        "SET LOCAL idle_in_transaction_session_timeout = "
+                        f"'{PG_MIGRATION_STATEMENT_TIMEOUT}'"
+                    )
+                )
+                _apply(conn, status, keyring=keyring, options=options, report=report)
+                if options.dry_run:
+                    raise _DryRun
+    except _DryRun:
+        return
 
 
 @contextmanager
@@ -258,14 +413,41 @@ def current(db: Database) -> MigrationStatus:
         return read_status(conn)
 
 
-def upgrade(db: Database, *, backup_to: pathlib.Path | None = None) -> tuple[MigrationStatus, MigrationStatus]:
-    """Upgrade to head (``token_admin db upgrade``); returns the status before and after."""
+def upgrade(
+    db: Database,
+    *,
+    backup_to: pathlib.Path | None = None,
+    keyring: Any = None,
+    dry_run: bool = False,
+    mark_undecryptable_invalid: bool = False,
+    report: AccountMigrationReport | None = None,
+) -> tuple[MigrationStatus, MigrationStatus]:
+    """Upgrade to head (``token_admin db upgrade``); returns the status before and after.
+
+    ``keyring`` is required when the database holds Canvas tokens that the upgrade has
+    to re-encrypt. A dry run (``dry_run=True``) does everything in the transaction,
+    fills ``report`` and rolls back: the database and its Alembic record are untouched
+    and no backup is made.
+    """
     before = current(db)
     _refuse_unusable(before)
+    path = db.sqlite_path
+    if dry_run and path is not None and not path.exists():
+        return before, before
     db.prepare_storage()
-    if backup_to is not None:
+    if backup_to is not None and not dry_run:
         backup_sqlite(db, backup_to)
-    ensure_ready(db, auto=True)
+    options = MigrationOptions(
+        dry_run=dry_run, mark_undecryptable_invalid=mark_undecryptable_invalid
+    )
+    ensure_ready(
+        db,
+        auto=True,
+        keyring=keyring,
+        options=options,
+        report=report,
+        auto_backup=backup_to is None,
+    )
     return before, current(db)
 
 
@@ -327,6 +509,8 @@ def render_sql(dialect: str) -> str:
 
 __all__ = [
     "BASELINE_REVISION",
+    "AccountMigrationReport",
+    "MigrationOptions",
     "MigrationStatus",
     "backup_sqlite",
     "compare_schema",

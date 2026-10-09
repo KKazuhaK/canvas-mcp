@@ -38,7 +38,15 @@ class RequestCredentials:
 
 @dataclass(frozen=True)
 class RequestPrincipal:
-    """The verified identity behind one request (self-hosted Entra mode)."""
+    """The verified identity behind one request (self-hosted mode).
+
+    ``key`` is the account key ``acct:<uuid>``: everything the server stores or caches
+    for a person is keyed by it. ``provider_id``, ``issuer`` and ``subject`` name the
+    external identity the request authenticated with (today only Entra: the issuer is
+    derived from the tenant and the subject is the object id), and ``account_id`` is the
+    bare UUID. ``tenant_id`` and ``object_id`` are the Entra-only fields the credential
+    gate cross-checks against the verified token.
+    """
 
     key: str
     tenant_id: str
@@ -47,6 +55,10 @@ class RequestPrincipal:
     upn: str
     roles: frozenset[str]
     is_owner: bool
+    provider_id: str = "entra"
+    issuer: str = ""
+    subject: str = ""
+    account_id: str = ""
 
 
 @dataclass

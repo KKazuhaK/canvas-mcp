@@ -41,11 +41,12 @@ class TestPrincipalKey:
     def test_stdio_is_local(self):
         assert current_principal_key() == "local"
 
-    def test_entra_principal_key(self):
+    def test_account_principal_key(self):
         principal = make_principal(OID_A)
         set_request_principal(principal)
         assert current_principal_key() == principal.key
-        assert current_principal_key().startswith("entra:")
+        assert current_principal_key().startswith("acct:")
+        assert "entra:" not in current_principal_key()
 
     def test_principal_wins_over_a_token(self):
         principal = make_principal(OID_A)

@@ -11,11 +11,10 @@ from canvas_mcp.core.credentials import RequestToolPrefs, get_request_tool_prefs
 from canvas_mcp.core.selfhost.request_context import SelfhostRequestContextMiddleware
 from canvas_mcp.core.selfhost.schools import SchoolPolicy
 
-from .conftest import OID_A, OID_B, TENANT
+from .conftest import OID_A, OID_B, TENANT, FakeAccounts, acct_key, identity_service
 from .test_request_context import (
     ACCOUNT_URL,
     CANVAS_URL,
-    POLICY,
     SECRET_TOKEN,
     Call,
     FakeStore,
@@ -25,7 +24,7 @@ from .test_request_context import (
     _user,
 )
 
-KEY_A = f"entra:{TENANT}:{OID_A}"
+KEY_A = acct_key(OID_A)
 
 
 class FakePrefs:
@@ -55,7 +54,7 @@ def middleware(app: Probe, prefs: Any) -> SelfhostRequestContextMiddleware:
     return SelfhostRequestContextMiddleware(
         app,
         mcp_path="/mcp",
-        policy=POLICY,
+        identity=identity_service(FakeAccounts()),
         store=FakeStore({(TENANT, OID_A): SECRET_TOKEN}),
         schools=SchoolPolicy.pinned(CANVAS_URL),
         account_url=ACCOUNT_URL,
@@ -78,7 +77,7 @@ class TestLoading:
         assert probe.prefs == [RequestToolPrefs(enabled=frozenset(), readable=True)]
 
     async def test_each_user_gets_their_own_switches(self) -> None:
-        prefs = FakePrefs({KEY_A: {"send_message"}, f"entra:{TENANT}:{OID_B}": {"submit_assignment"}})
+        prefs = FakePrefs({KEY_A: {"send_message"}, acct_key(OID_B): {"submit_assignment"}})
         a, b = PrefsProbe(), PrefsProbe()
         await _run(middleware(a, prefs), user=_user(_claims(oid=OID_A)))
         await _run(middleware(b, prefs), user=_user(_claims(oid=OID_B)))

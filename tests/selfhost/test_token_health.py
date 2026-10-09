@@ -41,7 +41,7 @@ from canvas_mcp.core.selfhost.token_store import (
 from canvas_mcp.core.token_health import set_token_health_monitor
 from canvas_mcp.core.write_outcome import RequestFailure, WriteOutcome
 
-from .conftest import OID_A, TENANT, make_principal
+from .conftest import OID_A, TENANT, acct_key, make_principal, store_put
 from .test_token_store import Clock as StoreClock
 from .test_token_store import _ring
 
@@ -49,7 +49,7 @@ CANVAS_HOST = "canvas.example.edu"
 API_URL = f"https://{CANVAS_HOST}/api/v1"
 ACCOUNT_URL = "https://mcp.example.test/account"
 TOKEN = "canvas-token-for-user-A-0123456789"
-PRINCIPAL_KEY = f"entra:{TENANT}:{OID_A}"
+PRINCIPAL_KEY = acct_key(OID_A)
 EXPECTED_MESSAGE = token_rejected_message(ACCOUNT_URL)
 
 
@@ -134,7 +134,7 @@ def env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Env
     store_clock = StoreClock()
     store = make_store(tmp_path / "tokens.sqlite3", _ring(("k1", 1)), clock=store_clock)
     store.initialize()
-    info = store.put(
+    info = store_put(store,
         tenant_id=TENANT,
         object_id=OID_A,
         api_token=TOKEN,
@@ -493,7 +493,7 @@ class TestSingleFlightAndCooldown:
         assert env.health.probe_count == 1
 
         env.store_clock.now += 30
-        info = env.store.put(
+        info = store_put(env.store,
             tenant_id=TENANT, object_id=OID_A, api_token="the-replacement-token-0123456789",
             canvas_user_id="42", canvas_user_name="Ada", entra_display_name="Ada",
             entra_upn="ada@example.test", canvas_host=CANVAS_HOST,
@@ -513,7 +513,7 @@ class TestSingleFlightAndCooldown:
         def probe(request: httpx.Request) -> httpx.Response:
             # While Canvas is being asked about the old token, the user enrolls a new one.
             env.store_clock.now += 30
-            env.store.put(
+            store_put(env.store,
                 tenant_id=TENANT, object_id=OID_A, api_token="the-replacement-token-0123456789",
                 canvas_user_id="42", canvas_user_name="Ada", entra_display_name="Ada",
                 entra_upn="ada@example.test", canvas_host=CANVAS_HOST,

@@ -23,7 +23,7 @@ Clock = Callable[[], float]
 class SlidingWindowLimiter(Protocol):
     """At most ``limit`` attempts per key in a rolling window."""
 
-    def allow(self, key: tuple[str, str]) -> bool:
+    def allow(self, key: tuple[str, ...]) -> bool:
         """Record an attempt; False when the key is over its limit."""
 
 
@@ -51,9 +51,9 @@ class InMemorySlidingWindowLimiter:
         self._window = window
         self._max_keys = max_keys
         self._clock = clock
-        self._hits: OrderedDict[tuple[str, str], deque[float]] = OrderedDict()
+        self._hits: OrderedDict[tuple[str, ...], deque[float]] = OrderedDict()
 
-    def allow(self, key: tuple[str, str]) -> bool:
+    def allow(self, key: tuple[str, ...]) -> bool:
         now = self._clock()
         cutoff = now - self._window
         hits = self._hits.get(key)

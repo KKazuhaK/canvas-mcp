@@ -17,7 +17,7 @@ from canvas_mcp.core.selfhost import tool_gate
 from canvas_mcp.core.selfhost.request_context import not_enrolled_message
 from canvas_mcp.core.selfhost.tool_gate import SelfhostCredentialGate
 
-from .conftest import OID_A, OID_B, make_principal
+from .conftest import OID_A, OID_B, TENANT, make_principal
 
 ACCOUNT_URL = "https://mcp.example.test/account"
 
@@ -56,7 +56,7 @@ def server() -> FastMCP:
 def _verified_token(oid: str | None) -> AccessToken | None:
     if oid is None:
         return None
-    return AccessToken(token="t", client_id="c", scopes=[], claims={"oid": oid})
+    return AccessToken(token="t", client_id="c", scopes=[], claims={"tid": TENANT, "oid": oid})
 
 
 @pytest.fixture

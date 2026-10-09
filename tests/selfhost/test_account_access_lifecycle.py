@@ -28,6 +28,7 @@ from canvas_mcp.core.selfhost.token_store import (
     PrincipalStatus,
 )
 
+from .conftest import acct_key, store_put
 from .test_account_web import (
     CANVAS_TOKEN,
     OID,
@@ -43,10 +44,10 @@ from .test_account_web import (
 )
 
 OID_OWNER_2 = "dddddddd-eeee-ffff-0000-111111111111"
-USER = f"entra:{TID}:{OID}"
-USER_2 = f"entra:{TID}:{OID_2}"
-OWNER = f"entra:{TID}:{OID_OWNER}"
-OWNER_2 = f"entra:{TID}:{OID_OWNER_2}"
+USER = acct_key(OID)
+USER_2 = acct_key(OID_2)
+OWNER = acct_key(OID_OWNER)
+OWNER_2 = acct_key(OID_OWNER_2)
 DISABLE = "/account/admin/disable"
 ENABLE = "/account/admin/enable"
 REMOVE = "/account/admin/remove"
@@ -130,7 +131,7 @@ def real_csrf_of_session(h: Harness, value: str) -> str:
 
 def owner_removes_the_token(h: Harness) -> None:
     assert post_form(
-        h, REMOVE, {"csrf": csrf_of(h), "tenant_id": TID, "object_id": OID}
+        h, REMOVE, {"csrf": csrf_of(h), "principal_key": USER}
     ).status_code == 303
     assert h.store.info(USER) is None
 
@@ -140,9 +141,7 @@ class TestTheReportedSequence:
         jar = two_owners_and_a_user(h)
         # The owner disables the user, then removes the stored token as well.
         assert disable_user(h).status_code == 303
-        assert post_form(
-            h, REMOVE, {"csrf": csrf_of(h), "tenant_id": TID, "object_id": OID}
-        ).status_code == 303
+        assert post_form(h, REMOVE, {"csrf": csrf_of(h), "principal_key": USER}).status_code == 303
         assert h.store.info(USER) is None
         # The user's sealed session is still within its lifetime and sealed by us.
         use_cookie(h, jar["user"])
@@ -331,9 +330,7 @@ class TestSelfDisconnectIsNotRevocation:
         self, h: Harness
     ) -> None:
         jar = two_owners_and_a_user(h)
-        assert post_form(
-            h, REMOVE, {"csrf": csrf_of(h), "tenant_id": TID, "object_id": OID}
-        ).status_code == 303
+        assert post_form(h, REMOVE, {"csrf": csrf_of(h), "principal_key": USER}).status_code == 303
         assert h.store.info(USER) is None
         use_cookie(h, jar["user"])
         enroll(h)
@@ -394,7 +391,7 @@ class TestOwnersAreCheckedAgain:
         forged = codec.seal(
             SESSION_COOKIE,
             {
-                "v": 2, "ep": 0, "tid": TID, "oid": OID, "name": "x", "upn": "x",
+                "v": 3, "ep": 0, "acct": USER, "pid": "entra", "name": "x", "upn": "x",
                 "owner": True, "iat": int(h.now), "exp": int(h.now) + 600, "csrf": "c",
             },
         )
@@ -441,13 +438,14 @@ class TestGuardrails:
 
     def test_the_own_row_has_no_disable_button(self, h: Harness) -> None:
         two_owners_and_a_user(h)
-        h.store.put(
+        store_put(h.store,
             tenant_id=TID, object_id=OID_OWNER, api_token=CANVAS_TOKEN, canvas_user_id="1",
             canvas_user_name="Olive", entra_display_name="Olive", entra_upn="o@example.test",
         )
         text = h.client.get("/account/admin").text
         assert "(you)" in text
-        assert f'name="principal_key" value="{OWNER}"' not in text
+        disable_forms = re.findall(r'action="/account/admin/disable">.*?</form>', text)
+        assert disable_forms and not any(OWNER in form for form in disable_forms)
 
     def test_the_last_active_owner_is_protected_from_the_operator_too(self, h: Harness) -> None:
         two_owners_and_a_user(h)
@@ -475,7 +473,7 @@ class TestAdminPage:
     ) -> None:
         two_owners_and_a_user(h)
         disable_user(h)
-        post_form(h, REMOVE, {"csrf": csrf_of(h), "tenant_id": TID, "object_id": OID})
+        post_form(h, REMOVE, {"csrf": csrf_of(h), "principal_key": USER})
         text = h.client.get("/account/admin").text
         assert "Disabled" in text and "Disabled by an administrator" in text
         assert f'action="{ENABLE}"' in text and f'name="principal_key" value="{USER}"' in text
@@ -530,15 +528,22 @@ class TestSessionCookieFormat:
         sign_in(h)
         codec = account_web._CookieCodec(SESSION_SECRET)
         base = {
-            "tid": TID, "oid": OID, "name": "x", "upn": "x", "owner": False,
+            "acct": USER, "pid": "entra", "name": "x", "upn": "x", "owner": False,
             "iat": int(h.now), "exp": int(h.now) + 600, "csrf": "c",
         }
+        old = {
+            "tid": TID, "oid": OID, "name": "x", "upn": "x", "owner": False,
+            "iat": int(h.now), "exp": int(h.now) + 600, "csrf": "c", "ep": 0,
+        }
         for payload in (
-            {**base, "v": 1},  # the old format: no epoch
-            {**base, "v": 2},  # no epoch
-            {**base, "v": 2, "ep": "0"},
-            {**base, "v": 2, "ep": True},
-            {**base, "v": 2, "ep": -1},
+            {**old, "v": 1},  # the first format: no epoch
+            {**old, "v": 2},  # the previous format: names the Entra tenant and object id
+            {**base, "v": 3},  # no epoch
+            {**base, "v": 3, "ep": "0"},
+            {**base, "v": 3, "ep": True},
+            {**base, "v": 3, "ep": -1},
+            {**base, "v": 3, "ep": 0, "acct": f"entra:{TID}:{OID}"},  # not an account key
+            {**base, "v": 3, "ep": 0, "pid": "google"},  # a provider that is not enabled
         ):
             use_cookie(h, codec.seal(SESSION_COOKIE, payload))
             assert signed_out(h), payload
@@ -547,7 +552,7 @@ class TestSessionCookieFormat:
         sign_in(h)
         codec = account_web._CookieCodec(SESSION_SECRET)
         base = {
-            "v": 2, "tid": TID, "oid": OID, "name": "x", "upn": "x", "owner": False,
+            "v": 3, "acct": USER, "pid": "entra", "name": "x", "upn": "x", "owner": False,
             "iat": int(h.now), "exp": int(h.now) + 600, "csrf": "c",
         }
         use_cookie(h, codec.seal(SESSION_COOKIE, {**base, "ep": 0}))
@@ -562,7 +567,7 @@ class TestSessionCookieFormat:
         assert sign_in(h).status_code == 303
         codec = account_web._CookieCodec(SESSION_SECRET)
         payload = codec.unseal(SESSION_COOKIE, cookie(h))
-        assert payload is not None and payload["ep"] == 2 and payload["v"] == 2
+        assert payload is not None and payload["ep"] == 2 and payload["v"] == 3
 
     def test_a_failing_status_read_fails_closed(
         self, h: Harness, monkeypatch: pytest.MonkeyPatch
@@ -587,19 +592,23 @@ class TestSessionCookieFormat:
         def boom(*_a: Any, **_k: Any) -> None:
             raise RuntimeError("database is locked")
 
-        monkeypatch.setattr(h.store, "record_sign_in", boom)
+        monkeypatch.setattr(h.store, "resolve_identity", boom)
         response = sign_in(h)
         assert response.status_code == 503
         assert SESSION_COOKIE not in response.headers.get("set-cookie", "")
 
 
 class TestSignInRecordsOwners:
-    def test_an_owner_sign_in_is_recorded_and_a_user_sign_in_leaves_no_row(self, h: Harness) -> None:
+    def test_an_owner_sign_in_is_recorded_as_the_role_and_a_user_sign_in_as_a_plain_account(
+        self, h: Harness
+    ) -> None:
         sign_in(h)
-        assert h.store.list_principal_statuses() == []
         sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
         rows = h.store.list_principal_statuses()
-        assert [(r.principal_key, r.is_owner) for r in rows] == [(OWNER, True)]
+        assert {r.principal_key: r.is_owner for r in rows} == {USER: False, OWNER: True}
+        assert h.store.get_principal_status(USER).last_login_at is not None
+        sign_in(h, oid=OID_2, roles=())  # refused by the rules: no account is made
+        assert len(h.store.list_principal_statuses()) == 2
 
 
 class TestAudit:
@@ -610,7 +619,7 @@ class TestAudit:
         events.clear()  # the owners' own sign-ins are covered by their own test
         disable_user(h)
         sign_in(h)  # refused
-        post_form(h, REMOVE, {"csrf": csrf_of(h), "tenant_id": TID, "object_id": OID})
+        post_form(h, REMOVE, {"csrf": csrf_of(h), "principal_key": USER})
         post_form(h, ENABLE, {"csrf": csrf_of(h), "principal_key": USER})
         got = principal_events(events)
         assert [(e["action"], e["principal"]) for e in got] == [
@@ -629,6 +638,8 @@ class TestAudit:
     def test_owner_changes_seen_at_sign_in_are_audited_once_each(
         self, h: Harness, events: list[str]
     ) -> None:
+        sign_in(h, oid=OID_OWNER_2, roles=("Canvas.Owner",))  # a second owner: the last one stays
+        events.clear()
         sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
         sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))  # unchanged: nothing new
         sign_in(h, oid=OID_OWNER, roles=("Canvas.User",))
@@ -650,4 +661,4 @@ class TestAudit:
         disable_user(h)
         post_form(h, ENABLE, {"csrf": csrf_of(h), "principal_key": USER})
         history = [(e.action, e.actor) for e in h.store.list_status_events(USER)]
-        assert history == [("enabled", OWNER), ("disabled", OWNER)]
+        assert history == [("enabled", OWNER), ("disabled", OWNER), ("account_created", None)]

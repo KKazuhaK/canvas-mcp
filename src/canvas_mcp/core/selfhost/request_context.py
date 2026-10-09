@@ -2,10 +2,12 @@
 
 A pure ASGI middleware that runs inside FastMCP's authentication, so
 ``scope['user']`` already holds the outcome of verifying the bearer token. For
-the MCP endpoint it re-checks the verified Entra claims against the operator's
-policy, looks up the caller's own Canvas token in the encrypted store, and
-publishes both through the request ContextVars that the Canvas client reads.
-Nothing here trusts a request header, and nothing outlives the request.
+the MCP endpoint it hands the verified Entra claims to the identity service
+(:class:`~.identity.IdentityService`), which maps them to the caller's account
+``acct:<uuid>`` under the operator's admission policy, looks up the caller's own
+Canvas token in the encrypted store, and publishes both through the request
+ContextVars that the Canvas client reads. Nothing here trusts a request header,
+and nothing outlives the request.
 
 A row whose token is marked invalid (Canvas rejected it, it could not be
 decrypted, or an administrator revoked it) gets no credentials at all: the
@@ -14,13 +16,14 @@ with that token. Each request also starts a shared token-health object, so a
 token found dead part-way through (see :mod:`canvas_mcp.core.token_health`) stops
 the rest of that request's Canvas calls.
 
-Before any of that, the caller's access status is checked (see
-:mod:`.principal_access`): a principal an administrator disabled gets a 403 for
-every MCP request, whatever token it presents, so an already issued or freshly
-refreshed token buys nothing. If the status cannot be read, the request is refused
-(503) rather than let through. The check is cached for a few seconds, so a change
-made by another process is noticed within that time; a request already past the
-check is not interrupted.
+The account's status is part of that decision (read through the cache of
+:mod:`.principal_access`): an account an administrator disabled, one still waiting
+for approval and a principal without an account all get a 403 for every MCP request,
+whatever token they present, so an already issued or freshly refreshed token buys
+nothing. If the decision cannot be made (the database is unavailable), the request is
+refused (503) rather than let through. The status is cached for a few seconds, so a
+change made by another process is noticed within that time; a request already past
+the check is not interrupted.
 
 The credential generation the token was read under (see
 :func:`canvas_mcp.core.credentials.note_credential_generation`) travels with the
@@ -54,6 +57,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .. import audit
 from ..credentials import (
     RequestCredentials,
+    RequestPrincipal,
     RequestTokenState,
     RequestToolPrefs,
     clear_http_request_context,
@@ -69,8 +73,8 @@ from ..credentials import (
     set_request_tool_prefs,
 )
 from ..logging import log_error, log_warning
-from .identity import ClaimsDenied, ClaimsPolicy, evaluate_entra_claims
-from .principal_access import access_disabled_message, access_unavailable_message
+from .accounts import Denied
+from .principal_access import access_unavailable_message
 from .schools import SchoolPolicy
 from .settings import COURSE_STATE_PER_PRINCIPAL, COURSE_STATE_REQUEST_LOCAL
 from .token_store import (
@@ -86,6 +90,12 @@ _GUID_RE = re.compile(
 )
 
 _NO_CLAIMS_MESSAGE = "Your sign-in carries no identity claims. Reconnect the connector."
+
+
+class RequestIdentity(Protocol):
+    """The slice of the identity service the middleware uses (synchronous)."""
+
+    def resolve_request(self, claims: Mapping[str, Any]) -> RequestPrincipal | Denied: ...
 
 
 class StoredTokenLike(Protocol):
@@ -137,9 +147,9 @@ class OwnerLedger(Protocol):
 class CanvasTokenReader(Protocol):
     """The slice of the token store the middleware uses (synchronous methods)."""
 
-    def get(self, tenant_id: str, object_id: str) -> StoredTokenLike | None: ...
+    def get(self, principal_key: str) -> StoredTokenLike | None: ...
 
-    def touch(self, tenant_id: str, object_id: str, *, min_interval_seconds: int = 300) -> None: ...
+    def touch(self, principal_key: str, *, min_interval_seconds: int = 300) -> None: ...
 
 
 def not_enrolled_message(account_url: str) -> str:
@@ -210,7 +220,7 @@ class SelfhostRequestContextMiddleware:
         app: ASGIApp,
         *,
         mcp_path: str,
-        policy: ClaimsPolicy,
+        identity: RequestIdentity,
         store: CanvasTokenReader,
         schools: SchoolPolicy,
         account_url: str,
@@ -224,7 +234,7 @@ class SelfhostRequestContextMiddleware:
         # Anything but the explicit opt-in keeps the course state request-local.
         self.request_local_state = course_state != COURSE_STATE_PER_PRINCIPAL
         self.mcp_path = mcp_path
-        self.policy = policy
+        self.identity = identity
         self.store = store
         self.schools = schools
         self.account_url = account_url
@@ -259,77 +269,63 @@ class SelfhostRequestContextMiddleware:
                 await _send_json(send, 403, _NO_CLAIMS_MESSAGE)
                 return
 
-            verdict = evaluate_entra_claims(claims, self.policy, token_kind="access")
-            if isinstance(verdict, ClaimsDenied):
+            try:
+                resolved = await anyio.to_thread.run_sync(self.identity.resolve_request, claims)
+            except Exception:  # noqa: BLE001 - fail closed; the error text is not logged
+                log_error("principal access check failed")
+                await _send_json(send, 503, access_unavailable_message())
+                return
+            if isinstance(resolved, Denied):
                 oid = claims.get("oid")
                 log_warning(
                     "MCP request denied",
-                    reason=verdict.reason,
+                    reason=resolved.code,
+                    # Only a well-formed object id is ever logged: it is how an operator
+                    # finds the person; no name, e-mail address or free text is.
                     entra_oid=oid.lower() if isinstance(oid, str) and _GUID_RE.match(oid) else None,
                 )
-                await _send_json(send, 403, verdict.message)
+                await _send_json(send, 403, resolved.message)
                 return
+            principal = resolved
 
-            refusal = await self._access_refusal(verdict, claims)
-            if refusal is not None:
-                await _send_json(send, refusal[0], refusal[1])
-                return
+            await self._note_owner_role_gone(principal, claims)
 
-            set_request_principal(verdict)
+            set_request_principal(principal)
             set_request_local_principal_state(self.request_local_state)
             set_request_token_state(RequestTokenState())
-            set_request_tool_prefs(await self._load_tool_prefs(verdict.key))
-            await self._attach_canvas_credentials(
-                verdict.tenant_id, verdict.object_id, verdict.key
-            )
+            set_request_tool_prefs(await self._load_tool_prefs(principal.key))
+            await self._attach_canvas_credentials(principal.key)
             await self.app(scope, receive, send)
         finally:
             clear_http_request_context()
 
-    async def _access_refusal(
-        self, verdict: Any, claims: Mapping[str, Any]
-    ) -> tuple[int, str] | None:
-        """``(status, message)`` if this principal may not use the server, else None."""
-        if self.access is None:
-            return None
-        try:
-            status = await anyio.to_thread.run_sync(self.access.status, verdict.key)
-        except Exception:  # noqa: BLE001 - fail closed; the error text is not logged
-            log_error("principal access check failed", entra_oid=verdict.object_id)
-            return 503, access_unavailable_message()
-        if status.disabled:
-            log_warning(
-                "MCP request denied", reason="principal_disabled", entra_oid=verdict.object_id
-            )
-            return 403, access_disabled_message()
-        await self._note_owner_role_gone(verdict, claims, status)
-        return None
-
     async def _note_owner_role_gone(
-        self, verdict: Any, claims: Mapping[str, Any], status: PrincipalStatus
+        self, principal: RequestPrincipal, claims: Mapping[str, Any]
     ) -> None:
-        """Lower the stored owner flag when a verified token proves the role is gone.
+        """Lower the stored owner role when a verified token proves the rule no longer holds.
 
         Only ever lowers it, and only on a token issued after the last recorded
         sign-in (see ``TokenStore.demote_owner``). Never raises.
         """
-        if self.owners is None or not status.is_owner or verdict.is_owner:
+        if self.owners is None or self.access is None or principal.is_owner:
             return
         issued = claims.get("iat")
         if not isinstance(issued, int | float) or isinstance(issued, bool):
             return
         try:
+            status = await anyio.to_thread.run_sync(self.access.status, principal.key)
+            if not status.is_owner:
+                return
             changed = await anyio.to_thread.run_sync(
                 functools.partial(
-                    self.owners.demote_owner, verdict.key, evidence_issued_at=int(issued)
+                    self.owners.demote_owner, principal.key, evidence_issued_at=int(issued)
                 )
             )
             if changed:
                 audit.log_principal_event(
-                    "owner_lost", verdict.key, reason="access_token_roles"
+                    "owner_lost", principal.key, reason="access_token_roles"
                 )
-                if self.access is not None:
-                    self.access.invalidate(verdict.key)
+                self.access.invalidate(principal.key)
         except Exception:  # noqa: BLE001 - bookkeeping must never change the answer
             pass
 
@@ -344,15 +340,13 @@ class SelfhostRequestContextMiddleware:
             return RequestToolPrefs(readable=False)
         return RequestToolPrefs(enabled=enabled)
 
-    async def _attach_canvas_credentials(
-        self, tenant_id: str, object_id: str, principal_key: str
-    ) -> None:
+    async def _attach_canvas_credentials(self, principal_key: str) -> None:
         try:
-            row: Any = await anyio.to_thread.run_sync(self.store.get, tenant_id, object_id)
+            row: Any = await anyio.to_thread.run_sync(self.store.get, principal_key)
         except Exception as exc:
             # The exception text is never logged: it can sit next to key or
             # token material.
-            log_error("stored Canvas token unreadable", entra_oid=object_id)
+            log_error("stored Canvas token unreadable", account=principal_key)
             generation: int | None = None
             if isinstance(exc, TokenDecryptionError):
                 # Only a failed decryption invalidates the row; a locked or
@@ -389,7 +383,7 @@ class SelfhostRequestContextMiddleware:
             # The settings no longer offer this user's school (or a legacy row
             # has no default school to belong to): fail closed. The host is
             # not logged, and touch() is deliberately not called.
-            log_warning("stored Canvas school not allowed", entra_oid=object_id)
+            log_warning("stored Canvas school not allowed", account=principal_key)
             set_missing_credentials_message(not_enrolled_message(self.account_url))
             return
 
@@ -404,7 +398,7 @@ class SelfhostRequestContextMiddleware:
             )
         )
         try:
-            await anyio.to_thread.run_sync(self.store.touch, tenant_id, object_id)
+            await anyio.to_thread.run_sync(self.store.touch, principal_key)
         except Exception:
             pass  # last-used bookkeeping must never fail a request
 

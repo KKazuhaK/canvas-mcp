@@ -62,7 +62,7 @@ class TestCurrent:
         capsys.readouterr()
         assert token_admin.main(["db", "current"]) == 0
         out = capsys.readouterr().out
-        assert "state: current" in out and "schema version marker: 4" in out
+        assert "state: current" in out and "schema version marker: 5" in out
 
     def test_a_newer_database_is_exit_2(self, env, capsys) -> None:
         legacy.build(_db_path(env), "v4")

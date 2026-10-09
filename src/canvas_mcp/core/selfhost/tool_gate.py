@@ -10,7 +10,8 @@ here, before the tool runs. That is the security boundary. The tool list hides
 those tools from the model too, which only saves it from trying them.
 
 When given the access cache (see :mod:`.principal_access`), it also refuses every
-call and read of a principal an administrator disabled. The request-context
+call and read of an account that is not active (disabled, waiting for approval, or
+unknown). The request-context
 middleware already refuses such a request up front; this is the second check, made
 at the moment of each tool call, so a request that is already running cannot start a
 further tool call after the change (the cache bounds how late another process's
@@ -49,7 +50,8 @@ from ..credentials import (
     request_credential_is_stale,
 )
 from ..logging import log_error
-from .principal_access import access_disabled_message, access_unavailable_message
+from .accounts import entra_issuer
+from .principal_access import access_refusal_message, access_unavailable_message
 from .token_store import PrincipalStatus
 from .tool_prefs import (
     WriteDecision,
@@ -87,7 +89,7 @@ def _check_generation_in_process(error_type: type[Exception]) -> None:
 
 
 async def _check_access(access: AccessChecker | None, error_type: type[Exception]) -> None:
-    """Raise ``error_type`` if the principal of this request is disabled (or unreadable)."""
+    """Raise ``error_type`` unless the account of this request is active (or if that is unreadable)."""
     if access is None:
         return
     principal = get_request_principal()
@@ -98,8 +100,9 @@ async def _check_access(access: AccessChecker | None, error_type: type[Exception
     except Exception:  # noqa: BLE001 - fail closed; the error text is not logged
         log_error("principal access check failed")
         raise error_type(access_unavailable_message()) from None
-    if status.disabled:
-        raise error_type(access_disabled_message())
+    refusal = access_refusal_message(status)
+    if refusal is not None:
+        raise error_type(refusal)
     held = get_request_credential_generation()
     # Only a store that is *ahead* of the request counts: a cached answer older than
     # the request's own read says nothing against it.
@@ -115,9 +118,17 @@ def _check_identity(error_type: type[Exception]) -> None:
 
     token = get_access_token()
     claims: Any = getattr(token, "claims", None)
+    tid = claims.get("tid") if hasattr(claims, "get") else None
     oid = claims.get("oid") if hasattr(claims, "get") else None
-    if not isinstance(oid, str) or oid.lower() != principal.object_id:
-        # Defence in depth: the verified token and the ContextVar must agree.
+    if (
+        not isinstance(tid, str)
+        or not isinstance(oid, str)
+        or not principal.issuer
+        or entra_issuer(tid) != principal.issuer
+        or oid.lower() != principal.subject
+    ):
+        # Defence in depth: the verified token and the ContextVar must agree on the
+        # external identity (issuer and subject), not on the object id alone.
         log_error("identity mismatch between access token and request context")
         raise error_type(_IDENTITY_MISMATCH)
 

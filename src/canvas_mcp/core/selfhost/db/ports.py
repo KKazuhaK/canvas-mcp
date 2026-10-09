@@ -7,6 +7,8 @@ transaction. The transaction boundaries of every public store operation live in
 guard, generation bumps, conditional updates) stays in one reviewable place.
 
 Rows are returned as tuples in a documented column order; the store decodes them.
+Every principal is named by its key ``acct:<uuid>``; the ``accounts`` table is
+keyed by the bare ``<uuid>``.
 """
 
 from __future__ import annotations
@@ -24,7 +26,12 @@ class CanvasTokenRepo(Protocol):
     """``canvas_tokens``: the encrypted enrollments and their health columns."""
 
     def row_for_get(self, conn: Connection, key: str) -> Row | None:
-        """Sealed columns plus metadata plus the credential generation, one statement."""
+        """Sealed columns plus metadata plus the credential generation, one statement.
+
+        ``(key_id, nonce, ciphertext, canvas_user_id, canvas_user_name, created_at,
+        updated_at, last_used_at, canvas_host, status, invalid_reason, invalid_since,
+        last_verified_at, expires_hint_at, credential_generation)``.
+        """
 
     def info(self, conn: Connection, key: str) -> Row | None:
         """Metadata and the credential generation of one enrollment."""
@@ -34,21 +41,19 @@ class CanvasTokenRepo(Protocol):
 
     def count(self, conn: Connection) -> int: ...
 
+    def exists(self, conn: Connection, key: str) -> bool: ...
+
     def upsert(
         self,
         conn: Connection,
         *,
-        tenant_id: str,
-        object_id: str,
+        principal_key: str,
         key_id: str,
         nonce: bytes,
         ciphertext: bytes,
         canvas_user_id: str,
         canvas_user_name: str,
-        entra_display_name: str,
-        entra_upn: str,
         canvas_host: str | None,
-        principal_key: str,
         status: str,
         now: int,
         expires_hint_at: int | None,
@@ -92,18 +97,14 @@ class CanvasTokenRepo(Protocol):
         expected_generation: int | None,
     ) -> bool: ...
 
-    def names(self, conn: Connection, key: str) -> tuple[str, str] | None:
-        """``(entra_display_name, entra_upn)`` of an enrollment, if there is one."""
-
     def rows_not_under_key(self, conn: Connection, key_id: str) -> list[Row]:
-        """``(tenant_id, object_id, key_id, nonce, ciphertext, canvas_host, principal_key)``."""
+        """``(principal_key, key_id, nonce, ciphertext, canvas_host)``."""
 
     def reseal(
         self,
         conn: Connection,
         *,
-        tenant_id: str,
-        object_id: str,
+        principal_key: str,
         key_id: str,
         nonce: bytes,
         ciphertext: bytes,
@@ -112,7 +113,11 @@ class CanvasTokenRepo(Protocol):
     def key_ids_in_use(self, conn: Connection) -> list[str]: ...
 
     def probe_row(self, conn: Connection, key_id: str) -> Row | None:
-        """``(tenant_id, object_id, nonce, ciphertext, canvas_host, principal_key)``."""
+        """``(principal_key, nonce, ciphertext, canvas_host)`` of a row that should decrypt.
+
+        Rows already recorded as unreadable (``decrypt_failed``) prove nothing about
+        the keyring and are skipped.
+        """
 
 
 class CredentialGenerationRepo(Protocol):
@@ -124,41 +129,122 @@ class CredentialGenerationRepo(Protocol):
     def get(self, conn: Connection, key: str) -> int: ...
 
 
-class PrincipalStatusRepo(Protocol):
-    """``principal_status``: whether a principal may use the server, and the owner flag."""
+class AccountRepo(Protocol):
+    """``accounts``: who may use the server, their role and the session epoch.
 
-    def get(self, conn: Connection, key: str, *, for_update: bool = False) -> Row | None: ...
+    Account columns, in order: ``(id, status, role, role_source, role_seen_at,
+    admitted_via, display_name, contact_email, ui_locale, created_at, approved_at,
+    approved_by, disabled_reason, disabled_at, disabled_by, last_login_at,
+    session_epoch, updated_at)``.
+    """
 
-    def get_with_generation(self, conn: Connection, key: str) -> tuple[Row | None, int]:
-        """The status row (if any) and the credential generation, in one statement."""
+    def get(self, conn: Connection, account_id: str, *, for_update: bool = False) -> Row | None: ...
+
+    def get_with_generation(self, conn: Connection, account_id: str) -> tuple[Row | None, int]:
+        """The account row (if any) and the credential generation, in one statement."""
 
     def list_all(self, conn: Connection) -> list[Row]: ...
 
     def count_active_owners(self, conn: Connection, *, exclude: str | None = None) -> int: ...
 
-    def gate_status(self, conn: Connection, key: str) -> str | None:
-        """The ``status`` value of the row, or None if there is no row."""
+    def count_pending(self, conn: Connection) -> int: ...
 
-    def insert_owner_seen(self, conn: Connection, key: str, now: int) -> None: ...
-
-    def set_owner_flag(self, conn: Connection, key: str, is_owner: bool, now: int) -> None: ...
-
-    def demote(self, conn: Connection, key: str, now: int) -> None: ...
-
-    def upsert_disabled(
+    def insert(
         self,
         conn: Connection,
-        key: str,
         *,
-        reason: str,
-        by: str,
+        account_id: str,
+        status: str,
+        role: str,
+        role_source: str | None,
+        admitted_via: str,
         display_name: str,
-        upn: str,
         now: int,
-    ) -> int:
-        """Mark disabled, raise ``session_epoch`` by one and return the new epoch."""
+        approved_by: str | None = None,
+        disabled_reason: str | None = None,
+        disabled_by: str | None = None,
+    ) -> None: ...
 
-    def enable(self, conn: Connection, key: str, now: int) -> None: ...
+    def activate(
+        self,
+        conn: Connection,
+        account_id: str,
+        *,
+        admitted_via: str,
+        approved_by: str | None,
+        now: int,
+    ) -> bool:
+        """pending -> active; True only if the account was pending."""
+
+    def disable(
+        self, conn: Connection, account_id: str, *, reason: str, by: str, now: int
+    ) -> int:
+        """Mark disabled, raise ``session_epoch`` by one in place and return the new epoch."""
+
+    def enable(self, conn: Connection, account_id: str, now: int) -> int:
+        """Lift a disablement, raise ``session_epoch`` by one in place and return it."""
+
+    def set_role(
+        self,
+        conn: Connection,
+        account_id: str,
+        *,
+        role: str,
+        source: str | None,
+        seen_at: int | None,
+        now: int,
+    ) -> None: ...
+
+    def mark_role_seen(self, conn: Connection, account_id: str, now: int) -> None:
+        """Record fresh evidence of the role (a sign-in)."""
+
+    def touch_login(self, conn: Connection, account_id: str, *, display_name: str, now: int) -> None: ...
+
+    def purge_pending(self, conn: Connection, older_than: int) -> list[str]:
+        """Delete pending accounts created before ``older_than``; returns their ids."""
+
+
+class IdentityRepo(Protocol):
+    """``external_identities``: the login identities that belong to accounts."""
+
+    def lookup(
+        self, conn: Connection, provider_id: str, issuer: str, subject: str
+    ) -> str | None:
+        """The account id the identity belongs to, if it is known."""
+
+    def insert(
+        self,
+        conn: Connection,
+        *,
+        account_id: str,
+        provider_id: str,
+        issuer: str,
+        subject: str,
+        username: str,
+        email: str | None,
+        email_verified: bool,
+        now: int,
+    ) -> None: ...
+
+    def touch(
+        self,
+        conn: Connection,
+        provider_id: str,
+        issuer: str,
+        subject: str,
+        *,
+        username: str,
+        now: int,
+    ) -> None: ...
+
+    def for_account(self, conn: Connection, account_id: str) -> list[Row]:
+        """``(provider_id, issuer, subject, username, email, email_verified, linked_at,
+        last_login_at)``, oldest first."""
+
+    def all(self, conn: Connection) -> list[Row]:
+        """``(account_id, provider_id, issuer, subject, username)`` of every identity."""
+
+    def delete_for_accounts(self, conn: Connection, account_ids: Sequence[str]) -> None: ...
 
 
 class PrincipalEventRepo(Protocol):
@@ -177,6 +263,48 @@ class PrincipalEventRepo(Protocol):
 
     def list_events(self, conn: Connection, key: str | None, limit: int) -> list[Row]:
         """Newest first: ``(id, principal_key, action, actor, reason, session_epoch, at)``."""
+
+
+class AuthEventRepo(Protocol):
+    """``auth_events``: the sign-in history (kept for 90 days)."""
+
+    def append(
+        self,
+        conn: Connection,
+        *,
+        now: int,
+        account_id: str | None,
+        provider_id: str,
+        surface: str,
+        outcome: str,
+        reason: str,
+        ip: str,
+        ua_hash: str | None,
+    ) -> None: ...
+
+    def list_for_account(self, conn: Connection, account_id: str, limit: int) -> list[Row]:
+        """Newest first: ``(id, at, provider_id, surface, outcome, reason, ip, ua_hash)``."""
+
+    def prune_before(self, conn: Connection, cutoff: int) -> int: ...
+
+
+class AuditRepo(Protocol):
+    """``audit_log``: administrative and security actions."""
+
+    def append(
+        self,
+        conn: Connection,
+        *,
+        now: int,
+        actor: str,
+        action: str,
+        target: str | None,
+        reason: str | None,
+        detail: str,
+    ) -> None: ...
+
+    def list(self, conn: Connection, limit: int, before_id: int | None) -> list[Row]:
+        """Newest first: ``(id, at, actor, action, target, reason, detail)``."""
 
 
 class PrefsRepo(Protocol):

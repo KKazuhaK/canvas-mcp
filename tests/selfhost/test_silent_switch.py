@@ -25,13 +25,13 @@ from canvas_mcp.core.selfhost.settings import (
     load_selfhost_settings,
 )
 from canvas_mcp.core.selfhost.token_store import (
-    OPERATOR,
     Keyring,
     TokenStore,
     TokenStoreError,
 )
 
 from . import legacy_schemas as legacy
+from .conftest import acct_key, make_account
 
 KEYS = "k1:" + base64.b64encode(bytes([1]) * 32).decode()
 TENANT = "11111111-2222-3333-4444-555555555555"
@@ -63,7 +63,7 @@ def _disabled_legacy_file(data_dir: pathlib.Path) -> pathlib.Path:
     path = default_sqlite_path(data_dir)
     store = TokenStore(path, Keyring.parse(KEYS))
     store.initialize()
-    store.disable_principal(TENANT, OID, actor=OPERATOR, reason="operator_disabled")
+    make_account(store, OID, status="disabled")  # one account, disabled by the operator
     store.close()
     return path
 
@@ -99,7 +99,7 @@ class TestTheCheck:
         target = Database.sqlite(tmp_path / "other.sqlite3")
         store = TokenStore(target, Keyring.parse(KEYS))
         store.initialize()
-        store.disable_principal(TENANT, OTHER, actor=OPERATOR, reason="operator_disabled")
+        make_account(store, OTHER, status="disabled")
         assert target_holds_rows(target)
         refuse_silent_switch(target, legacy_path)
 
@@ -148,17 +148,17 @@ class TestStartup:
         target = Database.sqlite(env / "other.sqlite3")
         store = TokenStore(target, Keyring.parse(KEYS))
         store.initialize()
-        store.disable_principal(TENANT, OID, actor=OPERATOR, reason="operator_disabled")
+        make_account(store, OID, status="disabled")
         store.close()
         settings = load_selfhost_settings(_settings_env(env, DATABASE_URL=_other_url(env)))
         runtime = prepare_selfhost(settings)
-        assert runtime.store.get_principal_status(f"entra:{TENANT}:{OID}").disabled
+        assert runtime.store.get_principal_status(acct_key(OID)).disabled
         runtime.store.close()
 
     def test_the_default_layout_starts_unchanged(self, env) -> None:
         _disabled_legacy_file(env)
         runtime = prepare_selfhost(load_selfhost_settings(_settings_env(env)))
-        assert runtime.store.get_principal_status(f"entra:{TENANT}:{OID}").disabled
+        assert runtime.store.get_principal_status(acct_key(OID)).disabled
         runtime.store.close()
 
 

@@ -1,12 +1,12 @@
 """Is this principal allowed to use the server at all? The MCP side of the answer.
 
 Access is an authorization decision stored in the token database
-(``principal_status``, see :mod:`.token_store`), not a property of an enrollment
+(``accounts.status``, see :mod:`.token_store`), not a property of an enrollment
 row. Every MCP request asks :class:`PrincipalAccessCache` before any Canvas
 credential is loaded, and the credential gate asks again for every tool call and
-resource read, so a disabled principal is refused wherever the request came from:
-an MCP token issued before the change, a freshly refreshed one, or a connection
-that survived a server restart.
+resource read, so a disabled, pending or unknown account is refused wherever the
+request came from: an MCP token issued before the change, a freshly refreshed one, or
+a connection that survived a server restart.
 
 The answer is cached for a few seconds per principal so the check costs one small
 read per user per interval, not one per request. The cache is dropped for a
@@ -28,6 +28,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from typing import Protocol
 
+from .accounts import DENIAL_MESSAGES, DENY_ACCESS_DENIED, DENY_PENDING_APPROVAL
 from .token_store import PrincipalStatus
 
 #: How long one answer is reused. This is also the longest another process (or the
@@ -47,6 +48,27 @@ def access_disabled_message() -> str:
 def access_unavailable_message() -> str:
     """The refusal when the access decision could not be read (fail closed)."""
     return "Your access could not be verified right now. Try again in a moment."
+
+
+def access_pending_message() -> str:
+    """The refusal for an account that waits for an owner's approval."""
+    return DENIAL_MESSAGES[DENY_PENDING_APPROVAL]
+
+
+def access_not_provisioned_message() -> str:
+    """The refusal for a principal without an account (fail closed)."""
+    return DENIAL_MESSAGES[DENY_ACCESS_DENIED]
+
+
+def access_refusal_message(status: PrincipalStatus) -> str | None:
+    """Why this account may not use the server, or None when it may."""
+    if status.active:
+        return None
+    if status.disabled:
+        return access_disabled_message()
+    if status.pending:
+        return access_pending_message()
+    return access_not_provisioned_message()
 
 
 class PrincipalStatusSource(Protocol):

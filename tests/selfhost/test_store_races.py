@@ -35,13 +35,16 @@ from canvas_mcp.core.selfhost.token_store import (
     TokenStore,
 )
 
+from .conftest import acct_key, ensure_account, make_account
+from .conftest import sign_in as sign_in_as
+
 TID = "11111111-2222-3333-4444-555555555555"
 OID_A = "aaaaaaaa-0000-4000-8000-00000000000a"
 OID_B = "bbbbbbbb-0000-4000-8000-00000000000b"
 OID_C = "cccccccc-0000-4000-8000-00000000000c"
-KEY_A = f"entra:{TID}:{OID_A}"
-KEY_B = f"entra:{TID}:{OID_B}"
-KEY_C = f"entra:{TID}:{OID_C}"
+KEY_A = acct_key(OID_A)
+KEY_B = acct_key(OID_B)
+KEY_C = acct_key(OID_C)
 WAIT = 20  # seconds: far above any honest wait, only there to end a hung test
 
 
@@ -104,13 +107,12 @@ class Runner:
 
 
 def _put(store: TokenStore, key: str = KEY_A, token: str = "7~" + "T" * 62, **kw: Any) -> Any:
+    ensure_account(store, key)  # a no-op when the account exists
     return store.put(
         principal_key=key,
         api_token=token,
         canvas_user_id="42",
         canvas_user_name="Ada",
-        entra_display_name="Ada",
-        entra_upn="ada@example.test",
         canvas_host="canvas.example.edu",
         **kw,
     )
@@ -129,7 +131,7 @@ def pair(tmp_path: pathlib.Path) -> tuple[TokenStore, TokenStore, Clock]:
 
 def _make_owners(store: TokenStore, *keys: str) -> None:
     for key in keys:
-        store.record_sign_in(key, is_owner=True)
+        ensure_account(store, key, role="owner")
 
 
 class TestEnrollmentVersusDisable:
@@ -332,12 +334,13 @@ class TestOtherWriters:
             path = tmp_path / f"r{round_}.sqlite3"
             one = make_store(path, _ring("k1"))
             one.initialize()
+            make_account(one, OID_A)
             two = make_store(path, _ring("k1"))
             barrier = threading.Barrier(2)
 
             def sign_in(store: TokenStore = one, barrier: threading.Barrier = barrier) -> None:
                 barrier.wait()
-                store.record_sign_in(KEY_A, is_owner=True)
+                sign_in_as(store, OID_A, owner=True)
 
             def disable(store: TokenStore = two, barrier: threading.Barrier = barrier) -> None:
                 barrier.wait()
@@ -361,7 +364,7 @@ class TestOtherWriters:
         path = tmp_path / "rot.sqlite3"
         old = make_store(path, old_ring)
         old.initialize()
-        keys = [f"entra:{TID}:{n:08d}-0000-4000-8000-000000000000" for n in range(6)]
+        keys = [f"acct:{n:08d}-0000-4000-8000-000000000000" for n in range(6)]
         for key in keys:
             _put(old, key)
         new_ring = Keyring.parse(
@@ -369,7 +372,7 @@ class TestOtherWriters:
         )
         rotator = make_store(path, new_ring)
         writer = make_store(path, new_ring)
-        writer_keys = [f"entra:{TID}:{n:08d}-0000-4000-8000-0000000000ff" for n in range(6)]
+        writer_keys = [f"acct:{n:08d}-0000-4000-8000-0000000000ff" for n in range(6)]
         runners = [
             Runner(rotator.rotate),
             Runner(lambda: [_put(writer, k) for k in writer_keys]),
@@ -384,6 +387,7 @@ class TestOtherWriters:
 
     def test_concurrent_tool_preference_writers_never_leave_a_torn_record(self, pair) -> None:
         first, second, _ = pair
+        ensure_account(first, KEY_A)
         sets = [["tool_a"], ["tool_b", "tool_c"], ["tool_d"], ["tool_e", "tool_f", "tool_g"]]
         barrier = threading.Barrier(len(sets))
 

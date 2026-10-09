@@ -13,7 +13,7 @@ from canvas_mcp.core import config as config_module
 from canvas_mcp.core.selfhost.app import validate_selfhost_startup
 from canvas_mcp.core.selfhost.settings import load_selfhost_settings
 
-from .conftest import CLIENT, TENANT
+from .conftest import CLIENT, TENANT, store_put
 
 SECRETS = {
     "ENTRA_CLIENT_SECRET": "entra-client-secret-0123456789",
@@ -159,7 +159,7 @@ class TestRefusals:
         settings = load_selfhost_settings()
         store = token_store.TokenStore(settings.token_db_path, token_store.Keyring.parse(SECRETS["CANVAS_TOKEN_KEYS"]))
         store.initialize()
-        store.put(
+        store_put(store,
             tenant_id=TENANT, object_id="aaaaaaaa-0000-4000-8000-00000000000a",
             api_token="canvas-token-1234567890abcdef", canvas_user_id="1",
             canvas_user_name="A", entra_display_name="A", entra_upn="a@example.test",

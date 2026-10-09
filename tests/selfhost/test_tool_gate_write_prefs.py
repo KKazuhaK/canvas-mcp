@@ -28,7 +28,7 @@ from canvas_mcp.core.selfhost.tool_prefs import (
     write_tool_off_message,
 )
 
-from .conftest import OID_A, make_principal
+from .conftest import OID_A, TENANT, make_principal
 
 ACCOUNT_URL = "https://mcp.example.test/account"
 READS = ("list_courses", "get_my_profile")
@@ -63,7 +63,7 @@ def _identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         tool_gate,
         "get_access_token",
-        lambda: AccessToken(token="t", client_id="c", scopes=[], claims={"oid": OID_A}),
+        lambda: AccessToken(token="t", client_id="c", scopes=[], claims={"tid": TENANT, "oid": OID_A}),
     )
     set_request_principal(make_principal(OID_A))
     set_request_credentials(RequestCredentials(api_token="x" * 30, api_url="https://c.example.test/api/v1"))

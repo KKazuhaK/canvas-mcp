@@ -1,13 +1,15 @@
 """Moving an existing SQLite token database into PostgreSQL.
 
 Switching ``DATABASE_URL`` to an empty database would silently drop
-``principal_status`` (the disablements) and re-activate disabled users, who could
+``accounts`` (the disablements) and re-activate disabled users, who could
 then enroll again. The server and the operator CLI therefore refuse to run in that
 situation (``refuse_silent_switch``: the target holds no rows while the default
 SQLite file does; an empty schema does not count as data) and
 ``token_admin db import-sqlite`` is the way across: one transaction, ciphertexts copied unchanged (the AAD does not depend
 on the backend), and a check that the counts match and that every stored token
-still decrypts with the keyring. Anything wrong rolls the whole import back.
+still decrypts with the keyring. A SQLite file from before the account model is
+migrated (on a private copy) with that keyring first. Anything wrong rolls the whole
+import back.
 """
 
 from __future__ import annotations
@@ -28,11 +30,35 @@ from .errors import StoreUnavailable, TokenStoreError
 COPIED_TABLES = (
     "canvas_tokens",
     "user_tool_prefs",
-    "principal_status",
+    "accounts",
+    "external_identities",
+    "principal_status_events",
+    "credential_generations",
+    "auth_events",
+    "audit_log",
+)
+#: The tables whose rows make a database "hold data" for the silent-switch guard.
+#: (The sign-in history and the audit log only exist next to accounts.)
+_DATA_TABLES = (
+    "canvas_tokens",
+    "user_tool_prefs",
+    "accounts",
+    "external_identities",
     "principal_status_events",
     "credential_generations",
 )
-_PROBE_TABLES = ("canvas_tokens", "principal_status", "principal_status_events", "user_tool_prefs")
+#: Probed in a SQLite file of any release: the legacy ``principal_status`` is still
+#: listed, because a file from before the account model keeps its disablements there.
+_PROBE_TABLES = (
+    "canvas_tokens",
+    "principal_status",
+    "principal_status_events",
+    "user_tool_prefs",
+    "accounts",
+    "external_identities",
+)
+#: Tables with an identity column: the sequence is moved past the copied ids.
+_IDENTITY_TABLES = ("principal_status_events", "external_identities", "auth_events", "audit_log")
 
 
 @dataclass(frozen=True)
@@ -65,7 +91,7 @@ def legacy_sqlite_has_rows(path: pathlib.Path) -> bool:
 
 
 def target_holds_rows(target: Database) -> bool:
-    """True if any copied table of ``target`` has a row.
+    """True if any table that holds accounts, tokens or access state of ``target`` has a row.
 
     Judged by data, not by schema: a schema that a failed import, ``db upgrade`` or
     a read-only CLI command created is still an empty database.
@@ -74,7 +100,7 @@ def target_holds_rows(target: Database) -> bool:
 
     with target.guard(), target.read() as conn:
         existing = set(inspect(conn).get_table_names())
-        for name in COPIED_TABLES:
+        for name in _DATA_TABLES:
             if name in existing:
                 table = schema.metadata.tables[name]
                 if conn.execute(select(table).limit(1)).first() is not None:
@@ -123,7 +149,8 @@ def import_sqlite(target: Database, source: pathlib.Path, keyring: Any) -> Impor
     """Copy every table of the SQLite file ``source`` into the empty PostgreSQL ``target``.
 
     ``source`` is never modified: it is copied to a private temporary file, adopted
-    to the current schema there, and read from the copy.
+    to the current schema there (with ``keyring``, because the account model
+    re-encrypts the tokens), and read from the copy.
     """
     from ..token_store import (
         KeyringError,
@@ -152,7 +179,7 @@ def import_sqlite(target: Database, source: pathlib.Path, keyring: Any) -> Impor
             raise StoreUnavailable("the SQLite file cannot be read", "sqlite3.Error") from None
         origin = Database.sqlite(copy)
         try:
-            migrate.ensure_ready(origin, auto=True)
+            migrate.ensure_ready(origin, auto=True, keyring=keyring, auto_backup=False)
             with origin.read() as oconn:
                 rows = {name: oconn.execute(select(schema.metadata.tables[name])).all() for name in COPIED_TABLES}
         finally:
@@ -173,14 +200,15 @@ def import_sqlite(target: Database, source: pathlib.Path, keyring: Any) -> Impor
             if data:
                 conn.execute(insert(table), data)
             counts[name] = len(data)
-        # Keep the identity of the history table ahead of the ids just copied.
-        conn.execute(
-            text(
-                "SELECT setval(pg_get_serial_sequence('principal_status_events', 'id'),"
-                " COALESCE((SELECT MAX(id) FROM principal_status_events), 1),"
-                " (SELECT MAX(id) IS NOT NULL FROM principal_status_events))"
+        # Keep every identity column ahead of the ids just copied.
+        for identity_table in _IDENTITY_TABLES:
+            conn.execute(
+                text(
+                    f"SELECT setval(pg_get_serial_sequence('{identity_table}', 'id'),"
+                    f" COALESCE((SELECT MAX(id) FROM {identity_table}), 1),"
+                    f" (SELECT MAX(id) IS NOT NULL FROM {identity_table}))"
+                )
             )
-        )
         for name in COPIED_TABLES:
             stored = conn.execute(select(func.count()).select_from(schema.metadata.tables[name])).scalar_one()
             if stored != counts[name]:
@@ -194,8 +222,13 @@ def import_sqlite(target: Database, source: pathlib.Path, keyring: Any) -> Impor
                 tokens.c.key_id,
                 tokens.c.nonce,
                 tokens.c.ciphertext,
+                tokens.c.status,
+                tokens.c.invalid_reason,
             )
         ):
+            if row.status == "invalid" and row.invalid_reason == "decrypt_failed":
+                # Already known to be unreadable in the source: carried over as it was.
+                continue
             if row.key_id not in key_ids:
                 raise KeyringError(
                     f"CANVAS_TOKEN_KEYS is missing key id {row.key_id}; nothing was imported"

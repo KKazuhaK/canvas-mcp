@@ -38,7 +38,7 @@ from canvas_mcp.core.selfhost.token_store import (
 )
 from canvas_mcp.tools import register_course_tools
 
-from .conftest import CLIENT, OID_A, OID_B, TENANT
+from .conftest import CLIENT, OID_A, OID_B, TENANT, acct_key, store_put
 from .test_selfhost_integration import TOKENS, call_tool, text_of
 
 BASE = "https://canvas.example.test"
@@ -47,8 +47,8 @@ ACCOUNT_URL = f"{BASE}/account"
 TOKEN_A = "canvas-token-for-user-A-0123456789"
 TOKEN_B = "canvas-token-for-user-B-0123456789"
 NEW_TOKEN_A = "canvas-token-for-user-A-fresh-0123"
-KEY_A = f"entra:{TENANT}:{OID_A}"
-KEY_B = f"entra:{TENANT}:{OID_B}"
+KEY_A = acct_key(OID_A)
+KEY_B = acct_key(OID_B)
 COURSES = {
     TOKEN_A: [{"id": 101, "name": "Intermediate Python", "course_code": "ICS 33"}],
     TOKEN_B: [{"id": 202, "name": "Single Variable Calculus", "course_code": "MATH 2B"}],
@@ -119,7 +119,7 @@ def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNam
     runtime = prepare_selfhost(settings)
 
     def enroll(oid: str, token: str) -> None:
-        runtime.store.put(
+        store_put(runtime.store,
             tenant_id=TENANT, object_id=oid, api_token=token, canvas_user_id="42",
             canvas_user_name="n", entra_display_name="n", entra_upn="n@example.test",
             canvas_host="canvas.example.edu",
@@ -259,7 +259,7 @@ class TestMarkedInvalidBeforeTheCall:
 class TestDecryptFailure:
     def test_an_unreadable_row_is_marked_invalid_and_stays_that_way(self, stack):
         with raw_connection(stack.runtime.store) as conn:
-            conn.execute("UPDATE canvas_tokens SET ciphertext = ? WHERE object_id = ?", (b"x" * 40, OID_A))
+            conn.execute("UPDATE canvas_tokens SET ciphertext = ? WHERE principal_key = ?", (b"x" * 40, acct_key(OID_A)))
 
         first = call_tool(stack, "bearer-A", "list_courses")
 
@@ -276,7 +276,7 @@ class TestDecryptFailure:
 
     def test_saving_a_new_token_clears_the_mark(self, stack):
         with raw_connection(stack.runtime.store) as conn:
-            conn.execute("UPDATE canvas_tokens SET ciphertext = ? WHERE object_id = ?", (b"x" * 40, OID_A))
+            conn.execute("UPDATE canvas_tokens SET ciphertext = ? WHERE principal_key = ?", (b"x" * 40, acct_key(OID_A)))
         call_tool(stack, "bearer-A", "list_courses")
         stack.enroll(OID_A, NEW_TOKEN_A)
         assert status_of(stack).status == STATUS_ACTIVE

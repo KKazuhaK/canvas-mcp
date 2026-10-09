@@ -38,19 +38,28 @@ from canvas_mcp.core.selfhost.token_store import (
 )
 from canvas_mcp.core.selfhost.tool_gate import SelfhostCredentialGate
 
-from .conftest import OID_A, OID_B, TENANT, make_principal
+from .conftest import (
+    OID_A,
+    OID_B,
+    TENANT,
+    acct_key,
+    identity_service,
+    make_account,
+    make_principal,
+    sign_in,
+    store_put,
+)
 from .test_request_context import (
     ACCOUNT_URL,
     CANVAS_URL,
-    POLICY,
     Probe,
     _claims,
     _run,
     _user,
 )
 
-KEY_A = f"entra:{TENANT}:{OID_A}"
-KEY_B = f"entra:{TENANT}:{OID_B}"
+KEY_A = acct_key(OID_A)
+KEY_B = acct_key(OID_B)
 TOKEN_A = "canvas-token-for-user-A-0123456789"
 TOKEN_B = "canvas-token-for-user-B-0123456789"
 
@@ -88,12 +97,14 @@ def make_store(tmp_path: pathlib.Path, name: str = "t.sqlite3") -> TokenStore:
     ring = Keyring.parse("k1:" + base64.b64encode(b"\x01" * 32).decode())
     store = backend_store(tmp_path / name, ring, clock=lambda: 1_800_000_000)
     store.initialize()
+    # An account created on first sight gets the key the tests expect.
+    store._new_account_id = lambda ext: acct_key(ext.subject).removeprefix("acct:")
     return store
 
 
 def enroll_both(store: TokenStore) -> None:
     for oid, token in ((OID_A, TOKEN_A), (OID_B, TOKEN_B)):
-        store.put(
+        store_put(store,
             tenant_id=TENANT, object_id=oid, api_token=token, canvas_user_id="1",
             canvas_user_name="n", entra_display_name="n", entra_upn="n@example.test",
             canvas_host="canvas.example.test",
@@ -101,7 +112,7 @@ def enroll_both(store: TokenStore) -> None:
 
 
 def disable(store: TokenStore, oid: str = OID_A) -> None:
-    store.disable_principal(TENANT, oid, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)
+    store.disable_principal(acct_key(oid), actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)
 
 
 class SpyStore:
@@ -109,14 +120,14 @@ class SpyStore:
 
     def __init__(self, inner: TokenStore) -> None:
         self.inner = inner
-        self.gets: list[tuple[str, str]] = []
+        self.gets: list[str] = []
 
-    def get(self, tenant_id: str, object_id: str) -> Any:
-        self.gets.append((tenant_id, object_id))
-        return self.inner.get(tenant_id, object_id)
+    def get(self, principal_key: str) -> Any:
+        self.gets.append(principal_key)
+        return self.inner.get(principal_key)
 
-    def touch(self, tenant_id: str, object_id: str, *, min_interval_seconds: int = 300) -> None:
-        self.inner.touch(tenant_id, object_id, min_interval_seconds=min_interval_seconds)
+    def touch(self, principal_key: str, *, min_interval_seconds: int = 300) -> None:
+        self.inner.touch(principal_key, min_interval_seconds=min_interval_seconds)
 
 
 def build(
@@ -125,7 +136,7 @@ def build(
     return SelfhostRequestContextMiddleware(
         probe,
         mcp_path="/mcp",
-        policy=POLICY,
+        identity=identity_service(store, access=cache),
         store=spy or SpyStore(store),
         schools=SchoolPolicy.pinned(CANVAS_URL),
         account_url=ACCOUNT_URL,
@@ -241,13 +252,14 @@ class TestMiddlewareRefusesADisabledPrincipal:
         store = make_store(tmp_path)
         enroll_both(store)
         disable(store)
-        store.delete(TENANT, OID_A)
+        store.delete(acct_key(OID_A))
         probe = Probe()
         call = await _run(build(probe, store, PrincipalAccessCache(store)), user=_user(_claims()))
         assert call.status == 403 and probe.calls == 0
 
     async def test_a_user_who_was_never_enrolled_is_refused_too(self, tmp_path: pathlib.Path) -> None:
         store = make_store(tmp_path)
+        make_account(store, OID_A)  # an account, but no Canvas token
         disable(store)
         probe = Probe()
         call = await _run(build(probe, store, PrincipalAccessCache(store)), user=_user(_claims()))
@@ -309,7 +321,7 @@ class TestMiddlewareRefusesADisabledPrincipal:
         disable(store)
         cache.invalidate(KEY_A)
         assert (await _run(mw, user=_user(_claims()))).status == 403
-        store.enable_principal(TENANT, OID_A, actor=OPERATOR)
+        store.enable_principal(acct_key(OID_A), actor=OPERATOR)
         cache.invalidate(KEY_A)
         assert (await _run(mw, user=_user(_claims()))).status == 200
         assert probe.seen["creds"].api_token == TOKEN_A
@@ -336,17 +348,20 @@ class TestMiddlewareRefusesADisabledPrincipal:
         enroll_both(store)
         disable(store)
         await _run(build(Probe(), store, PrincipalAccessCache(store)), user=_user(_claims()))
-        assert "principal_disabled" in caplog.text
+        assert "access_disabled" in caplog.text
         assert TOKEN_A not in caplog.text
 
-    async def test_without_an_access_checker_nothing_changes(self, tmp_path: pathlib.Path) -> None:
-        # Existing wiring (and the tests that build the middleware alone) is unchanged.
+    async def test_without_an_access_cache_the_identity_service_still_reads_the_status(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        # The account status is part of the identity decision, so a middleware built
+        # without the cache still refuses a disabled user (it just reads every time).
         store = make_store(tmp_path)
         enroll_both(store)
         disable(store)
         probe = Probe()
         call = await _run(build(probe, store, None), user=_user(_claims()))
-        assert call.status == 200
+        assert call.status == 403 and probe.calls == 0
 
 
 def make_store_view(tmp_path: pathlib.Path) -> TokenStore:
@@ -359,7 +374,8 @@ class TestOwnerDemotionFromRequestTokens:
         self, tmp_path: pathlib.Path
     ) -> None:
         store = make_store(tmp_path)
-        store.record_sign_in(KEY_A, is_owner=True)  # at 1_800_000_000
+        sign_in(store, OID_B, owner=True)  # a second owner: the last one is never demoted
+        sign_in(store, OID_A, owner=True)  # at 1_800_000_000
         cache = PrincipalAccessCache(store)
         mw = build(Probe(), store, cache)
         await _run(mw, user=_user(_claims(iat=1_800_000_500)))
@@ -379,7 +395,8 @@ class TestOwnerDemotionFromRequestTokens:
         monkeypatch.setattr(audit, "_audit_logger", Recorder())
         monkeypatch.setattr(audit, "_access_events_enabled", True)
         store = make_store(tmp_path)
-        store.record_sign_in(KEY_A, is_owner=True)
+        sign_in(store, OID_B, owner=True)
+        sign_in(store, OID_A, owner=True)
         mw = build(Probe(), store, PrincipalAccessCache(store))
         await _run(mw, user=_user(_claims(iat=1_800_000_500)))
         await _run(mw, user=_user(_claims(iat=1_800_000_600)))  # already lowered: no repeat
@@ -390,7 +407,8 @@ class TestOwnerDemotionFromRequestTokens:
 
     async def test_a_token_issued_before_the_last_sign_in_does_not(self, tmp_path: pathlib.Path) -> None:
         store = make_store(tmp_path)
-        store.record_sign_in(KEY_A, is_owner=True)
+        sign_in(store, OID_B, owner=True)
+        sign_in(store, OID_A, owner=True)
         mw = build(Probe(), store, PrincipalAccessCache(store))
         await _run(mw, user=_user(_claims(iat=1_799_990_000)))
         assert store.get_principal_status(KEY_A).is_owner
@@ -399,14 +417,16 @@ class TestOwnerDemotionFromRequestTokens:
         self, tmp_path: pathlib.Path
     ) -> None:
         store = make_store(tmp_path)
-        store.record_sign_in(KEY_A, is_owner=True)
+        sign_in(store, OID_B, owner=True)
+        sign_in(store, OID_A, owner=True)
         mw = build(Probe(), store, PrincipalAccessCache(store))
         await _run(mw, user=_user(_claims(roles=["Canvas.Owner"], iat=1_800_000_500)))
         assert store.get_principal_status(KEY_A).is_owner
 
     async def test_a_token_without_an_issue_time_is_no_evidence(self, tmp_path: pathlib.Path) -> None:
         store = make_store(tmp_path)
-        store.record_sign_in(KEY_A, is_owner=True)
+        sign_in(store, OID_B, owner=True)
+        sign_in(store, OID_A, owner=True)
         mw = build(Probe(), store, PrincipalAccessCache(store))
         await _run(mw, user=_user(_claims()))
         assert store.get_principal_status(KEY_A).is_owner
@@ -449,7 +469,7 @@ def gated(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(
         tool_gate,
         "get_access_token",
-        lambda: AccessToken(token="t", client_id="c", scopes=[], claims={"oid": OID_A}),
+        lambda: AccessToken(token="t", client_id="c", scopes=[], claims={"tid": TENANT, "oid": OID_A}),
     )
     set_request_principal(make_principal(OID_A))
     set_request_credentials(RequestCredentials(api_token=TOKEN_A, api_url=CANVAS_URL))

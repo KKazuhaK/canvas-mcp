@@ -35,12 +35,12 @@ from canvas_mcp.core.selfhost.settings import load_selfhost_settings
 from canvas_mcp.core.tool_policy import apply_tool_policy, resolve_tool_policy
 from canvas_mcp.server import register_all_tools
 
-from .conftest import CLIENT, OID_A, OID_B, TENANT
+from .conftest import CLIENT, OID_A, OID_B, TENANT, acct_key, store_put
 
 BASE = "https://canvas.example.test"
 CANVAS = "https://canvas.example.edu"
 TOKEN = {OID_A: "canvas-token-for-user-A-0123456789", OID_B: "canvas-token-for-user-B-0123456789"}
-KEY = {oid: f"entra:{TENANT}:{oid}".lower() for oid in (OID_A, OID_B)}
+KEY = {oid: acct_key(oid) for oid in (OID_A, OID_B)}
 STUDENT_WRITES = "mark_module_item_done,send_message,create_planner_note,submit_assignment"
 OPERATOR_ALLOWS = "mark_module_item_done,create_planner_note"
 
@@ -78,7 +78,7 @@ def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNam
     })
     runtime = prepare_selfhost(settings)
     for oid, token in TOKEN.items():
-        runtime.store.put(
+        store_put(runtime.store,
             tenant_id=TENANT, object_id=oid, api_token=token, canvas_user_id=oid[:2],
             canvas_user_name="n", entra_display_name="n", entra_upn="n@example.test",
             canvas_host="canvas.example.edu",

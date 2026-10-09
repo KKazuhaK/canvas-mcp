@@ -119,7 +119,7 @@ def _emit(event: dict[str, Any]) -> None:
     # UPNs) in the self-hosted multi-user mode.
     # The identity only: current_principal_key() also carries the school.
     principal = get_request_principal()
-    if principal is not None and principal.key.startswith("entra:"):
+    if principal is not None and principal.key.startswith(("acct:", "entra:")):
         # An event that names its own subject (an admin acting on someone else's
         # enrollment) keeps it.
         event.setdefault("principal", principal.key)

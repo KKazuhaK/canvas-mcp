@@ -173,6 +173,7 @@ class TokenHealth:
                 reason=reason,
                 expected_updated_at=expected_updated_at,
                 expected_generation=expected_generation,
+                actor=actor,
             )
         )
         if changed:

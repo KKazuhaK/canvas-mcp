@@ -93,6 +93,14 @@ USER_B = EntraUser(
 )
 USER_C = EntraUser("Carol", "cccccccc-0000-4000-8000-00000000000c", roles=())  # no role
 USER_D = EntraUser("Dave", "dddddddd-0000-4000-8000-00000000000d", tenant=OTHER_TENANT)
+
+
+def acct_of(runtime: Any, user: EntraUser) -> str:
+    """The account key the server made for an Entra user (found through their identity)."""
+    key = runtime.store.resolve_legacy_key(f"entra:{user.tenant}:{user.oid}".lower())
+    assert key is not None, "the user has no account yet"
+    return str(key)
+
 OWNER = EntraUser("Olive", "eeeeeeee-0000-4000-8000-00000000000e", roles=("Canvas.Owner",))
 ENROLLED_TOKENS = {USER_A.canvas_token: USER_A, USER_B.canvas_token: USER_B}
 
@@ -530,8 +538,8 @@ class TestEnrollmentThroughAccount:
         for user in (USER_A, USER_B):
             assert world.browser.enroll(user).status_code == 303
         store = world.runtime.store
-        stored_a = store.get(TENANT, USER_A.oid)
-        stored_b = store.get(TENANT, USER_B.oid)
+        stored_a = store.get(acct_of(world.runtime, USER_A))
+        stored_b = store.get(acct_of(world.runtime, USER_B))
         assert stored_a is not None and stored_a.api_token == USER_A.canvas_token
         assert stored_b is not None and stored_b.api_token == USER_B.canvas_token
         assert store.count() == 2
@@ -621,7 +629,7 @@ class TestMcpAsTwoUsers:
         assert ("/api/v1/courses/101", USER_A.canvas_token) in enrolled.canvas.seen
 
     def test_the_configured_course_state_decides_what_outlives_a_request(self, enrolled):
-        user_a_key = f"entra:{TENANT}:{USER_A.oid}"
+        user_a_key = acct_of(enrolled.runtime, USER_A)
         bearer_a = enrolled.browser.bearer_for(USER_A)
         for _ in range(2):
             mine = call_tool(enrolled.client, bearer_a, "get_course_details", {"course_identifier": "ICS 33"})
@@ -641,7 +649,7 @@ class TestMcpAsTwoUsers:
         # Write tools are off until each user turns them on; this test is about
         # the confirmation state, so both users have switched the widget tool on.
         for user in (USER_A, USER_B):
-            enrolled.runtime.store.set_tool_prefs(f"entra:{TENANT}:{user.oid}".lower(), ["delete_widget"])
+            enrolled.runtime.store.set_tool_prefs(acct_of(enrolled.runtime, user), ["delete_widget"])
         preview = text_of(call_tool(enrolled.client, bearer_a, "delete_widget", {"widget_id": "w1"}))
         token = re.search(r"Confirmation token: (\S+)", preview)
         assert token, preview
@@ -703,8 +711,8 @@ class TestMcpAsTwoUsers:
 
     def test_the_last_used_time_is_recorded_for_the_caller_only(self, enrolled):
         call_tool(enrolled.client, enrolled.browser.bearer_for(USER_A), "list_courses")
-        info_a = enrolled.runtime.store.info(TENANT, USER_A.oid)
-        info_b = enrolled.runtime.store.info(TENANT, USER_B.oid)
+        info_a = enrolled.runtime.store.info(acct_of(enrolled.runtime, USER_A))
+        info_b = enrolled.runtime.store.info(acct_of(enrolled.runtime, USER_B))
         assert info_a is not None and info_a.last_used_at is not None
         assert info_b is not None and info_b.last_used_at is None
 
@@ -730,7 +738,7 @@ class TestMcpAsTwoUsers:
         assert USER_A.oid in admin.text and USER_B.oid in admin.text
         assert USER_A.canvas_token not in admin.text and USER_B.canvas_token not in admin.text
         revoke = enrolled.client.post("/account/admin/remove", data={
-            "csrf": enrolled.browser.csrf("/account/admin"), "tenant_id": TENANT, "object_id": USER_A.oid,
+            "csrf": enrolled.browser.csrf("/account/admin"), "principal_key": acct_of(enrolled.runtime, USER_A),
         }, headers=ORIGIN, follow_redirects=False)
         assert revoke.status_code == 303
 
@@ -741,7 +749,7 @@ class TestMcpAsTwoUsers:
 
     def test_disabling_a_user_is_an_access_decision_that_deleting_rows_cannot_undo(self, enrolled):
         """The reported sequence, end to end through the real OAuth, MCP and /account stack."""
-        user_a_key = f"entra:{TENANT}:{USER_A.oid}"
+        user_a_key = acct_of(enrolled.runtime, USER_A)
         bearer_a = enrolled.browser.bearer_for(USER_A)
         assert call_tool(enrolled.client, bearer_a, "list_courses")["isError"] is False
         # User A has a sealed /account session that is still valid.
@@ -757,7 +765,7 @@ class TestMcpAsTwoUsers:
         }, headers=ORIGIN, follow_redirects=False)
         assert disable.status_code == 303
         remove = enrolled.client.post("/account/admin/remove", data={
-            "csrf": csrf, "tenant_id": TENANT, "object_id": USER_A.oid,
+            "csrf": csrf, "principal_key": acct_of(enrolled.runtime, USER_A),
         }, headers=ORIGIN, follow_redirects=False)
         assert remove.status_code == 303
         assert enrolled.runtime.store.info(user_a_key) is None
@@ -815,7 +823,7 @@ class TestMcpAsTwoUsers:
         is the one the session's own page rendered, and the very same request is first
         shown to be accepted while A is in good standing.
         """
-        user_a_key = f"entra:{TENANT}:{USER_A.oid}"
+        user_a_key = acct_of(enrolled.runtime, USER_A)
         browser, client, store = enrolled.browser, enrolled.client, enrolled.runtime.store
         assert browser.account_sign_in(USER_A).status_code == 303
         a_session = client.cookies.get("__Host-cmcp_session")
@@ -837,7 +845,7 @@ class TestMcpAsTwoUsers:
         }, headers=ORIGIN, follow_redirects=False)
         assert disable.status_code == 303
         remove = client.post("/account/admin/remove", data={
-            "csrf": csrf, "tenant_id": TENANT, "object_id": USER_A.oid,
+            "csrf": csrf, "principal_key": acct_of(enrolled.runtime, USER_A),
         }, headers=ORIGIN, follow_redirects=False)
         assert remove.status_code == 303
         assert store.info(user_a_key) is None
@@ -866,7 +874,7 @@ class TestMcpAsTwoUsers:
         server and a new ASGI app. Nothing in memory is carried over, so only the
         persisted decision can be what refuses user A.
         """
-        user_a_key = f"entra:{TENANT}:{USER_A.oid}"
+        user_a_key = acct_of(enrolled.runtime, USER_A)
         browser, client, store = enrolled.browser, enrolled.client, enrolled.runtime.store
 
         # User A holds an MCP bearer and a sealed /account session; so does B.
@@ -930,7 +938,7 @@ class TestMcpAsTwoUsers:
         assert restarted_runtime.store.get_principal_status(user_a_key).disabled
 
     def test_a_user_deleting_their_own_token_may_enroll_again(self, enrolled):
-        user_a_key = f"entra:{TENANT}:{USER_A.oid}"
+        user_a_key = acct_of(enrolled.runtime, USER_A)
         assert enrolled.browser.account_sign_in(USER_A).status_code == 303
         deleted = enrolled.client.post("/account/token/delete", data={
             "csrf": enrolled.browser.csrf(),
@@ -939,7 +947,7 @@ class TestMcpAsTwoUsers:
         assert enrolled.runtime.store.info(user_a_key) is None
         assert not enrolled.runtime.store.get_principal_status(user_a_key).disabled
         assert enrolled.browser.enroll(USER_A).status_code == 303
-        assert enrolled.runtime.store.get(TENANT, USER_A.oid) is not None
+        assert enrolled.runtime.store.get(acct_of(enrolled.runtime, USER_A)) is not None
 
     def test_a_non_owner_cannot_open_the_admin_page(self, enrolled):
         enrolled.browser.account_sign_in(USER_A)
@@ -1124,7 +1132,7 @@ class TestOAuthProxyHardening:
 
     def test_disabling_the_user_stops_the_whole_refresh_family_from_buying_anything(self, enrolled):
         """The access decision ignores the token family, so a disabled user's fresh tokens are refused."""
-        user_key = f"entra:{TENANT}:{USER_A.oid}"
+        user_key = acct_of(enrolled.runtime, USER_A)
         grant, _ = enrolled.browser.mcp_authorization_code(USER_A)
         assert grant is not None
         issued = enrolled.browser.exchange_code(grant).json()
@@ -1275,11 +1283,11 @@ class TestCredentialLifecycle:
         assert "ICS 33" in text_of(call_tool(enrolled.client, bearer_a, "list_courses"))
         mine = call_tool(enrolled.client, bearer_a, "get_course_details", {"course_identifier": "ICS 33"})
         assert "Intermediate Python" in text_of(mine)  # now cached under the first credential
-        generation = enrolled.runtime.store.credential_generation(f"entra:{TENANT}:{USER_A.oid}")
+        generation = enrolled.runtime.store.credential_generation(acct_of(enrolled.runtime, USER_A))
 
         self._replace_token_through_account(enrolled, self.USER_E.canvas_token)
         assert enrolled.runtime.store.credential_generation(
-            f"entra:{TENANT}:{USER_A.oid}"
+            acct_of(enrolled.runtime, USER_A)
         ) == generation + 1
         enrolled.canvas.seen.clear()
 
@@ -1295,7 +1303,7 @@ class TestCredentialLifecycle:
         assert "MATH 2B" in text_of(call_tool(enrolled.client, bearer_b, "list_courses"))
 
     def _preview(self, world, bearer: str) -> str:
-        world.runtime.store.set_tool_prefs(f"entra:{TENANT}:{USER_A.oid}", ["delete_widget"])
+        world.runtime.store.set_tool_prefs(acct_of(world.runtime, USER_A), ["delete_widget"])
         preview = text_of(call_tool(world.client, bearer, "delete_widget", {"widget_id": "w1"}))
         token = re.search(r"Confirmation token: (\S+)", preview)
         assert token, preview
@@ -1322,7 +1330,7 @@ class TestCredentialLifecycle:
         assert enrolled.deleted == ["w1"] and "Deleted widget w1" in done
 
     def test_a_pending_confirmation_does_not_survive_a_disable_and_enable(self, enrolled):
-        user_a_key = f"entra:{TENANT}:{USER_A.oid}"
+        user_a_key = acct_of(enrolled.runtime, USER_A)
         bearer_a = enrolled.browser.bearer_for(USER_A)
         token = self._preview(enrolled, bearer_a)
 
@@ -1340,7 +1348,7 @@ class TestCredentialLifecycle:
         assert enrolled.deleted == [] and "Deleted widget" not in redeemed
 
     def test_removing_the_token_then_enrolling_a_new_one_starts_with_empty_caches(self, enrolled):
-        user_a_key = f"entra:{TENANT}:{USER_A.oid}"
+        user_a_key = acct_of(enrolled.runtime, USER_A)
         bearer_a = enrolled.browser.bearer_for(USER_A)
         call_tool(enrolled.client, bearer_a, "list_courses")  # learns the alias under this credential
         mine = call_tool(enrolled.client, bearer_a, "get_course_details", {"course_identifier": "ICS 33"})

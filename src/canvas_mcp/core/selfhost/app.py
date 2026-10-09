@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+import anyio.to_thread
 from fastmcp import FastMCP
 from starlette.middleware import Middleware
 from starlette.requests import Request
@@ -17,9 +18,11 @@ from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp
 
 from ..config import Config, validate_canvas_url_scheme
+from ..logging import log_warning
 from ..token_health import set_token_health_monitor
+from .accounts import EntraClaimsPolicy
 from .edge_guard import SelfhostEdgeGuard
-from .identity import ClaimsPolicy, authorize_id_token_claims
+from .identity import IdentityService
 from .limits import RateLimiters, build_rate_limiters
 from .oauth import cull_expired_oauth_state
 from .principal_access import PrincipalAccessCache
@@ -35,6 +38,8 @@ if TYPE_CHECKING:
     from .token_store import TokenStore
 
 HEALTH_PATH = "/healthz"
+#: How often the sign-in history and the stale pending accounts are pruned.
+STORE_CLEANUP_SECONDS = 3600.0
 
 SSRF_TRUST_PROXY_ENV = "FASTMCP_SSRF_TRUST_PROXY"
 _FALSE_WORDS = frozenset({"", "0", "false", "f", "no", "n", "off"})
@@ -42,17 +47,19 @@ _FALSE_WORDS = frozenset({"", "0", "false", "f", "no", "n", "off"})
 
 @dataclass(frozen=True)
 class SelfhostRuntime:
-    """What the running server shares: settings, token store, claim policy, token health.
+    """What the running server shares: settings, token store, identity service, token health.
 
-    ``tool_prefs`` caches each user's write-tool switches for the MCP side; the
-    account page drops a user's entry when they change a switch. ``access`` caches
-    whether each principal is allowed to use the server at all; the account page
-    drops an entry when an owner disables or enables a user.
+    ``identity`` turns verified claims into accounts under the admission policy; both the
+    MCP path and ``/account`` use it. ``tool_prefs`` caches each user's write-tool
+    switches for the MCP side; the account page drops a user's entry when they change a
+    switch. ``access`` caches whether each principal is allowed to use the server at all;
+    the account page drops an entry when an owner disables, enables, approves or denies
+    a user.
     """
 
     settings: SelfhostSettings
     store: TokenStore
-    policy: ClaimsPolicy
+    identity: IdentityService
     health: TokenHealth
     tool_prefs: ToolPrefsCache
     access: PrincipalAccessCache
@@ -221,7 +228,11 @@ def _data_layer_problem(settings: SelfhostSettings) -> str | None:
 
 
 def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
-    """Open the encrypted token store and build the claim policy.
+    """Open the encrypted token store and build the identity service.
+
+    A database from before the account model is migrated here (every stored Canvas
+    token is re-encrypted with ``CANVAS_TOKEN_KEYS`` in one transaction; a SQLite file
+    is copied first), unless ``DATABASE_AUTO_MIGRATE=false``.
 
     Raises :class:`SelfhostConfigError` when the keyring or the store is
     unusable (a key id missing, a wrong key, an unreadable or newer database,
@@ -257,20 +268,21 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
     except OSError:
         raise SelfhostConfigError(["the Canvas token database cannot be opened"]) from None
 
-    policy = ClaimsPolicy(
-        tenant_id=settings.tenant_id,
-        client_id=settings.client_id,
-        required_role=settings.required_role,
-        owner_role=settings.owner_role,
+    access = PrincipalAccessCache(store)
+    identity = IdentityService(
+        store,
+        EntraClaimsPolicy(tenant_id=settings.tenant_id, client_id=settings.client_id),
+        settings.access_policy,
+        access=access,
     )
     health = TokenHealth(store, account_url=settings.account_url)
     return SelfhostRuntime(
         settings=settings,
         store=store,
-        policy=policy,
+        identity=identity,
         health=health,
         tool_prefs=ToolPrefsCache(store),
-        access=PrincipalAccessCache(store),
+        access=access,
         limiters=build_rate_limiters(settings.state_backend),
     )
 
@@ -340,7 +352,7 @@ def install_selfhost(
             session_ttl_seconds=settings.account_session_ttl_seconds,
         ),
         runtime.store,
-        authorize_id_token_claims(runtime.policy),
+        runtime.identity,
         health=runtime.health,
         write_tools=WriteToolCatalog(ceiling=ceiling, list_registered=registered_tool_names),
         tool_prefs=runtime.tool_prefs,
@@ -374,7 +386,7 @@ def build_selfhost_asgi_app(
             Middleware(
                 SelfhostRequestContextMiddleware,
                 mcp_path=settings.mcp_path,
-                policy=runtime.policy,
+                identity=runtime.identity,
                 store=runtime.store,
                 schools=selfhost_school_policy(settings, config),
                 account_url=settings.account_url,
@@ -391,13 +403,31 @@ def build_selfhost_asgi_app(
     )
 
     provider = mcp.auth
+    last_store_cleanup: list[float] = []
 
-    async def cull_oauth_state() -> None:
+    async def prune_store() -> None:
+        """Drop sign-in events older than 90 days and pending accounts older than 30 days.
+
+        At most once an hour, in a worker thread, and best effort: a failure only means
+        the next pass tries again.
+        """
+        now = time.monotonic()
+        if last_store_cleanup and now - last_store_cleanup[0] < STORE_CLEANUP_SECONDS:
+            return
+        last_store_cleanup[:] = [now]
+        try:
+            await anyio.to_thread.run_sync(runtime.store.prune_auth_events)
+            await anyio.to_thread.run_sync(runtime.store.purge_stale_pending)
+        except Exception:  # noqa: BLE001 - housekeeping must never affect a request
+            log_warning("cleanup of old sign-in records failed")
+
+    async def maintenance() -> None:
         await cull_expired_oauth_state(provider)
+        await prune_store()
 
     return SelfhostEdgeGuard(
         app,
         clock=clock or time.monotonic,
-        maintenance=cull_oauth_state,
+        maintenance=maintenance,
         rate_limiters=runtime.limiters,
     )

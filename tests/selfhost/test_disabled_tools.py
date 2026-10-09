@@ -47,7 +47,7 @@ from canvas_mcp.core.tool_policy import (
 )
 from canvas_mcp.server import register_all_tools
 
-from .conftest import CLIENT, OID_A, TENANT
+from .conftest import CLIENT, OID_A, TENANT, acct_key, store_put
 from .test_startup import HTTP, SECRETS, _run_main, entra_env  # noqa: F401 - fixture
 
 BASE = "https://canvas.example.test"
@@ -56,7 +56,7 @@ STUDENT_WRITES = "mark_module_item_done,create_planner_note,send_message"
 OPERATOR_ALLOWS = "mark_module_item_done,create_planner_note"
 READ_TOOL = "read_course_file_text"
 WRITE_TOOL = "create_planner_note"
-KEY_A = f"entra:{TENANT}:{OID_A}".lower()
+KEY_A = acct_key(OID_A)
 TOKEN_A = "canvas-token-for-user-A-0123456789"
 
 
@@ -247,7 +247,7 @@ def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNam
         SELFHOST_DISABLED_TOOLS=f"{READ_TOOL},{WRITE_TOOL}",
     ))
     runtime = prepare_selfhost(settings)
-    runtime.store.put(
+    store_put(runtime.store,
         tenant_id=TENANT, object_id=OID_A, api_token=TOKEN_A, canvas_user_id="1",
         canvas_user_name="n", entra_display_name="n", entra_upn="n@example.test",
         canvas_host="canvas.example.edu",

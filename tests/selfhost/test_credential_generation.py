@@ -63,19 +63,26 @@ from canvas_mcp.core.selfhost.tool_gate import SelfhostCredentialGate
 from canvas_mcp.core.write_confirmation import ConfirmationGuard
 from canvas_mcp.tools import discussions
 
-from .conftest import OID_A, OID_B, TENANT, make_principal
+from .conftest import (
+    OID_A,
+    OID_B,
+    TENANT,
+    acct_key,
+    identity_service,
+    make_principal,
+    store_put,
+)
 from .test_request_context import (
     ACCOUNT_URL,
     CANVAS_URL,
-    POLICY,
     Probe,
     _claims,
     _run,
     _user,
 )
 
-KEY_A = f"entra:{TENANT}:{OID_A}"
-KEY_B = f"entra:{TENANT}:{OID_B}"
+KEY_A = acct_key(OID_A)
+KEY_B = acct_key(OID_B)
 TOKEN_1 = "canvas-token-first-0123456789abcdef"
 TOKEN_2 = "canvas-token-second-0123456789abcdef"
 HOST = "canvas.example.test"
@@ -91,7 +98,7 @@ def make_store(tmp_path: pathlib.Path, name: str = "t.sqlite3") -> TokenStore:
 
 def put(store: TokenStore, token: str = TOKEN_1, oid: str = OID_A, *, user: str = "1",
         host: str = HOST) -> Any:
-    return store.put(
+    return store_put(store,
         tenant_id=TENANT, object_id=oid, api_token=token, canvas_user_id=user,
         canvas_user_name=f"user {user}", entra_display_name="n", entra_upn="n@example.test",
         canvas_host=host,
@@ -233,22 +240,25 @@ class TestMigration:
     def test_a_version_3_database_gains_the_table_and_starts_at_zero(
         self, tmp_path: pathlib.Path
     ) -> None:
-        store = make_store(tmp_path)
-        put(store)
-        with raw_connection(store) as conn:
-            conn.execute("DROP TABLE credential_generations")
-            conn.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
-        migrated = make_store(tmp_path)
+        from . import legacy_schemas as legacy
+
+        path = tmp_path / "t.sqlite3"
+        legacy.build(path, "v3")  # a release before the generation table existed
+        migrated = TokenStore(path, legacy.keyring())
+        migrated.initialize()
         with raw_connection(migrated) as conn:
             version = conn.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()[0]
-        assert version == str(SCHEMA_VERSION) == "4"
-        row = migrated.get(KEY_A)
-        assert row is not None and row.api_token == TOKEN_1 and row.credential_generation == 0
+        assert version == str(SCHEMA_VERSION) == "5"
+        key = migrated.resolve_legacy_key(legacy.KEY_B)
+        assert key is not None
+        row = migrated.get(key)
+        assert row is not None and row.api_token == legacy.TOKEN_B and row.credential_generation == 0
         # The first change after the upgrade is generation 1, and it only grows.
-        assert put(migrated, TOKEN_2, user="2").credential_generation == 1
-        assert make_store(tmp_path).credential_generation(KEY_A) == 1
+        assert migrated.mark_invalid(key, reason=REASON_CANVAS_TOKEN_REJECTED) is True
+        assert migrated.credential_generation(key) == 1
+        assert TokenStore(path, legacy.keyring()).credential_generation(key) == 1
 
     def test_an_older_server_refuses_the_new_database(self, tmp_path: pathlib.Path) -> None:
         # A version 3 server would save tokens without raising any generation.
@@ -672,11 +682,11 @@ class RealStore:
     def __init__(self, inner: TokenStore) -> None:
         self.inner = inner
 
-    def get(self, tenant_id: str, object_id: str) -> Any:
-        return self.inner.get(tenant_id, object_id)
+    def get(self, principal_key: str) -> Any:
+        return self.inner.get(principal_key)
 
-    def touch(self, tenant_id: str, object_id: str, *, min_interval_seconds: int = 300) -> None:
-        self.inner.touch(tenant_id, object_id, min_interval_seconds=min_interval_seconds)
+    def touch(self, principal_key: str, *, min_interval_seconds: int = 300) -> None:
+        self.inner.touch(principal_key, min_interval_seconds=min_interval_seconds)
 
 
 class GenerationProbe(Probe):
@@ -694,7 +704,7 @@ class TestMiddlewarePublishesTheGeneration:
         return SelfhostRequestContextMiddleware(
             probe,
             mcp_path="/mcp",
-            policy=POLICY,
+            identity=identity_service(store),
             store=RealStore(store),
             schools=SchoolPolicy.pinned(CANVAS_URL),
             account_url=ACCOUNT_URL,
@@ -793,7 +803,7 @@ def gate_server(source: SourceAt, monkeypatch: pytest.MonkeyPatch) -> FastMCP:
     monkeypatch.setattr(
         tool_gate,
         "get_access_token",
-        lambda: AccessToken(token="t", client_id="c", scopes=[], claims={"oid": OID_A}),
+        lambda: AccessToken(token="t", client_id="c", scopes=[], claims={"tid": TENANT, "oid": OID_A}),
     )
     return mcp
 

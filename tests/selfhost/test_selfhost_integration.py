@@ -29,7 +29,7 @@ from canvas_mcp.core.selfhost.app import (  # noqa: E402
 from canvas_mcp.core.selfhost.settings import load_selfhost_settings  # noqa: E402
 from canvas_mcp.tools import register_course_tools  # noqa: E402
 
-from .conftest import CLIENT, OID_A, OID_B, TENANT  # noqa: E402
+from .conftest import CLIENT, OID_A, OID_B, TENANT, acct_key, store_put  # noqa: E402
 
 BASE = "https://canvas.example.test"
 CANVAS = "https://canvas.example.edu"
@@ -87,7 +87,7 @@ def stack(
     })
     runtime = prepare_selfhost(settings)
     for oid, token in CANVAS_TOKEN.items():
-        runtime.store.put(
+        store_put(runtime.store,
             tenant_id=TENANT, object_id=oid, api_token=token, canvas_user_id=oid[:2],
             canvas_user_name="n", entra_display_name="n", entra_upn="n@example.test",
         )
@@ -174,14 +174,14 @@ class TestEnrollment:
 
     def test_deleting_the_enrollment_stops_tool_calls_immediately(self, stack):
         assert call_tool(stack, "bearer-A", "list_courses")["isError"] is False
-        assert stack.runtime.store.delete(TENANT, OID_A) is True
+        assert stack.runtime.store.delete(acct_key(OID_A)) is True
         result = call_tool(stack, "bearer-A", "list_courses")
         assert result["isError"] is True
         assert f"{BASE}/account" in text_of(result)
 
     def test_an_unreadable_stored_token_gets_the_enroll_again_message(self, stack):
         with raw_connection(stack.runtime.store) as conn:
-            conn.execute("UPDATE canvas_tokens SET ciphertext = ? WHERE object_id = ?", (b"x" * 40, OID_A))
+            conn.execute("UPDATE canvas_tokens SET ciphertext = ? WHERE principal_key = ?", (b"x" * 40, acct_key(OID_A)))
         result = call_tool(stack, "bearer-A", "list_courses")
         assert result["isError"] is True
         assert "could not be read" in text_of(result)
@@ -199,7 +199,7 @@ class TestDisablement:
         )
 
         stack.runtime.store.disable_principal(
-            TENANT, oid, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR
+            acct_key(oid), actor=OPERATOR, reason=DISABLE_REASON_OPERATOR
         )
         stack.runtime.access.invalidate()
 
@@ -223,7 +223,7 @@ class TestDisablement:
 
     def test_removing_the_enrollment_of_a_disabled_user_changes_nothing(self, stack):
         self._disable(stack)
-        assert stack.runtime.store.delete(TENANT, OID_A) is True
+        assert stack.runtime.store.delete(acct_key(OID_A)) is True
         response = rpc(stack, "bearer-A", "tools/call", {"name": "list_courses", "arguments": {}})
         assert response.status_code == 403
 
@@ -238,7 +238,7 @@ class TestDisablement:
         assert call_tool(stack, "bearer-A", "list_courses")["isError"] is False
         # The operator CLI is a second process: it cannot invalidate our cache.
         stack.runtime.store.disable_principal(
-            TENANT, OID_A, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR
+            acct_key(OID_A), actor=OPERATOR, reason=DISABLE_REASON_OPERATOR
         )
         clock["now"] += 1
         assert call_tool(stack, "bearer-A", "list_courses")["isError"] is False  # inside the bound
@@ -250,7 +250,7 @@ class TestDisablement:
         from canvas_mcp.core.selfhost.token_store import OPERATOR
 
         self._disable(stack)
-        stack.runtime.store.enable_principal(TENANT, OID_A, actor=OPERATOR)
+        stack.runtime.store.enable_principal(acct_key(OID_A), actor=OPERATOR)
         stack.runtime.access.invalidate()
         assert call_tool(stack, "bearer-A", "list_courses")["isError"] is False
 
@@ -281,8 +281,8 @@ class TestPerUserCredentialsAndIsolation:
 
     def test_last_used_is_recorded_for_the_caller_only(self, stack):
         call_tool(stack, "bearer-A", "list_courses")
-        info_a = stack.runtime.store.info(TENANT, OID_A)
-        info_b = stack.runtime.store.info(TENANT, OID_B)
+        info_a = stack.runtime.store.info(acct_key(OID_A))
+        info_b = stack.runtime.store.info(acct_key(OID_B))
         assert info_a is not None and info_a.last_used_at is not None
         assert info_b is not None and info_b.last_used_at is None
 

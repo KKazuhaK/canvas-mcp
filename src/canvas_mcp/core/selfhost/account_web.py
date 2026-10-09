@@ -5,8 +5,10 @@ and enrolls their own Canvas personal access token here. Canvas tokens never go
 through chat: they are accepted only from the form on this page, verified
 against Canvas, and handed to the encrypted :class:`TokenStore`.
 
-This module does not import any auth-branch module. Identity rules (tenant,
-role, owner) are injected as the ``authorize_claims`` callable.
+This module does not import any auth-branch module. Who may sign in (tenant,
+rules, owner, approval) is decided by the injected identity service
+(:class:`~.identity.IdentityService`); a successful sign-in names the user's account
+``acct:<uuid>``, which keys the session and everything stored for the user.
 
 Security notes:
 
@@ -35,16 +37,24 @@ Security notes:
   switches (see :mod:`.tool_prefs`).
 * Access is an authorization decision, not an enrollment row. An owner can
   *disable* a user (and enable them again); that is stored apart from the token row
-  (``principal_status``), so removing the row never lets a disabled user back in.
+  (``accounts.status``), so removing the row never lets a disabled user back in.
   Deleting your own token is only a self-disconnect: you may enroll again. The
   session cookie carries the user's ``session_epoch``; every request re-reads the
   stored status, so a session is rejected the moment the user is disabled or the
   epoch changes (no cache here: the delay is zero for this page). The owner role in
   the cookie is a snapshot and is not trusted by itself: owner pages and actions need
-  a sign-in from the last ten minutes *and* the stored owner flag, and the store
+  a sign-in from the last ten minutes *and* the stored owner role, and the store
   re-checks that the acting owner is still an active owner inside the transaction
-  that disables or enables someone. An owner cannot disable themselves or the last
-  active owner.
+  that disables, enables, approves or denies someone. An owner cannot disable
+  themselves or the last active owner.
+* With ``ACCESS_POLICY=approval`` (or the ``approval`` fallback) a new user lands in
+  a ``pending`` state: they can sign in and see that they are waiting, but the token
+  form and the write-tool switches are hidden and refused, and the store refuses a
+  token for a pending account in the same transaction as the write. An owner approves
+  or denies at ``/account/admin``.
+* Every sign-in is written to ``auth_events`` (the page shows the last twenty); the
+  client address is ``unknown`` (no proxy is trusted) and the user agent is only a
+  keyed hash. Owners can read the audit log at ``/account/admin/audit``.
 """
 
 from __future__ import annotations
@@ -64,7 +74,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta, tzinfo
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal
 
 import anyio.to_thread
 import httpx
@@ -77,6 +87,14 @@ from starlette.routing import Route
 
 from canvas_mcp.core import audit
 from canvas_mcp.core.dates import output_timezone
+from canvas_mcp.core.selfhost.accounts import (
+    DENY_ACCESS_DISABLED,
+    DENY_SIGNUPS_PAUSED,
+    PROVIDER_ENTRA,
+    Denied,
+    valid_account_key,
+)
+from canvas_mcp.core.selfhost.identity import IdentityService, SignIn
 from canvas_mcp.core.selfhost.limits import (
     InMemorySlidingWindowLimiter,
     RateLimiters,
@@ -100,14 +118,20 @@ from canvas_mcp.core.selfhost.schools import (
 from canvas_mcp.core.selfhost.token_health import TokenHealth
 from canvas_mcp.core.selfhost.token_store import (
     DISABLE_REASON_ADMIN,
+    DISABLE_REASON_DENIED,
     DISABLE_REASON_OPERATOR,
     REASON_CANVAS_TOKEN_REJECTED,
     REASON_DECRYPT_FAILED,
     REASON_REVOKED_BY_ADMIN,
     STATUS_INVALID,
     AccessActionRefused,
+    AccountInfo,
+    AuditEntry,
+    AuthEvent,
     EnrollmentInfo,
     PrincipalDisabledError,
+    PrincipalMissingError,
+    PrincipalPendingError,
     PrincipalStatus,
     TokenDecryptionError,
     TokenStore,
@@ -140,6 +164,9 @@ _ADMIN_REMOVE_PATH = "/account/admin/remove"
 _ADMIN_DISABLE_PATH = "/account/admin/disable"
 _ADMIN_ENABLE_PATH = "/account/admin/enable"
 _ADMIN_INVALIDATE_PATH = "/account/admin/invalidate"
+_ADMIN_APPROVE_PATH = "/account/admin/approve"
+_ADMIN_DENY_PATH = "/account/admin/deny"
+_ADMIN_AUDIT_PATH = "/account/admin/audit"
 _SCHOOLS_PATH = "/account/schools"
 _WRITE_TOOLS_PATH = "/account/write-tools"
 
@@ -166,8 +193,14 @@ _FRESH_SIGN_IN_SECONDS = 600
 # The admin pages and actions need a sign-in this recent, so an owner whose Entra
 # role was removed loses them within this time even if the stored flag is stale.
 _OWNER_FRESH_SECONDS = _FRESH_SIGN_IN_SECONDS
-# Session cookie format. Version 2 carries the session epoch; older cookies are refused.
-_SESSION_VERSION = 2
+# Session cookie format. Version 3 names the account (``acct``) and the login provider
+# (``pid``) instead of the Entra tenant and object id; older cookies are refused, so
+# everyone signs in once after the account-model upgrade.
+_SESSION_VERSION = 3
+# How many sign-ins the account page lists, and how many audit rows a page of the
+# audit log shows.
+_SIGN_IN_HISTORY = 20
+_AUDIT_PAGE = 100
 # Where the verified session of a request is kept (in the ASGI scope).
 _SESSION_SCOPE_KEY = "canvas_mcp.session"
 # One checkbox per offered write tool plus the CSRF token and a button.
@@ -206,26 +239,6 @@ _SECURITY_HEADERS = {
 # -- public types ------------------------------------------------------------
 
 
-class PrincipalLike(Protocol):
-    """What the account pages need to know about a signed-in user."""
-
-    @property
-    def tenant_id(self) -> str: ...
-
-    @property
-    def object_id(self) -> str: ...
-
-    @property
-    def display_name(self) -> str: ...
-
-    @property
-    def upn(self) -> str: ...
-
-    @property
-    def is_owner(self) -> bool: ...
-
-
-AuthorizeClaims = Callable[[Mapping[str, Any]], tuple[PrincipalLike | None, str]]
 IdTokenVerifier = Callable[[str], Awaitable[Mapping[str, Any] | None]]
 
 
@@ -307,8 +320,8 @@ class _CookieCodec:
 
 @dataclass(frozen=True)
 class _Session:
-    tid: str
-    oid: str
+    #: The account key ``acct:<uuid>``: the principal of everything stored for the user.
+    acct: str
     name: str
     upn: str
     owner: bool
@@ -319,6 +332,10 @@ class _Session:
     iat: int = 0
     # The user's session epoch at sign-in; valid only while the stored epoch equals it.
     ep: int = 0
+    # The login provider that issued this session.
+    pid: str = PROVIDER_ENTRA
+    # Set from the stored status on every request: the account waits for approval.
+    pending: bool = False
 
 
 class _StoreUnavailable(Exception):
@@ -505,6 +522,12 @@ _DENIAL_ZH: dict[str, str] = {
     "Your sign-in carries malformed role information. Sign in again.": (
         "你的登录信息中的角色数据格式有误，请重新登录。"
     ),
+    "Your sign-in carries malformed group information. Sign in again.": (
+        "你的登录信息中的组数据格式有误，请重新登录。"
+    ),
+    "New sign-ups are paused on this server. Contact the server owner.": (
+        "此服务器暂时不接受新的注册，请联系服务器所有者。"
+    ),
 }
 
 # Chinese line shown for a refusal message that has no entry in _DENIAL_ZH.
@@ -640,7 +663,7 @@ class _AccountApp:
         self,
         cfg: AccountConfig,
         store: TokenStore,
-        authorize_claims: AuthorizeClaims,
+        identity: IdentityService,
         id_token_verifier: IdTokenVerifier | None,
         canvas_whoami: CanvasWhoAmI | None,
         http_client_factory: Callable[[], httpx.AsyncClient] | None,
@@ -662,9 +685,17 @@ class _AccountApp:
         self.base = cfg.public_base_url.rstrip("/")
         self.tenant = cfg.tenant_id.lower()
         self.store = store
-        self.authorize_claims = authorize_claims
+        self.identity = identity
         self.clock = clock
         self.codec = _CookieCodec(cfg.session_secret)
+        # Keyed hash of the user agent for the sign-in history: the secret is never
+        # used directly, and the user agent itself is never stored.
+        self._ua_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=b"canvas-mcp-account",
+            info=b"auth-event-ua-v1",
+        ).derive(cfg.session_secret)
         self.limiter = window(
             _RATE_LIMIT_ATTEMPTS,
             _RATE_LIMIT_WINDOW_SECONDS,
@@ -710,6 +741,9 @@ class _AccountApp:
             (_ADMIN_DISABLE_PATH, {"POST": self.admin_disable}),
             (_ADMIN_ENABLE_PATH, {"POST": self.admin_enable}),
             (_ADMIN_INVALIDATE_PATH, {"POST": self.admin_invalidate}),
+            (_ADMIN_APPROVE_PATH, {"POST": self.admin_approve}),
+            (_ADMIN_DENY_PATH, {"POST": self.admin_deny}),
+            (_ADMIN_AUDIT_PATH, {"GET": self.admin_audit}),
             (_SCHOOLS_PATH, {"GET": self.schools_page}),
             (_WRITE_TOOLS_PATH, {"POST": self.save_write_tools}),
         ]
@@ -772,7 +806,11 @@ class _AccountApp:
         Always one of the fixed route constants, never request input.
         """
         path = request.url.path
-        return path if path in (ACCOUNT_PATH, _ADMIN_PATH, _SCHOOLS_PATH) else ACCOUNT_PATH
+        return (
+            path
+            if path in (ACCOUNT_PATH, _ADMIN_PATH, _SCHOOLS_PATH, _ADMIN_AUDIT_PATH)
+            else ACCOUNT_PATH
+        )
 
     @staticmethod
     def _remember_lang(response: Response, lang: str) -> None:
@@ -822,14 +860,14 @@ class _AccountApp:
         if payload is None or payload.get("v") != _SESSION_VERSION:
             return None
         try:
-            tid, oid = payload["tid"], payload["oid"]
+            acct, pid = payload["acct"], payload["pid"]
             name, upn, csrf = payload["name"], payload["upn"], payload["csrf"]
             owner, exp, epoch = payload["owner"], payload["exp"], payload["ep"]
         except KeyError:
             return None
         if not (
-            isinstance(tid, str)
-            and isinstance(oid, str)
+            isinstance(acct, str)
+            and isinstance(pid, str)
             and isinstance(name, str)
             and isinstance(upn, str)
             and isinstance(csrf, str)
@@ -841,34 +879,33 @@ class _AccountApp:
             and epoch >= 0
         ):
             return None
-        if (
-            exp <= self.clock()
-            or tid != self.tenant
-            or not _GUID_RE.fullmatch(oid)
-            or not csrf
-        ):
+        if exp <= self.clock() or not valid_account_key(acct) or pid != PROVIDER_ENTRA or not csrf:
             return None
         raw_iat = payload.get("iat")
         iat = raw_iat if isinstance(raw_iat, int) and not isinstance(raw_iat, bool) else 0
-        return _Session(tid, oid.lower(), name, upn, owner, csrf, exp, iat, epoch)
+        return _Session(acct, name, upn, owner, csrf, exp, iat, epoch, pid)
 
     async def _resolve_session(self, request: Request) -> _Session | None:
         """The session in the cookie, accepted only if the stored decision still allows it.
 
         Read from the database on every request (no cache): the session must be
-        refused as soon as the user is disabled or the epoch moved on. The owner
-        flag in the cookie is a snapshot, so it is kept only while the stored owner
-        flag agrees. A database error raises, and the caller fails closed.
+        refused as soon as the account is disabled, denied or gone, or the epoch moved
+        on. A pending account keeps its session (the page tells it to wait) but is
+        marked ``pending``. The owner role in the cookie is a snapshot, so it is kept
+        only while the stored role agrees and the account is active. A database error
+        raises, and the caller fails closed.
         """
         cookie = self.session_from(request)
         if cookie is None:
             return None
-        stored = await anyio.to_thread.run_sync(
-            self.store.get_principal_status, self._principal_key(cookie)
-        )
-        if stored.disabled or stored.session_epoch != cookie.ep:
+        stored = await anyio.to_thread.run_sync(self.store.get_principal_status, cookie.acct)
+        if not (stored.active or stored.pending) or stored.session_epoch != cookie.ep:
             return None
-        return replace(cookie, owner=cookie.owner and stored.is_owner)
+        return replace(
+            cookie,
+            owner=cookie.owner and stored.is_owner and stored.active,
+            pending=stored.pending,
+        )
 
     @staticmethod
     def _session_of(request: Request) -> _Session | None:
@@ -895,7 +932,7 @@ class _AccountApp:
         if session is None:
             return self.signed_out_page()
         try:
-            info = await anyio.to_thread.run_sync(self.store.info, session.tid, session.oid)
+            info = await anyio.to_thread.run_sync(self.store.info, session.acct)
         except Exception as exc:  # noqa: BLE001
             logger.error("account page store read failed: %s", type(exc).__name__)
             return self.message_page(
@@ -1215,6 +1252,16 @@ class _AccountApp:
         ]
         if notice is not None:
             parts.append(f'<div class="notice {notice[0]}" role="alert">{notice[1]}</div>')
+        if session.pending:
+            # Waiting for an owner's approval: no token form, no write tools, no MCP.
+            parts.append(
+                '<section class="card banner" role="status">'
+                f"<h2>{_bi('等待管理员批准', 'Waiting for approval')}</h2>"
+                f"<p>{_bi('你的账户已创建，但需要服务器所有者批准后才能使用。批准之前不能绑定 Canvas 令牌，AI 应用也无法连接。批准后请刷新此页。', 'Your account was created, but the server owner has to approve it before you can use it. Until then you cannot add a Canvas token and your AI app cannot connect. Reload this page once you are approved.')}</p>"
+                "</section>"
+            )
+            parts.append(await self._sign_in_history(session))
+            return self.html_page(status, _bi("Canvas 账户", "Canvas account"), "".join(parts))
         if info is not None:
             parts.append(self._health_banner(session, info))
 
@@ -1269,7 +1316,67 @@ class _AccountApp:
         parts.append(self._search_section())
         parts.append(self._mcp_url_section())
         parts.append(await self._write_tools_section(session, write_notice))
+        parts.append(await self._sign_in_history(session))
         return self.html_page(status, _bi("Canvas 账户", "Canvas account"), "".join(parts))
+
+    @staticmethod
+    def _auth_result(event: AuthEvent) -> str:
+        """A sign-in event's result as plain text (closed codes only)."""
+        if event.outcome == "success":
+            if event.reason == "account_created":
+                return _bi("登录成功（账户已创建）", "Signed in (account created)")
+            if event.reason == "activated":
+                return _bi("登录成功（已自动批准）", "Signed in (approved automatically)")
+            return _bi("登录成功", "Signed in")
+        if event.outcome == "pending":
+            return _bi("等待批准", "Waiting for approval")
+        if event.reason == "access_disabled":
+            return _bi("被拒绝：账户已停用", "Refused: account disabled")
+        if event.reason == "signups_paused":
+            return _bi("被拒绝：暂停注册", "Refused: sign-ups paused")
+        if event.reason == "pending_approval":
+            return _bi("等待批准", "Waiting for approval")
+        return _bi("被拒绝", "Refused")
+
+    @staticmethod
+    def _auth_provider(provider_id: str) -> str:
+        return "Microsoft" if provider_id == PROVIDER_ENTRA else provider_id
+
+    async def _sign_in_history(self, session: _Session) -> str:
+        """The "Recent sign-ins" card: the last twenty sign-ins of this account."""
+        try:
+            events = await anyio.to_thread.run_sync(
+                self.store.list_auth_events, session.acct, _SIGN_IN_HISTORY
+            )
+        except Exception as exc:  # noqa: BLE001 - a missing history must not break the page
+            logger.error("account sign-in history read failed: %s", type(exc).__name__)
+            return ""
+        if not events:
+            return ""
+        rows = "".join(
+            "<tr>"
+            f'<td data-label="{_e(_bi("时间", "Time"))}">{_e(_fmt_ts(event.at))}</td>'
+            f'<td data-label="{_e(_bi("结果", "Result"))}">{_e(self._auth_result(event))}</td>'
+            f'<td data-label="{_e(_bi("登录方式", "Method"))}">{_e(self._auth_provider(event.provider_id))}</td>'
+            "</tr>"
+            for event in events
+        )
+        return (
+            f'<section class="card tablecard" id="sign-ins"><h2>{_bi("最近的登录", "Recent sign-ins")}</h2>'
+            "<table><thead><tr>"
+            f"<th>{_bi('时间', 'Time')}</th><th>{_bi('结果', 'Result')}</th>"
+            f"<th>{_bi('登录方式', 'Method')}</th>"
+            f"</tr></thead><tbody>{rows}</tbody></table>"
+            f'<p class="muted small">{_bi("如果这里有你不认识的登录，请联系服务器所有者。", "If you see a sign-in here that you do not recognise, tell the server owner.")}</p>'
+            "</section>"
+        )
+
+    def _ua_hash(self, request: Request) -> str | None:
+        """16 hex characters of a keyed hash of the user agent (never the user agent itself)."""
+        agent = request.headers.get("user-agent", "")[:512]
+        if not agent:
+            return None
+        return hmac.new(self._ua_key, agent.encode("utf-8", "replace"), hashlib.sha256).hexdigest()[:16]
 
     # -- school search ---------------------------------------------------------
 
@@ -1341,7 +1448,7 @@ class _AccountApp:
                 ),
                 status=400,
             )
-        if not self.search_limiter.allow((session.tid, session.oid)):
+        if not self.search_limiter.allow((session.acct,)):
             return self._schools_document(
                 session,
                 query,
@@ -1375,7 +1482,7 @@ class _AccountApp:
             for entry in entries
             if not is_blocked_hostname(entry.domain)
         ]
-        logger.info("account school search tid=%s oid=%s results=%d", session.tid, session.oid, len(results))
+        logger.info("account school search account=%s results=%d", session.acct, len(results))
         return self._schools_document(session, query, results=results)
 
     # -- sign-in -------------------------------------------------------------
@@ -1520,22 +1627,13 @@ class _AccountApp:
                 ),
             )
 
-        principal, message = self.authorize_claims(claims)
-        if principal is None:
-            return self.message_page(403, _denial_html(message))
-        if principal.tenant_id.lower() != self.tenant or not _GUID_RE.fullmatch(
-            principal.object_id
-        ):
-            logger.error("account sign-in refused: principal identity mismatch")
-            return self.message_page(
-                403, _bi("此账号不可使用。", "This account cannot be used.")
-            )
-
-        sign_in_key = f"entra:{self.tenant}:{principal.object_id.lower()}"
         try:
-            standing = await anyio.to_thread.run_sync(
+            outcome = await anyio.to_thread.run_sync(
                 functools.partial(
-                    self.store.record_sign_in, sign_in_key, is_owner=bool(principal.is_owner)
+                    self.identity.sign_in,
+                    claims,
+                    ip="unknown",
+                    ua_hash=self._ua_hash(request),
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -1543,40 +1641,31 @@ class _AccountApp:
             return self.message_page(
                 503, _bi("暂时无法读取令牌库。", "The token store is unavailable.")
             )
+        if isinstance(outcome, Denied):
+            return self._sign_in_refused(outcome)
+        assert isinstance(outcome, SignIn)
+        standing = outcome.status
+        sign_in_key = standing.principal_key
         if standing.owner_change is not None:
             audit.log_principal_event(standing.owner_change, sign_in_key, reason="sign_in")
-        if standing.disabled:
-            logger.warning("account sign-in refused: principal disabled oid=%s", principal.object_id.lower())
-            audit.log_principal_event(
-                "sign_in_refused", sign_in_key, reason=standing.disabled_reason
-            )
-            return self.message_page(
-                403,
-                _bi(
-                    "你的访问权限已被管理员停用。请联系服务器所有者恢复。",
-                    "Your access to this server was disabled by an administrator. Contact the server owner to have it restored.",
-                ),
-            )
 
         issued = int(now)
         sealed = self.codec.seal(
             SESSION_COOKIE,
             {
                 "v": _SESSION_VERSION,
-                "tid": self.tenant,
-                "oid": principal.object_id.lower(),
-                "name": principal.display_name[:200],
-                "upn": principal.upn[:254],
-                "owner": bool(principal.is_owner),
+                "acct": sign_in_key,
+                "pid": outcome.ext.provider_id,
+                "name": outcome.ext.display_name[:200],
+                "upn": outcome.ext.username[:254],
+                "owner": bool(outcome.owner),
                 "iat": issued,
                 "exp": issued + self.cfg.session_ttl_seconds,
                 "csrf": secrets.token_urlsafe(32),
                 "ep": standing.session_epoch,
             },
         )
-        logger.info(
-            "account sign-in ok tid=%s oid=%s", self.tenant, principal.object_id.lower()
-        )
+        logger.info("account sign-in ok account=%s pending=%s", sign_in_key, outcome.pending)
         response = self.redirect(ACCOUNT_PATH, 303)
         response.set_cookie(
             SESSION_COOKIE,
@@ -1585,6 +1674,24 @@ class _AccountApp:
             **self._cookie_kwargs(),
         )
         return response
+
+    def _sign_in_refused(self, denied: Denied) -> Response:
+        """The page for a refused sign-in (closed codes, never an upstream message)."""
+        key = getattr(denied, "account_key", None)
+        if denied.code == DENY_ACCESS_DISABLED:
+            logger.warning("account sign-in refused: account disabled account=%s", key)
+            if key:
+                audit.log_principal_event("sign_in_refused", key, reason="access_disabled")
+            return self.message_page(
+                403,
+                _bi(
+                    "你的访问权限已被管理员停用。请联系服务器所有者恢复。",
+                    "Your access to this server was disabled by an administrator. Contact the server owner to have it restored.",
+                ),
+            )
+        if denied.code == DENY_SIGNUPS_PAUSED:
+            logger.warning("account sign-in refused: sign-ups paused")
+        return self.message_page(403, _denial_html(denied.message))
 
     async def _exchange_code(self, code: str, verifier: str) -> str | None:
         form = {
@@ -1716,14 +1823,25 @@ class _AccountApp:
         return {key: values[0] for key, values in parsed.items() if values}
 
     async def _guard_post(
-        self, request: Request, *, owner_only: bool = False, max_fields: int = 10
+        self,
+        request: Request,
+        *,
+        owner_only: bool = False,
+        active_only: bool = False,
+        max_fields: int = 10,
     ) -> tuple[_Session, dict[str, str]] | Response:
-        """Session, Origin, content type, size and CSRF checks for a POST."""
+        """Session, Origin, content type, size and CSRF checks for a POST.
+
+        ``active_only`` refuses an account that waits for approval (it has no token to
+        save, check or switch tools for).
+        """
         session = self._session_of(request)
         if session is None:
             if owner_only:
                 return self.message_page(403, _bi("无权访问。", "Forbidden."))
             return self.redirect(ACCOUNT_PATH, 303)
+        if active_only and session.pending:
+            return self.message_page(403, self._pending_message())
         if owner_only:
             refusal = self._owner_refusal(session)
             if refusal is not None:
@@ -1745,15 +1863,22 @@ class _AccountApp:
             )
         return session, form
 
+    @staticmethod
+    def _pending_message() -> str:
+        return _bi(
+            "你的账户正在等待服务器所有者批准，批准之前不能绑定令牌。",
+            "Your account is waiting for the server owner's approval, so a token cannot be saved yet.",
+        )
+
     # -- POST handlers -------------------------------------------------------
 
     async def save_token(self, request: Request) -> Response:
-        guarded = await self._guard_post(request)
+        guarded = await self._guard_post(request, active_only=True)
         if isinstance(guarded, Response):
             return guarded
         session, form = guarded
 
-        if not self.limiter.allow((session.tid, session.oid)):
+        if not self.limiter.allow((session.acct,)):
             return await self._token_error(
                 session,
                 429,
@@ -1818,7 +1943,9 @@ class _AccountApp:
                 form.get("confirm_identity_change", "").encode("utf-8"),
                 confirmation.encode("utf-8"),
             ):
-                logger.warning("account token identity change needs confirmation oid=%s", session.oid)
+                logger.warning(
+                    "account token identity change needs confirmation account=%s", session.acct
+                )
                 audit.log_token_event(
                     "identity_change_detected", principal_key, outcome="confirmation_required"
                 )
@@ -1832,7 +1959,7 @@ class _AccountApp:
                     selected=selected,
                     identity_change=(existing.canvas_user_name, identity.name, confirmation),
                 )
-            logger.warning("account token identity change confirmed oid=%s", session.oid)
+            logger.warning("account token identity change confirmed account=%s", session.acct)
             audit.log_token_event(
                 "identity_change_confirmed", principal_key, outcome="confirmed"
             )
@@ -1840,13 +1967,10 @@ class _AccountApp:
             await anyio.to_thread.run_sync(
                 functools.partial(
                     self.store.put,
-                    tenant_id=session.tid,
-                    object_id=session.oid,
+                    principal_key=session.acct,
                     api_token=token,
                     canvas_user_id=identity.user_id,
                     canvas_user_name=identity.name,
-                    entra_display_name=session.name,
-                    entra_upn=session.upn,
                     canvas_host=school.host,
                     expires_hint_at=expiry,
                 )
@@ -1861,6 +1985,15 @@ class _AccountApp:
                     "Your access to this server was disabled by an administrator, so a token cannot be saved.",
                 ),
             )
+        except PrincipalPendingError:
+            # Not approved (or no longer approved) when the write happened.
+            audit.log_principal_event("enroll_refused", self._principal_key(session), reason="pending")
+            return self.message_page(403, self._pending_message())
+        except PrincipalMissingError:
+            audit.log_principal_event("enroll_refused", self._principal_key(session), reason="missing")
+            return self.message_page(
+                403, _bi("此账号不可使用。", "This account cannot be used.")
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error("account token save failed: %s", type(exc).__name__)
             return await self._token_error(
@@ -1870,14 +2003,12 @@ class _AccountApp:
                 selected=selected,
             )
         self.health.forget(self._principal_key(session))
-        logger.info(
-            "account token enrolled tid=%s oid=%s host=%s", session.tid, session.oid, school.host
-        )
+        logger.info("account token enrolled account=%s host=%s", session.acct, school.host)
         return self.redirect(ACCOUNT_PATH, 303)
 
     @staticmethod
     def _principal_key(session: _Session) -> str:
-        return f"entra:{session.tid}:{session.oid}".lower()
+        return session.acct
 
     def _identity_changed(
         self, existing: EnrollmentInfo, school: School, identity: CanvasIdentity
@@ -1969,7 +2100,7 @@ class _AccountApp:
 
     def _safe_info(self, session: _Session) -> EnrollmentInfo | None:
         try:
-            return self.store.info(session.tid, session.oid)
+            return self.store.info(session.acct)
         except Exception:  # noqa: BLE001
             return None
 
@@ -1980,19 +2111,19 @@ class _AccountApp:
         session, _form = guarded
         # A self-disconnect: it removes the user's own token and nothing else. It is
         # not an authorization decision, so it does not touch the access status.
-        removed = await anyio.to_thread.run_sync(self.store.delete, session.tid, session.oid)
-        logger.info("account token deleted tid=%s oid=%s", session.tid, session.oid)
+        removed = await anyio.to_thread.run_sync(self.store.delete, session.acct)
+        logger.info("account token deleted account=%s", session.acct)
         if removed:
             audit.log_principal_event("self_disconnected", self._principal_key(session))
         return self.redirect(ACCOUNT_PATH, 303)
 
     async def recheck_token(self, request: Request) -> Response:
         """Probe Canvas once with the stored token and restore it if Canvas accepts it."""
-        guarded = await self._guard_post(request)
+        guarded = await self._guard_post(request, active_only=True)
         if isinstance(guarded, Response):
             return guarded
         session, _form = guarded
-        if not self.recheck_limiter.allow((session.tid, session.oid)):
+        if not self.recheck_limiter.allow((session.acct,)):
             return await self._token_error(
                 session,
                 429,
@@ -2022,7 +2153,7 @@ class _AccountApp:
                 ),
             )
         try:
-            stored = await anyio.to_thread.run_sync(self.store.get, session.tid, session.oid)
+            stored = await anyio.to_thread.run_sync(self.store.get, session.acct)
         except TokenDecryptionError:
             audit.log_token_event("recheck", principal_key, outcome="unreadable")
             return await self._token_error(
@@ -2039,7 +2170,7 @@ class _AccountApp:
             await self._canvas_whoami(stored.api_token, school.api_url)
         except CanvasCheckError as exc:
             if exc.kind == "invalid":
-                logger.info("account recheck still rejected oid=%s", session.oid)
+                logger.info("account recheck still rejected account=%s", session.acct)
                 audit.log_token_event("recheck", principal_key, outcome="still_rejected")
                 return await self._token_error(
                     session,
@@ -2072,7 +2203,7 @@ class _AccountApp:
             # The token was replaced or removed while Canvas was being asked.
             return self.redirect(ACCOUNT_PATH, 303)
         self.health.forget(principal_key)
-        logger.info("account recheck restored oid=%s", session.oid)
+        logger.info("account recheck restored account=%s", session.acct)
         audit.log_token_event("recheck", principal_key, outcome="restored")
         fresh = await anyio.to_thread.run_sync(self._safe_info, session)
         return await self.account_page(
@@ -2275,7 +2406,7 @@ class _AccountApp:
 
     async def save_write_tools(self, request: Request) -> Response:
         """Save the user's write-tool switches; turning any on needs a recent sign-in."""
-        guarded = await self._guard_post(request, max_fields=_WRITE_FORM_MAX_FIELDS)
+        guarded = await self._guard_post(request, active_only=True, max_fields=_WRITE_FORM_MAX_FIELDS)
         if isinstance(guarded, Response):
             return guarded
         session, form = guarded
@@ -2360,8 +2491,8 @@ class _AccountApp:
             disabled=turned_off,
         )
         logger.info(
-            "account write tools changed oid=%s on=%d off=%d",
-            session.oid,
+            "account write tools changed account=%s on=%d off=%d",
+            session.acct,
             len(turned_on),
             len(turned_off),
         )
@@ -2410,9 +2541,17 @@ class _AccountApp:
     def _disabled_by_label(status: PrincipalStatus) -> str:
         if status.disabled_reason == DISABLE_REASON_OPERATOR:
             return _bi("由服务器运维停用", "Disabled by the server operator")
+        if status.disabled_reason == DISABLE_REASON_DENIED:
+            return _bi("申请被拒绝", "Request denied")
         return _bi("由管理员停用", "Disabled by an administrator")
 
     def _admin_status(self, row: EnrollmentInfo | None, access: PrincipalStatus) -> str:
+        if access.pending:
+            return (
+                f"<strong>{_bi('等待批准', 'Waiting for approval')}</strong><br>"
+                f'<span class="muted">{_bi("申请时间", "Requested")}: '
+                f"{_e(_fmt_ts(access.created_at))}</span>"
+            )
         if access.disabled:
             token_line = ""
             if row is not None and row.status == STATUS_INVALID:
@@ -2423,15 +2562,16 @@ class _AccountApp:
                 f'<span class="muted">{_bi("停用时间", "Disabled since")}: '
                 f"{_e(_fmt_ts(access.disabled_at))}</span>{token_line}"
             )
-        if row is None:
-            return _bi("正常", "Active")
-        if row.status != STATUS_INVALID:
-            return _bi("正常", "Active")
+        owner = (
+            f'<br><span class="muted">{_bi("所有者", "Owner")}</span>' if access.is_owner else ""
+        )
+        if row is None or row.status != STATUS_INVALID:
+            return _bi("正常", "Active") + owner
         return (
             f"<strong>{_bi('需重新绑定', 'Needs re-enroll')}</strong><br>"
             f'<span class="muted">{self._reason_label(row.invalid_reason)}</span><br>'
             f'<span class="muted">{_bi("失效时间", "Invalid since")}: '
-            f"{_e(_fmt_ts(row.invalid_since))}</span>"
+            f"{_e(_fmt_ts(row.invalid_since))}</span>{owner}"
         )
 
     def _admin_actions(
@@ -2443,18 +2583,28 @@ class _AccountApp:
     ) -> str:
         forms: list[str] = []
         csrf = _csrf_field(session.csrf)
-        if row is not None and row.status != STATUS_INVALID and not access.disabled:
+        target = f'<input type="hidden" name="principal_key" value="{_e(key)}">'
+        if access.pending:
             forms.append(
-                f'<form method="post" action="{_ADMIN_INVALIDATE_PATH}">{csrf}'
-                f'<input type="hidden" name="tenant_id" value="{_e(row.tenant_id)}">'
-                f'<input type="hidden" name="object_id" value="{_e(row.object_id)}">'
+                f'<form method="post" action="{_ADMIN_APPROVE_PATH}">{csrf}{target}'
+                f'<button class="btn sm" type="submit">{_bi("批准", "Approve")}</button>'
+                "</form>"
+            )
+            forms.append(
+                f'<form method="post" action="{_ADMIN_DENY_PATH}">{csrf}{target}'
+                f'<button class="btn danger sm" type="submit">{_bi("拒绝", "Deny")}</button>'
+                "</form>"
+            )
+            return "".join(forms)
+        if row is not None and row.status != STATUS_INVALID and access.active:
+            forms.append(
+                f'<form method="post" action="{_ADMIN_INVALIDATE_PATH}">{csrf}{target}'
                 f'<button class="btn secondary sm" type="submit">{_bi("标记为失效", "Mark as invalid")}</button>'
                 "</form>"
             )
         if access.disabled:
             forms.append(
-                f'<form method="post" action="{_ADMIN_ENABLE_PATH}">{csrf}'
-                f'<input type="hidden" name="principal_key" value="{_e(key)}">'
+                f'<form method="post" action="{_ADMIN_ENABLE_PATH}">{csrf}{target}'
                 f'<button class="btn sm" type="submit">{_bi("重新启用用户", "Enable user")}</button>'
                 "</form>"
             )
@@ -2462,16 +2612,13 @@ class _AccountApp:
             forms.append(f'<span class="muted small">{_bi("（你自己）", "(you)")}</span>')
         else:
             forms.append(
-                f'<form method="post" action="{_ADMIN_DISABLE_PATH}">{csrf}'
-                f'<input type="hidden" name="principal_key" value="{_e(key)}">'
+                f'<form method="post" action="{_ADMIN_DISABLE_PATH}">{csrf}{target}'
                 f'<button class="btn danger sm" type="submit">{_bi("停用用户", "Disable user")}</button>'
                 "</form>"
             )
         if row is not None:
             forms.append(
-                f'<form method="post" action="{_ADMIN_REMOVE_PATH}">{csrf}'
-                f'<input type="hidden" name="tenant_id" value="{_e(row.tenant_id)}">'
-                f'<input type="hidden" name="object_id" value="{_e(row.object_id)}">'
+                f'<form method="post" action="{_ADMIN_REMOVE_PATH}">{csrf}{target}'
                 f'<button class="btn secondary sm" type="submit">{_bi("移除绑定", "Remove enrollment")}</button>'
                 "</form>"
             )
@@ -2480,16 +2627,22 @@ class _AccountApp:
     def _admin_row(
         self,
         session: _Session,
-        key: str,
+        account: AccountInfo,
         row: EnrollmentInfo | None,
-        access: PrincipalStatus,
     ) -> str:
+        access = account.status
+        key = account.principal_key
+        who = (
+            f"{_e(access.display_name)}<br>"
+            f'<span class="muted">{_e(account.username)}</span>'
+        )
+        identity = account.identities[0] if account.identities else None
+        provider = (
+            self._auth_provider(identity.provider_id) if identity is not None else "-"
+        )
+        tenant = identity.tenant_id if identity is not None else ""
+        subject = identity.subject if identity is not None else ""
         if row is not None:
-            who = (
-                f"{_e(row.entra_display_name)}<br>"
-                f'<span class="muted">{_e(row.entra_upn)}</span>'
-            )
-            tenant, oid = row.tenant_id, row.object_id
             canvas = (
                 f'{_e(row.canvas_user_name)}<br><span class="muted">id {_e(row.canvas_user_id)}</span>'
             )
@@ -2501,12 +2654,6 @@ class _AccountApp:
             verified = _e(_fmt_ts(row.last_verified_at))
             used = _e(_fmt_ts(row.last_used_at))
         else:
-            who = (
-                f"{_e(access.display_name)}<br>"
-                f'<span class="muted">{_e(access.upn)}</span>'
-            )
-            parts = key.split(":")
-            tenant, oid = (parts[1], parts[2]) if len(parts) == 3 else ("", key)
             canvas = '<span class="muted">-</span>'
             school = '<span class="muted">-</span>'
             enrolled = (
@@ -2520,8 +2667,10 @@ class _AccountApp:
             f'<td data-label="{_e(_bi("Entra 用户", "Entra user"))}">{who}'
             '<details class="tech">'
             f"<summary>{_bi('技术信息', 'Technical details')}</summary><dl>"
+            f"<dt>{_bi('登录方式', 'Sign-in')}</dt><dd>{_e(provider)}</dd>"
             f"<dt>{_bi('租户', 'Tenant')}</dt><dd><code>{_e(tenant)}</code></dd>"
-            f"<dt>{_bi('对象 ID', 'Object')}</dt><dd><code>{_e(oid)}</code></dd>"
+            f"<dt>{_bi('对象 ID', 'Object')}</dt><dd><code>{_e(subject)}</code></dd>"
+            f"<dt>{_bi('账户', 'Account')}</dt><dd><code>{_e(key)}</code></dd>"
             f"{enrolled}"
             "</dl></details></td>"
             f'<td data-label="{_e(_bi("Canvas 用户", "Canvas user"))}">{canvas}</td>'
@@ -2538,28 +2687,30 @@ class _AccountApp:
         if session is None or refusal is not None:
             return refusal or self.message_page(403, _bi("无权访问。", "Forbidden."))
         all_rows = await anyio.to_thread.run_sync(self.store.list_enrollments)
-        statuses = {
-            st.principal_key: st
-            for st in await anyio.to_thread.run_sync(self.store.list_principal_statuses)
-        }
+        accounts = await anyio.to_thread.run_sync(self.store.list_accounts)
+        by_key = {a.principal_key: a for a in accounts}
         needing = [row for row in all_rows if row.status == STATUS_INVALID]
         only_needing = request.query_params.get("filter") == _FILTER_NEEDS_REENROLL
-        entries: list[tuple[str, EnrollmentInfo | None, PrincipalStatus]] = []
+        entries: list[tuple[AccountInfo, EnrollmentInfo | None]] = []
         seen: set[str] = set()
         for row in needing if only_needing else all_rows:
-            key = row.principal_key or f"entra:{row.tenant_id}:{row.object_id}".lower()
+            key = row.principal_key
             seen.add(key)
-            entries.append((key, row, statuses.get(key) or PrincipalStatus(key)))
-        if not only_needing:
-            # A disabled user whose enrollment row is gone must still be listed, or
-            # nobody could enable them again.
-            entries.extend(
-                (key, None, st)
-                for key, st in statuses.items()
-                if st.disabled and key not in seen
+            entries.append(
+                (by_key.get(key) or AccountInfo(PrincipalStatus(key, status="missing"), ()), row)
             )
-        disabled_total = sum(1 for st in statuses.values() if st.disabled)
-        lines = [self._admin_row(session, key, row, st) for key, row, st in entries]
+        if not only_needing:
+            # A pending or disabled user without an enrollment must still be listed, or
+            # nobody could approve or enable them.
+            entries.extend(
+                (a, None)
+                for a in accounts
+                if (a.status.pending or a.status.disabled) and a.principal_key not in seen
+            )
+        entries.sort(key=lambda entry: 0 if entry[0].status.pending else 1)
+        disabled_total = sum(1 for a in accounts if a.status.disabled)
+        pending_total = sum(1 for a in accounts if a.status.pending)
+        lines = [self._admin_row(session, account, row) for account, row in entries]
         if lines:
             table = (
                 '<section class="card tablecard"><table><thead><tr>'
@@ -2586,6 +2737,10 @@ class _AccountApp:
             "{count} 个绑定需要重新录入令牌（共 {total} 个），{disabled} 个用户已停用。",
             "{count} of {total} enrollments need a new token. {disabled} user(s) disabled.",
         ).format(count=len(needing), total=len(all_rows), disabled=disabled_total)
+        if pending_total:
+            count_text += " " + _bi(
+                "{pending} 个账户等待批准。", "{pending} account(s) waiting for approval."
+            ).format(pending=pending_total)
         if only_needing:
             filter_link = (
                 f'<a href="{_ADMIN_PATH}">{_bi("显示全部", "Show all")}</a>'
@@ -2597,6 +2752,8 @@ class _AccountApp:
             )
         explain = (
             '<section class="card"><ul>'
+            f"<li><strong>{_bi('批准 / 拒绝', 'Approve / Deny')}</strong>: "
+            f"{_bi('等待批准的账户可以登录本页，但在批准之前不能绑定令牌，也不能使用任何 MCP 工具。拒绝会停用该账户，之后仍可重新启用。', 'An account that waits for approval can sign in here, but cannot add a token or use any MCP tool until you approve it. Denying disables the account; you can enable it again later.')}</li>"
             f"<li><strong>{_bi('停用用户', 'Disable user')}</strong>: "
             f"{_bi('禁止此人登录本页、绑定令牌和使用任何 MCP 工具，直到所有者重新启用。已签发的令牌和已登录的会话也会失效。保存的 Canvas 令牌不会被删除。', 'blocks this person from signing in here, enrolling a token and using any MCP tool until an owner enables them again. Tokens already issued and sessions already open stop working. The saved Canvas token is not deleted.')}</li>"
             f"<li><strong>{_bi('移除绑定', 'Remove enrollment')}</strong>: "
@@ -2607,7 +2764,8 @@ class _AccountApp:
         body = (
             _header(session)
             + f"<h1>{_bi('已绑定的用户', 'Enrollments')}</h1>"
-            + f'<p class="muted">{count_text} {filter_link}</p>'
+            + f'<p class="muted">{count_text} {filter_link} · '
+            + f'<a href="{_ADMIN_AUDIT_PATH}">{_bi("审计日志", "Audit log")}</a></p>'
             + explain
             + table
             + f'<p><a href="{ACCOUNT_PATH}">{_bi("返回账户页", "Back to account")}</a></p>'
@@ -2634,27 +2792,25 @@ class _AccountApp:
             )
         return text
 
+    def _bad_target_page(self) -> Response:
+        return self.message_page(400, _bi("用户标识不正确。", "Invalid user identifier."))
+
     async def admin_invalidate(self, request: Request) -> Response:
         """Owner action: mark one enrollment invalid so the user must enroll a new token."""
         guarded = await self._guard_post(request, owner_only=True)
         if isinstance(guarded, Response):
             return guarded
         session, form = guarded
-        tid = form.get("tenant_id", "")
-        oid = form.get("object_id", "")
-        if not _GUID_RE.fullmatch(tid) or not _GUID_RE.fullmatch(oid):
-            return self.message_page(
-                400, _bi("用户标识不正确。", "Invalid user identifier.")
-            )
-        target = f"entra:{tid}:{oid}".lower()
+        target = valid_principal_key(form.get("principal_key"))
+        if target is None:
+            return self._bad_target_page()
         changed = await self.health.mark_invalid(
             target, REASON_REVOKED_BY_ADMIN, actor=self._principal_key(session)
         )
         logger.info(
-            "account admin mark invalid by oid=%s target tid=%s oid=%s changed=%s",
-            session.oid,
-            tid.lower(),
-            oid.lower(),
+            "account admin mark invalid by account=%s target=%s changed=%s",
+            session.acct,
+            target,
             changed,
         )
         return self.redirect(_ADMIN_PATH, 303)
@@ -2669,24 +2825,18 @@ class _AccountApp:
         if isinstance(guarded, Response):
             return guarded
         session, form = guarded
-        tid = form.get("tenant_id", "")
-        oid = form.get("object_id", "")
-        if not _GUID_RE.fullmatch(tid) or not _GUID_RE.fullmatch(oid):
-            return self.message_page(
-                400, _bi("用户标识不正确。", "Invalid user identifier.")
-            )
-        removed = await anyio.to_thread.run_sync(self.store.delete, tid, oid)
+        target = valid_principal_key(form.get("principal_key"))
+        if target is None:
+            return self._bad_target_page()
+        removed = await anyio.to_thread.run_sync(
+            functools.partial(self.store.delete, target, actor=self._principal_key(session))
+        )
         if removed:
             audit.log_principal_event(
-                "enrollment_removed",
-                f"entra:{tid}:{oid}".lower(),
-                actor=self._principal_key(session),
+                "enrollment_removed", target, actor=self._principal_key(session)
             )
         logger.info(
-            "account admin remove enrollment by oid=%s target tid=%s oid=%s",
-            session.oid,
-            tid.lower(),
-            oid.lower(),
+            "account admin remove enrollment by account=%s target=%s", session.acct, target
         )
         return self.redirect(_ADMIN_PATH, 303)
 
@@ -2719,9 +2869,7 @@ class _AccountApp:
         session, form = guarded
         target = valid_principal_key(form.get("principal_key"))
         if target is None:
-            return self.message_page(
-                400, _bi("用户标识不正确。", "Invalid user identifier.")
-            )
+            return self._bad_target_page()
         actor = self._principal_key(session)
         try:
             changed = await anyio.to_thread.run_sync(
@@ -2745,7 +2893,9 @@ class _AccountApp:
             audit.log_principal_event(
                 "disabled", target, actor=actor, reason=DISABLE_REASON_ADMIN
             )
-        logger.info("account admin disable by oid=%s target=%s changed=%s", session.oid, target, changed)
+        logger.info(
+            "account admin disable by account=%s target=%s changed=%s", session.acct, target, changed
+        )
         return self.redirect(_ADMIN_PATH, 303)
 
     async def admin_enable(self, request: Request) -> Response:
@@ -2756,9 +2906,7 @@ class _AccountApp:
         session, form = guarded
         target = valid_principal_key(form.get("principal_key"))
         if target is None:
-            return self.message_page(
-                400, _bi("用户标识不正确。", "Invalid user identifier.")
-            )
+            return self._bad_target_page()
         actor = self._principal_key(session)
         try:
             changed = await anyio.to_thread.run_sync(
@@ -2775,8 +2923,159 @@ class _AccountApp:
         self._access_changed(target)
         if changed:
             audit.log_principal_event("enabled", target, actor=actor)
-        logger.info("account admin enable by oid=%s target=%s changed=%s", session.oid, target, changed)
+        logger.info(
+            "account admin enable by account=%s target=%s changed=%s", session.acct, target, changed
+        )
         return self.redirect(_ADMIN_PATH, 303)
+
+    async def _decide_pending(self, request: Request, *, approve: bool) -> Response:
+        guarded = await self._guard_post(request, owner_only=True)
+        if isinstance(guarded, Response):
+            return guarded
+        session, form = guarded
+        target = valid_principal_key(form.get("principal_key"))
+        if target is None:
+            return self._bad_target_page()
+        actor = self._principal_key(session)
+        action = self.store.approve_account if approve else self.store.deny_account
+        try:
+            changed = await anyio.to_thread.run_sync(functools.partial(action, target, actor=actor))
+        except AccessActionRefused as exc:
+            audit.log_principal_event("refused", target, actor=actor, outcome=exc.code)
+            return self._refused_page(exc.code)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("account admin approval failed: %s", type(exc).__name__)
+            return self.message_page(
+                503, _bi("暂时无法保存这项更改。", "The change could not be saved right now.")
+            )
+        self._access_changed(target)
+        if changed:
+            audit.log_principal_event("approved" if approve else "denied", target, actor=actor)
+        logger.info(
+            "account admin %s by account=%s target=%s changed=%s",
+            "approve" if approve else "deny",
+            session.acct,
+            target,
+            changed,
+        )
+        return self.redirect(_ADMIN_PATH, 303)
+
+    async def admin_approve(self, request: Request) -> Response:
+        """Owner action: approve a pending account so it can enroll a token and use MCP."""
+        return await self._decide_pending(request, approve=True)
+
+    async def admin_deny(self, request: Request) -> Response:
+        """Owner action: deny a pending account (it becomes disabled and can be enabled again)."""
+        return await self._decide_pending(request, approve=False)
+
+    # -- audit log -----------------------------------------------------------
+
+    @staticmethod
+    def _audit_action_label(action: str) -> str:
+        """The action name as text; an unknown name (a newer release) is shown as it is."""
+        if action == "account_created":
+            return _bi("账户已创建", "Account created")
+        if action == "account_created_by_operator":
+            return _bi("运维创建账户", "Account created by the operator")
+        if action == "account_activated":
+            return _bi("账户已自动启用", "Account activated by the rules")
+        if action == "account_approved":
+            return _bi("账户已批准", "Account approved")
+        if action == "account_denied":
+            return _bi("账户申请被拒绝", "Account denied")
+        if action == "account_disabled":
+            return _bi("账户已停用", "Account disabled")
+        if action == "account_enabled":
+            return _bi("账户已启用", "Account enabled")
+        if action == "role_changed":
+            return _bi("角色变更", "Role changed")
+        if action == "token_enrolled":
+            return _bi("绑定了令牌", "Token enrolled")
+        if action == "token_replaced":
+            return _bi("替换了令牌", "Token replaced")
+        if action == "token_deleted":
+            return _bi("删除了令牌", "Token deleted")
+        if action == "token_marked_invalid":
+            return _bi("令牌被标记失效", "Token marked invalid")
+        if action == "write_tools_changed":
+            return _bi("写工具开关变更", "Write tools changed")
+        if action == "schema_migrated":
+            return _bi("数据库已升级", "Database upgraded")
+        if action == "pending_purged":
+            return _bi("清理了过期的待批准账户", "Stale pending accounts removed")
+        return action
+
+    @staticmethod
+    def _audit_detail(entry: AuditEntry) -> str:
+        parts: list[str] = []
+        for name in sorted(entry.detail):
+            value = entry.detail[name]
+            if isinstance(value, list):
+                value = ", ".join(str(v) for v in value)
+            if value in ("", None):
+                continue
+            parts.append(f"{name}={value}")
+        return "; ".join(parts)
+
+    @staticmethod
+    def _audit_who(value: str | None, names: Mapping[str, str]) -> str:
+        if not value:
+            return "-"
+        name = names.get(value)
+        short = value[:13] + "…" if value.startswith("acct:") else value
+        return f"{name} ({short})" if name else short
+
+    async def admin_audit(self, request: Request) -> Response:
+        """Owner page: the administrative and security actions, newest first, 100 at a time."""
+        session = self._session_of(request)
+        refusal = self._owner_refusal(session)
+        if session is None or refusal is not None:
+            return refusal or self.message_page(403, _bi("无权访问。", "Forbidden."))
+        raw_before = request.query_params.get("before", "")
+        before = int(raw_before) if raw_before.isdigit() and len(raw_before) < 15 else None
+        entries = await anyio.to_thread.run_sync(
+            functools.partial(self.store.list_audit, _AUDIT_PAGE, before)
+        )
+        accounts = await anyio.to_thread.run_sync(self.store.list_accounts)
+        names = {a.principal_key: a.status.display_name for a in accounts if a.status.display_name}
+        rows = []
+        for entry in entries:
+            reason = _e(entry.reason) if entry.reason else "-"
+            rows.append(
+                "<tr>"
+                f'<td data-label="{_e(_bi("时间", "Time"))}">{_e(_fmt_ts(entry.at))}</td>'
+                f'<td data-label="{_e(_bi("操作", "Action"))}">{_e(self._audit_action_label(entry.action))}</td>'
+                f'<td data-label="{_e(_bi("执行者", "Actor"))}">{_e(self._audit_who(entry.actor, names))}</td>'
+                f'<td data-label="{_e(_bi("对象", "Target"))}">{_e(self._audit_who(entry.target, names))}</td>'
+                f'<td data-label="{_e(_bi("原因", "Reason"))}">{reason}</td>'
+                f'<td data-label="{_e(_bi("详情", "Details"))}">{_e(self._audit_detail(entry))}</td>'
+                "</tr>"
+            )
+        if rows:
+            table = (
+                '<section class="card tablecard"><table><thead><tr>'
+                f"<th>{_bi('时间', 'Time')}</th><th>{_bi('操作', 'Action')}</th>"
+                f"<th>{_bi('执行者', 'Actor')}</th><th>{_bi('对象', 'Target')}</th>"
+                f"<th>{_bi('原因', 'Reason')}</th><th>{_bi('详情', 'Details')}</th>"
+                "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></section>"
+            )
+        else:
+            table = f'<section class="card"><p>{_bi("没有更多记录。", "No more entries.")}</p></section>'
+        older = ""
+        if len(entries) >= _AUDIT_PAGE:
+            older = (
+                f'<p><a href="{_ADMIN_AUDIT_PATH}?before={entries[-1].id}">'
+                f'{_bi("更早的记录", "Older entries")}</a></p>'
+            )
+        body = (
+            _header(session)
+            + f"<h1>{_bi('审计日志', 'Audit log')}</h1>"
+            + f'<p class="muted">{_bi("管理员操作和账户安全变更。这里不会出现令牌、密钥或网络地址。", "Administrator actions and account security changes. No token, key or network address appears here.")}</p>'
+            + table
+            + older
+            + f'<p><a href="{_ADMIN_PATH}">{_bi("返回管理页", "Back to admin")}</a></p>'
+        )
+        return self.html_page(200, _bi("审计日志", "Audit log"), body, wide=True)
 
 
 # -- public builders ----------------------------------------------------------
@@ -2785,7 +3084,7 @@ class _AccountApp:
 def build_account_routes(
     cfg: AccountConfig,
     store: TokenStore,
-    authorize_claims: AuthorizeClaims,
+    identity: IdentityService,
     *,
     id_token_verifier: IdTokenVerifier | None = None,
     canvas_whoami: CanvasWhoAmI | None = None,
@@ -2801,19 +3100,21 @@ def build_account_routes(
 ) -> list[Route]:
     """Build the /account Starlette routes.
 
-    ``directory`` and ``resolve_host`` replace the Instructure school directory
+    ``identity`` decides who may sign in and which account they get. ``directory`` and
+    ``resolve_host`` replace the Instructure school directory
     and the system DNS resolver (tests inject fakes; no real network is needed).
     ``health`` is the token-health service shared with the MCP side; the pages
     build their own when none is given. ``write_tools`` lists the write tools the
     server offers (the "Write tools" section is hidden without it) and
     ``tool_prefs`` is the cache the MCP side reads, dropped when a user saves.
     ``access`` is the MCP side's access cache, dropped for a user whenever an owner
-    disables or enables them (without it the MCP side notices within its TTL).
+    disables, enables, approves or denies them (without it the MCP side notices within
+    its TTL).
     """
     app = _AccountApp(
         cfg,
         store,
-        authorize_claims,
+        identity,
         id_token_verifier,
         canvas_whoami,
         http_client_factory,
@@ -2833,11 +3134,11 @@ def register_account_routes(
     mcp: FastMCP,
     cfg: AccountConfig,
     store: TokenStore,
-    authorize_claims: AuthorizeClaims,
+    identity: IdentityService,
     **kwargs: Any,
 ) -> None:
     """Register the /account routes on a FastMCP server as custom routes."""
-    for route in build_account_routes(cfg, store, authorize_claims, **kwargs):
+    for route in build_account_routes(cfg, store, identity, **kwargs):
         mcp.custom_route(route.path, methods=sorted(route.methods or _ALL_METHODS))(
             route.endpoint
         )

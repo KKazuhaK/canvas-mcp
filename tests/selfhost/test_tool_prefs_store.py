@@ -10,10 +10,11 @@ from sqlalchemy import inspect
 
 from canvas_mcp.core.selfhost.token_store import SCHEMA_VERSION, TokenStore
 
-from .test_token_store import OID_A, OID_B, TID, Clock, _put, _ring
+from .conftest import acct_key, make_account
+from .test_token_store import OID_A, OID_B, Clock, _put, _ring
 
-PK_A = f"entra:{TID}:{OID_A}"
-PK_B = f"entra:{TID}:{OID_B}"
+PK_A = acct_key(OID_A)
+PK_B = acct_key(OID_B)
 
 
 @pytest.fixture
@@ -25,6 +26,8 @@ def clock() -> Clock:
 def store(tmp_path: pathlib.Path, clock: Clock) -> TokenStore:
     s = make_store(tmp_path / "data" / "tokens.sqlite3", _ring(("k1", 1)), clock=clock)
     s.initialize()
+    make_account(s, OID_A)
+    make_account(s, OID_B)
     return s
 
 
@@ -181,28 +184,24 @@ class TestMigration:
         self, store: TokenStore, tmp_path: pathlib.Path
     ) -> None:
         assert "user_tool_prefs" in _tables(store)
-        # The table was added without a version change; version 3 added the access
-        # tables, and this table must still be there.
-        assert SCHEMA_VERSION == 4
+        # The table was added without a version change; later versions kept it.
+        assert SCHEMA_VERSION == 5
 
     @pytest.mark.sqlite_only
 
     def test_opening_a_database_without_the_table_adds_it_and_keeps_the_rows(
         self, tmp_path: pathlib.Path, clock: Clock
     ) -> None:
-        path = tmp_path / "data" / "tokens.sqlite3"
-        first = make_store(path, _ring(("k1", 1)), clock=clock)
-        first.initialize()
-        _put(first, canvas_host="canvas.example.edu")
-        with raw_connection(first) as conn:
-            conn.execute("DROP TABLE user_tool_prefs")
-        assert "user_tool_prefs" not in _tables(first)
+        from . import legacy_schemas as legacy
 
-        reopened = make_store(path, _ring(("k1", 1)), clock=clock)
+        path = tmp_path / "data" / "tokens.sqlite3"
+        seeded = legacy.build(path, "v2b")  # a release that had no preferences table yet
+        reopened = make_store(path, legacy.keyring(), clock=clock)
         reopened.initialize()
         assert "user_tool_prefs" in _tables(reopened)
-        assert reopened.count() == 1
-        assert reopened.get_tool_prefs(PK_A) is None
+        assert reopened.count() == len(seeded.plaintexts)
+        migrated = reopened.resolve_legacy_key(legacy.KEY_A)
+        assert migrated is not None and reopened.get_tool_prefs(migrated) is None
 
     def test_opening_twice_keeps_the_saved_switches(
         self, store: TokenStore, tmp_path: pathlib.Path, clock: Clock

@@ -1,11 +1,13 @@
 """Alembic adoption and upgrade of the token database.
 
 SQLite files written by every pre-Alembic release (schema versions 1 to 4, six
-historical shapes) must be adopted in place without losing or altering a row: every
-token still decrypts, every status, epoch, owner flag, history entry and credential
-generation is identical, and a second start changes nothing. Both backends: a fresh
-database matches ``schema.metadata`` exactly, a database from a newer server is
-refused untouched, and ``DATABASE_AUTO_MIGRATE=false`` refuses a stale schema.
+historical shapes) must be adopted and carried to the account model (schema 5) without
+losing a row: every token still decrypts under its account, every status, epoch, owner
+role, history entry and credential generation survives, and a second start changes
+nothing. Both backends: a fresh database matches ``schema.metadata`` exactly, a
+database from a newer server is refused untouched, and ``DATABASE_AUTO_MIGRATE=false``
+refuses a stale schema. The schema 4 -> 5 data migration has its own, deeper tests in
+``test_account_migration.py``.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from canvas_mcp.core.selfhost.db.errors import TokenStoreError
 from canvas_mcp.core.selfhost.token_store import SCHEMA_VERSION, TokenStore
 
 from . import legacy_schemas as legacy
+from .conftest import make_account
 
 SNAPSHOT = pathlib.Path(__file__).parent / "ddl_postgresql_head.sql"
 
@@ -96,6 +99,13 @@ def _store(path: pathlib.Path) -> TokenStore:
     return TokenStore(path, legacy.keyring())
 
 
+def _account_of(store: TokenStore, legacy_key: str) -> str:
+    """The account a pre-account principal key became."""
+    key = store.resolve_legacy_key(legacy_key)
+    assert key is not None, legacy_key
+    return key
+
+
 def _meta_version(path: pathlib.Path) -> str:
     conn = sqlite3.connect(str(path))
     try:
@@ -122,7 +132,7 @@ def fresh_shape(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
 @pytest.mark.sqlite_only
 @pytest.mark.parametrize("shape", legacy.SHAPES)
 class TestAdoptingPreAlembicFiles:
-    def test_every_token_still_decrypts_and_nothing_else_changes(
+    def test_every_token_still_decrypts_under_its_account_and_nothing_else_is_lost(
         self, tmp_path: pathlib.Path, shape: str
     ) -> None:
         path = tmp_path / "t.sqlite3"
@@ -135,48 +145,53 @@ class TestAdoptingPreAlembicFiles:
         status = migrate.current(store.database)
         assert status.state == migrate.STATE_CURRENT
         assert status.alembic_revision == migrate.head_revision()
-        assert _meta_version(path) == str(SCHEMA_VERSION) == "4"
-        for key, token in seeded.plaintexts.items():
+        assert _meta_version(path) == str(SCHEMA_VERSION) == "5"
+        for legacy_key, token in seeded.plaintexts.items():
+            key = legacy_key if not legacy_key.startswith("entra:") else _account_of(store, legacy_key)
             row = store.get(key)
-            assert row is not None and row.api_token == token, key
-        # Every table that existed keeps every value of every column it had.
+            assert row is not None and row.api_token == token, legacy_key
         after = _dump(path)
-        conn = sqlite3.connect(str(path))
-        try:
-            for table, rows in before.items():
-                if table == "meta":
-                    continue
-                old_cols = _old_columns(shape, table)
-                got = conn.execute(f"SELECT {', '.join(old_cols)} FROM {table}").fetchall()
-                wanted = [tuple(r[: len(old_cols)]) for r in rows]
-                assert sorted(got, key=repr) == sorted(wanted, key=repr), table
-        finally:
-            conn.close()
-        assert set(before) <= set(after)
+        # Every table the old file had still has every row (re-keyed, with the same counts).
+        for table, rows in before.items():
+            if table in ("meta", "principal_status"):
+                continue
+            assert len(after[table]) == len(rows), table
+        assert "principal_status" not in after
+        assert len(after["accounts"]) == len(after["external_identities"])
+        # Re-encrypted rows moved to the active key; nothing is left under the old one.
+        assert {r[0] for r in raw_sql(store, "SELECT key_id FROM canvas_tokens")} == {"k2"}
 
-    def test_status_epochs_owners_history_and_generations_are_identical(
+    def test_status_epochs_owners_history_and_generations_survive(
         self, tmp_path: pathlib.Path, shape: str
     ) -> None:
         path = tmp_path / "t.sqlite3"
         seeded = legacy.build(path, shape)
         store = _store(path)
         store.initialize()
-        invalid = store.info(legacy.KEY_C) if legacy.KEY_C in seeded.plaintexts else None
+        key_c = _account_of(store, legacy.KEY_C) if legacy.KEY_C in seeded.plaintexts else None
+        invalid = store.info(key_c) if key_c else None
         if invalid is not None:
             assert invalid.status == "invalid" and invalid.invalid_reason == "canvas_token_rejected"
         if seeded.has_status:
-            c = store.get_principal_status(legacy.KEY_C)
-            assert c.disabled and c.session_epoch == 3 and c.disabled_by == legacy.KEY_B
-            assert store.get_principal_status(legacy.KEY_B).is_owner
-            events = [(e.action, e.session_epoch) for e in store.list_status_events(legacy.KEY_C)]
+            key_b = _account_of(store, legacy.KEY_B)
+            c = store.get_principal_status(_account_of(store, legacy.KEY_C))
+            assert c.disabled and c.session_epoch == 3 and c.disabled_by == key_b
+            assert store.get_principal_status(key_b).is_owner
+            events = [
+                (e.action, e.session_epoch)
+                for e in store.list_status_events(_account_of(store, legacy.KEY_C))
+            ]
             assert events == [("disabled", 3), ("enabled", 2), ("disabled", 1)]
         else:
-            assert store.list_principal_statuses() == []
+            assert all(a.status.active and not a.status.is_owner for a in store.list_accounts())
         expected_generation = {"v4": {legacy.KEY_B: 2, legacy.KEY_C: 5}}.get(shape, {})
-        for key in seeded.plaintexts:
-            assert store.credential_generation(key) == expected_generation.get(key, 0)
+        for legacy_key in seeded.plaintexts:
+            if not legacy_key.startswith("entra:"):
+                continue
+            key = _account_of(store, legacy_key)
+            assert store.credential_generation(key) == expected_generation.get(legacy_key, 0)
         if shape in ("v2c", "v3", "v4"):
-            prefs = store.get_tool_prefs(legacy.KEY_B)
+            prefs = store.get_tool_prefs(_account_of(store, legacy.KEY_B))
             assert prefs is not None and prefs.enabled_write_tools == {"send_message"}
 
     def test_the_schema_equals_a_freshly_created_one(
@@ -215,26 +230,38 @@ class TestAdoptingPreAlembicFiles:
         )
         store = TokenStore(path, new_ring)
         store.initialize()
-        assert store.rotate() == len(seeded.plaintexts)
+        # The upgrade already moved every account's row from k1 to the then-active key k3;
+        # the one row of a principal that is no account (carried over unchanged) is left
+        # under k2 until a rotation.
+        entra_keys = {r[0] for r in raw_sql(store, "SELECT key_id FROM canvas_tokens WHERE principal_key LIKE 'acct:%'")}
+        assert entra_keys <= {"k3"}
+        assert store.rotate() == (1 if legacy.KEY_OTHER in seeded.plaintexts else 0)
+        assert {r[0] for r in raw_sql(store, "SELECT key_id FROM canvas_tokens")} == {"k3"}
         only_new = TokenStore(path, Keyring.parse("k3:" + base64.b64encode(bytes([3]) * 32).decode()))
         only_new.initialize()
-        for key, token in seeded.plaintexts.items():
+        for legacy_key, token in seeded.plaintexts.items():
+            key = legacy_key if not legacy_key.startswith("entra:") else _account_of(store, legacy_key)
             row = only_new.get(key)
             assert row is not None and row.api_token == token
 
-    def test_the_previous_release_still_opens_the_adopted_file(
+    def test_the_previous_release_refuses_the_migrated_file(
         self, tmp_path: pathlib.Path, shape: str
     ) -> None:
-        """Rollback stays safe at the baseline: the old start-up steps are a no-op."""
+        """Rollback is a restore of the backup: the old start-up steps refuse the new file.
+
+        A release that read ``principal_status`` would find nothing and serve every
+        disabled user, so the schema marker moved past what it supports.
+        """
         path = tmp_path / "t.sqlite3"
         legacy.build(path, shape)
         _store(path).initialize()
         before = _dump(path)
         db = Database.sqlite(path)
-        with db.write() as conn:
-            baseline_v4.ensure_sqlite_v4(conn)  # what the pre-Alembic server ran at start
+        with pytest.raises(TokenStoreError, match="newer than this server supports"):
+            with db.write() as conn:
+                baseline_v4.ensure_sqlite_v4(conn)  # what the schema 4 server ran at start
         assert _dump(path) == before
-        assert _meta_version(path) == "4"
+        assert _meta_version(path) == "5"
 
 
 def _old_columns(shape: str, table: str) -> list[str]:
@@ -266,7 +293,7 @@ _SHAPE_COLUMNS = _shape_columns()
 
 @pytest.mark.sqlite_only
 class TestRefusalsLeaveTheFileUntouched:
-    @pytest.mark.parametrize("marker", ["5", "9999", "x", "4.5", ""])
+    @pytest.mark.parametrize("marker", ["6", "9999", "x", "4.5", ""])
     def test_a_newer_or_unreadable_marker_is_refused(self, tmp_path: pathlib.Path, marker: str) -> None:
         path = tmp_path / "t.sqlite3"
         legacy.build(path, "v4")
@@ -321,19 +348,23 @@ class TestRefusalsLeaveTheFileUntouched:
         # And the file still adopts cleanly afterwards.
         store = _store(path)
         store.initialize()
-        assert store.get(legacy.KEY_A) is not None
+        assert store.get(_account_of(store, legacy.KEY_A)) is not None
 
     def test_a_half_migrated_file_at_the_baseline_is_completed(self, tmp_path: pathlib.Path) -> None:
+        from alembic import command
+
         path = tmp_path / "t.sqlite3"
         legacy.build(path, "v4")
+        db = Database.sqlite(path)
+        with db.write() as conn:  # a server of the previous release: adopted, at the baseline
+            command.upgrade(migrate._config(connection=conn), migrate.BASELINE_REVISION)
+        conn2 = sqlite3.connect(str(path))
+        conn2.execute("DROP TABLE principal_status_events")
+        conn2.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
+        conn2.commit()
+        conn2.close()
         _store(path).initialize()
-        conn = sqlite3.connect(str(path))
-        conn.execute("DROP TABLE principal_status_events")
-        conn.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
-        conn.commit()
-        conn.close()
-        _store(path).initialize()
-        assert _meta_version(path) == "4"
+        assert _meta_version(path) == "5"
         assert "principal_status_events" in _dump(path)
 
 
@@ -354,7 +385,9 @@ class TestManualMigrationMode:
         legacy.build(path, "v2c")
         backup = tmp_path / "backup.sqlite3"
         db = Database.sqlite(path)
-        before_status, after_status = migrate.upgrade(db, backup_to=backup)
+        before_status, after_status = migrate.upgrade(
+            db, backup_to=backup, keyring=legacy.keyring()
+        )
         assert before_status.state == migrate.STATE_LEGACY
         assert after_status.state == migrate.STATE_CURRENT
         assert _meta_version(backup) == "2"  # the backup is the file as it was
@@ -362,7 +395,7 @@ class TestManualMigrationMode:
         if sys.platform != "win32":
             assert stat.S_IMODE(backup.stat().st_mode) == 0o600
         with pytest.raises(TokenStoreError, match="already exists"):
-            migrate.upgrade(db, backup_to=backup)
+            migrate.upgrade(db, backup_to=backup, keyring=legacy.keyring())
 
     def test_current_reports_each_state_without_changing_anything(
         self, tmp_path: pathlib.Path
@@ -375,7 +408,7 @@ class TestManualMigrationMode:
         status = migrate.current(db)
         assert status.state == migrate.STATE_LEGACY and status.alembic_revision is None
         assert "alembic" not in " ".join(_dump(path))
-        migrate.ensure_ready(db)
+        migrate.ensure_ready(db, keyring=legacy.keyring())
         assert migrate.current(db).state == migrate.STATE_CURRENT
 
 
@@ -385,7 +418,7 @@ class TestBothBackends:
         store.initialize()
         status = migrate.current(store.database)
         assert status.state == migrate.STATE_CURRENT
-        assert status.meta_version == "4" and status.alembic_revision == migrate.head_revision()
+        assert status.meta_version == "5" and status.alembic_revision == migrate.head_revision()
         with store.database.read() as conn:
             assert migrate.compare_schema(conn) == []
 
@@ -393,21 +426,21 @@ class TestBothBackends:
         path = tmp_path / "t.sqlite3"
         first = make_store(path, legacy.keyring())
         first.initialize()
+        key_b = make_account(first, legacy.OID_B, tenant=legacy.TID, name="Bob")
         first.put(
-            principal_key=legacy.KEY_B, api_token=legacy.TOKEN_B, canvas_user_id="2",
-            canvas_user_name="Bob", entra_display_name="Bob", entra_upn="b@example.test",
-            canvas_host=legacy.HOST,
+            principal_key=key_b, api_token=legacy.TOKEN_B, canvas_user_id="2",
+            canvas_user_name="Bob", canvas_host=legacy.HOST,
         )
         for _ in range(2):
             make_store(path, legacy.keyring()).initialize()
         again = make_store(path, legacy.keyring())
         again.initialize(auto_migrate=False)
-        row = again.get(legacy.KEY_B)
+        row = again.get(key_b)
         assert row is not None and row.api_token == legacy.TOKEN_B
         revisions = raw_sql(again, f"SELECT version_num FROM {schema.VERSION_TABLE}")
         assert [r[0] for r in revisions] == [migrate.head_revision()]
 
-    @pytest.mark.parametrize("marker", ["5", "x"])
+    @pytest.mark.parametrize("marker", ["6", "x"])
     def test_a_newer_marker_is_refused_and_nothing_is_recorded(
         self, tmp_path: pathlib.Path, marker: str
     ) -> None:
@@ -450,19 +483,26 @@ class TestRevisionPolicy:
         assert versions[-1] == SCHEMA_VERSION
         assert migrate.head_compat_version() == SCHEMA_VERSION
 
-    def test_the_baseline_has_no_downgrade(self) -> None:
+    @pytest.mark.parametrize("revision", [migrate.BASELINE_REVISION, "0002_accounts"])
+    def test_no_revision_has_a_downgrade(self, revision: str) -> None:
         from alembic.script import ScriptDirectory
 
-        rev = migrate._script().get_revision(migrate.BASELINE_REVISION)
+        rev = migrate._script().get_revision(revision)
         assert rev is not None
         module: Any = rev.module
         with pytest.raises(NotImplementedError, match="restore the backup"):
             module.downgrade()
         assert isinstance(migrate._script(), ScriptDirectory)
 
-    def test_there_is_one_linear_history_ending_at_the_baseline_for_now(self) -> None:
-        assert migrate.head_revision() == migrate.BASELINE_REVISION
-        assert migrate.known_revisions() == {migrate.BASELINE_REVISION}
+    def test_there_is_one_linear_history_ending_at_the_account_model(self) -> None:
+        assert migrate.head_revision() == "0002_accounts"
+        assert migrate.known_revisions() == {migrate.BASELINE_REVISION, "0002_accounts"}
+        assert migrate.revision_compat_versions() == {migrate.BASELINE_REVISION: 4, "0002_accounts": 5}
+
+    def test_the_revision_that_re_encrypts_asks_for_a_backup(self) -> None:
+        rev = migrate._script().get_revision("0002_accounts")
+        assert rev is not None
+        assert rev.module.BACKUP_BEFORE is True
 
 
 class TestOfflineDdl:
