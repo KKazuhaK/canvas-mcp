@@ -168,6 +168,19 @@ def test_opt_in_flags_enable_every_student_write_tool_and_real_names(tmp_path):
     load(values, tmp_path)
 
 
+def test_the_enabled_writes_comment_and_help_say_each_user_still_opts_in(tmp_path):
+    result = run_script(tmp_path, "--enable-writes", env=preset())
+    assert result.returncode == 0, result.stderr
+    text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "only the ceiling" in text
+    flat_env = " ".join(text.replace("# ", " ").split())
+    assert 'tool stays off for each user until that user turns it on in the "Write tools" section of /account' in flat_env
+    help_result = run_script(tmp_path, "--help")
+    flat = " ".join(help_result.stdout.split())
+    assert "only the server ceiling" in flat
+    assert 'turns it on in the "Write tools" section of /account' in flat
+
+
 def test_values_can_be_answered_at_the_prompts(tmp_path):
     answers = "\n".join((BASE, TENANT, CLIENT, CANVAS, SECRET)) + "\n"
     result = run_script(tmp_path, stdin=answers)

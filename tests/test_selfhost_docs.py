@@ -417,3 +417,20 @@ def test_the_root_readme_does_not_call_the_selfhost_guide_chinese() -> None:
 def test_the_canvas_api_url_comment_does_not_contradict_itself() -> None:
     text = (SELFHOST / "env.example").read_text(encoding="utf-8")
     assert "All users can reach only this one Canvas" not in text
+
+
+def test_every_operator_facing_write_tool_text_mentions_the_per_user_opt_in(readme) -> None:
+    """ALLOWED_WRITE_TOOLS is a ceiling: no text may read as if it turns the tools on for users."""
+    script = (SELFHOST / "setup-env.sh").read_text(encoding="utf-8")
+    assert "ceiling" in script and '"Write tools" section of /account' in script
+    assert script.count("/account") >= 2  # the --help text and the generated .env comment
+    flat = " ".join(readme.split())
+    for needle in (
+        "`--enable-writes`: allow all the student write tools on the server. This is only the ceiling",
+        "even after you enable tools here, each user still has to turn them on",
+        "Once the operator has enabled them and a user has turned them on for themselves",
+    ):
+        assert needle in flat, f"README.md is missing {needle!r}"
+    assert "Once enabled, the AI can do these things" not in flat
+    assert flat.count("#write-tools-each-user-opts-in") >= 3
+

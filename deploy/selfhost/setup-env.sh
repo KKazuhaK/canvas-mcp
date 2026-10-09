@@ -41,9 +41,11 @@ Usage: bash setup-env.sh [--enable-writes] [--real-names] [--school-search] [--o
 Generate the .env for self-hosted multi-user mode in the deployment directory
 (for example /opt/canvas-mcp).
 
-  --enable-writes  Enable all 11 student write tools and allow writes in courses that
-                   have no instructor policy. Read-only by default; for the risks see
-                   README.md ("Prompt-injection risk of write tools").
+  --enable-writes  Allow all 11 student write tools on the server and allow writes in
+                   courses that have no instructor policy. This is only the server
+                   ceiling: every write tool stays off for each user until that user turns
+                   it on in the "Write tools" section of /account. Read-only by default;
+                   for the risks see README.md ("Prompt-injection risk of write tools").
   --real-names     Turn data anonymization off (ENABLE_DATA_ANONYMIZATION=false; the
                    image default is on).
   --school-search  Let each user pick their own school: writes CANVAS_SCHOOL_SEARCH=true and
@@ -208,8 +210,11 @@ EOF
   if [ "$ENABLE_WRITES" = true ]; then
     cat <<EOF
 
-# Write tools: enabled (--enable-writes). The discussions and announcements the AI reads may
-# carry prompt injection; have every user set the write tools to Ask before using in claude.ai.
+# Write tools: allowed on the server (--enable-writes). This is only the ceiling: every write
+# tool stays off for each user until that user turns it on in the "Write tools" section of
+# /account (README.md, "Write tools: each user opts in"). The discussions and announcements
+# the AI reads may carry prompt injection; have every user set the write tools to Ask before
+# using in claude.ai.
 ALLOWED_WRITE_TOOLS=all
 STUDENT_WRITE_TOOLS=${STUDENT_WRITE_TOOLS_ALL}
 COURSE_AGENT_POLICY_DEFAULT=allow
