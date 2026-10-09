@@ -597,6 +597,9 @@ def _selfhost_summary(settings: SelfhostSettings) -> list[str]:
         f"  Token store: {settings.token_db_path}",
         f"  FastMCP home: {settings.fastmcp_home}",
         f"  Redirect URIs: {', '.join(settings.allowed_client_redirect_uris)}",
+        "  Canvas schools: featured="
+        + (", ".join(school.host for school in settings.featured_schools) or "none")
+        + f", search={'on' if settings.school_search else 'off'}",
     ]
 
 
@@ -641,7 +644,7 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
         print(f"  Tool Profile: {args.role or config.canvas_role}", file=sys.stderr)
         print(f"  Host: {args.host}", file=sys.stderr)
         print(f"  Port: {args.port}", file=sys.stderr)
-        print(f"  Canvas API URL: {config.canvas_api_url}", file=sys.stderr)
+        print(f"  Canvas API URL: {config.canvas_api_url or '(none)'}", file=sys.stderr)
         for line in _selfhost_summary(settings):
             print(line, file=sys.stderr)
         sys.exit(0)

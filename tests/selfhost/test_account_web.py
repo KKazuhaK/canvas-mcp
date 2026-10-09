@@ -33,6 +33,7 @@ from canvas_mcp.core.selfhost.account_web import (
     build_account_routes,
     register_account_routes,
 )
+from canvas_mcp.core.selfhost.schools import SchoolPolicy
 from canvas_mcp.core.selfhost.token_store import Keyring, TokenStore
 
 BASE = "https://canvas.example.test"
@@ -84,6 +85,7 @@ class Harness:
         default=lambda request: httpx.Response(200, json={"id_token": "fake-id-token"})
     )
     whoami_calls: list[str] = field(default_factory=list)
+    whoami_urls: list[str] = field(default_factory=list)
     whoami_result: CanvasIdentity | CanvasCheckError = field(
         default_factory=lambda: CanvasIdentity("42", "Ada Canvas")
     )
@@ -99,7 +101,7 @@ def make_cfg(**kw: Any) -> AccountConfig:
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
         "session_secret": SESSION_SECRET,
-        "canvas_api_url": "https://canvas.example.test/api/v1",
+        "schools": SchoolPolicy.pinned("https://canvas.example.test/api/v1"),
     }
     args.update(kw)
     return AccountConfig(**args)
@@ -111,8 +113,13 @@ def _display_in_utc(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(account_web, "output_timezone", lambda: UTC)
 
 
-@pytest.fixture
-def h(tmp_path: pathlib.Path) -> Harness:
+def build_harness(
+    tmp_path: pathlib.Path,
+    *,
+    cfg: AccountConfig | None = None,
+    **route_kwargs: Any,
+) -> Harness:
+    """A signed-out harness; ``route_kwargs`` (directory, resolve_host, ...) go to the routes."""
     keyring = Keyring.parse("k1:" + base64.b64encode(b"\x01" * 32).decode())
     store = TokenStore(tmp_path / "tokens.sqlite3", keyring, clock=lambda: 1_800_000_000)
     store.initialize()
@@ -125,8 +132,9 @@ def h(tmp_path: pathlib.Path) -> Harness:
             return None
         return dict(harness.claims)
 
-    async def whoami(token: str) -> CanvasIdentity:
+    async def whoami(token: str, api_url: str) -> CanvasIdentity:
         harness.whoami_calls.append(token)
+        harness.whoami_urls.append(api_url)
         if isinstance(harness.whoami_result, CanvasCheckError):
             raise harness.whoami_result
         return harness.whoami_result
@@ -139,18 +147,24 @@ def h(tmp_path: pathlib.Path) -> Harness:
         return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
     routes = build_account_routes(
-        make_cfg(),
+        cfg or make_cfg(),
         store,
         fake_authorize,
         id_token_verifier=verify,
         canvas_whoami=whoami,
         http_client_factory=factory,
         clock=harness.clock,
+        **route_kwargs,
     )
     harness.client = TestClient(
         Starlette(routes=routes), base_url=BASE, follow_redirects=False
     )
     return harness
+
+
+@pytest.fixture
+def h(tmp_path: pathlib.Path) -> Harness:
+    return build_harness(tmp_path)
 
 
 def login_params(h: Harness) -> dict[str, str]:
@@ -1839,6 +1853,7 @@ class TestRegistration:
             "/account/logout",
             "/account/admin",
             "/account/admin/revoke",
+            "/account/schools",
         }
         client = TestClient(mcp.http_app(), base_url=BASE, follow_redirects=False)
         response = client.get("/account")

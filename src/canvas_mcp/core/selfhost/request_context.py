@@ -6,6 +6,11 @@ the MCP endpoint it re-checks the verified Entra claims against the operator's
 policy, looks up the caller's own Canvas token in the encrypted store, and
 publishes both through the request ContextVars that the Canvas client reads.
 Nothing here trusts a request header, and nothing outlives the request.
+
+The Canvas school comes only from the caller's own stored row, mapped through
+the operator's :class:`SchoolPolicy`. A host the current settings no longer
+allow is treated as "not enrolled": no Canvas call is ever made for it, and
+nothing falls back to the server's default school.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from ..credentials import (
 )
 from ..logging import log_error, log_warning
 from .identity import ClaimsDenied, ClaimsPolicy, evaluate_entra_claims
+from .schools import SchoolPolicy
 
 _GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -38,10 +44,13 @@ _NO_CLAIMS_MESSAGE = "Your sign-in carries no identity claims. Reconnect the con
 
 
 class StoredTokenLike(Protocol):
-    """What the middleware needs from a stored row: the decrypted Canvas token."""
+    """What the middleware needs from a stored row: the Canvas token and its school."""
 
     @property
     def api_token(self) -> str: ...
+
+    @property
+    def canvas_host(self) -> str | None: ...
 
 
 class CanvasTokenReader(Protocol):
@@ -95,14 +104,14 @@ class SelfhostRequestContextMiddleware:
         mcp_path: str,
         policy: ClaimsPolicy,
         store: CanvasTokenReader,
-        canvas_api_url: str,
+        schools: SchoolPolicy,
         account_url: str,
     ) -> None:
         self.app = app
         self.mcp_path = mcp_path
         self.policy = policy
         self.store = store
-        self.canvas_api_url = canvas_api_url
+        self.schools = schools
         self.account_url = account_url
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -162,8 +171,17 @@ class SelfhostRequestContextMiddleware:
             set_missing_credentials_message(not_enrolled_message(self.account_url))
             return
 
+        school = self.schools.resolve_stored(getattr(row, "canvas_host", None))
+        if school is None:
+            # The settings no longer offer this user's school (or a legacy row
+            # has no default school to belong to): fail closed. The host is
+            # not logged, and touch() is deliberately not called.
+            log_warning("stored Canvas school not allowed", entra_oid=object_id)
+            set_missing_credentials_message(not_enrolled_message(self.account_url))
+            return
+
         set_request_credentials(
-            RequestCredentials(api_token=row.api_token, api_url=self.canvas_api_url)
+            RequestCredentials(api_token=row.api_token, api_url=school.api_url)
         )
         try:
             await anyio.to_thread.run_sync(self.store.touch, tenant_id, object_id)

@@ -33,7 +33,11 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .credentials import current_principal_key, get_request_credentials, get_request_principal
+from .credentials import (
+    current_principal_key,
+    get_request_credentials,
+    get_request_principal,
+)
 from .write_outcome import WriteOutcome
 
 

@@ -303,3 +303,120 @@ class TestLegacyUntouched:
         monkeypatch.setenv("CANVAS_API_URL", "https://canvas.example.edu")
         monkeypatch.setenv("MCP_ALLOW_UNAUTHENTICATED", "true")
         assert _run_main(monkeypatch, *HTTP, "--config").code == 0
+
+
+def _serve(entra_env, caplog) -> dict[str, Any]:
+    """Run main() through a fake selfhost runner; returns what the runner got."""
+    pytest.importorskip("canvas_mcp.core.selfhost.token_store")
+    mp = entra_env["monkeypatch"]
+    caplog.set_level(logging.INFO)
+    captured: dict[str, Any] = {}
+
+    def fake_runner(app, host, port):
+        captured.update(app=app, host=host, port=port)
+
+    mp.setattr(server_module, "_run_selfhost_http_server", fake_runner)
+    mp.setenv("CANVAS_ROLE", "student")
+    mp.setattr("sys.argv", ["canvas-mcp-server", *HTTP, "--port", "9912"])
+    config_module.reset_config()
+    try:
+        server_module.main()
+    finally:
+        config_module.reset_config()
+    return captured
+
+
+class TestSchoolStartup:
+    def test_featured_only_boots_without_a_canvas_url(self, entra_env, caplog, monkeypatch):
+        import socket
+
+        def no_dns(*_a, **_k):
+            raise AssertionError("startup must not resolve names")
+
+        monkeypatch.setattr(socket, "getaddrinfo", no_dns)
+        mp = entra_env["monkeypatch"]
+        mp.delenv("CANVAS_API_URL")
+        mp.setenv("CANVAS_FEATURED_SCHOOLS", "canvas.school-a.edu=School A,canvas.school-b.edu")
+        captured = _serve(entra_env, caplog)
+        assert captured["port"] == 9912 and captured["app"] is not None
+
+    def test_search_only_boots_without_a_canvas_url(self, entra_env, caplog):
+        mp = entra_env["monkeypatch"]
+        mp.delenv("CANVAS_API_URL")
+        mp.setenv("CANVAS_SCHOOL_SEARCH", "true")
+        assert _serve(entra_env, caplog)["app"] is not None
+
+    def test_the_default_school_plus_featured_boots(self, entra_env, caplog):
+        entra_env["monkeypatch"].setenv("CANVAS_FEATURED_SCHOOLS", "canvas.school-a.edu")
+        assert _serve(entra_env, caplog)["app"] is not None
+
+    def test_nothing_configured_is_refused(self, entra_env, caplog):
+        entra_env["monkeypatch"].delenv("CANVAS_API_URL")
+        assert _run_main(entra_env["monkeypatch"], *HTTP).code == 1
+        assert "CANVAS_API_URL is required unless" in caplog.text
+        assert "CANVAS_FEATURED_SCHOOLS" in caplog.text
+
+    def test_search_off_and_nothing_else_is_refused(self, entra_env):
+        mp = entra_env["monkeypatch"]
+        mp.delenv("CANVAS_API_URL")
+        mp.setenv("CANVAS_SCHOOL_SEARCH", "false")
+        assert _run_main(mp, *HTTP).code == 1
+
+    def test_a_cleartext_default_is_refused_even_with_featured_schools(self, entra_env, caplog):
+        mp = entra_env["monkeypatch"]
+        mp.setenv("CANVAS_API_URL", "http://canvas.example.edu")
+        mp.setenv("CANVAS_FEATURED_SCHOOLS", "canvas.school-a.edu")
+        assert _run_main(mp, *HTTP).code == 1
+        assert "CANVAS_API_URL must use https" in caplog.text
+
+    def test_a_scheme_less_default_is_refused(self, entra_env, caplog):
+        entra_env["monkeypatch"].setenv("CANVAS_API_URL", "canvas.example.edu")
+        assert _run_main(entra_env["monkeypatch"], *HTTP).code == 1
+        assert "CANVAS_API_URL" in caplog.text
+
+    @pytest.mark.parametrize("host", ["canvas.local", "db.internal", "localhost.localdomain", "x.test"])
+    def test_a_local_featured_host_is_refused(self, entra_env, host, caplog):
+        mp = entra_env["monkeypatch"]
+        mp.setenv("CANVAS_FEATURED_SCHOOLS", f"canvas.school-a.edu,{host}")
+        assert _run_main(mp, *HTTP).code == 1
+        assert "CANVAS_FEATURED_SCHOOLS entry 2 is not a public address" in caplog.text
+        assert host not in caplog.text
+
+    def test_a_featured_entry_equal_to_the_default_host_is_fine(self, entra_env):
+        """The default school is the operator's own pin and keeps its exemption."""
+        mp = entra_env["monkeypatch"]
+        mp.setenv("CANVAS_API_URL", "https://canvas.corp.lan")
+        mp.setenv("CANVAS_FEATURED_SCHOOLS", "canvas.corp.lan=Our Canvas")
+        config_module.reset_config()
+        assert validate_selfhost_startup(config_module.get_config(), load_selfhost_settings()) == []
+
+    def test_invalid_school_settings_are_refused_at_load(self, entra_env, caplog):
+        mp = entra_env["monkeypatch"]
+        mp.setenv("CANVAS_FEATURED_SCHOOLS", "https://canvas.school-a.edu")
+        mp.setenv("CANVAS_SCHOOL_SEARCH", "maybe")
+        assert _run_main(mp, *HTTP).code == 1
+        assert "CANVAS_FEATURED_SCHOOLS entry 1" in caplog.text
+        assert "CANVAS_SCHOOL_SEARCH must be true or false" in caplog.text
+
+    def test_config_shows_the_schools_summary(self, entra_env, capsys):
+        mp = entra_env["monkeypatch"]
+        mp.setenv("CANVAS_FEATURED_SCHOOLS", "canvas.school-a.edu,canvas.school-b.edu=B")
+        mp.setenv("CANVAS_SCHOOL_SEARCH", "true")
+        assert _run_main(mp, *HTTP, "--config").code == 0
+        out = capsys.readouterr().err
+        assert "Canvas schools: featured=canvas.school-a.edu, canvas.school-b.edu, search=on" in out
+
+    def test_config_without_schools_or_url(self, entra_env, capsys):
+        mp = entra_env["monkeypatch"]
+        mp.delenv("CANVAS_API_URL")
+        mp.setenv("CANVAS_SCHOOL_SEARCH", "true")
+        assert _run_main(mp, *HTTP, "--config").code == 0
+        out = capsys.readouterr().err
+        assert "Canvas API URL: (none)" in out
+        assert "featured=none, search=on" in out
+
+    def test_the_pinned_default_summary_is_unchanged(self, entra_env, capsys):
+        assert _run_main(entra_env["monkeypatch"], *HTTP, "--config").code == 0
+        out = capsys.readouterr().err
+        assert "Canvas API URL: https://canvas.example.edu/api/v1" in out
+        assert "featured=none, search=off" in out

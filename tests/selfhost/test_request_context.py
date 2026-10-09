@@ -22,8 +22,9 @@ from canvas_mcp.core.selfhost.request_context import (
     not_enrolled_message,
     unreadable_token_message,
 )
+from canvas_mcp.core.selfhost.schools import FeaturedSchool, SchoolPolicy
 
-from .conftest import CLIENT, OID_A, TENANT
+from .conftest import CLIENT, OID_A, OID_B, TENANT
 
 POLICY = ClaimsPolicy(tenant_id=TENANT, client_id=CLIENT, required_role="Canvas.User", owner_role="Canvas.Owner")
 CANVAS_URL = "https://canvas.example.test/api/v1"
@@ -32,12 +33,20 @@ SECRET_TOKEN = "canvas-token-that-must-never-be-logged-1234567890"
 
 
 class _Row:
-    def __init__(self, api_token: str) -> None:
+    def __init__(self, api_token: str, canvas_host: str | None = None) -> None:
         self.api_token = api_token
+        self.canvas_host = canvas_host
 
 
 class FakeStore:
-    def __init__(self, rows: dict[tuple[str, str], str] | None = None, *, fail: Exception | None = None) -> None:
+    """Rows map (tenant, oid) to a token (a legacy row) or (token, canvas_host)."""
+
+    def __init__(
+        self,
+        rows: dict[tuple[str, str], str | tuple[str, str | None]] | None = None,
+        *,
+        fail: Exception | None = None,
+    ) -> None:
         self.rows = rows or {}
         self.fail = fail
         self.gets: list[tuple[str, str]] = []
@@ -48,8 +57,10 @@ class FakeStore:
         self.gets.append((tenant_id, object_id))
         if self.fail is not None:
             raise self.fail
-        token = self.rows.get((tenant_id, object_id))
-        return _Row(token) if token is not None else None
+        value = self.rows.get((tenant_id, object_id))
+        if value is None:
+            return None
+        return _Row(value) if isinstance(value, str) else _Row(*value)
 
     def touch(self, tenant_id: str, object_id: str, *, min_interval_seconds: int = 300) -> None:
         self.touches.append((tenant_id, object_id))
@@ -122,9 +133,16 @@ class Call:
         return b"".join(m.get("body", b"") for m in self.sent if m["type"] == "http.response.body")
 
 
-def _middleware(app: Probe, store: FakeStore) -> SelfhostRequestContextMiddleware:
+def _middleware(
+    app: Probe, store: FakeStore, schools: SchoolPolicy | None = None
+) -> SelfhostRequestContextMiddleware:
     return SelfhostRequestContextMiddleware(
-        app, mcp_path="/mcp", policy=POLICY, store=store, canvas_api_url=CANVAS_URL, account_url=ACCOUNT_URL
+        app,
+        mcp_path="/mcp",
+        policy=POLICY,
+        store=store,
+        schools=schools or SchoolPolicy.pinned(CANVAS_URL),
+        account_url=ACCOUNT_URL,
     )
 
 
@@ -239,7 +257,7 @@ class TestEnrolled:
         assert probe.seen["creds"].api_token == SECRET_TOKEN
         assert probe.seen["creds"].api_url == CANVAS_URL
         assert probe.seen["principal"].key == f"entra:{TENANT}:{OID_A}"
-        assert probe.seen["key"] == f"entra:{TENANT}:{OID_A}"
+        assert probe.seen["key"] == f"entra:{TENANT}:{OID_A}|{CANVAS_URL}"
         assert store.gets == [(TENANT, OID_A)]
         assert store.touches == [(TENANT, OID_A)]
 
@@ -257,6 +275,82 @@ class TestEnrolled:
         call = await _run(_middleware(probe, store), user=_user(_claims()))
         assert call.status == 200
         assert probe.seen["creds"] is not None
+
+
+FEATURED = (FeaturedSchool("canvas.school-a.edu", "School A"), FeaturedSchool("canvas.school-b.edu", "School B"))
+
+
+class TestSchoolRouting:
+    async def test_a_featured_host_routes_to_its_own_api_url(self):
+        probe = Probe()
+        store = FakeStore({(TENANT, OID_A): (SECRET_TOKEN, "canvas.school-b.edu")})
+        schools = SchoolPolicy.build(CANVAS_URL, FEATURED, False)
+        await _run(_middleware(probe, store, schools), user=_user(_claims()))
+        assert probe.seen["creds"].api_url == "https://canvas.school-b.edu/api/v1"
+        assert probe.seen["creds"].api_token == SECRET_TOKEN
+        assert probe.seen["key"].endswith("|https://canvas.school-b.edu/api/v1")
+        assert store.touches == [(TENANT, OID_A)]
+
+    async def test_a_legacy_row_goes_to_the_default_school(self):
+        probe = Probe()
+        store = FakeStore({(TENANT, OID_A): (SECRET_TOKEN, None)})
+        schools = SchoolPolicy.build(CANVAS_URL, FEATURED, False)
+        await _run(_middleware(probe, store, schools), user=_user(_claims()))
+        assert probe.seen["creds"].api_url == CANVAS_URL
+
+    async def test_the_default_host_row_uses_the_default_url_verbatim(self):
+        probe = Probe()
+        url = "https://canvas.example.test:8443/lms/api/v1"
+        store = FakeStore({(TENANT, OID_A): (SECRET_TOKEN, "canvas.example.test")})
+        await _run(_middleware(probe, store, SchoolPolicy.pinned(url)), user=_user(_claims()))
+        assert probe.seen["creds"].api_url == url
+
+    async def test_a_host_the_settings_no_longer_allow_is_not_enrolled(self, caplog):
+        caplog.set_level(logging.DEBUG)
+        probe = Probe()
+        store = FakeStore({(TENANT, OID_A): (SECRET_TOKEN, "canvas.school-b.edu")})
+        only_a = SchoolPolicy.build("", FEATURED[:1], False)
+        call = await _run(_middleware(probe, store, only_a), user=_user(_claims()))
+        assert call.status == 200
+        assert probe.seen["creds"] is None
+        assert probe.seen["principal"] is not None
+        assert probe.seen["message"] == not_enrolled_message(ACCOUNT_URL)
+        assert store.touches == []
+        assert "stored Canvas school not allowed" in caplog.text
+        assert OID_A in caplog.text
+        assert "school-b" not in caplog.text and SECRET_TOKEN not in caplog.text
+
+    async def test_a_legacy_row_without_a_default_school_is_not_enrolled(self):
+        probe = Probe()
+        store = FakeStore({(TENANT, OID_A): (SECRET_TOKEN, None)})
+        featured_only = SchoolPolicy.build("", FEATURED, True)
+        await _run(_middleware(probe, store, featured_only), user=_user(_claims()))
+        assert probe.seen["creds"] is None
+        assert probe.seen["message"] == not_enrolled_message(ACCOUNT_URL)
+
+    async def test_a_searched_host_is_allowed_only_while_search_is_on(self):
+        store = FakeStore({(TENANT, OID_A): (SECRET_TOKEN, "canvas.found.edu")})
+        on = Probe()
+        await _run(_middleware(on, store, SchoolPolicy.build(CANVAS_URL, (), True)), user=_user(_claims()))
+        assert on.seen["creds"].api_url == "https://canvas.found.edu/api/v1"
+        off = Probe()
+        await _run(_middleware(off, store, SchoolPolicy.build(CANVAS_URL, (), False)), user=_user(_claims()))
+        assert off.seen["creds"] is None
+        assert off.seen["message"] == not_enrolled_message(ACCOUNT_URL)
+
+    async def test_two_users_at_two_schools_never_share_credentials(self):
+        store = FakeStore({
+            (TENANT, OID_A): ("token-of-a-" + "x" * 20, "canvas.school-a.edu"),
+            (TENANT, OID_B): ("token-of-b-" + "y" * 20, "canvas.school-b.edu"),
+        })
+        schools = SchoolPolicy.build("", FEATURED, False)
+        seen = {}
+        for oid in (OID_A, OID_B):
+            probe = Probe()
+            await _run(_middleware(probe, store, schools), user=_user(_claims(oid=oid)))
+            seen[oid] = (probe.seen["creds"].api_token, probe.seen["creds"].api_url)
+        assert seen[OID_A] == ("token-of-a-" + "x" * 20, "https://canvas.school-a.edu/api/v1")
+        assert seen[OID_B] == ("token-of-b-" + "y" * 20, "https://canvas.school-b.edu/api/v1")
 
 
 class TestNotEnrolled:

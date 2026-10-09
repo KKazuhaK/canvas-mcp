@@ -87,10 +87,6 @@ def test_parse_hostname_rejects(raw: str) -> None:
     assert parse_hostname(raw) is None
 
 
-def test_parse_hostname_rejects_non_strings() -> None:
-    assert parse_hostname(None) is None  # type: ignore[arg-type]
-
-
 def test_254_character_host_is_rejected() -> None:
     host = ".".join(["a" * 50] * 5) + ".edu"
     assert len(host) > 253

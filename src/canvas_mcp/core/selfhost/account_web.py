@@ -19,6 +19,11 @@ Security notes:
   every interpolation goes through ``html.escape``.
 * Neither the Canvas token, the Entra ``error_description`` nor any upstream
   response body is ever logged or rendered.
+* Each user picks their own Canvas school (see :mod:`.schools`). The school
+  host submitted with the token is accepted only if the operator features it
+  or, with the opt-in search, Instructure's directory confirms that exact
+  domain; its DNS answer must be public; only then is the token sent to it.
+  The school search is a plain GET form, needs a session and is rate limited.
 """
 
 from __future__ import annotations
@@ -51,6 +56,20 @@ from starlette.responses import Response
 from starlette.routing import Route
 
 from canvas_mcp.core.dates import output_timezone
+from canvas_mcp.core.selfhost.schools import (
+    MAX_QUERY_CHARS,
+    MIN_QUERY_CHARS,
+    DirectoryError,
+    HostResolver,
+    School,
+    SchoolDirectory,
+    SchoolDirectoryLike,
+    SchoolPolicy,
+    check_public_host,
+    is_blocked_hostname,
+    parse_hostname,
+    system_resolve,
+)
 from canvas_mcp.core.selfhost.token_store import EnrollmentInfo, TokenStore
 
 if TYPE_CHECKING:
@@ -66,6 +85,7 @@ _TOKEN_DELETE_PATH = "/account/token/delete"
 _LOGOUT_PATH = "/account/logout"
 _ADMIN_PATH = "/account/admin"
 _ADMIN_REVOKE_PATH = "/account/admin/revoke"
+_SCHOOLS_PATH = "/account/schools"
 
 LOGIN_COOKIE = "__Host-cmcp_login"
 SESSION_COOKIE = "__Host-cmcp_session"
@@ -83,6 +103,8 @@ _FORM_CONTENT_TYPE = "application/x-www-form-urlencoded"
 _RATE_LIMIT_ATTEMPTS = 10
 _RATE_LIMIT_WINDOW_SECONDS = 600
 _RATE_LIMIT_MAX_KEYS = 1024
+_SEARCH_LIMIT_ATTEMPTS = 30
+_SEARCH_LIMIT_WINDOW_SECONDS = 600
 _SCOPE = "openid profile"
 _ALL_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 
@@ -149,7 +171,8 @@ class CanvasCheckError(Exception):
         self.kind: Literal["invalid", "unavailable"] = kind
 
 
-CanvasWhoAmI = Callable[[str], Awaitable[CanvasIdentity]]
+# Called as (token, api_url): the API URL of the school the user chose.
+CanvasWhoAmI = Callable[[str, str], Awaitable[CanvasIdentity]]
 
 
 @dataclass(frozen=True)
@@ -159,7 +182,7 @@ class AccountConfig:
     client_id: str
     client_secret: str = field(repr=False)
     session_secret: bytes = field(repr=False)
-    canvas_api_url: str
+    schools: SchoolPolicy
     session_ttl_seconds: int = 900
     authority_host: str = "login.microsoftonline.com"
 
@@ -349,8 +372,13 @@ line-height:1.3;cursor:pointer;text-decoration:none;white-space:nowrap}
 .btn.danger{background:transparent;color:var(--bad);border-color:var(--bad)}
 .btn.sm{padding:.3rem .75rem;font-size:.9rem}
 label{display:block;font-weight:600;font-size:.92rem}
-input[type=password]{width:100%;padding:.6rem;border:1px solid var(--line);
+input[type=password],input[type=search]{width:100%;padding:.6rem;border:1px solid var(--line);
 border-radius:8px;background:var(--bg);color:var(--fg);font:inherit;margin:.4rem 0 .9rem}
+fieldset{border:0;padding:0;margin:0 0 .9rem;min-width:0}
+legend{font-weight:600;font-size:.92rem;padding:0;margin:0 0 .3rem}
+.choice{display:flex;gap:.5rem;align-items:baseline;font-weight:400;margin:.3rem 0}
+.choice input{flex:none}
+ul.results{margin:0 0 1rem;padding-left:1.3rem}
 .notice{border-radius:8px;padding:.6rem .8rem;margin:1rem 0 0}
 .notice.error{background:var(--bad-bg);color:var(--bad)}
 .notice.ok{background:var(--ok-bg);color:var(--ok)}
@@ -390,6 +418,10 @@ font-size:.8rem}
 
 def _e(value: object) -> str:
     return html.escape(str(value), quote=True)
+
+
+def _has_control(text: str) -> bool:
+    return any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in text)
 
 
 def _bi(zh: str, en: str) -> str:
@@ -515,8 +547,11 @@ class _AccountApp:
         canvas_whoami: CanvasWhoAmI | None,
         http_client_factory: Callable[[], httpx.AsyncClient] | None,
         clock: Callable[[], float],
+        directory: SchoolDirectoryLike | None = None,
+        resolve_host: HostResolver | None = None,
     ) -> None:
         self.cfg = cfg
+        self.schools = cfg.schools
         self.base = cfg.public_base_url.rstrip("/")
         self.tenant = cfg.tenant_id.lower()
         self.store = store
@@ -529,9 +564,19 @@ class _AccountApp:
             _RATE_LIMIT_MAX_KEYS,
             clock,
         )
+        self.search_limiter = _RateLimiter(
+            _SEARCH_LIMIT_ATTEMPTS,
+            _SEARCH_LIMIT_WINDOW_SECONDS,
+            _RATE_LIMIT_MAX_KEYS,
+            clock,
+        )
         self._client_factory = http_client_factory or (
             lambda: httpx.AsyncClient(timeout=10, follow_redirects=False)
         )
+        self._directory: SchoolDirectoryLike = directory or SchoolDirectory(
+            client_factory=self._client_factory
+        )
+        self._resolve_host: HostResolver = resolve_host or system_resolve
         self._id_token_verifier = id_token_verifier
         self._canvas_whoami = canvas_whoami or self._default_whoami
 
@@ -547,6 +592,7 @@ class _AccountApp:
             (_LOGOUT_PATH, {"POST": self.logout}),
             (_ADMIN_PATH, {"GET": self.admin}),
             (_ADMIN_REVOKE_PATH, {"POST": self.admin_revoke}),
+            (_SCHOOLS_PATH, {"GET": self.schools_page}),
         ]
         return [
             Route(path, self._endpoint(handlers), methods=_ALL_METHODS)
@@ -596,7 +642,7 @@ class _AccountApp:
         Always one of the fixed route constants, never request input.
         """
         path = request.url.path
-        return path if path in (ACCOUNT_PATH, _ADMIN_PATH) else ACCOUNT_PATH
+        return path if path in (ACCOUNT_PATH, _ADMIN_PATH, _SCHOOLS_PATH) else ACCOUNT_PATH
 
     @staticmethod
     def _remember_lang(response: Response, lang: str) -> None:
@@ -689,7 +735,25 @@ class _AccountApp:
             return self.message_page(
                 503, _bi("暂时无法读取令牌库。", "The token store is unavailable.")
             )
-        return self.account_page(session, info)
+        return self.account_page(session, info, selected=self._selection(request.query_params.get("school")))
+
+    def _selection(self, raw: str | None) -> str | None:
+        """A school host from ``?school=`` / a failed form that may be pre-selected.
+
+        Only a featured school, or (with search on) a syntactically valid and
+        not-local host name, is ever echoed back; anything else is ignored.
+        """
+        if not raw:
+            return None
+        candidate = raw.strip().lower()
+        if self.schools.featured_school(candidate) is not None:
+            return candidate
+        if not self.schools.search_enabled:
+            return None
+        host = parse_hostname(candidate)
+        if host is None or is_blocked_hostname(host):
+            return None
+        return host
 
     def _mcp_url_section(self) -> str:
         return (
@@ -711,11 +775,76 @@ class _AccountApp:
         )
         return self.html_page(200, _bi("Canvas 账户", "Canvas account"), body)
 
-    def _token_form(self, session: _Session) -> str:
+    def _school_choices(self, info: EnrollmentInfo | None, selected: str | None) -> str | None:
+        """The school radios, or None when there is no school to choose from."""
+        choices: list[tuple[str, str, str]] = []  # (host, name, note html)
+        for school in self.schools.featured:
+            choices.append((school.host, school.name, ""))
+        listed = {host for host, _name, _note in choices}
+        if selected is not None and selected not in listed:
+            note = _bi("（来自学校目录，保存时验证）", "(from the school directory, verified when you save)")
+            choices.append((selected, selected, note))
+            listed.add(selected)
+        enrolled = info.canvas_host if info is not None else None
+        if (
+            enrolled is not None
+            and enrolled not in listed
+            and self.schools.resolve_stored(enrolled) is not None
+        ):
+            choices.append((enrolled, enrolled, _bi("（你当前的学校）", "(your current school)")))
+            listed.add(enrolled)
+        if not choices:
+            return None
+
+        checked = selected
+        if checked is None and enrolled is not None and enrolled in listed:
+            checked = enrolled
+        if checked is None and self.schools.default is not None:
+            checked = self.schools.default.host
+        if checked is None or checked not in listed:
+            checked = choices[0][0]
+
+        radios = []
+        for host, name, note in choices:
+            mark = " checked" if host == checked else ""
+            host_part = "" if name == host else f' <span class="muted">{_e(host)}</span>'
+            note_part = f' <span class="muted">{note}</span>' if note else ""
+            radios.append(
+                f'<label class="choice"><input type="radio" name="school" value="{_e(host)}"{mark}>'
+                f"<span>{_e(name)}{host_part}{note_part}</span></label>"
+            )
+        return (
+            f"<fieldset><legend>{_bi('你的学校', 'Your school')}</legend>"
+            + "".join(radios)
+            + "</fieldset>"
+        )
+
+    def _token_form(
+        self,
+        session: _Session,
+        info: EnrollmentInfo | None = None,
+        selected: str | None = None,
+    ) -> str:
+        school_part = ""
+        if self.schools.picker_enabled:
+            choices = self._school_choices(info, selected)
+            if choices is None:
+                return (
+                    f'<p class="warn">{_bi("请先搜索你的学校。", "Search for your school first.")}</p>'
+                )
+            school_part = choices
+        else:
+            sole = self.schools.sole_school
+            if sole is not None and self.schools.default is None:
+                school_part = (
+                    f'<p class="muted small">{_bi("学校", "School")}: {_e(sole.name)}'
+                    f' <span class="muted">({_e(sole.host)})</span></p>'
+                )
         return (
             f'<p class="warn"><strong>{_bi("绝不要把令牌粘贴到 Claude 对话里。", "Never paste the token into Claude.")}</strong></p>'
             f'<form method="post" action="{_TOKEN_PATH}">'
             f"{_csrf_field(session.csrf)}"
+            f"{school_part}"
             f'<label for="canvas_token">{_bi("Canvas 访问令牌", "Canvas access token")}</label>'
             '<input id="canvas_token" name="canvas_token" type="password" '
             'autocomplete="off" spellcheck="false" autocapitalize="off" '
@@ -724,12 +853,51 @@ class _AccountApp:
             "</form>"
         )
 
+    def _search_section(self) -> str:
+        """The school search form (plain GET, no JavaScript); empty when search is off."""
+        if not self.schools.search_enabled:
+            return ""
+        return (
+            f'<section class="card"><h2>{_bi("搜索其他学校", "Search other schools")}</h2>'
+            f'<form method="get" action="{_SCHOOLS_PATH}">'
+            f'<label for="school_q">{_bi("学校名称或 Canvas 域名", "School name or Canvas domain")}</label>'
+            f'<input id="school_q" name="q" type="search" required '
+            f'minlength="{MIN_QUERY_CHARS}" maxlength="{MAX_QUERY_CHARS}" '
+            'autocomplete="off" spellcheck="false">'
+            f'<button class="btn secondary" type="submit">{_bi("搜索", "Search")}</button>'
+            "</form>"
+            f'<p class="muted small">{_bi("搜索词会发送给 Instructure 的公共学校目录。", "Search terms are sent to the public school directory run by Instructure.")}</p>'
+            "</section>"
+        )
+
+    def _school_status(self, info: EnrollmentInfo) -> str:
+        """The School row of the status card, plus a notice when it is no longer offered."""
+        school = self.schools.resolve_stored(info.canvas_host)
+        if school is not None:
+            host_part = "" if school.name == school.host else f' <span class="muted">({_e(school.host)})</span>'
+            value = f"{_e(school.name)}{host_part}"
+        elif info.canvas_host:
+            value = _e(info.canvas_host)
+        else:
+            value = _bi("未记录学校", "No school recorded")
+        return f"<dt>{_bi('学校', 'School')}</dt><dd>{value}</dd>"
+
+    def _school_notice(self, info: EnrollmentInfo) -> str:
+        if self.schools.resolve_stored(info.canvas_host) is not None:
+            return ""
+        return (
+            '<p class="warn">'
+            f"{_bi('服务器已不再支持你登记的学校，请重新登记。', 'This server no longer offers your school. Enroll again.')}"
+            "</p>"
+        )
+
     def account_page(
         self,
         session: _Session,
         info: EnrollmentInfo | None,
         notice: tuple[Literal["error", "ok"], str] | None = None,
         status: int = 200,
+        selected: str | None = None,
     ) -> Response:
         parts: list[str] = [
             _header(session),
@@ -747,7 +915,7 @@ class _AccountApp:
                 f"<li>{_bi('在 Canvas 中打开 <strong>Account → Settings → + New Access Token</strong>。', 'In Canvas, open <strong>Account → Settings → + New Access Token</strong>.')}</li>"
                 f"<li>{_bi('用途填 <code>Claude MCP</code>，并设置到期时间。', 'Purpose: <code>Claude MCP</code>. Set an expiry date.')}</li>"
                 f"<li>{_bi('复制令牌，粘贴到下方。', 'Copy the token and paste it below.')}</li>"
-                "</ol>" + self._token_form(session) + "</section>"
+                "</ol>" + self._token_form(session, info, selected) + "</section>"
             )
         else:
             parts.append(
@@ -756,25 +924,140 @@ class _AccountApp:
                 f"<dt>{_bi('Canvas 用户', 'Canvas user')}</dt>"
                 f"<dd>{_e(info.canvas_user_name)} "
                 f'<span class="muted">(id {_e(info.canvas_user_id)})</span></dd>'
+                f"{self._school_status(info)}"
                 f"<dt>{_bi('最近使用', 'Last used')}</dt><dd>{_e(_fmt_ts(info.last_used_at))}</dd>"
                 f"<dt>{_bi('绑定时间', 'Enrolled')}</dt><dd>{_e(_fmt_ts(info.created_at))}</dd>"
                 f"<dt>{_bi('更新时间', 'Updated')}</dt><dd>{_e(_fmt_ts(info.updated_at))}</dd>"
                 "</dl>"
+                f"{self._school_notice(info)}"
                 f'<form method="post" action="{_TOKEN_DELETE_PATH}">'
                 f"{_csrf_field(session.csrf)}"
                 f'<button class="btn danger sm" type="submit">{_bi("删除我的令牌", "Delete my token")}</button>'
                 "</form></section>"
             )
-            # Collapsed unless the last attempt failed, so the error and the form meet.
-            is_open = " open" if notice is not None and notice[0] == "error" else ""
+            # Collapsed unless the last attempt failed (so the error and the form
+            # meet) or a school was just chosen from the search results.
+            is_open = (
+                " open"
+                if (notice is not None and notice[0] == "error") or selected is not None
+                else ""
+            )
             parts.append(
                 f'<details class="card"{is_open}>'
                 f"<summary>{_bi('替换令牌', 'Replace token')}</summary>"
-                + self._token_form(session)
+                + self._token_form(session, info, selected)
                 + "</details>"
             )
+        parts.append(self._search_section())
         parts.append(self._mcp_url_section())
         return self.html_page(status, _bi("Canvas 账户", "Canvas account"), "".join(parts))
+
+    # -- school search ---------------------------------------------------------
+
+    def _schools_document(
+        self,
+        session: _Session,
+        query: str,
+        *,
+        notice: tuple[Literal["error", "ok"], str] | None = None,
+        results: list[tuple[str, str]] | None = None,
+        status: int = 200,
+    ) -> Response:
+        parts: list[str] = [
+            _header(session),
+            f"<h1>{_bi('搜索学校', 'Find your school')}</h1>",
+            '<section class="card">'
+            f'<form method="get" action="{_SCHOOLS_PATH}">'
+            f'<label for="school_q">{_bi("学校名称或 Canvas 域名", "School name or Canvas domain")}</label>'
+            f'<input id="school_q" name="q" type="search" value="{_e(query)}" required '
+            f'minlength="{MIN_QUERY_CHARS}" maxlength="{MAX_QUERY_CHARS}" '
+            'autocomplete="off" spellcheck="false">'
+            f'<button class="btn" type="submit">{_bi("搜索", "Search")}</button>'
+            "</form>"
+            f'<p class="muted small">{_bi("搜索词会发送给 Instructure 的公共学校目录。", "Search terms are sent to the public school directory run by Instructure.")}</p>'
+            "</section>",
+        ]
+        if notice is not None:
+            parts.append(f'<div class="notice {notice[0]}" role="alert">{notice[1]}</div>')
+        if results is not None:
+            if results:
+                items = "".join(
+                    f'<li><a href="{_e(ACCOUNT_PATH + "?" + urllib.parse.urlencode({"school": domain}))}">'
+                    f'{_e(name)}</a> <span class="muted">{_e(domain)}</span></li>'
+                    for domain, name in results
+                )
+                parts.append(f'<section class="card"><ul class="results">{items}</ul></section>')
+            else:
+                parts.append(
+                    f'<section class="card"><p>{_bi("没有找到学校。", "No schools found.")}</p></section>'
+                )
+        parts.append(f'<p><a href="{ACCOUNT_PATH}">{_bi("返回账户页", "Back to account")}</a></p>')
+        return self.html_page(
+            status, _bi("搜索学校", "Find your school"), "".join(parts)
+        )
+
+    async def schools_page(self, request: Request) -> Response:
+        session = self.session_from(request)
+        if session is None:
+            return self.redirect(ACCOUNT_PATH, 303)
+        if not self.schools.search_enabled:
+            return self.message_page(404, _bi("未启用学校搜索。", "School search is not enabled."))
+        query = request.query_params.get("q", "").strip()
+        if not query:
+            return self._schools_document(session, "")
+        if (
+            len(query) < MIN_QUERY_CHARS
+            or len(query) > MAX_QUERY_CHARS
+            or _has_control(query)
+        ):
+            return self._schools_document(
+                session,
+                "" if _has_control(query) else query[:MAX_QUERY_CHARS],
+                notice=(
+                    "error",
+                    _bi(
+                        "请输入 2 到 64 个字符，不含控制字符。",
+                        "Enter 2 to 64 characters, without control characters.",
+                    ),
+                ),
+                status=400,
+            )
+        if not self.search_limiter.allow((session.tid, session.oid)):
+            return self._schools_document(
+                session,
+                query,
+                notice=(
+                    "error",
+                    _bi(
+                        "搜索次数过多，请 10 分钟后再试。",
+                        "Too many searches. Try again in 10 minutes.",
+                    ),
+                ),
+                status=429,
+            )
+        try:
+            entries = await self._directory.search(query)
+        except DirectoryError:
+            logger.warning("account school search failed")
+            return self._schools_document(
+                session,
+                query,
+                notice=(
+                    "error",
+                    _bi(
+                        "暂时无法连接学校目录。",
+                        "The school directory is unavailable right now.",
+                    ),
+                ),
+                status=503,
+            )
+        results = [
+            (entry.domain, entry.name)
+            for entry in entries
+            if not is_blocked_hostname(entry.domain)
+        ]
+        logger.info("account school search tid=%s oid=%s results=%d", session.tid, session.oid, len(results))
+        return self._schools_document(session, query, results=results)
 
     # -- sign-in -------------------------------------------------------------
 
@@ -1015,8 +1298,8 @@ class _AccountApp:
 
     # -- Canvas verification -------------------------------------------------
 
-    async def _default_whoami(self, token: str) -> CanvasIdentity:
-        url = self.cfg.canvas_api_url.rstrip("/") + "/users/self"
+    async def _default_whoami(self, token: str, api_url: str) -> CanvasIdentity:
+        url = api_url.rstrip("/") + "/users/self"
         try:
             async with self._client_factory() as client:
                 resp = await client.get(
@@ -1138,14 +1421,22 @@ class _AccountApp:
                     "That does not look like a Canvas token. Copy the whole token.",
                 ),
             )
+        raw_school = form.get("school", "")
+        chosen = await self._choose_school(raw_school)
+        selected = self._selection(raw_school)
+        if not isinstance(chosen, School):
+            status, message = chosen
+            return await self._token_error(session, status, message, selected=selected)
+        school = chosen
         try:
-            identity = await self._canvas_whoami(token)
+            identity = await self._canvas_whoami(token, school.api_url)
         except CanvasCheckError as exc:
             if exc.kind == "invalid":
                 return await self._token_error(
                     session,
                     400,
                     _bi("Canvas 拒绝了这个令牌。", "Canvas rejected this token."),
+                    selected=selected,
                 )
             return await self._token_error(
                 session,
@@ -1154,6 +1445,7 @@ class _AccountApp:
                     "暂时无法连接 Canvas，请稍后再试。",
                     "Canvas is unavailable right now. Try again later.",
                 ),
+                selected=selected,
             )
         try:
             await anyio.to_thread.run_sync(
@@ -1166,6 +1458,7 @@ class _AccountApp:
                     canvas_user_name=identity.name,
                     entra_display_name=session.name,
                     entra_upn=session.upn,
+                    canvas_host=school.host,
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -1174,15 +1467,80 @@ class _AccountApp:
                 session,
                 503,
                 _bi("暂时无法保存令牌。", "The token could not be saved right now."),
+                selected=selected,
             )
-        logger.info("account token enrolled tid=%s oid=%s", session.tid, session.oid)
+        logger.info(
+            "account token enrolled tid=%s oid=%s host=%s", session.tid, session.oid, school.host
+        )
         return self.redirect(ACCOUNT_PATH, 303)
 
+    async def _choose_school(self, raw: str) -> School | tuple[int, str]:
+        """The school to enroll at, or (status, message html) when it is refused.
+
+        Nothing is sent to the school (or anywhere else) before every check has
+        passed: syntax, the operator's list or the directory's confirmation, and
+        the public-address check on what the name resolves to.
+        """
+        policy = self.schools
+        value = raw.strip().lower()
+        default = policy.default
+        if not value:
+            if default is not None and policy.picker_enabled:
+                return default
+            sole = policy.sole_school
+            if sole is None:
+                return 400, _bi("请选择你的学校。", "Choose your school.")
+            return await self._public_school_or_refusal(sole)
+        if default is not None and value == default.host:
+            # The operator's own pin: kept exactly as before, no DNS check.
+            return default
+        invalid = (400, _bi("学校地址无效。", "That school address is not valid."))
+        host = parse_hostname(value)
+        if host is None or is_blocked_hostname(host):
+            return invalid
+        school = policy.featured_school(host)
+        if school is None:
+            if not policy.search_enabled:
+                return 400, _bi("此服务器不提供该学校。", "This server does not offer that school.")
+            try:
+                entry = await self._directory.confirm(host)
+            except DirectoryError:
+                return 503, _bi(
+                    "暂时无法连接学校目录。", "The school directory is unavailable right now."
+                )
+            if entry is None:
+                return 400, _bi(
+                    "学校目录里没有这个地址。", "That address is not in the school directory."
+                )
+            school = School(host, f"https://{host}/api/v1", entry.name)
+        return await self._public_school_or_refusal(school)
+
+    async def _public_school_or_refusal(self, school: School) -> School | tuple[int, str]:
+        """Refuse a school whose name does not resolve, or resolves to a non-public address.
+
+        The operator's default school is their own pin and is not checked.
+        """
+        if school.is_default:
+            return school
+        verdict = await check_public_host(school.host, self._resolve_host)
+        if verdict == "unresolvable":
+            return 400, _bi("找不到该学校的服务器。", "Could not find that school's server.")
+        if verdict == "blocked":
+            return 400, _bi("该学校的地址不被允许。", "That school's address is not allowed.")
+        return school
+
     async def _token_error(
-        self, session: _Session, status: int, message_html: str
+        self,
+        session: _Session,
+        status: int,
+        message_html: str,
+        *,
+        selected: str | None = None,
     ) -> Response:
         info = await anyio.to_thread.run_sync(self._safe_info, session)
-        return self.account_page(session, info, ("error", message_html), status)
+        return self.account_page(
+            session, info, ("error", message_html), status, selected=selected
+        )
 
     def _safe_info(self, session: _Session) -> EnrollmentInfo | None:
         try:
@@ -1230,6 +1588,7 @@ class _AccountApp:
                 "</dl></details></td>"
                 f'<td data-label="{_e(_bi("Canvas 用户", "Canvas user"))}">'
                 f'{_e(row.canvas_user_name)}<br><span class="muted">id {_e(row.canvas_user_id)}</span></td>'
+                f'<td data-label="{_e(_bi("学校", "School"))}">{self._admin_school(row)}</td>'
                 f'<td data-label="{_e(_bi("最近使用", "Last used"))}">{_e(_fmt_ts(row.last_used_at))}</td>'
                 f'<td class="act"><form method="post" action="{_ADMIN_REVOKE_PATH}">'
                 f"{_csrf_field(session.csrf)}"
@@ -1243,6 +1602,7 @@ class _AccountApp:
                 '<section class="card tablecard"><table><thead><tr>'
                 f"<th>{_bi('Entra 用户', 'Entra user')}</th>"
                 f"<th>{_bi('Canvas 用户', 'Canvas user')}</th>"
+                f"<th>{_bi('学校', 'School')}</th>"
                 f"<th>{_bi('最近使用', 'Last used')}</th>"
                 f'<th class="act"><span class="muted">{_bi("操作", "Actions")}</span></th>'
                 "</tr></thead><tbody>" + "".join(lines) + "</tbody></table></section>"
@@ -1261,6 +1621,24 @@ class _AccountApp:
         return self.html_page(
             200, _bi("Canvas 绑定管理", "Canvas enrollments"), body, wide=True
         )
+
+    def _admin_school(self, row: EnrollmentInfo) -> str:
+        """A row's school for the admin table; flags rows the settings no longer allow."""
+        allowed = self.schools.resolve_stored(row.canvas_host) is not None
+        if row.canvas_host is None:
+            default = self.schools.default
+            if default is None:
+                text = "-"
+            else:
+                text = f"{_e(default.host)} <span class=\"muted\">{_bi('（默认）', '(default)')}</span>"
+        else:
+            text = _e(row.canvas_host)
+        if not allowed:
+            text += (
+                '<br><span class="muted">'
+                f"{_bi('当前设置不再允许', 'Not allowed by the current settings')}</span>"
+            )
+        return text
 
     async def admin_revoke(self, request: Request) -> Response:
         guarded = await self._guard_post(request, owner_only=True)
@@ -1295,8 +1673,14 @@ def build_account_routes(
     canvas_whoami: CanvasWhoAmI | None = None,
     http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
     clock: Callable[[], float] = time.time,
+    directory: SchoolDirectoryLike | None = None,
+    resolve_host: HostResolver | None = None,
 ) -> list[Route]:
-    """Build the /account Starlette routes."""
+    """Build the /account Starlette routes.
+
+    ``directory`` and ``resolve_host`` replace the Instructure school directory
+    and the system DNS resolver (tests inject fakes; no real network is needed).
+    """
     app = _AccountApp(
         cfg,
         store,
@@ -1305,6 +1689,8 @@ def build_account_routes(
         canvas_whoami,
         http_client_factory,
         clock,
+        directory,
+        resolve_host,
     )
     return app.routes()
 

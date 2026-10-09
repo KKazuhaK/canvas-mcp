@@ -5,7 +5,11 @@ import json
 import pytest
 
 from canvas_mcp.core import audit
-from canvas_mcp.core.credentials import RequestCredentials, set_request_credentials, set_request_principal
+from canvas_mcp.core.credentials import (
+    RequestCredentials,
+    set_request_credentials,
+    set_request_principal,
+)
 
 from .conftest import OID_A, make_principal
 

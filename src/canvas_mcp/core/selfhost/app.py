@@ -8,7 +8,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from fastmcp import FastMCP
 from starlette.middleware import Middleware
@@ -21,6 +22,7 @@ from .edge_guard import SelfhostEdgeGuard
 from .identity import ClaimsPolicy, authorize_id_token_claims
 from .oauth import cull_expired_oauth_state
 from .request_context import SelfhostRequestContextMiddleware
+from .schools import SchoolPolicy, is_blocked_hostname
 from .settings import SelfhostConfigError, SelfhostSettings
 from .tool_gate import SelfhostCredentialGate
 
@@ -49,6 +51,47 @@ def _writable_directory_problem(name: str, path: Path) -> str | None:
     return None
 
 
+def selfhost_school_policy(settings: SelfhostSettings, config: Config) -> SchoolPolicy:
+    """The schools this server offers: ``CANVAS_API_URL`` plus the featured list.
+
+    Deterministic and free of I/O, so the account pages and the request
+    middleware always agree.
+    """
+    return SchoolPolicy.build(
+        getattr(config, "canvas_api_url", "") or "",
+        settings.featured_schools,
+        settings.school_search,
+    )
+
+
+def _school_problems(config: Config, settings: SelfhostSettings) -> list[str]:
+    """Startup problems with the Canvas schools. Values are never included."""
+    problems: list[str] = []
+    default_host = ""
+    if config.canvas_api_url:
+        if not validate_canvas_url_scheme():
+            problems.append("CANVAS_API_URL must use https")
+        try:
+            default_host = (urlsplit(config.canvas_api_url).hostname or "").lower()
+        except ValueError:
+            default_host = ""
+        if not default_host:
+            problems.append("CANVAS_API_URL must include a host name")
+    elif not settings.featured_schools and not settings.school_search:
+        problems.append(
+            "CANVAS_API_URL is required unless CANVAS_FEATURED_SCHOOLS or "
+            "CANVAS_SCHOOL_SEARCH=true is set"
+        )
+    for index, school in enumerate(settings.featured_schools, start=1):
+        # The default school is the operator's own pin and keeps its exemption.
+        if school.host != default_host and is_blocked_hostname(school.host):
+            problems.append(
+                f"CANVAS_FEATURED_SCHOOLS entry {index} is not a public address "
+                "(local and internal names are refused)"
+            )
+    return problems
+
+
 def validate_selfhost_startup(config: Config, settings: SelfhostSettings) -> list[str]:
     """Every reason the server must refuse to start in this mode (empty = fine).
 
@@ -56,10 +99,7 @@ def validate_selfhost_startup(config: Config, settings: SelfhostSettings) -> lis
     """
     problems: list[str] = []
 
-    if not config.canvas_api_url:
-        problems.append("CANVAS_API_URL is required (the Canvas API URL is server-pinned)")
-    elif not validate_canvas_url_scheme():
-        problems.append("CANVAS_API_URL must use https")
+    problems.extend(_school_problems(config, settings))
 
     if config.canvas_api_token:
         problems.append(
@@ -146,8 +186,14 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
     return SelfhostRuntime(settings=settings, store=store, policy=policy)
 
 
-def install_selfhost(mcp: FastMCP, runtime: SelfhostRuntime, config: Config) -> None:
-    """Add the credential gate, the /account pages and /healthz to the server."""
+def install_selfhost(
+    mcp: FastMCP, runtime: SelfhostRuntime, config: Config, **account_options: Any
+) -> None:
+    """Add the credential gate, the /account pages and /healthz to the server.
+
+    ``account_options`` are passed to the account routes (tests inject the school
+    directory, the host resolver and the HTTP client factory there).
+    """
     from .account_web import AccountConfig, register_account_routes
 
     settings = runtime.settings
@@ -161,11 +207,12 @@ def install_selfhost(mcp: FastMCP, runtime: SelfhostRuntime, config: Config) -> 
             client_id=settings.client_id,
             client_secret=settings.client_secret,
             session_secret=settings.account_session_secret,
-            canvas_api_url=config.canvas_api_url,
+            schools=selfhost_school_policy(settings, config),
             session_ttl_seconds=settings.account_session_ttl_seconds,
         ),
         runtime.store,
         authorize_id_token_claims(runtime.policy),
+        **account_options,
     )
 
     @mcp.custom_route(HEALTH_PATH, methods=["GET"])
@@ -196,7 +243,7 @@ def build_selfhost_asgi_app(
                 mcp_path=settings.mcp_path,
                 policy=runtime.policy,
                 store=runtime.store,
-                canvas_api_url=config.canvas_api_url,
+                schools=selfhost_school_policy(settings, config),
                 account_url=settings.account_url,
             )
         ],

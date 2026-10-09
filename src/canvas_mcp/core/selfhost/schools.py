@@ -82,8 +82,6 @@ def parse_hostname(raw: str) -> str | None:
     Syntax only (no lookups): ASCII, at least two valid labels, no scheme,
     port, path, user information, trailing dot or IP literal.
     """
-    if not isinstance(raw, str):
-        return None
     host = raw.strip().lower()
     if not host or len(host) > _MAX_HOST_CHARS or not host.isascii():
         return None
