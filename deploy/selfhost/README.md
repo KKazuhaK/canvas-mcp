@@ -16,6 +16,7 @@ Image: `ghcr.io/kkazuhak/canvas-mcp` (linux/amd64 + linux/arm64, non-root, data 
 - [Step 5: Pull the image and start](#step-5-pull-the-image-and-start)
 - [Step 6: Connect claude.ai and Claude Code](#step-6-connect-claudeai-and-claude-code)
 - [Per-user enrollment (/account)](#per-user-enrollment-account)
+- [Accounts and admission](#accounts-and-admission)
 - [Disabling tools](#disabling-tools)
 - [Multiple schools (optional)](#multiple-schools-optional)
 - [Prompt-injection risk of write tools](#prompt-injection-risk-of-write-tools)
@@ -60,8 +61,8 @@ Image: `ghcr.io/kkazuhak/canvas-mcp` (linux/amd64 + linux/arm64, non-root, data 
 
 Key points:
 
-- Who can use it: accounts assigned to the Entra app role `Canvas.User` (or your own `Canvas.Owner`).
-- The Canvas tokens, access decisions and per-user switches live in one database: a SQLite file on the data volume by default, or PostgreSQL if you ask for it (see [Database](#database)). Either way this is a single-instance service.
+- Who can use it: by default, people assigned to the Entra app role `Canvas.User` (or your own `Canvas.Owner`). Each person has an **account** (`acct:<uuid>`) that every stored row is keyed by; who gets one is decided by one admission policy (see [Accounts and admission](#accounts-and-admission)).
+- The accounts, Canvas tokens, access decisions, sign-in history and per-user switches live in one database: a SQLite file on the data volume by default, or PostgreSQL if you ask for it (see [Database](#database)). Either way this is a single-instance service.
 - Each person enrolls their own Canvas token at `/account`. From then on the AI always uses the **caller's own** token; there is no server-level Canvas credential at all.
 - Canvas tokens are stored encrypted in the token database (a SQLite file in `/data`, or PostgreSQL) and the keys live only in `.env`, so a leaked database or backup **on its own** does not leak the tokens. That is the whole claim: the running server decrypts every token, so a compromised runtime, or an operator who holds both `.env` and the data, can use every enrolled token. See [Custody and privacy boundary](#custody-and-privacy-boundary).
 - The audit log is **off by default**: events are written, and the `audit/` directory is created, only if you set `LOG_ACCESS_EVENTS=true` in `.env`. Even when it is on, enrolling or replacing a Canvas token at `/account` does not write an audit log entry (to find out who enrolled and when, look at the created and updated times in `token_admin list`). What it does write about tokens are health events (`event_type` `canvas_token`): a token marked invalid with its reason, the outcome of a re-check, an administrator marking a token invalid, and a Canvas user change that was detected or confirmed. They carry the principal key and a short code, never a token, a name or an e-mail address. Access decisions write `principal_status` events: a user disabled or enabled (with the acting owner's key, or `operator`), an owner gained or lost, a disabled user refused at sign-in or enrollment, a refused disable, an owner removing an enrollment, and a user deleting their own token (`self_disconnected`); the same transitions are always kept in the token database (`token_admin history`). A user switching write tools on or off at `/account` writes a `write_tools` event (`changed`, `cleared`, or `refused` when the sign-in was too old), with the principal key and the tool names only.
@@ -414,16 +415,16 @@ Then type `/mcp` in Claude Code and choose `canvas` to authenticate; the browser
 
 Open `https://canvas.mcp.kazuhahub.com/account`:
 
-1. Click **Sign in with Microsoft** and sign in with an account that has been assigned a role.
+1. Click **Sign in with Microsoft** and sign in with an account the server admits (by default, one that has been assigned the `Canvas.User` or `Canvas.Owner` role). If the operator runs the server in `approval` mode you can sign in but the page says you are waiting for an owner to approve you; you cannot add a token until then.
 2. Generate an access token in Canvas: Account → Settings → Approved Integrations → **New Access Token**.
 3. Paste the token into the form at `/account` and submit. The service first verifies it with a call to Canvas `users/self`, and stores it encrypted if that succeeds.
-4. On the page you can replace or delete your own token, and sign out. The session lasts only 15 minutes (it is not renewed).
+4. On the page you can replace or delete your own token, and sign out. The session lasts only 15 minutes (it is not renewed). A **Recent sign-ins** card lists the last 20 sign-ins of your account (time, result and method); if one is not yours, tell the owner.
 
 **Never paste a Canvas token into a conversation with the AI.** The token is submitted only through the form at `/account`.
 
 If the server offers more than one school (see below), step 3 also has a school choice: pick a featured school or search for yours. The status card shows which school you are enrolled at.
 
-After signing in, an owner also gets an `/account/admin` link: it lists everyone's enrollment status (without tokens) and has four separate actions: **Disable user** / **Enable user** (the access decision), **Remove enrollment** (deletes the stored Canvas token only) and **Mark as invalid** (asks the user for a new token). What each one means, and how fast it takes effect, is in [Revoking a user](#revoking-a-user).
+After signing in, an owner also gets an `/account/admin` link: it lists everyone's enrollment status (without tokens) and has separate actions: **Approve** / **Deny** (for accounts waiting for approval), **Disable user** / **Enable user** (the access decision), **Remove enrollment** (deletes the stored Canvas token only) and **Mark as invalid** (asks the user for a new token). An **Audit log** link opens `/account/admin/audit`. What each one means, and how fast it takes effect, is in [Revoking a user](#revoking-a-user).
 
 Deleting your own token (**Delete my token**) is a self-disconnect: it removes only your own Canvas token, and you can enroll again whenever you like. It is not, and cannot be used as, a way around a disablement.
 
@@ -459,6 +460,84 @@ Details:
 - To remove a user's write access immediately, the user can press **Turn all off**, or the operator can remove the tool from `ALLOWED_WRITE_TOOLS` and restart.
 
 > **React UI (in development).** `/account` is being rewritten as a React single-page app, with the source in `web/` in the repository (see `web/README.md`). `Dockerfile.selfhost` already builds it and puts the output in the image at `/app/web-dist`, but the server does **not** serve those files yet: what you see now is still the server-rendered page described above, and neither the deployment nor the runtime behavior has changed.
+
+## Accounts and admission
+
+Since the account model, every person who signs in has an **account**. Its key is `acct:<uuid>`, a random identifier that belongs to this server, and every stored row (the encrypted Canvas token, the access decision and its history, write-tool switches, credential generations) is keyed by it. How the person signs in is stored separately, as an **external identity** attached to the account:
+
+| Part | Entra |
+|---|---|
+| Provider | `entra` |
+| Issuer | `https://login.microsoftonline.com/<tenant id>/v2.0` |
+| Subject | the `oid` claim (the user's object id in your directory) |
+
+The subject is never the `sub` claim (Entra makes `sub` different for every application) and never the e-mail address or user principal name (neither is a verified identifier). The same person is therefore the same account whatever name or address they use. Entra is the only login provider; the model is ready for another one to attach to an existing account later without changing any table.
+
+### Who is admitted
+
+One policy decides, for both `/account` and the MCP endpoint, what happens to someone the server has not seen before. The defaults reproduce the earlier behaviour exactly, so an existing deployment needs no new setting.
+
+| Setting | Values | Default |
+|---|---|---|
+| `ACCESS_POLICY` | `rules`: only people a rule admits get an account. `approval`: everybody who signs in gets an account that waits for an owner. `open`: everybody the tenant signs in gets an account at once. | `rules` |
+| `ACCESS_RULES` | With `rules`: comma-separated `provider:kind:value`. Any one match admits. | `entra:role:<ENTRA_REQUIRED_ROLE>` |
+| `ACCESS_FALLBACK` | With `rules`, for someone no rule admits: `deny` or `approval`. | `deny` |
+| `OWNER_RULES` | Who is an owner: rules in the same grammar, or `none`. | `entra:role:<ENTRA_OWNER_ROLE>` |
+| `SELFHOST_BOOTSTRAP_OWNER` | `entra:<tenant id>:<object id>`: this person becomes an owner when they sign in, but only while the server has no active owner. | unset |
+
+Rule kinds (checked at startup):
+
+- `entra:role:<value>`: the app role is in the token's `roles` claim.
+- `entra:group:<group object id>`: the group is in the token's `groups` claim. When Entra signals a groups *overage* (too many groups to list) the rule simply does not match; the server never calls Microsoft Graph.
+- `entra:tenant:<tenant id>`: the token comes from this tenant, which must be `ENTRA_TENANT_ID`.
+
+The server **refuses to start** on anything it cannot honour: an unknown rule kind or prefix, a `google:`, `github:` or `oidc:` rule (those providers are not enabled), `ACCESS_RULES` or `ACCESS_FALLBACK` together with a policy other than `rules`, a malformed value, `SELFHOST_BOOTSTRAP_OWNER` that names another tenant, and `TRUSTED_PROXY_CIDRS` (reserved: until a trusted-proxy mode exists, the sign-in history records the client address as `unknown` rather than trusting a forwarded header). `ACCESS_OPEN_ACKNOWLEDGE_PUBLIC` is accepted and reserved for login providers open to the whole internet, which Entra is not.
+
+Examples:
+
+```bash
+# The default: people with the Canvas.User app role.
+# (nothing to set)
+
+# Admit the members of one group, and put everybody else in the approval queue.
+ACCESS_POLICY=rules
+ACCESS_RULES=entra:group:00000000-0000-4000-8000-000000000000
+ACCESS_FALLBACK=approval
+
+# Everybody in the tenant waits for an owner.
+ACCESS_POLICY=approval
+```
+
+What a decision does:
+
+- **Admitted by a rule or `open`:** the account is created active. It is created by the first successful sign-in at `/account` or the first MCP request, whichever comes first.
+- **Waiting for approval:** the account is created `pending`. The person can sign in and sees that they are waiting, but cannot add a token, change anything or use any MCP tool (an MCP request is refused, naming the reason). Owners see the queue at `/account/admin` and press **Approve** or **Deny**; the CLI has `token_admin approve`. Approving takes effect at once; denying disables the account (reason `approval_denied`) and an owner can enable it again. At most 200 accounts may wait at once (more sign-ups are refused until some are decided) and an account still pending after 30 days is removed with its identity.
+- **A rule that later matches** activates a waiting account on the next sign-in or MCP request. A rule that stops matching never disables anyone, but a person who was admitted only by that rule is refused on each request while no rule matches them; a person an owner approved stays approved. To cut someone off for good, disable them.
+- **Refused:** nothing is written, so a stranger cannot fill the database by trying.
+- **Disabled accounts stay disabled** whatever the rules say, until an owner or the operator enables them.
+
+### Owners
+
+An account is an owner when `OWNER_RULES` match at **sign-in**. The role is taken at that moment and lost at a later sign-in (or an MCP request whose token was issued after the last sign-in) that no longer matches, as before. Two roles are never taken back by the rules: one the operator gave with `token_admin promote-owner`, and the bootstrap owner. The **last active owner is never demoted**, by a sign-in, an MCP request or `disable`; the operator can force the last case with `--allow-last-owner`. If the server has no owner (for example `OWNER_RULES=none` on a new database), use `SELFHOST_BOOTSTRAP_OWNER` once, or `token_admin promote-owner <account>`.
+
+### What is recorded
+
+- **Sign-in history** (`auth_events`, kept 90 days). Every sign-in attempt at `/account` writes one row: time, provider, result (a closed code such as `ok`, `account_created`, `pending_approval`, `access_denied`, `access_disabled`), the client address (always `unknown` for now) and a 16-character keyed hash of the browser's user agent, never the user agent itself. Each user sees their own last 20 on `/account`. A refusal that happens on the MCP side writes nothing. Old rows are pruned hourly.
+- **Audit log** (`audit_log`, in the database, always on). Administrative and security actions, newest first at `/account/admin/audit` (owners only): account creation and activation, approving, denying, disabling and enabling, role changes (including owner promotions by the operator), token enrolled, replaced, deleted or marked invalid, write-tool changes, the schema migration, and stale pending accounts removed. Each row has the time, an action code, who did it (an account, `operator` or `system`), the target account and a short reason. It never holds a token, a key or a network address. This is separate from the optional `LOG_ACCESS_EVENTS` file and logs described above.
+- The per-account history of status changes (`token_admin history`) is kept as before.
+
+### Operator commands
+
+`token_admin` names an account as `acct:<uuid>`, a bare uuid, `entra:<tenant id>:<object id>` (the form the earlier release used, found through the account's identity) or the tenant id and object id as two arguments, so existing scripts keep working.
+
+```bash
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin accounts          # every account, tab-separated
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin approve acct:<uuid>
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin promote-owner acct:<uuid>
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin disable <tenant id> <object id>
+```
+
+`disable` with an Entra identity the server has not seen yet creates a disabled account for it, so you can block someone before their first sign-in. `list` keeps its first six columns and adds the account key as a seventh.
 
 ## Disabling tools
 
@@ -522,7 +601,7 @@ This is the explicit opt-in mode in which **a server you run holds each user's C
 - **It protects against a database-only leak.** Someone who gets a copy of the token database (`tokens.sqlite3`, or a `pg_dump` file or the disk of the PostgreSQL server), a backup of `/data`, or a disk snapshot, **without** `.env`, cannot recover Canvas tokens or upstream Entra tokens. The keys are in `.env`, not in the volume.
 - **It does not protect against a compromised runtime.** The running process decrypts a user's Canvas token for every request. Anyone who can run code in the container, read its memory, or read its environment (`docker inspect`, `/proc/<pid>/environ`) gets the keys and can decrypt everything in `/data` and in the token database.
 - **It does not protect against the operator.** Whoever holds both `.env` and the data volume (the person running the server, anyone with root on the host, anyone with access to the Docker socket, and any backup system that stores both together, whether the database is the SQLite file or a PostgreSQL dump) can decrypt every enrolled Canvas token and act in Canvas as that user. The owner pages at `/account/admin` never show a token or let an owner read one, but **that is a user-interface restriction, not a cryptographic one**: it does not mean the operator cannot decrypt.
-- **Some data is not encrypted at all.** The token database keeps in plain text, per user: the principal key (`entra:<tenant id>:<object id>`), the Entra display name and user principal name (usually an e-mail address), the Canvas user id and name, the Canvas host, timestamps, health flags and reasons, the write tools the user switched on, and the access history (`principal_status_events`). A database-only leak exposes the list of who uses the server.
+- **Some data is not encrypted at all.** The token database keeps in plain text, per user: the account key (`acct:<uuid>`), the Entra identity it is attached to (issuer and object id) with the display name and user principal name (usually an e-mail address), the Canvas user id and name, the Canvas host, timestamps, health flags and reasons, the write tools the user switched on, the access history (`principal_status_events`), the sign-in history (`auth_events`, with a keyed hash of the user agent) and the audit log (`audit_log`). A database-only leak exposes the list of who uses the server.
 - **Everything the AI reads passes through your server and the user's AI provider.** Tool results (course names, grades, messages) are in the server's memory while they are processed, and in the provider's systems after that. The server writes no Canvas content to disk; the optional audit log holds codes and sanitized endpoint paths only (numeric ids, page slugs, `sis_*:` ids and `by_path` folder paths are masked as `***`).
 
 Be honest with the people you invite: they are trusting **you** and **the host you run this on**, not just the code.
@@ -531,7 +610,7 @@ Be honest with the people you invite: they are trusting **you** and **the host y
 
 | Item | Where it lives | Who can read it | Rotation | Backup and restore | Deletion and retention |
 |---|---|---|---|---|---|
-| **Canvas personal access tokens** (one per user) | The token database: `tokens.sqlite3` in the `/data` volume, or the `canvas-mcp-postgres` volume (or your external server) if `DATABASE_URL` is set. AES-256-GCM, the ciphertext bound to the user, Canvas host and key id. Also in process memory, decrypted, for the duration of each request that uses it. | The server process; the operator or anyone with `.env` **and** the volume. The user can see (and revoke) it in Canvas under Approved Integrations. Owners cannot read it in the UI. | The user creates a new token in Canvas and enrolls it. Key ring rotation re-encrypts rows (see [Secret rotation](#secret-rotation)). | Included in `/data` backups (SQLite) or in `pg_dump` files (PostgreSQL) as ciphertext; useless without `CANVAS_TOKEN_KEYS`. A restore brings back tokens the user has since replaced or deleted; dead ones fail the next health check. | Removed by the user (**Delete my token**), an owner (**Remove enrollment**) or `token_admin remove`. The row is deleted, but bytes can survive in SQLite free pages and the write-ahead log, or on PostgreSQL in dead tuples and WAL until vacuum, and in older backups and `pg_dump` files until overwritten, and are readable by anyone who also has the key. **The only deletion that makes a token worthless is revoking it in Canvas.** An invalid token keeps its ciphertext so that **Check again** can restore it, until removed. |
+| **Canvas personal access tokens** (one per user) | The token database: `tokens.sqlite3` in the `/data` volume, or the `canvas-mcp-postgres` volume (or your external server) if `DATABASE_URL` is set. AES-256-GCM, the ciphertext bound to the account, the Canvas host (when the row has one) and the key id. Also in process memory, decrypted, for the duration of each request that uses it. | The server process; the operator or anyone with `.env` **and** the volume. The user can see (and revoke) it in Canvas under Approved Integrations. Owners cannot read it in the UI. | The user creates a new token in Canvas and enrolls it. Key ring rotation re-encrypts rows (see [Secret rotation](#secret-rotation)). | Included in `/data` backups (SQLite) or in `pg_dump` files (PostgreSQL) as ciphertext; useless without `CANVAS_TOKEN_KEYS`. A restore brings back tokens the user has since replaced or deleted; dead ones fail the next health check. | Removed by the user (**Delete my token**), an owner (**Remove enrollment**) or `token_admin remove`. The row is deleted, but bytes can survive in SQLite free pages and the write-ahead log, or on PostgreSQL in dead tuples and WAL until vacuum, and in older backups and `pg_dump` files until overwritten, and are readable by anyone who also has the key. **The only deletion that makes a token worthless is revoking it in Canvas.** An invalid token keeps its ciphertext so that **Check again** can restore it, until removed. |
 | **`CANVAS_TOKEN_KEYS`** (AES-256 key ring) | `.env`, then the container environment. | Whoever can read `.env`, the environment of the container (`docker inspect`, root on the host) or the process. | `token_admin rotate` (see [Secret rotation](#secret-rotation)). | Keep a copy **offline and apart from the data backups**. If lost, enrolled tokens cannot be decrypted and users enroll again. | Until you remove an old key id from `.env`; the server refuses to start if a row still needs it. |
 | **Upstream Entra tokens** (access and refresh token per signed-in MCP client) | Encrypted files under `/data/fastmcp/oauth-proxy/<key fingerprint>/` (Fernet; the key is derived from `OAUTH_JWT_SIGNING_KEY`). Entra's access token is for this application's own API scope (`Canvas.Access`) and is not a Canvas credential. | The server process; whoever has `OAUTH_JWT_SIGNING_KEY` **and** the volume. A refresh token redeemed together with `ENTRA_CLIENT_SECRET` yields new Entra tokens for this application until Entra stops honouring it. | Change `OAUTH_JWT_SIGNING_KEY` (every client reconnects; the old directory is unreadable and can be deleted). To cut one person off at Entra: **Revoke sessions** on their user. | In `/data` backups. Not needed for a restore: losing it only makes clients reconnect. | Expired records are deleted by the cleanup the service runs; the refresh token lives as long as Entra reports (up to about a year). Remove the whole directory to forget all of them. |
 | **`OAUTH_JWT_SIGNING_KEY`** | `.env`, then the container environment. | Whoever reads `.env` or the environment. It signs the MCP access tokens the server issues and is the root of the storage key above, so holding it together with the volume means decrypting the Entra tokens. | Edit `.env`, `docker compose up -d`; all MCP clients reconnect. | Offline with `.env`. If lost, clients reconnect; nothing else is lost. | Replaced on rotation; the old fingerprint directory stays until you delete it. |
@@ -544,7 +623,7 @@ State kept only in memory (lost on every restart, never written to disk): access
 
 ### Retention and deletion
 
-1. **A user leaves or asks to be forgotten:** disable first (see [Revoking a user](#revoking-a-user)), then **Remove enrollment**, then have them delete the token in Canvas. The principal key, status flag and history rows are kept on purpose, so that a disablement stays in force; there is no purge command. They contain no token, and you can delete them by hand with SQL (SQLite with the server stopped, or `psql` on PostgreSQL), if your policy requires it.
+1. **A user leaves or asks to be forgotten:** disable first (see [Revoking a user](#revoking-a-user)), then **Remove enrollment**, then have them delete the token in Canvas. The account, its identity, status flag and history rows are kept on purpose, so that a disablement stays in force; there is no purge command. They contain no token, and you can delete them by hand with SQL (SQLite with the server stopped, or `psql` on PostgreSQL), if your policy requires it.
 2. **Old backups** keep whatever they held. Delete or expire them on a schedule that matches what you promised your users.
 3. **Decommissioning:** stop the container, delete the `canvas-mcp-data` volume and `.env` (and the offline copy). If you used PostgreSQL, also remove the `canvas-mcp-postgres` volume (`docker compose -f docker-compose.yml -f docker-compose.postgres.yml down -v` does both volumes), delete every `pg_dump` file, or drop the database on an external server. Then remove the Entra application or its client secret, and ask users to remove the Approved Integration in Canvas.
 
@@ -599,9 +678,36 @@ The OAuth state store is now built by this project and passed to FastMCP through
 
 Schema changes are now managed with Alembic. A database from any earlier release (schema versions 1 to 4) is adopted in place on first start, in one transaction, without touching a single stored token; see [Database](#database) for what is automatic, what is not, and how to check.
 
+### Upgrading to the account model
+
+The version with **accounts** (see [Accounts and admission](#accounts-and-admission)) moves the token database to **schema version 5** with the Alembic revision `0002_accounts`. Unlike every earlier step this one **re-encrypts every stored Canvas token**: the ciphertext is bound to the person it belongs to, and the person is now `acct:<uuid>` instead of `entra:<tenant id>:<object id>`, so each row is decrypted with its old binding and sealed again under the new one (with the active key and a fresh nonce), then decrypted a second time and compared. Nothing else changes for the people: they stay enrolled, disabled users stay disabled, owners stay owners, write-tool switches and credential generations are kept, and no one has to do anything. Open `/account` sessions end once (the cookie format changed), MCP connections are not affected.
+
+What the upgrade does, in one transaction on both backends:
+
+- creates `accounts`, `external_identities`, `auth_events` and `audit_log`, gives every earlier principal a new account with one Entra identity (issuer `https://login.microsoftonline.com/<tid>/v2.0`, subject = the object id), moves the contents of `principal_status` into `accounts` and drops `principal_status`;
+- re-encrypts the tokens as described, and re-keys the write-tool switches, credential generations and status history to the new account keys;
+- checks the result (every token decrypts, every row is accounted for) and **rolls everything back on the slightest difference**, so a failed upgrade leaves the database exactly as it was.
+
+Before you start:
+
+1. **Keep `CANVAS_TOKEN_KEYS` as it is.** The upgrade needs every key id in use. A stored token that does not decrypt stops the upgrade (and with it the server's start) with a message saying so. Fix the keys, or accept the loss with `db upgrade --mark-undecryptable-invalid`, which migrates such rows marked invalid so those people enroll again.
+2. **Back up.** For SQLite the upgrade copies a populated database file first, next to it: `tokens.sqlite3.pre-0002-accounts-<UTC time>.bak` (private, mode 0600, removed again if the upgrade fails; it holds ciphertexts, so keep it as safe as the database). `db upgrade --backup PATH` writes a copy where you want it instead. For PostgreSQL there is no automatic copy: run `pg_dump -Fc` first (see [Backup and restore](#backup-and-restore)).
+3. **Try it without changing anything:** `token_admin db upgrade --dry-run` runs the whole migration, prints what it would do (accounts and identities created, tokens re-encrypted, unreadable tokens, rows re-keyed, disabled accounts, owners) and rolls back.
+
+```bash
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin db current
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin db upgrade --dry-run
+```
+
+With `DATABASE_AUTO_MIGRATE=true` (the default) the new server does this itself at start, after the same automatic SQLite copy. With `DATABASE_AUTO_MIGRATE=false` it refuses to start until you run `db upgrade`. Run only one server against the database during the upgrade.
+
+**Rolling back means restoring the backup.** There is no downgrade: stop every server, put the backup file (or the `pg_dump`) back, and run the previous image. The previous image refuses a version 5 database on purpose, because it reads `principal_status` and would serve users you disabled. Anything that happened after the upgrade (new accounts, new tokens, approvals) is lost with it.
+
+What operators of scripts will see: `token_admin list` has a seventh column (the account key) and `check`/`access`/`history` print account keys where they printed `entra:` keys; the old tenant id and object id arguments still work everywhere. The `entra:<tenant>:<object>` strings that older audit lines and logs contain are not rewritten.
+
 ## Database
 
-The self-hosted server keeps everything it must not lose in **one database**: the encrypted Canvas tokens, the access decisions (disabled users, owners and the history of every change), the per-user write-tool switches and the credential generations. Two backends are supported. It is still **one server process**: do not run two instances against one database.
+The self-hosted server keeps everything it must not lose in **one database**: the accounts and their external identities, the encrypted Canvas tokens, the access decisions (disabled users, owners and the history of every change), the sign-in history and audit log, the per-user write-tool switches and the credential generations. Two backends are supported. It is still **one server process**: do not run two instances against one database.
 
 | | SQLite (default) | PostgreSQL (optional) |
 | --- | --- | --- |
@@ -643,23 +749,24 @@ Every write to the access state takes one global lock inside PostgreSQL (`pg_adv
 
 ### Schema changes (migrations)
 
-- Alembic manages the schema. `meta.schema_version` (currently **4**) is still the marker that stops an older server from opening a newer database; Alembic keeps its own table, `canvas_mcp_alembic_version`, so it cannot collide with anything else in a shared PostgreSQL database.
+- Alembic manages the schema. `meta.schema_version` (currently **5**) is still the marker that stops an older server from opening a newer database; Alembic keeps its own table, `canvas_mcp_alembic_version`, so it cannot collide with anything else in a shared PostgreSQL database.
 - **Automatic by default** (`DATABASE_AUTO_MIGRATE=true`): the server applies pending revisions when it starts, inside one transaction. This is safe because the server is one process; if two starts overlap (a restart racing a CLI command), a lock makes one migrate and the other wait, then find nothing to do. With `DATABASE_AUTO_MIGRATE=false` the server instead **refuses** to start on a database that is not current and tells you to run the command below, so you can take a backup first.
 - **Existing SQLite files are adopted in place**, whatever their version (1 to 4, including the three different shapes version 2 had): missing tables and columns are added, `principal_key` is filled in, the baseline revision is recorded, all in one transaction, so a crash leaves the file as it was. No token, nonce, key id, status, session epoch, owner flag, history entry or generation is changed, and every token stays readable. Starting again is a no-op.
 - **A database written by a newer server is refused and left untouched** (`... schema version N is newer than this server supports`, or an unknown Alembic revision). Do not edit the marker to get around it.
-- **No downgrade.** Take a backup first and restore it to go back. A database that has only been adopted to the first Alembic revision still has marker 4 and is readable by the previous release; any later revision that an older server would misread will raise the marker, so rolling back past it needs the backup, as before.
+- **No downgrade.** Take a backup first and restore it to go back. A database that has only been adopted to the first Alembic revision still has marker 4 and is readable by the previous release. The second revision (`0002_accounts`, the account model) raises the marker to 5 and re-encrypts the tokens, so going back past it needs the backup; see [Upgrading to the account model](#upgrading-to-the-account-model).
 
 ```bash
 docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin db current
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin db upgrade --dry-run                                  # show what would change, change nothing
 docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin db upgrade --backup /data/before-upgrade.sqlite3   # SQLite
 docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin db upgrade                                          # PostgreSQL: pg_dump first
 ```
 
-`db current` needs no keys and changes nothing. It prints the backend (without credentials), the Alembic revision, the marker, the head revision and a state: `current`, `legacy` (a file from before Alembic), `uninitialized`, `behind`, `newer` or `unreadable`. Exit code 0 means current, 4 means the schema is behind this build (run `db upgrade`), 2 means newer or unusable. `db upgrade --backup PATH` (SQLite only) first copies the file to a new private (mode 0600) file with SQLite's backup API; it refuses to overwrite an existing file. Stop the server before running `db upgrade` yourself.
+`db current` needs no keys and changes nothing. It prints the backend (without credentials), the Alembic revision, the marker, the head revision and a state: `current`, `legacy` (a file from before Alembic), `uninitialized`, `behind`, `newer` or `unreadable`. Exit code 0 means current, 4 means the schema is behind this build (run `db upgrade`), 2 means newer or unusable. `db upgrade --backup PATH` (SQLite only) first copies the file to a new private (mode 0600) file with SQLite's backup API; it refuses to overwrite an existing file. Without `--backup`, a populated SQLite file is still copied automatically before a revision that re-encrypts data. `--dry-run` rolls everything back after reporting, and `--mark-undecryptable-invalid` lets the account upgrade carry tokens that do not decrypt over as invalid instead of stopping. `db upgrade` needs `CANVAS_TOKEN_KEYS` in the environment for the account upgrade. Stop the server before running `db upgrade` yourself.
 
 ### Moving from SQLite to PostgreSQL
 
-Do **not** just set `DATABASE_URL`. An empty PostgreSQL database has no `principal_status`, so every user you disabled would be active again and could enroll. The server therefore **refuses to start** when `DATABASE_URL` names a database that holds no data (even one whose schema already exists, for example after `db upgrade` or a failed import) while the SQLite file in the data directory still holds enrollments or access state. `token_admin` commands (except `db ...`) refuse in the same situation, so a stray `disable` cannot make the empty database look populated. Import the file instead:
+Do **not** just set `DATABASE_URL`. An empty PostgreSQL database has no accounts, so every user you disabled would be active again and could enroll. The server therefore **refuses to start** when `DATABASE_URL` names a database that holds no data (even one whose schema already exists, for example after `db upgrade` or a failed import) while the SQLite file in the data directory still holds enrollments or access state. `token_admin` commands (except `db ...`) refuse in the same situation, so a stray `disable` cannot make the empty database look populated. Import the file instead:
 
 ```bash
 docker compose stop canvas-mcp
@@ -669,7 +776,7 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml run --rm --n
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
 ```
 
-The import copies every table in one transaction into an empty database (it refuses a database that already holds data), copies ciphertexts unchanged, then checks the row counts and that **every stored token decrypts with `CANVAS_TOKEN_KEYS`**; any problem rolls everything back. The SQLite file is never modified (a pre-Alembic file is adopted in a temporary copy). Afterwards keep it as a backup, or move it away: once the PostgreSQL database holds rows (in `canvas_tokens`, `principal_status`, `principal_status_events`, `user_tool_prefs` or `credential_generations`; an empty schema does not count) the server no longer looks at it. Going back the other way is a restore of the SQLite backup you took, not an export.
+The import copies every table in one transaction into an empty database (it refuses a database that already holds data), copies ciphertexts unchanged, then checks the row counts and that **every stored token decrypts with `CANVAS_TOKEN_KEYS`**; any problem rolls everything back. The SQLite file is never modified (a pre-Alembic file is adopted in a temporary copy). Afterwards keep it as a backup, or move it away: once the PostgreSQL database holds rows (in `accounts`, `canvas_tokens`, `principal_status_events`, `user_tool_prefs` or `credential_generations`; an empty schema does not count) the server no longer looks at it. Going back the other way is a restore of the SQLite backup you took, not an export.
 
 ## Secret rotation
 
@@ -738,6 +845,8 @@ docker compose start canvas-mcp
 
 The same warnings apply as for SQLite: a restore rewinds disablements and credential generations, so run `token_admin access` afterwards and restart the server. The `/data` archive still matters for the OAuth proxy state and the audit log.
 
+Before an upgrade that re-encrypts data (the account model), a populated SQLite file is also copied next to itself automatically (`*.pre-0002-accounts-<time>.bak`); with PostgreSQL take the `pg_dump` yourself first. Those `.bak` files hold ciphertexts like the database: delete them once the upgrade is confirmed good, and keep them apart from `.env`.
+
 If you do not want to stop the service, you can back up just the token store (SQLite): `sqlite3 /data/canvas-mcp/tokens.sqlite3 '.backup /backup/tokens.sqlite3'` (run it in an environment that can reach that volume).
 
 Restore: first run `docker volume inspect canvas-mcp-data` (the volume must be the one the service is using; on a fresh deployment, create it first with `docker compose up --no-start`), stop the service, extract the archive into that volume (`docker run --rm -v canvas-mcp-data:/data -v "$PWD":/backup alpine tar xzf /backup/<file>.tgz -C /data`), then confirm the directory owner is uid 10001 (`chown -R 10001:10001 /data`, run in the same temporary container), and then `docker compose up -d`.
@@ -758,13 +867,13 @@ Revoking is an **access decision**, not the deletion of a database row. An owner
 
 Who may do what:
 
-- **Only owners** (the Entra role named by `ENTRA_OWNER_ROLE`, normally `Canvas.Owner`) can disable and enable from the browser, and the **operator** with shell access to the data volume can do the same with the CLI. Users cannot lift their own disablement, and an owner who is disabled can no longer act.
+- **Only owners** (accounts that `OWNER_RULES` matched at their last sign-in, by default the Entra role named by `ENTRA_OWNER_ROLE`, normally `Canvas.Owner`) can disable and enable from the browser, and the **operator** with shell access to the data volume can do the same with the CLI. Users cannot lift their own disablement, and an owner who is disabled can no longer act.
 - **An owner cannot disable themselves**, and nobody (owner or not) can disable the **last active owner**. "Active owner" means a person whose stored owner flag is still set, and that flag is only lowered at their next sign-in or MCP request without the role. A former owner whose Entra role you removed and who never comes back therefore still counts, so the guard can be satisfied by someone who no longer holds the role; `token_admin access` lists `owner_seen_at` (the last time the role was seen) for checking. The check and the write are one database transaction, so two owners cannot disable each other at the same moment. The operator can force it with `token_admin disable ... --allow-last-owner` (break-glass), and if you are ever left without an owner, sign in with an account that has the Entra owner role (this records it again) or use the CLI.
 - **Owner status is re-checked, not remembered.** The owner role in the browser session is only a snapshot. The admin page and every admin action need a sign-in from the **last 10 minutes** (the same window as turning a write tool on) and a stored owner flag that a sign-in recorded, and the database re-checks inside the transaction that the acting owner is still an active owner. The stored flag is lowered at the owner's next sign-in without the role, or by an MCP request whose token was issued after their last sign-in and no longer carries the role (a token issued earlier cannot undo a promotion). The server only learns about an owner role being *added* when that person signs in.
 
 ### Revoking someone, in order
 
-1. **Disable the user** (`/account/admin` → **Disable user**, or `token_admin disable <tenant-id> <object-id>`). This is the step that takes effect at once.
+1. **Disable the user** (`/account/admin` → **Disable user**, or `token_admin disable acct:<uuid>`, or `token_admin disable <tenant-id> <object-id>`). This is the step that takes effect at once.
 2. Optional: **Remove enrollment**, to delete their encrypted Canvas token from the database.
 3. In Entra, remove them from the assigned group (or from the app's "Users and groups"), and on their user page click **Revoke sessions** so refresh tokens already issued stop working. This stops Entra from issuing new tokens to them.
 4. Ask the person to delete their access token in Canvas themselves (Account → Settings → Approved Integrations), or do it for them if you can. That is the only thing that makes the Canvas token itself worthless; the server cannot do it.
@@ -846,6 +955,9 @@ Use `--config` to see the value the server runs with.
 | **421** | The reverse proxy is not forwarding the `Host` header, or the domain being visited is not the one in `PUBLIC_BASE_URL`. For nginx add `proxy_set_header Host $host;` |
 | A tool returns an "**enroll** ..." message | The user has not enrolled a Canvas token yet (or the enrolled token cannot be decrypted). Have them enroll or re-enroll at `/account` |
 | Sign-in or a tool says **disabled by an administrator** (HTTP 403 on the MCP endpoint) | An owner or the operator disabled this user. Only an owner (`/account/admin` → **Enable user**) or `token_admin enable` can lift it; deleting the token or enrolling again does not. See [Revoking a user](#revoking-a-user) |
+| `/account` says the account is **waiting for approval**, or an MCP request is refused as pending | `ACCESS_POLICY=approval` (or `ACCESS_FALLBACK=approval`) put the person in the queue. An owner approves them at `/account/admin` (**Approve**) or the operator runs `token_admin approve acct:<uuid>`. See [Accounts and admission](#accounts-and-admission) |
+| The server will not start and names `ACCESS_RULES`, `OWNER_RULES`, `ACCESS_POLICY`, `ACCESS_FALLBACK`, `SELFHOST_BOOTSTRAP_OWNER` or `TRUSTED_PROXY_CIDRS` | An admission setting is malformed or unsupported (an unknown rule kind, a `google:`/`github:`/`oidc:` rule, `ACCESS_RULES` with a policy other than `rules`, a bootstrap owner of another tenant, or the reserved proxy setting). The message says which; fix `.env` |
+| The server will not start after an upgrade: a stored token "does not decrypt" | The account upgrade needs every key in `CANVAS_TOKEN_KEYS` that stored tokens use. Restore the missing key, or run `token_admin db upgrade --mark-undecryptable-invalid` to migrate those rows as invalid (those people enroll again). Nothing was changed |
 | A tool says **Canvas rejected your stored access token** | The token was revoked, expired or regenerated in Canvas and the server confirmed it. The user creates a new token in Canvas and enrolls it at `/account` (the banner there explains how). If Canvas was only briefly wrong, **Check again** on `/account` restores it |
 | A write tool returns "**is turned off for your account**" | The server allows the tool, but this user has not turned it on. They open `/account`, sign in, tick it under **Write tools** and save (turning on needs a sign-in from the last 10 minutes), then start a new chat or reconnect the connector so the app refreshes its tool list |
 | The user wants a write tool but it is shown as "**not offered on this server**" | It is not in `ALLOWED_WRITE_TOOLS`, or it is not registered (for `STUDENT_WRITE_TOOLS` tools, also check that list and `CANVAS_ROLE`). The operator decides; users cannot turn it on |

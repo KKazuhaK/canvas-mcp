@@ -243,6 +243,10 @@ def test_every_variable_the_selfhost_settings_read_is_documented(env_text):
         "ACCOUNT_SESSION_TTL_SECONDS", "OAUTH_ALLOWED_REDIRECT_URIS", "MCP_AUTH_MODE", "SELFHOST_COURSE_STATE",
         "SELFHOST_DISABLED_TOOLS",
     }
+    # The admission settings are read by the pure module (settings.py hands it the environment).
+    accounts_source = (SRC / "core" / "selfhost" / "accounts.py").read_text(encoding="utf-8")
+    read |= set(re.findall(r'^[A-Z_]+_ENV = "([A-Z][A-Z0-9_]+)"$', accounts_source, re.MULTILINE))
+    assert {"ACCESS_POLICY", "ACCESS_RULES", "OWNER_RULES", "SELFHOST_BOOTSTRAP_OWNER"} <= read
     assert len(read) >= 12  # the regex still finds the settings
     for name in sorted(read):
         assert re.search(rf"^#? ?{name}=", env_text, re.MULTILINE), f"{name} is not in env.example"
@@ -281,7 +285,7 @@ def test_container_port_health_path_and_mcp_path_match_the_code():
 def test_token_admin_commands_in_the_docs_exist():
     readme = (SELFHOST / "README.md").read_text(encoding="utf-8")
     source = (SRC / "core" / "selfhost" / "token_admin.py").read_text(encoding="utf-8")
-    for command in set(re.findall(r"token_admin (check|list|revoke|remove|disable|enable|access|history|rotate|db)\b", readme)):
+    for command in set(re.findall(r"token_admin (check|list|accounts|approve|promote-owner|revoke|remove|disable|enable|access|history|rotate|db)\b", readme)):
         assert f'add_parser("{command}"' in source
 
 
@@ -673,3 +677,58 @@ def test_the_database_commands_in_the_docs_exist_in_the_cli():
     source = (SRC / "core" / "selfhost" / "token_admin.py").read_text(encoding="utf-8")
     for command in ("current", "upgrade", "import-sqlite"):
         assert re.search(rf'add_parser\(\s*"{command}"', source), command
+
+
+# --- the account model ---
+
+
+def test_the_readme_documents_accounts_admission_and_the_upgrade(readme):
+    for needle in (
+        "## Accounts and admission",
+        "### Upgrading to the account model",
+        "acct:<uuid>",
+        "https://login.microsoftonline.com/<tenant id>/v2.0",
+        "ACCESS_POLICY",
+        "ACCESS_RULES",
+        "ACCESS_FALLBACK",
+        "OWNER_RULES",
+        "SELFHOST_BOOTSTRAP_OWNER",
+        "TRUSTED_PROXY_CIDRS",
+        "/account/admin/audit",
+        "db upgrade --dry-run",
+        "pre-0002-accounts",
+        "pg_dump",
+        "token_admin approve",
+        "token_admin promote-owner",
+    ):
+        assert needle in readme, f"README.md is missing {needle!r}"
+
+
+def test_the_changelog_announces_the_account_model():
+    changelog = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    unreleased = changelog[changelog.index("## [Unreleased]") :].split("\n## [")[0]
+    assert "acct:<uuid>" in unreleased and "0002_accounts" in unreleased
+
+
+def test_the_documented_rule_kinds_are_the_ones_the_parser_accepts():
+    from canvas_mcp.core.selfhost import accounts
+
+    problems: list[str] = []
+    tenant = "11111111-2222-3333-4444-555555555555"
+    for rule in (
+        "entra:role:Canvas.User",
+        "entra:group:99999999-0000-4000-8000-000000000001",
+        f"entra:tenant:{tenant}",
+    ):
+        accounts.parse_access_settings(
+            {"ACCESS_RULES": rule}, tenant_id=tenant, required_role="Canvas.User",
+            owner_role="Canvas.Owner", problems=problems,
+        )
+    assert problems == []
+    for rule in ("google:role:x", "github:role:x", "oidc:role:x", "entra:magic:x", "other:role:x"):
+        refused: list[str] = []
+        accounts.parse_access_settings(
+            {"ACCESS_RULES": rule}, tenant_id=tenant, required_role="Canvas.User",
+            owner_role="Canvas.Owner", problems=refused,
+        )
+        assert refused, rule
