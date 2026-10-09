@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .credentials import get_request_principal
+from .redact import scrub_event, scrub_secrets, strip_query
 
 # Separate logger for audit events (not the main application logger)
 _audit_logger = logging.getLogger("canvas_mcp.audit")
@@ -39,14 +40,16 @@ _NUMERIC_PATH_RE = re.compile(r"/\d+")
 _MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 _BACKUP_COUNT = 5
 _AUDIT_FILENAME = "audit.jsonl"
+# Free-form error text is cut to this length; a codes-only field never needs more.
+_MAX_ERROR_CHARS = 300
 
 
 def _sanitize_endpoint(endpoint: str) -> str:
-    """Replace numeric IDs in endpoint paths with '***'.
+    """Replace numeric IDs in endpoint paths with '***' and drop the query string.
 
-    Example: /courses/12345/users/678 → /courses/***/users/***
+    Example: /courses/12345/users/678?access_token=x → /courses/***/users/***
     """
-    return _NUMERIC_PATH_RE.sub("/***", endpoint)
+    return _NUMERIC_PATH_RE.sub("/***", strip_query(scrub_secrets(endpoint)))
 
 
 def init_audit_logging() -> None:
@@ -116,7 +119,12 @@ def _emit(event: dict[str, Any]) -> None:
         # An event that names its own subject (an admin acting on someone else's
         # enrollment) keeps it.
         event.setdefault("principal", principal.key)
-    _audit_logger.info(json.dumps(event, default=str))
+    # Last line of defence: no event may carry a credential, whatever text a
+    # caller passed in (an exception message that quotes a URL, a header).
+    scrubbed = scrub_event(event)
+    if isinstance(scrubbed.get("error"), str):
+        scrubbed["error"] = scrub_secrets(scrubbed["error"], emails=True)[:_MAX_ERROR_CHARS]
+    _audit_logger.info(json.dumps(scrubbed, default=str))
 
 
 def log_data_access(

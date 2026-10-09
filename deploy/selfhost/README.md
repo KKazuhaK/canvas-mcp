@@ -18,6 +18,7 @@ Image: `ghcr.io/kkazuhak/canvas-mcp` (linux/amd64 + linux/arm64, non-root, data 
 - [Per-user enrollment (/account)](#per-user-enrollment-account)
 - [Multiple schools (optional)](#multiple-schools-optional)
 - [Prompt-injection risk of write tools](#prompt-injection-risk-of-write-tools)
+- [Custody and privacy boundary](#custody-and-privacy-boundary)
 - [Upgrading](#upgrading)
 - [Secret rotation](#secret-rotation)
 - [Backup and restore](#backup-and-restore)
@@ -57,7 +58,7 @@ Key points:
 
 - Who can use it: accounts assigned to the Entra app role `Canvas.User` (or your own `Canvas.Owner`).
 - Each person enrolls their own Canvas token at `/account`. From then on the AI always uses the **caller's own** token; there is no server-level Canvas credential at all.
-- Canvas tokens are stored encrypted in `/data` and the key lives only in `.env`, so leaking a backup of the data volume on its own does not leak the tokens.
+- Canvas tokens are stored encrypted in `/data` and the keys live only in `.env`, so a leaked database or backup **on its own** does not leak the tokens. That is the whole claim: the running server decrypts every token, so a compromised runtime, or an operator who holds both `.env` and the data, can use every enrolled token. See [Custody and privacy boundary](#custody-and-privacy-boundary).
 - The audit log is **off by default**: events are written, and the `audit/` directory is created, only if you set `LOG_ACCESS_EVENTS=true` in `.env`. Even when it is on, enrolling or replacing a Canvas token at `/account` does not write an audit log entry (to find out who enrolled and when, look at the created and updated times in `token_admin list`). What it does write about tokens are health events (`event_type` `canvas_token`): a token marked invalid with its reason, the outcome of a re-check, an administrator marking a token invalid, and a Canvas user change that was detected or confirmed. They carry the principal key and a short code, never a token, a name or an e-mail address. Access decisions write `principal_status` events: a user disabled or enabled (with the acting owner's key, or `operator`), an owner gained or lost, a disabled user refused at sign-in or enrollment, a refused disable, an owner removing an enrollment, and a user deleting their own token (`self_disconnected`); the same transitions are always kept in the token database (`token_admin history`). A user switching write tools on or off at `/account` writes a `write_tools` event (`changed`, `cleared`, or `refused` when the sign-in was too old), with the principal key and the tool names only.
 
 ## Prerequisites
@@ -293,6 +294,43 @@ Standard Caddy has no rate-limiting feature. To limit `/register` and `/authoriz
 
 The service itself **does not trust** the `X-Forwarded-*` headers (every URL is generated from `PUBLIC_BASE_URL`), so how the proxy sets those headers does not affect security.
 
+### Keep OAuth codes out of proxy logs
+
+The sign-in flow puts one-time values in URLs: `/authorize` receives `state` and a PKCE challenge, and the browser comes back to `/auth/callback?code=...&state=...` after Entra (this service's redirect back to the MCP client carries another `code`/`state` pair in its `Location` header). A default access log writes the whole request line, query string included, so these values end up in log files, log shippers and backups. They are short-lived and single use, but a code captured and replayed inside its lifetime is still an attack, and `state` is a CSRF defence. Log the path only.
+
+nginx (the full example is in [`nginx.conf.example`](nginx.conf.example)): define a format that uses `$uri`, which has no query string, instead of `$request`, and use it for every `access_log`:
+
+```nginx
+log_format canvas_safe '$remote_addr [$time_local] "$request_method $uri" $status $body_bytes_sent "$http_user_agent"';
+access_log /var/log/nginx/canvas-mcp.access.log canvas_safe;
+```
+
+nginx writes the request line (with its query string) into `error_log` when an upstream error occurs; keep that log at `error` level or above, restricted to root, with short retention. Do not log `$http_authorization`, `$http_cookie` or `$http_referer`.
+
+Caddy (the full example is in [`Caddyfile.example`](Caddyfile.example)): Caddy logs nothing until you add a `log` block, and its `filter` encoder can blank query values and headers:
+
+```caddy
+log {
+	output file /var/log/caddy/canvas-mcp.access.log
+	format filter {
+		wrap json
+		request>uri query {
+			replace code REDACTED
+			replace state REDACTED
+			replace session_state REDACTED
+			replace id_token REDACTED
+			replace access_token REDACTED
+		}
+		request>headers>Authorization delete
+		request>headers>Cookie delete
+		resp_headers>Set-Cookie delete
+		resp_headers>Location delete
+	}
+}
+```
+
+Any other proxy, load balancer, CDN or WAF in front (Cloudflare logs, a cloud load balancer's access log) needs the same treatment; check what it records and for how long. In Cloudflare, do not enable logpush fields that include the query string for this hostname.
+
 ### Disk and abuse protection
 
 `POST /register` (dynamic client registration) and `GET /authorize` **need no sign-in**, so anyone can call them, and every call writes a file under `/data/fastmcp` (on the same volume as the Canvas token store). Without limits, someone could fill the disk or the inodes, after which everyone's enrollment and audit log writes would fail. The protection has three layers:
@@ -453,6 +491,49 @@ Mitigations:
 4. Make sure every user knows the above, and ask them to follow item 1.
 5. Even with a tool in `ALLOWED_WRITE_TOOLS`, each user has to turn it on for themselves at `/account` (see [Write tools: each user opts in](#write-tools-each-user-opts-in)). Nothing is on for anyone until they do, and a tool you add later starts off for everyone. Tell users to turn on only the few tools they really need.
 
+## Custody and privacy boundary
+
+This is the explicit opt-in mode in which **a server you run holds each user's Canvas access token**. That is a different trust model from running canvas-mcp locally (your own token in your own `.env`) and from the upstream HTTP modes, where each request supplies the token and the server keeps none. Read this section before you invite anyone, and show it to them.
+
+### What the encryption does and does not protect
+
+- **It protects against a database-only leak.** Someone who gets a copy of `tokens.sqlite3`, a backup of `/data`, or a disk snapshot, **without** `.env`, cannot recover Canvas tokens or upstream Entra tokens. The keys are in `.env`, not in the volume.
+- **It does not protect against a compromised runtime.** The running process decrypts a user's Canvas token for every request. Anyone who can run code in the container, read its memory, or read its environment (`docker inspect`, `/proc/<pid>/environ`) gets the keys and can decrypt everything in `/data`.
+- **It does not protect against the operator.** Whoever holds both `.env` and the data volume (the person running the server, anyone with root on the host, anyone with access to the Docker socket, and any backup system that stores both together) can decrypt every enrolled Canvas token and act in Canvas as that user. The owner pages at `/account/admin` never show a token or let an owner read one, but **that is a user-interface restriction, not a cryptographic one**: it does not mean the operator cannot decrypt.
+- **Some data is not encrypted at all.** The token database keeps in plain text, per user: the principal key (`entra:<tenant id>:<object id>`), the Entra display name and user principal name (usually an e-mail address), the Canvas user id and name, the Canvas host, timestamps, health flags and reasons, the write tools the user switched on, and the access history (`principal_status_events`). A database-only leak exposes the list of who uses the server.
+- **Everything the AI reads passes through your server and the user's AI provider.** Tool results (course names, grades, messages) are in the server's memory while they are processed, and in the provider's systems after that. The server writes no Canvas content to disk; the optional audit log holds codes and sanitized endpoint paths only.
+
+Be honest with the people you invite: they are trusting **you** and **the host you run this on**, not just the code.
+
+### Inventory: every secret and token this mode holds
+
+| Item | Where it lives | Who can read it | Rotation | Backup and restore | Deletion and retention |
+|---|---|---|---|---|---|
+| **Canvas personal access tokens** (one per user) | `tokens.sqlite3` in the `/data` volume, AES-256-GCM, the ciphertext bound to the user, Canvas host and key id. Also in process memory, decrypted, for the duration of each request that uses it. | The server process; the operator or anyone with `.env` **and** the volume. The user can see (and revoke) it in Canvas under Approved Integrations. Owners cannot read it in the UI. | The user creates a new token in Canvas and enrolls it. Key ring rotation re-encrypts rows (see [Secret rotation](#secret-rotation)). | Included in `/data` backups as ciphertext; useless without `CANVAS_TOKEN_KEYS`. A restore brings back tokens the user has since replaced or deleted; dead ones fail the next health check. | Removed by the user (**Delete my token**), an owner (**Remove enrollment**) or `token_admin remove`. The row is deleted, but bytes can survive in SQLite free pages, the write-ahead log and older backups until overwritten, and are readable by anyone who also has the key. **The only deletion that makes a token worthless is revoking it in Canvas.** An invalid token keeps its ciphertext so that **Check again** can restore it, until removed. |
+| **`CANVAS_TOKEN_KEYS`** (AES-256 key ring) | `.env`, then the container environment. | Whoever can read `.env`, the environment of the container (`docker inspect`, root on the host) or the process. | `token_admin rotate` (see [Secret rotation](#secret-rotation)). | Keep a copy **offline and apart from the data backups**. If lost, enrolled tokens cannot be decrypted and users enroll again. | Until you remove an old key id from `.env`; the server refuses to start if a row still needs it. |
+| **Upstream Entra tokens** (access and refresh token per signed-in MCP client) | Encrypted files under `/data/fastmcp/oauth-proxy/<key fingerprint>/` (Fernet; the key is derived from `OAUTH_JWT_SIGNING_KEY`). Entra's access token is for this application's own API scope (`Canvas.Access`) and is not a Canvas credential. | The server process; whoever has `OAUTH_JWT_SIGNING_KEY` **and** the volume. A refresh token redeemed together with `ENTRA_CLIENT_SECRET` yields new Entra tokens for this application until Entra stops honouring it. | Change `OAUTH_JWT_SIGNING_KEY` (every client reconnects; the old directory is unreadable and can be deleted). To cut one person off at Entra: **Revoke sessions** on their user. | In `/data` backups. Not needed for a restore: losing it only makes clients reconnect. | Expired records are deleted by the cleanup the service runs; the refresh token lives as long as Entra reports (up to about a year). Remove the whole directory to forget all of them. |
+| **`OAUTH_JWT_SIGNING_KEY`** | `.env`, then the container environment. | Whoever reads `.env` or the environment. It signs the MCP access tokens the server issues and is the root of the storage key above, so holding it together with the volume means decrypting the Entra tokens. | Edit `.env`, `docker compose up -d`; all MCP clients reconnect. | Offline with `.env`. If lost, clients reconnect; nothing else is lost. | Replaced on rotation; the old fingerprint directory stays until you delete it. |
+| **`ACCOUNT_SESSION_SECRET`** | `.env`, then the container environment. | Whoever reads `.env` or the environment. It seals the `/account` session and login cookies. **Treat it as owner-equivalent:** with it someone could forge a session cookie for any user; the owner flag in a cookie is re-checked against the stored owner status, but a forged cookie for a real owner would pass. | Edit `.env`, `docker compose up -d`; only open `/account` sessions end. | Offline with `.env`. Cheap to replace. | Sessions are sealed cookies with a fixed lifetime (`ACCOUNT_SESSION_TTL_SECONDS`, default 15 minutes) and live in the browser, not on the server. |
+| **`ENTRA_CLIENT_SECRET`** | `.env`, then the container environment; at Entra as the registered secret. | Whoever reads `.env` or the environment. It lets a holder authenticate as this application to Entra (for example to redeem an authorization code it intercepted). It cannot read Canvas. | Create a new secret in Entra, edit `.env`, `docker compose up -d`; no other effect. | Offline with `.env`, or simply create another. | Expires at the date you chose in Entra; delete the old secret there. |
+| **`.env` itself** | The host file (mode 600) and the container environment. | Root on the host, the Docker group, anyone who can read the file or run `docker inspect`. | As listed above. | **Never in the same backup as `/data`.** A password manager is the right place. | Delete the file when you decommission the server. |
+| **Audit log** (optional) | `/data/audit/audit.jsonl` and container stderr when `LOG_ACCESS_EVENTS=true`. | Whoever can read the volume or the container logs. Holds principal keys, closed-set codes and sanitized endpoint paths; no tokens, names or Canvas content. Free-form text is scrubbed of credentials and e-mail addresses and cut short. | n/a | In `/data` backups. | Rotating file (10 MB, six files in all), then overwritten. |
+
+State kept only in memory (lost on every restart, never written to disk): course caches, course-policy decisions, access and token-health verdicts, pending write confirmations, and the decrypted Canvas token of each running request.
+
+### Retention and deletion
+
+1. **A user leaves or asks to be forgotten:** disable first (see [Revoking a user](#revoking-a-user)), then **Remove enrollment**, then have them delete the token in Canvas. The principal key, status flag and history rows are kept on purpose, so that a disablement stays in force; there is no purge command. They contain no token, and you can delete them by hand in SQLite, with the server stopped, if your policy requires it.
+2. **Old backups** keep whatever they held. Delete or expire them on a schedule that matches what you promised your users.
+3. **Decommissioning:** stop the container, delete the `canvas-mcp-data` volume and `.env` (and the offline copy), remove the Entra application or its client secret, and ask users to remove the Approved Integration in Canvas.
+
+### Keeping secrets and data apart
+
+Back up `/data` and `.env` **separately**, in places that different people (or different systems) can reach. A restore of `/data` rewinds disablements and credential generations (see [Backup and restore](#backup-and-restore)). Restoring `.env` without `/data`, or the other way round, never exposes a token, but loses the ability to decrypt: users enroll again.
+
+### Logs outside the container
+
+The reverse proxy sees the OAuth query strings (`code`, `state`) of `/authorize` and `/auth/callback`, and the `Authorization` header of every MCP request. Configure it as described in [Keep OAuth codes out of proxy logs](#keep-oauth-codes-out-of-proxy-logs). Application logs and audit events are scrubbed of bearer tokens, JWTs, Canvas tokens, Entra refresh tokens, `code=`/`state=`-style parameters and URL credentials before they are written, but that is a safety net for shapes, not a license to log secrets.
+
 ## Upgrading
 
 ```bash
@@ -472,6 +553,8 @@ The version with **access control** (disable and enable users, see [Revoking a u
 - **An older image refuses a version 3 database on purpose.** It would not know about disablements and would serve users you disabled. Roll back only together with the backup taken before the upgrade, and expect disabled users to be active again in the old version.
 
 The version with **credential generations** (see [Canvas credential lifecycle](#canvas-credential-lifecycle)) moves the token database to **schema version 4**: one more table, `credential_generations`, holding a counter per user. The migration is automatic and safe to repeat; every user starts at generation 0 and nothing is invalidated by the upgrade itself. An older image refuses a version 4 database on purpose: it would save and replace tokens without raising the counter, so a newer process would keep serving state learned under the old token. Roll back only together with the backup taken before the upgrade. Pending write confirmations (previews waiting for their confirmation token) are lost on every restart anyway; nothing else the user sees changes.
+
+The OAuth state store is now built by this project and passed to FastMCP through its public `client_storage` parameter, instead of being created by FastMCP and patched afterwards. **Nothing changes on disk:** the directory (`/data/fastmcp/oauth-proxy/<key fingerprint>/`), the key derivation and the encryption are the same as before, so sign-ins, MCP clients and stored upstream Entra tokens carry on across the upgrade (a test writes records with FastMCP's own store and reads them back with ours, and the other way round). The supported dependency range is `py-key-value-aio` `>=0.4.6,<0.5` (the earlier lock pinned 0.4.5, which has no `FileTreeStore.cull`, so the cleanup of expired OAuth records failed) and `fastmcp` `>=4.0.3,<5`. If you build the image yourself, use `uv sync --locked`. If you ever do see a client asked to sign in again after an upgrade, the only data involved is OAuth state, which is safe to lose.
 
 `/account/admin` no longer has a **Revoke** button: it was a deletion of the enrollment row, which is not an access decision (the user could simply enroll again). It is now **Remove enrollment** (same effect, honest name) next to the new **Disable user**; the form posts to `/account/admin/remove`. The CLI command `token_admin revoke` still works as an alias of `remove`.
 

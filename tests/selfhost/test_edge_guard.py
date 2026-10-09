@@ -34,7 +34,7 @@ from canvas_mcp.core.selfhost.oauth import (
     DCR_CLIENT_TTL_SECONDS,
     build_entra_auth_provider,
     cull_expired_oauth_state,
-    limit_client_record_lifetime,
+    oauth_storage_of,
 )
 from canvas_mcp.core.selfhost.settings import SelfhostSettings
 
@@ -352,7 +352,7 @@ class TestThroughTheRealApp:
 class TestStorageLifetimeAndCleanup:
     async def test_expired_oauth_records_are_deleted_from_disk(self, settings):
         provider = build_entra_auth_provider(settings)
-        storage = provider._client_storage  # noqa: SLF001 - the same object FastMCP writes through
+        storage = oauth_storage_of(provider).store  # the object FastMCP writes through
         await storage.put(key="stale", value={"a": 1}, collection="mcp-oauth-transactions", ttl=0.05)
         await storage.put(key="fresh", value={"a": 2}, collection="mcp-oauth-transactions", ttl=3600)
         await asyncio.sleep(0.2)
@@ -365,7 +365,7 @@ class TestStorageLifetimeAndCleanup:
 
     async def test_records_that_bring_their_own_lifetime_keep_it(self, settings):
         provider = build_entra_auth_provider(settings)
-        await provider._client_storage.put(  # noqa: SLF001
+        await oauth_storage_of(provider).store.put(
             key="txn", value={"a": 1}, collection="mcp-oauth-transactions", ttl=900
         )
         (record,) = _records(settings.fastmcp_home, "mcp_oauth_transactions")
@@ -375,10 +375,9 @@ class TestStorageLifetimeAndCleanup:
         lifetime = (datetime.fromisoformat(entry["expires_at"]) - datetime.fromisoformat(entry["created_at"]))
         assert lifetime.total_seconds() == pytest.approx(900, abs=5)
 
-    def test_it_refuses_to_start_if_fastmcp_moves_its_storage(self):
-        fake: Any = SimpleNamespace(_client_storage=object())
-        with pytest.raises(RuntimeError, match="encrypted file store"):
-            limit_client_record_lifetime(fake)
+    def test_a_provider_that_is_not_ours_has_no_storage(self):
+        assert oauth_storage_of(object()) is None
+        assert oauth_storage_of(SimpleNamespace()) is None
 
     async def test_cleanup_for_an_unknown_provider_is_a_no_op(self):
         await cull_expired_oauth_state(object())

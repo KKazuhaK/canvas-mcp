@@ -1090,6 +1090,7 @@ class _AccountApp:
             )
         return (
             f'<p class="warn"><strong>{_bi("绝不要把令牌粘贴到 Claude 对话里。", "Never paste the token into Claude.")}</strong></p>'
+            f'<p class="muted small">{_bi("服务器会加密保存你的令牌，但运营这台服务器的人仍然可以使用它，所以只有信任运营者时才绑定。你可以随时在这里删除它，同时也请在 Canvas 的 Approved Integrations 里撤销它。", "The server stores your token encrypted, but whoever operates this server can still use it, so enroll only if you trust them. You can delete it here at any time; also revoke it in Canvas under Approved Integrations.")}</p>'
             f'<form method="post" action="{_TOKEN_PATH}">'
             f"{_csrf_field(session.csrf)}"
             f"{school_part}"

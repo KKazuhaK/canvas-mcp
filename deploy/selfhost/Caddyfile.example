@@ -13,7 +13,29 @@
 #   }
 # If Cloudflare is in front, {remote_host} is a Cloudflare address: restore the real IP with
 # trusted_proxies together with {client_ip}, or simply use option 2.
+#
+# Logging: the sign-in flow puts one-time values in URLs (/authorize?...state=...,
+# /auth/callback?code=...&state=...). The log block below blanks them, and the headers that
+# carry credentials, before anything is written. Keep it when you add log outputs or sinks.
 canvas.mcp.kazuhahub.com {
+	log {
+		output file /var/log/caddy/canvas-mcp.access.log
+		format filter {
+			wrap json
+			request>uri query {
+				replace code REDACTED
+				replace state REDACTED
+				replace session_state REDACTED
+				replace id_token REDACTED
+				replace access_token REDACTED
+			}
+			request>headers>Authorization delete
+			request>headers>Cookie delete
+			resp_headers>Set-Cookie delete
+			resp_headers>Location delete
+		}
+	}
+
 	# Requires the caddy-ratelimit module; without it Caddy refuses to load the file
 	# because of an unknown directive, so this stays commented out by default.
 	# @oauth_open path /register /authorize

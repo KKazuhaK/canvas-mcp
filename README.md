@@ -303,7 +303,8 @@ When `ENABLE_DATA_ANONYMIZATION=true` is enabled, supported identity fields are 
 ### For Students: Data Scope & Privacy
 
 - **Canvas-scoped access**: Student-specific tools use Canvas's "self" endpoints; shared course-content tools follow the permissions Canvas grants your account
-- **No shared-server credential storage**: Local mode reads your Canvas token from your own `.env`. In authenticated institutional HTTP deployments, each request supplies the user's Canvas token and the server does not store it.
+- **No shared-server credential storage by default**: Local mode reads your Canvas token from your own `.env`. In the upstream authenticated institutional HTTP deployments, each request supplies the user's Canvas token and the server does not store it.
+- **The one exception is an explicit opt-in**: the self-hosted multi-user mode ([deploy/selfhost](deploy/selfhost/README.md)) stores each enrolled user's Canvas token on the server you run, encrypted with keys kept in `.env`. Encryption protects against a leak of the database or a backup on its own. It does **not** protect against a compromised runtime or against whoever operates the server and holds both the keys and the data: that operator can decrypt every token, even though the owner pages never display one. Its [custody section](deploy/selfhost/README.md#custody-and-privacy-boundary) lists every secret it holds, who can read it, and how to rotate and delete it.
 - **No built-in product analytics**: Canvas MCP does not add telemetry; Canvas and your AI client still apply their own logging and data policies
 - **Optional anonymization**: Student tools are scoped to your own Canvas data, but your AI client's privacy policy still applies
 

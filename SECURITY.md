@@ -192,6 +192,11 @@ Canvas MCP includes several security features:
    - No way to limit token permissions via Canvas MCP
    - Use Canvas account permissions for access control
 
+5. **Self-Hosted Multi-User Mode Holds Credentials**
+   - The opt-in Entra ID mode in `deploy/selfhost/` stores each user's Canvas token on the server, encrypted at rest
+   - The encryption protects against a database-only leak, not against a compromised runtime or an operator who holds the keys and the data
+   - See the custody section of `deploy/selfhost/README.md` for the full inventory of secrets, rotation, backup and deletion
+
 ---
 
 ## Security Roadmap

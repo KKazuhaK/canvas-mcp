@@ -14,6 +14,13 @@
 limit_req_zone $binary_remote_addr zone=canvas_oauth:10m rate=10r/m;
 limit_req_status 429;
 
+# Logging: the default `combined` format writes the whole request line, and the OAuth
+# redirects carry one-time values in it (/authorize?...&state=..., /auth/callback?code=..&state=..).
+# Log the path only ($uri has no query string) and never the Authorization header or cookies.
+# nginx still writes the request line into error_log when an upstream error happens: keep that
+# log at `error` level, readable by root only, with short retention.
+log_format canvas_safe '$remote_addr [$time_local] "$request_method $uri" $status $body_bytes_sent "$http_user_agent"';
+
 server {
     listen 80;
     listen [::]:80;
@@ -35,6 +42,9 @@ server {
     # HTTP/2 is not required; if you do not want the hassle, just delete the line.
     http2 on;
     server_name canvas.mcp.kazuhahub.com;
+
+    access_log /var/log/nginx/canvas-mcp.access.log canvas_safe;
+    error_log  /var/log/nginx/canvas-mcp.error.log error;
 
     ssl_certificate     /etc/letsencrypt/live/canvas.mcp.kazuhahub.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/canvas.mcp.kazuhahub.com/privkey.pem;

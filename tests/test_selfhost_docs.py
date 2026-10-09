@@ -450,3 +450,86 @@ def test_readme_documents_the_credential_lifecycle(readme):
         assert needle in section, f"credential lifecycle section is missing {needle!r}"
     assert "schema version 4" in readme
     assert "restart the server after a restore" in readme.lower()
+
+
+def _custody_section(readme: str) -> str:
+    return readme.split("## Custody and privacy boundary", 1)[1].split("\n## ", 1)[0]
+
+
+def test_readme_inventories_every_secret_the_mode_holds(readme):
+    section = _custody_section(readme)
+    for item in (
+        "Canvas personal access tokens",
+        "CANVAS_TOKEN_KEYS",
+        "Upstream Entra tokens",
+        "OAUTH_JWT_SIGNING_KEY",
+        "ACCOUNT_SESSION_SECRET",
+        "ENTRA_CLIENT_SECRET",
+        "Audit log",
+    ):
+        assert item in section, f"{item} is missing from the custody inventory"
+    for column in (
+        "Where it lives",
+        "Who can read it",
+        "Rotation",
+        "Backup and restore",
+        "Deletion and retention",
+    ):
+        assert column in section
+
+
+def test_readme_states_the_real_privacy_boundary(readme):
+    section = _custody_section(readme)
+    assert "database-only leak" in section
+    assert "compromised runtime" in section
+    assert "operator" in section
+    assert "not a cryptographic one" in section
+
+
+def test_the_root_readme_states_the_opt_in_exception() -> None:
+    root = (SELFHOST.parents[1] / "README.md").read_text(encoding="utf-8")
+    assert "explicit opt-in" in root
+    assert "deploy/selfhost/README.md#custody-and-privacy-boundary" in root
+    assert "compromised runtime" in root
+
+
+def test_nginx_example_logs_the_path_without_the_query_string():
+    conf = (SELFHOST / "nginx.conf.example").read_text(encoding="utf-8")
+    format_line = next(
+        line for line in conf.splitlines() if line.startswith("log_format canvas_safe")
+    )
+    assert "$uri" in format_line
+    for leaky in (
+        "$request ",
+        '$request"',
+        "$request_uri",
+        "$args",
+        "$query_string",
+        "$http_authorization",
+        "$http_cookie",
+        "$http_referer",
+    ):
+        assert leaky not in format_line
+    assert re.search(r"^\s*access_log\s+\S+\s+canvas_safe;", conf, re.MULTILINE)
+
+
+def test_caddy_example_blanks_oauth_query_values_and_credential_headers():
+    conf = (SELFHOST / "Caddyfile.example").read_text(encoding="utf-8")
+    active = "\n".join(
+        line for line in conf.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "format filter" in active
+    for needle in (
+        "request>uri query",
+        "replace code REDACTED",
+        "replace state REDACTED",
+        "request>headers>Authorization delete",
+        "request>headers>Cookie delete",
+    ):
+        assert needle in active
+
+
+def test_readme_documents_the_proxy_log_redaction(readme):
+    assert "### Keep OAuth codes out of proxy logs" in readme
+    assert "canvas_safe" in readme
+    assert "replace code REDACTED" in readme

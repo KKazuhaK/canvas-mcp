@@ -7,6 +7,8 @@ import sys
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from .redact import SecretScrubFilter
+
 # Configure logger for Canvas MCP
 logger = logging.getLogger("canvas_mcp")
 logger.setLevel(logging.INFO)
@@ -21,6 +23,8 @@ formatter = logging.Formatter(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 handler.setFormatter(formatter)
+# Exception messages quote URLs; an OAuth callback URL carries a code and state.
+handler.addFilter(SecretScrubFilter())
 
 # Add handler to logger
 logger.addHandler(handler)
