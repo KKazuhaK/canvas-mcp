@@ -362,6 +362,7 @@ class TestInitialize:
         with _raw(store) as conn:
             assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
 
+    @pytest.mark.sqlite_only
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
     def test_posix_permissions(self, tmp_path: pathlib.Path) -> None:
         path = token_db_path(tmp_path / "state")
