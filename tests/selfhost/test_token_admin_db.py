@@ -244,8 +244,10 @@ class TestImportIntoPostgres:
         assert "could not be migrated to the current schema" in err
         assert "does not decrypt with CANVAS_TOKEN_KEYS" in err
         assert "Nothing was imported" in err
-        assert "db upgrade" not in err  # that command would not help here
+        # The advice names the flag and both commands that take it, so it is right
+        # whichever of them reaches the message (a server start does not take flags).
         assert "--mark-undecryptable-invalid" in err
+        assert "db import-sqlite" in err and "db upgrade" in err
         assert wrong not in err
         assert source.read_bytes() == before
         assert migrate.current(self._db()).state == migrate.STATE_UNINITIALIZED
@@ -263,7 +265,13 @@ class TestImportIntoPostgres:
         monkeypatch.setenv("CANVAS_TOKEN_KEYS", wrong)
         argv = ["db", "import-sqlite", str(source), "--mark-undecryptable-invalid"]
         assert token_admin.main(argv) == 0
-        capsys.readouterr()
+        out = capsys.readouterr().out
+        # The operator is told what was lost: the copy migration's report and a total
+        # (B was marked by the migration of the copy, the unmapped principal by the
+        # final check on PostgreSQL).
+        assert "migration of the private copy:" in out
+        assert "unreadable tokens that would be marked invalid: 1" in out
+        assert "tokens marked invalid during the import: 2" in out
         monkeypatch.setenv("CANVAS_TOKEN_KEYS", wrong)
         store = TokenStore(self._db(), Keyring.parse(wrong))
         store.initialize(auto_migrate=False)
@@ -276,6 +284,76 @@ class TestImportIntoPostgres:
         assert info[a].status == "active"
         # A principal the account migration does not map is marked the same way.
         assert info[legacy.KEY_OTHER].status == "invalid"
+
+    def _schema5_source(self, path: pathlib.Path) -> None:
+        """A SQLite file already at the current schema whose tokens are sealed under k2."""
+        legacy.build(path, "v4")
+        migrate.ensure_ready(
+            Database.sqlite(path), auto=True, keyring=Keyring.parse(KEYS), auto_backup=False
+        )
+
+    def test_a_missing_key_id_is_never_marked_invalid(self, tmp_path, monkeypatch, capsys) -> None:
+        # The tokens of a current-schema file are sealed under k2. Without k2 in the
+        # keyring the server could not start on the result, so the import refuses even
+        # with the flag, and PostgreSQL is left empty.
+        source = tmp_path / "current.sqlite3"
+        self._schema5_source(source)
+        before = source.read_bytes()
+        k1_only = "k1:" + base64.b64encode(bytes([1]) * 32).decode()
+        monkeypatch.setenv("CANVAS_TOKEN_KEYS", k1_only)
+        for argv in (
+            ["db", "import-sqlite", str(source)],
+            ["db", "import-sqlite", str(source), "--mark-undecryptable-invalid"],
+        ):
+            assert token_admin.main(argv) == token_admin.EXIT_CONFIG
+            err = capsys.readouterr().err
+            assert "missing key id k2" in err and "nothing was imported" in err
+            assert k1_only not in err
+            assert migrate.current(self._db()).state == migrate.STATE_UNINITIALIZED
+        assert source.read_bytes() == before
+        from canvas_mcp.core.selfhost.db import transfer
+
+        assert not transfer.target_holds_rows(self._db())
+
+    def test_unreadable_tokens_of_a_current_file_are_marked_like_the_runtime_does(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        # k2 is present but its material is wrong: the rows cannot be read. Without
+        # the flag the import refuses; with it they are marked invalid, the credential
+        # generations are raised, audit entries are written and the count is printed.
+        source = tmp_path / "current.sqlite3"
+        self._schema5_source(source)
+        wrong = "k2:" + base64.b64encode(bytes([9]) * 32).decode() + ",k1:" + base64.b64encode(bytes([1]) * 32).decode()
+        monkeypatch.setenv("CANVAS_TOKEN_KEYS", wrong)
+        assert token_admin.main(["db", "import-sqlite", str(source)]) == token_admin.EXIT_CONFIG
+        assert "does not decrypt" in capsys.readouterr().err
+        assert migrate.current(self._db()).state == migrate.STATE_UNINITIALIZED
+
+        origin = TokenStore(Database.sqlite(source), Keyring.parse(KEYS))
+        origin.initialize(auto_migrate=False)
+        generations_before = {
+            e.principal_key: origin.credential_generation(e.principal_key)
+            for e in origin.list_enrollments()
+        }
+        argv = ["db", "import-sqlite", str(source), "--mark-undecryptable-invalid"]
+        assert token_admin.main(argv) == 0
+        out = capsys.readouterr().out
+        assert "tokens marked invalid during the import: 4" in out
+        assert "migration of the private copy:" not in out  # nothing was migrated
+
+        store = TokenStore(self._db(), Keyring.parse(wrong))
+        store.initialize(auto_migrate=False)  # the keyring covers every stored key id
+        rows = {e.principal_key: e for e in store.list_enrollments()}
+        # Every row is unreadable, including the one that was invalid for another
+        # reason: all end as decrypt_failed, the reason the server's key check skips.
+        assert len(rows) == 4
+        marked = set(rows)
+        for key, entry in rows.items():
+            assert entry.status == "invalid" and entry.invalid_reason == "decrypt_failed"
+            assert store.credential_generation(key) == generations_before[key] + 1
+        audited = [e for e in store.list_audit(limit=50) if e.action == "token_marked_invalid"]
+        assert {e.target for e in audited} == marked
+        assert all(e.actor == "system" and e.reason == "decrypt_failed" for e in audited)
 
     def test_a_failure_inside_the_transaction_leaves_no_schema_behind(
         self, tmp_path, monkeypatch, capsys

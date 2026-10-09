@@ -39,8 +39,10 @@ from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.engine import Connection
 
 from . import migrate, schema
+from .accounts_v5 import AccountMigrationReport
 from .engine import Database
 from .errors import StoreUnavailable, TokenStoreError
+from .repos import Repositories
 
 #: Tables copied, in order. ``meta`` is not copied: the target is created by Alembic.
 COPIED_TABLES = (
@@ -79,7 +81,21 @@ _IDENTITY_TABLES = ("principal_status_events", "external_identities", "auth_even
 
 @dataclass(frozen=True)
 class ImportReport:
+    """What an import did: rows copied, what the copy migration did, tokens marked invalid.
+
+    ``tokens_marked_invalid`` counts the tokens the final check on PostgreSQL found
+    unreadable and marked; the ones the migration of the copy marked are in
+    ``migration.tokens_marked_invalid``. Both stay zero unless
+    ``--mark-undecryptable-invalid`` was given.
+    """
+
     counts: dict[str, int]
+    migration: AccountMigrationReport
+    tokens_marked_invalid: int = 0
+
+    @property
+    def total_marked_invalid(self) -> int:
+        return self.migration.tokens_marked_invalid + self.tokens_marked_invalid
 
 
 def legacy_sqlite_has_rows(path: pathlib.Path) -> bool:
@@ -162,11 +178,17 @@ def refuse_silent_switch(target: Database, legacy_path: pathlib.Path) -> None:
 
 
 def _private_migrated_copy(
-    source: pathlib.Path, workdir: pathlib.Path, keyring: Any, *, mark_undecryptable_invalid: bool
+    source: pathlib.Path,
+    workdir: pathlib.Path,
+    keyring: Any,
+    *,
+    mark_undecryptable_invalid: bool,
+    report: AccountMigrationReport,
 ) -> dict[str, list[Any]]:
     """Copy ``source`` into ``workdir``, migrate the copy to head, return its rows.
 
-    Touches neither ``source`` nor PostgreSQL. Raises :class:`StoreUnavailable` if the
+    Touches neither ``source`` nor PostgreSQL. What the migration did is collected
+    in ``report`` (all zero for a file that is already current). Raises :class:`StoreUnavailable` if the
     file cannot be read and :class:`TokenStoreError` (naming the migration, not the
     import) if the copy cannot be brought to the current schema.
     """
@@ -193,6 +215,7 @@ def _private_migrated_copy(
                 options=migrate.MigrationOptions(
                     mark_undecryptable_invalid=mark_undecryptable_invalid
                 ),
+                report=report,
                 auto_backup=False,
             )
         except TokenStoreError as exc:
@@ -218,18 +241,33 @@ def _private_migrated_copy(
 
 
 def _verify_tokens(conn: Connection, keyring: Any, *, mark_invalid: bool = False) -> int:
-    """Decrypt every stored token as the server would; raise on the first that fails.
+    """Check every stored token as the server would; return how many were marked invalid.
 
-    With ``mark_invalid`` (the operator passed ``--mark-undecryptable-invalid``) a row
-    that cannot be read is marked invalid (``decrypt_failed``) instead of failing the
-    import; that only happens to rows the account migration left alone (principals
-    that are not Entra users, which nobody can reach anyway). Returns how many.
+    A row whose key id is not in the keyring always fails the import, flag or not: the
+    server refuses to start when a stored row (even an invalid one) names a key id the
+    keyring lacks, so marking it would produce a database nobody can run.
+
+    A row that fails to decrypt under a key id that is present fails the import too,
+    unless ``mark_invalid`` (the operator passed ``--mark-undecryptable-invalid``): such
+    row is then marked invalid with the reason ``decrypt_failed``, in this transaction
+    and as the runtime ``TokenStore.mark_invalid`` and the account migration do: the
+    credential generation is raised (reason ``invalidated``) and an audit entry is
+    written. A row that was invalid for another reason is switched to ``decrypt_failed``
+    too (as the account migration does): the server's key check skips only rows with
+    that reason, so otherwise it would refuse to start on a token it cannot read.
     """
-    from ..token_store import KeyringError, TokenDecryptionError, _aad_for_principal
+    from ..token_store import (
+        AUDIT_TOKEN_MARKED_INVALID,
+        GENERATION_INVALIDATED,
+        KeyringError,
+        TokenDecryptionError,
+        _aad_for_principal,
+        _json,
+    )
 
     tokens = schema.canvas_tokens
     key_ids = set(keyring.key_ids)
-    unreadable: list[tuple[str, str | None]] = []
+    unreadable: list[tuple[str, bool]] = []
     for row in conn.execute(
         select(
             tokens.c.principal_key,
@@ -241,36 +279,58 @@ def _verify_tokens(conn: Connection, keyring: Any, *, mark_invalid: bool = False
             tokens.c.invalid_reason,
         )
     ):
+        if row.key_id not in key_ids:
+            raise KeyringError(
+                f"CANVAS_TOKEN_KEYS is missing key id {row.key_id}; nothing was imported "
+                "(restore that key: --mark-undecryptable-invalid cannot help, because the "
+                "server would refuse to start on a database that names it)"
+            )
         if row.status == "invalid" and row.invalid_reason == "decrypt_failed":
             # Already known to be unreadable in the source: carried over as it was.
             continue
-        if row.key_id not in key_ids:
-            if mark_invalid:
-                unreadable.append((row.principal_key, row.canvas_host))
-                continue
-            raise KeyringError(
-                f"CANVAS_TOKEN_KEYS is missing key id {row.key_id}; nothing was imported"
-            )
         try:
             aad = _aad_for_principal(row.principal_key, row.canvas_host, row.key_id)
             keyring.decrypt(row.key_id, bytes(row.nonce), bytes(row.ciphertext), aad)
         except (TokenDecryptionError, ValueError):
             if mark_invalid:
-                unreadable.append((row.principal_key, row.canvas_host))
+                unreadable.append((row.principal_key, row.status == "invalid"))
                 continue
             raise TokenStoreError(
                 "a stored token does not decrypt with CANVAS_TOKEN_KEYS after the copy; "
                 "nothing was imported (repeat with --mark-undecryptable-invalid to mark "
                 "such rows invalid)"
             ) from None
+    repos = Repositories("postgresql")
     now = int(time.time())
-    for principal_key, host in unreadable:
-        conn.execute(
-            update(tokens)
-            .where(tokens.c.principal_key == principal_key, tokens.c.canvas_host.is_not_distinct_from(host))
-            .values(status="invalid", invalid_reason="decrypt_failed", invalid_since=now)
+    marked = 0
+    for principal_key, was_invalid in unreadable:
+        if was_invalid:
+            conn.execute(
+                update(tokens)
+                .where(tokens.c.principal_key == principal_key)
+                .values(invalid_reason="decrypt_failed")
+            )
+        else:
+            repos.tokens.mark_invalid(
+                conn,
+                principal_key,
+                reason="decrypt_failed",
+                now=now,
+                expected_updated_at=None,
+                expected_generation=None,
+            )
+        marked += 1
+        repos.generations.bump(conn, principal_key, GENERATION_INVALIDATED, now)
+        repos.audit.append(
+            conn,
+            now=now,
+            actor="system",
+            action=AUDIT_TOKEN_MARKED_INVALID,
+            target=principal_key,
+            reason="decrypt_failed",
+            detail=_json({"via": "import-sqlite"}),
         )
-    return len(unreadable)
+    return marked
 
 
 def _copy_rows(conn: Connection, rows: dict[str, list[Any]]) -> dict[str, int]:
@@ -328,19 +388,22 @@ def import_sqlite(
             "refusing to import into a PostgreSQL database that already holds data"
         )
 
+    migration = AccountMigrationReport()
     with tempfile.TemporaryDirectory(prefix="canvas-mcp-import-") as tmp:
         rows = _private_migrated_copy(
             source,
             pathlib.Path(tmp),
             keyring,
             mark_undecryptable_invalid=mark_undecryptable_invalid,
+            report=migration,
         )
 
     counts: dict[str, int] = {}
+    marked = [0]
 
     def populate(conn: Connection) -> None:
         counts.update(_copy_rows(conn, rows))
-        _verify_tokens(conn, keyring, mark_invalid=mark_undecryptable_invalid)
+        marked[0] = _verify_tokens(conn, keyring, mark_invalid=mark_undecryptable_invalid)
 
     migrate.ensure_ready(target, auto=True, populate=populate)
-    return ImportReport(counts)
+    return ImportReport(counts, migration, marked[0])

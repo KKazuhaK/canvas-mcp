@@ -59,8 +59,12 @@ user enrolls again). ``db import-sqlite PATH`` copies a SQLite token database in
 empty PostgreSQL database (``DATABASE_URL``): a file from before the account model is
 first migrated to the current schema in a private copy (it needs the keys and accepts
 ``--mark-undecryptable-invalid`` like ``db upgrade``), then the schema and every row are
-created in one PostgreSQL transaction and every token is checked to still decrypt. On
-any failure PostgreSQL is left as it was; the source file is never modified.
+created in one PostgreSQL transaction and every token is checked to still decrypt. The
+flag marks tokens that fail to decrypt under a key the keyring has (the user enrolls
+again, the credential generation is raised and the audit log records it); a stored key
+id that ``CANVAS_TOKEN_KEYS`` lacks always stops the import, because the server would
+refuse to start on it. The output counts the tokens marked invalid. On any failure
+PostgreSQL is left as it was; the source file is never modified.
 
 Every command except ``db ...`` refuses to run (exit 2) on a database that holds no
 rows while the default SQLite file in the data directory still has data: using it
@@ -340,6 +344,11 @@ def _run_db(args: argparse.Namespace) -> int:
         )
         for table, count in report_.counts.items():
             print(f"{table}: {count} row(s)")
+        if report_.migration.ran:
+            print("migration of the private copy:")
+            for line in report_.migration.lines():
+                print(f"  {line}")
+        print(f"tokens marked invalid during the import: {report_.total_marked_invalid}")
         print(
             "imported at the current schema; every stored token that is not marked invalid "
             "decrypts with CANVAS_TOKEN_KEYS"
