@@ -17,6 +17,8 @@ from pathlib import Path, PurePosixPath
 from typing import ClassVar, Literal
 from urllib.parse import urlsplit
 
+from .schools import MAX_FEATURED, FeaturedSchool, parse_hostname
+
 AUTH_MODE_ENV = "MCP_AUTH_MODE"
 AUTH_MODE_ENTRA = "entra-oauth"
 AUTH_MODE_LEGACY = "legacy"
@@ -49,6 +51,7 @@ MIN_SIGNING_KEY_CHARS = 32
 MIN_SESSION_SECRET_BYTES = 32
 MIN_SESSION_TTL_SECONDS = 60
 MAX_SESSION_TTL_SECONDS = 3600
+MAX_FEATURED_NAME_CHARS = 80
 
 
 class SelfhostConfigError(Exception):
@@ -78,6 +81,8 @@ class SelfhostSettings:
     canvas_token_keys_raw: str = field(repr=False)
     data_dir: Path
     fastmcp_home: Path
+    featured_schools: tuple[FeaturedSchool, ...] = ()
+    school_search: bool = False
 
     mcp_path: ClassVar[str] = "/mcp"
 
@@ -228,6 +233,60 @@ def _parse_int(name: str, raw: str, default: int, low: int, high: int, problems:
     return value
 
 
+def _parse_featured_schools(raw: str, problems: list[str]) -> tuple[FeaturedSchool, ...]:
+    """``host`` or ``host=Display Name`` entries, comma-separated. Syntax only."""
+    name = "CANVAS_FEATURED_SCHOOLS"
+    if not raw:
+        return ()
+    schools: list[FeaturedSchool] = []
+    seen: set[str] = set()
+    index = 0
+    for item in raw.split(","):
+        if not item.strip():
+            continue
+        index += 1
+        host_part, _, label = item.partition("=")
+        host = parse_hostname(host_part)
+        if host is None:
+            problems.append(
+                f"{name} entry {index} must be a host name such as canvas.school.edu "
+                "(no https://, port or path)"
+            )
+            continue
+        label = label.strip()
+        if len(label) > MAX_FEATURED_NAME_CHARS or any(
+            ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in label
+        ):
+            problems.append(
+                f"{name} entry {index} has a display name that is too long "
+                f"(over {MAX_FEATURED_NAME_CHARS} characters) or has control characters"
+            )
+            continue
+        if host in seen:
+            problems.append(f"{name} entry {index} repeats a school that is already listed")
+            continue
+        seen.add(host)
+        schools.append(FeaturedSchool(host, label))
+    if index > MAX_FEATURED:
+        problems.append(f"{name} lists more than {MAX_FEATURED} schools")
+    elif index == 0:
+        problems.append(f"{name} is set but lists no school")
+    return tuple(schools)
+
+
+_TRUE_WORDS = frozenset({"true", "1", "yes"})
+_FALSE_WORDS = frozenset({"", "false", "0", "no"})
+
+
+def _parse_bool(name: str, raw: str, problems: list[str]) -> bool:
+    word = raw.strip().lower()
+    if word in _TRUE_WORDS:
+        return True
+    if word not in _FALSE_WORDS:
+        problems.append(f"{name} must be true or false")
+    return False
+
+
 def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSettings:
     """Parse and validate every variable of the mode, reporting all problems at once."""
     source = os.environ if env is None else env
@@ -319,6 +378,9 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
     elif not _is_absolute(home_raw):
         problems.append("FASTMCP_HOME must be an absolute path")
 
+    featured = _parse_featured_schools(get("CANVAS_FEATURED_SCHOOLS"), problems)
+    school_search = _parse_bool("CANVAS_SCHOOL_SEARCH", get("CANVAS_SCHOOL_SEARCH"), problems)
+
     if problems or base is None:
         raise SelfhostConfigError(problems)
 
@@ -338,4 +400,6 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
         canvas_token_keys_raw=token_keys,
         data_dir=Path(data_dir_raw),
         fastmcp_home=Path(home_raw),
+        featured_schools=featured,
+        school_search=school_search,
     )

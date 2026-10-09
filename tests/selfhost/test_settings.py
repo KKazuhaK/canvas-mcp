@@ -270,3 +270,95 @@ class TestAuthMode:
         assert auth_mode() == "entra-oauth"
         monkeypatch.delenv(AUTH_MODE_ENV)
         assert auth_mode() == "legacy"
+
+
+class TestFeaturedSchools:
+    def test_defaults_are_empty_and_off(self):
+        settings = load_selfhost_settings(_env())
+        assert settings.featured_schools == ()
+        assert settings.school_search is False
+
+    def test_hosts_with_and_without_names(self):
+        settings = load_selfhost_settings(_env(
+            CANVAS_FEATURED_SCHOOLS="canvas.a.edu=A University, canvas.b.edu"
+        ))
+        assert [(s.host, s.name) for s in settings.featured_schools] == [
+            ("canvas.a.edu", "A University"), ("canvas.b.edu", ""),
+        ]
+
+    def test_whitespace_case_and_blank_items(self):
+        settings = load_selfhost_settings(_env(
+            CANVAS_FEATURED_SCHOOLS="  Canvas.A.EDU = Name = With Equals ,, canvas.b.edu  ,"
+        ))
+        assert [(s.host, s.name) for s in settings.featured_schools] == [
+            ("canvas.a.edu", "Name = With Equals"), ("canvas.b.edu", ""),
+        ]
+
+    @pytest.mark.parametrize("value", [
+        "https://canvas.a.edu", "canvas.a.edu:8443", "canvas.a.edu/lms", "127.0.0.1",
+        "localhost", "singlelabel", "user@canvas.a.edu", "=Name", "canvas.a.edu.",
+    ])
+    def test_bad_hosts_are_refused_without_echoing_the_value(self, value):
+        problems = _problems(CANVAS_FEATURED_SCHOOLS=value)
+        assert len(problems) == 1
+        assert "CANVAS_FEATURED_SCHOOLS entry 1" in problems[0]
+        assert value not in problems[0]
+
+    def test_the_failing_entry_is_numbered(self):
+        problems = _problems(CANVAS_FEATURED_SCHOOLS="canvas.a.edu,,https://x.edu,canvas.b.edu,y")
+        assert [p.split(" must")[0] for p in problems] == [
+            "CANVAS_FEATURED_SCHOOLS entry 2", "CANVAS_FEATURED_SCHOOLS entry 4",
+        ]
+
+    def test_duplicates_are_refused(self):
+        problems = _problems(CANVAS_FEATURED_SCHOOLS="canvas.a.edu,CANVAS.A.EDU=Again")
+        assert len(problems) == 1 and "repeats" in problems[0]
+
+    def test_a_set_but_empty_list_is_refused(self):
+        problems = _problems(CANVAS_FEATURED_SCHOOLS=" , ,")
+        assert problems == ["CANVAS_FEATURED_SCHOOLS is set but lists no school"]
+
+    def test_too_many_schools_are_refused(self):
+        many = ",".join(f"canvas.s{i}.edu" for i in range(51))
+        assert any("more than 50" in p for p in _problems(CANVAS_FEATURED_SCHOOLS=many))
+        fifty = ",".join(f"canvas.s{i}.edu" for i in range(50))
+        assert len(load_selfhost_settings(_env(CANVAS_FEATURED_SCHOOLS=fifty)).featured_schools) == 50
+
+    def test_bad_display_names_are_refused(self):
+        too_long = "canvas.a.edu=" + "n" * 81
+        problems = _problems(CANVAS_FEATURED_SCHOOLS=too_long)
+        assert len(problems) == 1 and "n" * 10 not in problems[0]
+        control = "canvas.a.edu=Bad" + chr(7) + "Name"
+        assert len(_problems(CANVAS_FEATURED_SCHOOLS=control)) == 1
+        ok = "canvas.a.edu=" + "n" * 80
+        assert load_selfhost_settings(_env(CANVAS_FEATURED_SCHOOLS=ok)).featured_schools[0].name == "n" * 80
+
+    def test_reserved_names_are_not_judged_at_load_time(self):
+        """Only syntax is checked here; blocked suffixes are refused at startup,
+        where the (exempt) default host is known."""
+        settings = load_selfhost_settings(_env(CANVAS_FEATURED_SCHOOLS="canvas.school.example"))
+        assert settings.featured_schools[0].host == "canvas.school.example"
+
+    def test_no_dns_lookup_at_load_time(self, monkeypatch):
+        import socket
+
+        def boom(*_a, **_k):
+            raise AssertionError("settings must not resolve names")
+
+        monkeypatch.setattr(socket, "getaddrinfo", boom)
+        load_selfhost_settings(_env(CANVAS_FEATURED_SCHOOLS="canvas.a.edu", CANVAS_SCHOOL_SEARCH="true"))
+
+
+class TestSchoolSearch:
+    @pytest.mark.parametrize("value", ["true", "TRUE", "True", "1", "yes", " Yes "])
+    def test_truthy(self, value):
+        assert load_selfhost_settings(_env(CANVAS_SCHOOL_SEARCH=value)).school_search is True
+
+    @pytest.mark.parametrize("value", ["", "false", "FALSE", "0", "no", "No"])
+    def test_falsey(self, value):
+        assert load_selfhost_settings(_env(CANVAS_SCHOOL_SEARCH=value)).school_search is False
+
+    @pytest.mark.parametrize("value", ["maybe", "on", "2", "enabled", "tru"])
+    def test_anything_else_is_refused(self, value):
+        problems = _problems(CANVAS_SCHOOL_SEARCH=value)
+        assert problems == ["CANVAS_SCHOOL_SEARCH must be true or false"]
