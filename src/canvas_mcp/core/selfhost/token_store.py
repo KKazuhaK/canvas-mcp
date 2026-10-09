@@ -1,26 +1,41 @@
 """Encrypted per-user Canvas token store for the self-hosted multi-user mode.
 
-One SQLite file holds one row per Entra principal ``(tenant_id, object_id)``.
+One SQLite file holds one row per principal. A principal is named by one opaque,
+lower-case ``principal_key`` string; today that is ``entra:<tenant id>:<object id>``.
 The Canvas personal access token is encrypted with AES-256-GCM; the associated
-data binds each ciphertext to its row, key id and (when recorded) Canvas host,
-so a copied or swapped row, or a row whose host was edited in the database,
-fails to decrypt instead of sending the token to another school. Metadata columns (Canvas name and id, timestamps) are
-plaintext on purpose: the admin page and the operator CLI never need to decrypt.
+data binds each ciphertext to its principal, Canvas host and key id, so a copied
+or swapped row, or a row whose principal or host was edited in the database,
+fails to decrypt instead of sending the token to another user or school.
+Metadata columns (Canvas name and id, timestamps) are plaintext on purpose: the
+admin page and the operator CLI never need to decrypt.
 
 Associated data (AAD) layouts, joined by ``0x1f``:
 
-* v1 (rows without a host, written before schools existed):
+* v2 (every row that records a host, written by the account page):
+  ``"canvas-mcp/canvas-token/v2" principal_key host key_id``
+* v1 (legacy rows without a host, written before schools existed):
   ``"canvas-mcp/canvas-token/v1" tenant object key_id``
-* v2 (rows with a host): ``"canvas-mcp/canvas-token/v2" tenant object key_id host``
 
-Whether a row has a host decides which layout is used, so no version column is
-needed. The host is used exactly as stored, never normalised on read; removing
-or changing it, or adding one to a v1 row, makes decryption fail. Saving a row
-always goes through the account page with a host, which re-seals a v1 row as v2.
+The principal key is an opaque string to the v2 layout, so moving an account to
+another identity only means re-encrypting under the new string; the layout does
+not change. Whether a row has a host decides which layout is used, so no version
+column is needed. The principal and host are used exactly as given (the lookup
+key and the stored host), never normalised on read; changing either, removing the
+host, or adding one to a v1 row makes decryption fail. Saving a row through the
+account page always passes a host, which re-seals a v1 row as v2.
 
-Schema version 2 adds the nullable ``canvas_host`` column; opening a version 1
-database migrates it in place (idempotently). A version 2 database is refused by
-older servers, so roll back only together with a backup taken before the upgrade.
+Public methods take the ``principal_key``. For callers that still hold an Entra
+tenant and object id, each method also accepts ``(tenant_id, object_id)`` and
+turns the pair into ``entra:<tenant>:<object>``.
+
+Schema version 2 adds the ``canvas_host`` and ``principal_key`` columns (the key
+is unique and backfilled for existing rows) and the status columns ``status``
+(``active`` or ``invalid``, default ``active``), ``invalid_reason``,
+``invalid_since``, ``last_verified_at`` and ``expires_hint_at``. They are
+reserved for token health tracking and do not change behaviour yet, except that
+saving a token marks the row ``active`` and verified. Opening an older database
+migrates it in place, idempotently. A version 2 database is refused by older
+servers, so roll back only together with a backup taken before the upgrade.
 
 Keys come from ``CANVAS_TOKEN_KEYS`` (``kid:base64key[,kid:base64key...]``).
 The first entry encrypts new rows; every entry decrypts. Error messages never
@@ -50,13 +65,19 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 SCHEMA_VERSION = 2
 
+STATUS_ACTIVE = "active"
+STATUS_INVALID = "invalid"
+
 _KEY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 _GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 _AAD_PREFIX_V1 = b"canvas-mcp/canvas-token/v1\x1f"
 _AAD_PREFIX_V2 = b"canvas-mcp/canvas-token/v2\x1f"
+_AAD_SEP = b"\x1f"
+_ENTRA_PREFIX = "entra:"
 _MAX_HOST = 253
+_MAX_PRINCIPAL_KEY = 256
 _KEY_BYTES = 32
 _NONCE_BYTES = 12
 
@@ -85,13 +106,35 @@ _SCHEMA_TOKENS = (
     " updated_at INTEGER NOT NULL,"
     " last_used_at INTEGER,"
     " canvas_host TEXT,"
+    " principal_key TEXT,"
+    " status TEXT NOT NULL DEFAULT 'active',"
+    " invalid_reason TEXT,"
+    " invalid_since INTEGER,"
+    " last_verified_at INTEGER,"
+    " expires_hint_at INTEGER,"
     " PRIMARY KEY (tenant_id, object_id)"
     ") WITHOUT ROWID"
+)
+_SCHEMA_PRINCIPAL_INDEX = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS canvas_tokens_principal_key"
+    " ON canvas_tokens (principal_key)"
+)
+# Columns added after version 1, as (name, definition). A database that lacks one
+# gets it with ALTER TABLE; a freshly created table already has them all.
+_ADDED_COLUMNS = (
+    ("canvas_host", "TEXT"),
+    ("principal_key", "TEXT"),
+    ("status", "TEXT NOT NULL DEFAULT 'active'"),
+    ("invalid_reason", "TEXT"),
+    ("invalid_since", "INTEGER"),
+    ("last_verified_at", "INTEGER"),
+    ("expires_hint_at", "INTEGER"),
 )
 
 _INFO_COLUMNS = (
     "tenant_id, object_id, canvas_user_id, canvas_user_name, entra_display_name,"
-    " entra_upn, key_id, created_at, updated_at, last_used_at, canvas_host"
+    " entra_upn, key_id, created_at, updated_at, last_used_at, canvas_host,"
+    " principal_key"
 )
 
 
@@ -123,6 +166,7 @@ class StoredToken:
     updated_at: int
     last_used_at: int | None
     canvas_host: str | None = None
+    principal_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -140,6 +184,7 @@ class EnrollmentInfo:
     updated_at: int
     last_used_at: int | None
     canvas_host: str | None = None
+    principal_key: str = ""
 
 
 def _decode_key(text: str) -> bytes | None:
@@ -246,6 +291,58 @@ def _normalize_guid(value: str, label: str) -> str:
     return value.lower()
 
 
+def entra_principal_key(tenant_id: str, object_id: str) -> str:
+    """The principal key of an Entra user, ``entra:<tenant id>:<object id>`` in lower case.
+
+    Raises ValueError unless both ids are GUIDs.
+    """
+    tid = _normalize_guid(tenant_id, "tenant_id")
+    oid = _normalize_guid(object_id, "object_id")
+    return f"{_ENTRA_PREFIX}{tid}:{oid}"
+
+
+def _split_entra_key(principal_key: str) -> tuple[str, str] | None:
+    """``(tenant id, object id)`` of an ``entra:`` key, or None for any other key."""
+    if not principal_key.startswith(_ENTRA_PREFIX):
+        return None
+    tid, sep, oid = principal_key[len(_ENTRA_PREFIX) :].partition(":")
+    if not sep or not _GUID_RE.fullmatch(tid) or not _GUID_RE.fullmatch(oid):
+        return None
+    return tid, oid
+
+
+def _validate_principal_key(principal_key: str) -> str:
+    """A principal key to store or look up: lower-case printable ASCII, otherwise opaque.
+
+    An ``entra:`` key must carry two GUIDs, because the legacy tenant and object
+    columns and the v1 layout are derived from it.
+    """
+    if (
+        not isinstance(principal_key, str)
+        or not 1 <= len(principal_key) <= _MAX_PRINCIPAL_KEY
+        or not principal_key.isascii()
+        or principal_key != principal_key.lower()
+        or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in principal_key)
+    ):
+        raise ValueError("principal_key must be a lower-case printable ASCII string")
+    if principal_key.startswith(_ENTRA_PREFIX) and _split_entra_key(principal_key) is None:
+        raise ValueError("an entra principal_key must be entra:<tenant GUID>:<object GUID>")
+    return principal_key
+
+
+def _resolve_principal(principal_key: str, object_id: str | None) -> str:
+    """The key to use: ``principal_key`` itself, or the adapter's ``(tenant, object)`` pair."""
+    if object_id is None:
+        return _validate_principal_key(principal_key)
+    return entra_principal_key(principal_key, object_id)
+
+
+def _legacy_columns(principal_key: str) -> tuple[str, str]:
+    """Values of the old ``tenant_id`` / ``object_id`` primary-key columns for a principal."""
+    parts = _split_entra_key(principal_key)
+    return parts if parts is not None else ("", principal_key)
+
+
 def _validate_host_value(host: str | None) -> str | None:
     """A host to store: None (legacy / default school) or a lowercase ASCII name.
 
@@ -265,12 +362,55 @@ def _validate_host_value(host: str | None) -> str | None:
     return host
 
 
-def _aad(tenant_id: str, object_id: str, key_id: str, canvas_host: str | None = None) -> bytes:
-    """Associated data of one row; a host selects the v2 layout and is bound."""
-    base = tenant_id.encode() + b"\x1f" + object_id.encode() + b"\x1f" + key_id.encode()
+def _aad_v2(principal_key: str, canvas_host: str, key_id: str) -> bytes:
+    """Associated data of a row that records a host (the current layout)."""
+    return (
+        _AAD_PREFIX_V2
+        + principal_key.encode("utf-8", "surrogatepass")
+        + _AAD_SEP
+        + canvas_host.encode("utf-8", "surrogatepass")
+        + _AAD_SEP
+        + key_id.encode("utf-8", "surrogatepass")
+    )
+
+
+def _aad_v1(tenant_id: str, object_id: str, key_id: str) -> bytes:
+    """Associated data of a legacy row (no host), as the pre-school server sealed it."""
+    return (
+        _AAD_PREFIX_V1
+        + tenant_id.encode()
+        + _AAD_SEP
+        + object_id.encode()
+        + _AAD_SEP
+        + key_id.encode()
+    )
+
+
+def _aad_for_principal(principal_key: str, canvas_host: str | None, key_id: str) -> bytes:
+    """AAD of the row stored under ``principal_key``; the host selects the layout.
+
+    Raises ValueError for a host-less (v1) row of a principal that has no tenant
+    and object id: such a row cannot exist.
+    """
+    if canvas_host is not None:
+        return _aad_v2(principal_key, canvas_host, key_id)
+    parts = _split_entra_key(principal_key)
+    if parts is None:
+        raise ValueError("a row without a host needs an entra principal")
+    return _aad_v1(parts[0], parts[1], key_id)
+
+
+def _row_aad(
+    tenant_id: str,
+    object_id: str,
+    canvas_host: str | None,
+    principal_key: str | None,
+    key_id: str,
+) -> bytes:
+    """AAD of a stored row read from its own columns (rotation and the open-time check)."""
     if canvas_host is None:
-        return _AAD_PREFIX_V1 + base
-    return _AAD_PREFIX_V2 + base + b"\x1f" + canvas_host.encode("utf-8", "surrogatepass")
+        return _aad_v1(tenant_id, object_id, key_id)
+    return _aad_v2(principal_key or "", canvas_host, key_id)
 
 
 def _info_from_row(row: tuple[Any, ...]) -> EnrollmentInfo:
@@ -286,6 +426,7 @@ def _info_from_row(row: tuple[Any, ...]) -> EnrollmentInfo:
         updated_at=row[8],
         last_used_at=row[9],
         canvas_host=row[10],
+        principal_key=row[11] or "",
     )
 
 
@@ -353,7 +494,7 @@ class TokenStore:
                 ).fetchone()
                 if row is None:
                     conn.execute(_SCHEMA_TOKENS)
-                    self._ensure_host_column(conn)
+                    self._migrate_columns(conn)
                     conn.execute(
                         "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
                         (str(SCHEMA_VERSION),),
@@ -371,7 +512,7 @@ class TokenStore:
                             f"than this server supports ({SCHEMA_VERSION})"
                         )
                     conn.execute(_SCHEMA_TOKENS)
-                    self._ensure_host_column(conn)
+                    self._migrate_columns(conn)
                     if version < SCHEMA_VERSION:
                         conn.execute(
                             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
@@ -388,11 +529,23 @@ class TokenStore:
         self._verify_keyring()
 
     @staticmethod
-    def _ensure_host_column(conn: sqlite3.Connection) -> None:
-        """Version 1 -> 2: add the nullable ``canvas_host`` column once."""
+    def _migrate_columns(conn: sqlite3.Connection) -> None:
+        """Bring an older table up to date; a current one is left unchanged.
+
+        Adds each missing column, gives every row without a principal key the key
+        ``entra:<tenant>:<object>`` (both ids are stored lower-case) and makes the
+        key unique. Safe to run again at any point.
+        """
         columns = {r[1] for r in conn.execute("PRAGMA table_info(canvas_tokens)")}
-        if "canvas_host" not in columns:
-            conn.execute("ALTER TABLE canvas_tokens ADD COLUMN canvas_host TEXT")
+        for name, definition in _ADDED_COLUMNS:
+            if name not in columns:
+                conn.execute(f"ALTER TABLE canvas_tokens ADD COLUMN {name} {definition}")
+        conn.execute(
+            "UPDATE canvas_tokens"
+            " SET principal_key = 'entra:' || tenant_id || ':' || object_id"
+            " WHERE principal_key IS NULL"
+        )
+        conn.execute(_SCHEMA_PRINCIPAL_INDEX)
 
     def _verify_keyring(self) -> None:
         with self._connection() as conn:
@@ -409,8 +562,8 @@ class TokenStore:
                 )
             for kid in used:
                 probe = conn.execute(
-                    "SELECT tenant_id, object_id, nonce, ciphertext, canvas_host"
-                    " FROM canvas_tokens WHERE key_id = ? LIMIT 1",
+                    "SELECT tenant_id, object_id, nonce, ciphertext, canvas_host,"
+                    " principal_key FROM canvas_tokens WHERE key_id = ? LIMIT 1",
                     (kid,),
                 ).fetchone()
                 if probe is None:
@@ -418,9 +571,9 @@ class TokenStore:
                 try:
                     self._keyring.decrypt(
                         kid,
-                        probe[2],
-                        probe[3],
-                        _aad(probe[0], probe[1], kid, probe[4]),
+                        bytes(probe[2]),
+                        bytes(probe[3]),
+                        _row_aad(probe[0], probe[1], probe[4], probe[5], kid),
                     )
                 except TokenDecryptionError:
                     raise KeyringError(
@@ -429,30 +582,39 @@ class TokenStore:
 
     # -- reads -------------------------------------------------------------
 
-    def get(self, tenant_id: str, object_id: str) -> StoredToken | None:
-        """Return the decrypted enrollment, or None. Raises TokenDecryptionError."""
-        tid = _normalize_guid(tenant_id, "tenant_id")
-        oid = _normalize_guid(object_id, "object_id")
+    def get(self, principal_key: str, object_id: str | None = None) -> StoredToken | None:
+        """Return the decrypted enrollment of a principal, or None.
+
+        ``get(principal_key)``; the adapter form ``get(tenant_id, object_id)``
+        means the Entra principal. Raises TokenDecryptionError.
+        """
+        key = _resolve_principal(principal_key, object_id)
         with self._connection() as conn:
             row = conn.execute(
                 "SELECT key_id, nonce, ciphertext, canvas_user_id,"
                 " canvas_user_name, entra_display_name, entra_upn,"
-                " created_at, updated_at, last_used_at, canvas_host"
-                " FROM canvas_tokens WHERE tenant_id = ? AND object_id = ?",
-                (tid, oid),
+                " created_at, updated_at, last_used_at, canvas_host,"
+                " tenant_id, object_id"
+                " FROM canvas_tokens WHERE principal_key = ?",
+                (key,),
             ).fetchone()
         if row is None:
             return None
-        plaintext = self._keyring.decrypt(
-            row[0], bytes(row[1]), bytes(row[2]), _aad(tid, oid, row[0], row[10])
-        )
+        # The AAD is built from the key the caller asked for, not from anything
+        # stored next to the row, so a row that was moved to another principal
+        # fails to decrypt.
+        try:
+            aad = _aad_for_principal(key, row[10], row[0])
+        except ValueError:
+            raise TokenDecryptionError("stored token could not be decrypted") from None
+        plaintext = self._keyring.decrypt(row[0], bytes(row[1]), bytes(row[2]), aad)
         try:
             api_token = plaintext.decode("utf-8")
         except UnicodeDecodeError:
             raise TokenDecryptionError("stored token could not be decrypted") from None
         return StoredToken(
-            tenant_id=tid,
-            object_id=oid,
+            tenant_id=row[11],
+            object_id=row[12],
             api_token=api_token,
             canvas_user_id=row[3],
             canvas_user_name=row[4],
@@ -463,16 +625,15 @@ class TokenStore:
             updated_at=row[8],
             last_used_at=row[9],
             canvas_host=row[10],
+            principal_key=key,
         )
 
-    def info(self, tenant_id: str, object_id: str) -> EnrollmentInfo | None:
-        tid = _normalize_guid(tenant_id, "tenant_id")
-        oid = _normalize_guid(object_id, "object_id")
+    def info(self, principal_key: str, object_id: str | None = None) -> EnrollmentInfo | None:
+        key = _resolve_principal(principal_key, object_id)
         with self._connection() as conn:
             row = conn.execute(
-                f"SELECT {_INFO_COLUMNS} FROM canvas_tokens"
-                " WHERE tenant_id = ? AND object_id = ?",
-                (tid, oid),
+                f"SELECT {_INFO_COLUMNS} FROM canvas_tokens WHERE principal_key = ?",
+                (key,),
             ).fetchone()
         return None if row is None else _info_from_row(row)
 
@@ -494,27 +655,39 @@ class TokenStore:
     def put(
         self,
         *,
-        tenant_id: str,
-        object_id: str,
         api_token: str,
         canvas_user_id: str,
         canvas_user_name: str,
         entra_display_name: str,
         entra_upn: str,
+        principal_key: str | None = None,
+        tenant_id: str | None = None,
+        object_id: str | None = None,
         canvas_host: str | None = None,
     ) -> EnrollmentInfo:
-        """Insert or replace an enrollment, preserving ``created_at``.
+        """Insert or replace a principal's enrollment, preserving ``created_at``.
 
-        ``canvas_host`` is the school the token belongs to (None only for the
-        legacy single-school layout); it is bound into the encryption.
+        Name the principal with ``principal_key`` or, as the Entra adapter, with
+        ``tenant_id`` and ``object_id``. ``canvas_host`` is the school the token
+        belongs to (None only for the legacy single-school layout, which needs an
+        ``entra:`` principal); it is bound into the encryption together with the
+        principal. Saving marks the row ``active`` and verified now.
         """
-        tid = _normalize_guid(tenant_id, "tenant_id")
-        oid = _normalize_guid(object_id, "object_id")
+        if principal_key is not None:
+            if tenant_id is not None or object_id is not None:
+                raise ValueError("give either principal_key or tenant_id and object_id")
+            key = _validate_principal_key(principal_key)
+        elif tenant_id is not None and object_id is not None:
+            key = entra_principal_key(tenant_id, object_id)
+        else:
+            raise ValueError("give a principal_key, or both tenant_id and object_id")
         host = _validate_host_value(canvas_host)
         if not isinstance(api_token, str) or not api_token:
             raise ValueError("api_token must be a non-empty string")
+        tid, oid = _legacy_columns(key)
         kid, nonce, ciphertext = self._keyring.encrypt(
-            api_token.encode("utf-8"), _aad(tid, oid, self._keyring.active_key_id, host)
+            api_token.encode("utf-8"),
+            _aad_for_principal(key, host, self._keyring.active_key_id),
         )
         now = self._now()
         with self._write() as conn:
@@ -522,9 +695,10 @@ class TokenStore:
                 "INSERT INTO canvas_tokens (tenant_id, object_id, key_id, nonce,"
                 " ciphertext, canvas_user_id, canvas_user_name,"
                 " entra_display_name, entra_upn, created_at, updated_at,"
-                " last_used_at, canvas_host)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)"
-                " ON CONFLICT (tenant_id, object_id) DO UPDATE SET"
+                " last_used_at, canvas_host, principal_key, status,"
+                " last_verified_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)"
+                " ON CONFLICT (principal_key) DO UPDATE SET"
                 " key_id = excluded.key_id, nonce = excluded.nonce,"
                 " ciphertext = excluded.ciphertext,"
                 " canvas_user_id = excluded.canvas_user_id,"
@@ -532,6 +706,9 @@ class TokenStore:
                 " entra_display_name = excluded.entra_display_name,"
                 " entra_upn = excluded.entra_upn,"
                 " canvas_host = excluded.canvas_host,"
+                " status = excluded.status,"
+                " invalid_reason = NULL, invalid_since = NULL,"
+                " last_verified_at = excluded.last_verified_at,"
                 " updated_at = excluded.updated_at",
                 (
                     tid,
@@ -546,39 +723,42 @@ class TokenStore:
                     now,
                     now,
                     host,
+                    key,
+                    STATUS_ACTIVE,
+                    now,
                 ),
             )
             row = conn.execute(
-                f"SELECT {_INFO_COLUMNS} FROM canvas_tokens"
-                " WHERE tenant_id = ? AND object_id = ?",
-                (tid, oid),
+                f"SELECT {_INFO_COLUMNS} FROM canvas_tokens WHERE principal_key = ?",
+                (key,),
             ).fetchone()
         return _info_from_row(row)
 
-    def delete(self, tenant_id: str, object_id: str) -> bool:
-        tid = _normalize_guid(tenant_id, "tenant_id")
-        oid = _normalize_guid(object_id, "object_id")
+    def delete(self, principal_key: str, object_id: str | None = None) -> bool:
+        key = _resolve_principal(principal_key, object_id)
         with self._write() as conn:
             cur = conn.execute(
-                "DELETE FROM canvas_tokens WHERE tenant_id = ? AND object_id = ?",
-                (tid, oid),
+                "DELETE FROM canvas_tokens WHERE principal_key = ?", (key,)
             )
             return cur.rowcount > 0
 
     def touch(
-        self, tenant_id: str, object_id: str, *, min_interval_seconds: int = 300
+        self,
+        principal_key: str,
+        object_id: str | None = None,
+        *,
+        min_interval_seconds: int = 300,
     ) -> None:
         """Record use, at most once per interval. Never raises."""
         try:
-            tid = _normalize_guid(tenant_id, "tenant_id")
-            oid = _normalize_guid(object_id, "object_id")
+            key = _resolve_principal(principal_key, object_id)
             now = self._now()
             with self._connection() as conn:
                 conn.execute(
                     "UPDATE canvas_tokens SET last_used_at = ?"
-                    " WHERE tenant_id = ? AND object_id = ?"
+                    " WHERE principal_key = ?"
                     " AND (last_used_at IS NULL OR last_used_at < ?)",
-                    (now, tid, oid, now - max(0, min_interval_seconds)),
+                    (now, key, now - max(0, min_interval_seconds)),
                 )
         except (sqlite3.Error, ValueError, OSError):
             return
@@ -589,17 +769,19 @@ class TokenStore:
         changed = 0
         with self._write() as conn:
             rows = conn.execute(
-                "SELECT tenant_id, object_id, key_id, nonce, ciphertext, canvas_host"
+                "SELECT tenant_id, object_id, key_id, nonce, ciphertext,"
+                " canvas_host, principal_key"
                 " FROM canvas_tokens WHERE key_id != ?",
                 (active,),
             ).fetchall()
-            for tid, oid, kid, nonce, ciphertext, host in rows:
-                # Each row keeps its own host, so its AAD layout is preserved.
+            for tid, oid, kid, nonce, ciphertext, host, pkey in rows:
+                # Each row keeps its own principal and host, so its AAD layout
+                # (v1 or v2) is preserved.
                 plaintext = self._keyring.decrypt(
-                    kid, bytes(nonce), bytes(ciphertext), _aad(tid, oid, kid, host)
+                    kid, bytes(nonce), bytes(ciphertext), _row_aad(tid, oid, host, pkey, kid)
                 )
                 new_kid, new_nonce, new_ct = self._keyring.encrypt(
-                    plaintext, _aad(tid, oid, active, host)
+                    plaintext, _row_aad(tid, oid, host, pkey, active)
                 )
                 conn.execute(
                     "UPDATE canvas_tokens SET key_id = ?, nonce = ?,"

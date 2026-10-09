@@ -235,3 +235,43 @@ def test_rotate_with_mixed_rows_keeps_working(env, monkeypatch, capsys) -> None:
     assert token_admin.main(["list"]) == 0
     out = capsys.readouterr().out
     assert "canvas.school-b.edu" in out
+
+
+def test_a_version_1_database_is_migrated_by_the_cli_and_stays_manageable(env, monkeypatch, capsys) -> None:
+    import sqlite3
+
+    path = token_db_path(env)
+    path.parent.mkdir(parents=True)
+    ring = Keyring.parse(f"k1:{KEY1}")
+    aad = b"canvas-mcp/canvas-token/v1\x1f" + f"{TID}\x1f{OID_A}\x1fk1".encode()
+    kid, nonce, ct = ring.encrypt(TOKEN_A.encode(), aad)
+    conn = sqlite3.connect(str(path), isolation_level=None)
+    try:
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID")
+        conn.execute(
+            "CREATE TABLE canvas_tokens ("
+            " tenant_id TEXT NOT NULL, object_id TEXT NOT NULL, key_id TEXT NOT NULL,"
+            " nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, canvas_user_id TEXT NOT NULL,"
+            " canvas_user_name TEXT NOT NULL, entra_display_name TEXT NOT NULL DEFAULT '',"
+            " entra_upn TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL,"
+            " updated_at INTEGER NOT NULL, last_used_at INTEGER,"
+            " PRIMARY KEY (tenant_id, object_id)) WITHOUT ROWID"
+        )
+        conn.execute("INSERT INTO meta VALUES ('schema_version', '1')")
+        conn.execute(
+            "INSERT INTO canvas_tokens VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)",
+            (TID, OID_A, kid, nonce, ct, "1", "Ada", "Ada", "ada@example.test", 1, 1),
+        )
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("CANVAS_TOKEN_KEYS", f"k2:{KEY2},k1:{KEY1}")
+    assert token_admin.main(["rotate"]) == 0
+    assert "re-encrypted 1 row(s)" in capsys.readouterr().out
+    monkeypatch.setenv("CANVAS_TOKEN_KEYS", f"k2:{KEY2}")
+    assert token_admin.main(["list"]) == 0
+    row = capsys.readouterr().out.splitlines()[0].split("\t")
+    assert row[:2] == [TID, OID_A] and row[5] == "-"
+    assert token_admin.main(["revoke", TID, OID_A]) == 0
+    assert "revoked 1 enrollment" in capsys.readouterr().out
+    assert token_admin.main(["revoke", TID, OID_A]) == 1
