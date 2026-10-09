@@ -36,14 +36,32 @@ health of the stored token: saving a token marks the row ``active`` and verified
 :meth:`TokenStore.mark_invalid` and :meth:`TokenStore.restore_active` move it
 between the two states, and an invalid row keeps its ciphertext so a successful
 re-check can restore it. Opening an older database migrates it in place,
-idempotently. A version 2 database is refused by older
-servers, so roll back only together with a backup taken before the upgrade.
+idempotently.
 
-The same database holds one more table, ``user_tool_prefs``: the write tools each
-principal has switched on at ``/account`` (see :mod:`.tool_prefs`). It is keyed by
-``principal_key``, is created idempotently when the store opens (the schema version
-stays 2, so an older server simply ignores it), and is independent of the token row:
-replacing, deleting or invalidating a token does not touch it.
+The same database holds more tables, all keyed by ``principal_key`` and created
+idempotently when the store opens:
+
+* ``user_tool_prefs``: the write tools each principal has switched on at
+  ``/account`` (see :mod:`.tool_prefs`). Independent of the token row: replacing,
+  deleting or invalidating a token does not touch it.
+* ``principal_status``: whether the principal may use the server at all. This is
+  the authorization decision, kept apart from the token row on purpose. An
+  administrator *disables* a principal (``status = 'disabled'``); deleting the
+  enrollment row never changes that, so a user cannot re-enroll their way back in,
+  and a sealed ``/account`` session cannot restore a deleted row. Disabling and
+  enabling also bump ``session_epoch``, which every ``/account`` session carries and
+  which invalidates every session issued before the change. The row also keeps the
+  last owner status seen at a sign-in (``is_owner``), which the "never disable the
+  last active owner" rule counts. A principal without a row is active. Because the
+  key is an opaque string, a later account model (``acct:<uuid>`` principals) can
+  absorb the table without a change.
+* ``principal_status_events``: append-only history of every status transition
+  (disabled, enabled, owner gained or lost) with the actor, written in the same
+  transaction as the change, so it also covers the operator CLI.
+
+Schema version 3 adds ``principal_status`` and ``principal_status_events``. A
+version 2 server would ignore them and serve a disabled user, so it refuses a
+version 3 database: roll back only together with a backup taken before the upgrade.
 
 Keys come from ``CANVAS_TOKEN_KEYS`` (``kid:base64key[,kid:base64key...]``).
 The first entry encrypts new rows; every entry decrypts. Error messages never
@@ -66,14 +84,14 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Literal
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 STATUS_ACTIVE = "active"
 STATUS_INVALID = "invalid"
@@ -85,6 +103,35 @@ REASON_REVOKED_BY_ADMIN = "revoked_by_admin"
 INVALID_REASONS = frozenset(
     {REASON_CANVAS_TOKEN_REJECTED, REASON_DECRYPT_FAILED, REASON_REVOKED_BY_ADMIN}
 )
+
+# Whether a principal may use the server (``principal_status.status``). Not to be
+# confused with the health of a token row above, which reuses STATUS_ACTIVE.
+STATUS_DISABLED = "disabled"
+
+# Why a principal is disabled: a closed set, stored in ``disabled_reason``.
+DISABLE_REASON_ADMIN = "admin_disabled"
+DISABLE_REASON_OPERATOR = "operator_disabled"
+DISABLE_REASONS = frozenset({DISABLE_REASON_ADMIN, DISABLE_REASON_OPERATOR})
+
+# The ``actor`` of a change made by the operator CLI (no Entra identity).
+OPERATOR_ACTOR = "operator"
+
+
+class _Operator:
+    """The operator at the host (the CLI): authorized by file access, not by an identity."""
+
+    def __repr__(self) -> str:
+        return "OPERATOR"
+
+
+#: Pass as ``actor`` for a change made through the operator CLI.
+OPERATOR = _Operator()
+Actor = str | _Operator
+
+EVENT_DISABLED = "disabled"
+EVENT_ENABLED = "enabled"
+EVENT_OWNER_GAINED = "owner_gained"
+EVENT_OWNER_LOST = "owner_lost"
 
 _KEY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 _GUID_RE = re.compile(
@@ -142,6 +189,40 @@ _SCHEMA_TOOL_PREFS = (
     " updated_via TEXT NOT NULL DEFAULT 'account_web'"
     ") WITHOUT ROWID"
 )
+_SCHEMA_PRINCIPAL_STATUS = (
+    "CREATE TABLE IF NOT EXISTS principal_status ("
+    " principal_key TEXT PRIMARY KEY,"
+    " status TEXT NOT NULL DEFAULT 'active',"
+    " disabled_reason TEXT,"
+    " disabled_at INTEGER,"
+    " disabled_by TEXT,"
+    " display_name TEXT NOT NULL DEFAULT '',"
+    " upn TEXT NOT NULL DEFAULT '',"
+    " session_epoch INTEGER NOT NULL DEFAULT 0,"
+    " is_owner INTEGER NOT NULL DEFAULT 0,"
+    " owner_seen_at INTEGER,"
+    " updated_at INTEGER NOT NULL"
+    ") WITHOUT ROWID"
+)
+_SCHEMA_STATUS_EVENTS = (
+    "CREATE TABLE IF NOT EXISTS principal_status_events ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " principal_key TEXT NOT NULL,"
+    " action TEXT NOT NULL,"
+    " actor TEXT,"
+    " reason TEXT,"
+    " session_epoch INTEGER NOT NULL,"
+    " at INTEGER NOT NULL"
+    ")"
+)
+_SCHEMA_STATUS_EVENTS_INDEX = (
+    "CREATE INDEX IF NOT EXISTS principal_status_events_principal"
+    " ON principal_status_events (principal_key, id)"
+)
+_PRINCIPAL_STATUS_COLUMNS = (
+    "principal_key, status, disabled_reason, disabled_at, disabled_by,"
+    " display_name, upn, session_epoch, is_owner, owner_seen_at, updated_at"
+)
 _SCHEMA_PRINCIPAL_INDEX = (
     "CREATE UNIQUE INDEX IF NOT EXISTS canvas_tokens_principal_key"
     " ON canvas_tokens (principal_key)"
@@ -195,6 +276,22 @@ class TokenDecryptionError(TokenStoreError):
     """
 
     updated_at: int | None = None
+
+
+class PrincipalDisabledError(TokenStoreError):
+    """The principal is administratively disabled, so nothing may be saved for it."""
+
+
+class AccessActionRefused(TokenStoreError):
+    """An administrative access change was refused. ``code`` says why (a closed set)."""
+
+    NOT_OWNER = "not_owner"
+    LAST_OWNER = "last_owner"
+    SELF = "self"
+
+    def __init__(self, code: str) -> None:
+        super().__init__(f"access change refused: {code}")
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -259,6 +356,68 @@ class ToolPrefs:
     enabled_at: dict[str, int]
     updated_at: int
     updated_via: str
+
+
+@dataclass(frozen=True)
+class PrincipalStatus:
+    """Whether a principal may use the server, as last decided by an administrator.
+
+    A principal with no stored row is active at epoch 0 (``stored`` is False).
+    ``session_epoch`` changes whenever the principal is disabled or enabled; an
+    ``/account`` session is valid only while its epoch equals this one.
+    ``is_owner`` is the owner role as last seen at a sign-in; it is a record, not
+    the authority (the Entra role in a fresh sign-in is).
+    """
+
+    principal_key: str
+    status: str = STATUS_ACTIVE
+    disabled_reason: str | None = None
+    disabled_at: int | None = None
+    disabled_by: str | None = None
+    display_name: str = ""
+    upn: str = ""
+    session_epoch: int = 0
+    is_owner: bool = False
+    owner_seen_at: int | None = None
+    updated_at: int = 0
+    stored: bool = False
+    # Set only on the value returned by ``record_sign_in`` when that call changed the
+    # owner flag: ``EVENT_OWNER_GAINED`` or ``EVENT_OWNER_LOST``. Not stored.
+    owner_change: str | None = None
+
+    @property
+    def disabled(self) -> bool:
+        return self.status == STATUS_DISABLED
+
+
+@dataclass(frozen=True)
+class StatusEvent:
+    """One entry of the status history of a principal."""
+
+    id: int
+    principal_key: str
+    action: str
+    actor: str | None
+    reason: str | None
+    session_epoch: int
+    at: int
+
+
+def _status_from_row(row: tuple[Any, ...]) -> PrincipalStatus:
+    return PrincipalStatus(
+        principal_key=row[0],
+        status=STATUS_DISABLED if row[1] == STATUS_DISABLED else STATUS_ACTIVE,
+        disabled_reason=row[2],
+        disabled_at=row[3],
+        disabled_by=row[4],
+        display_name=row[5] or "",
+        upn=row[6] or "",
+        session_epoch=int(row[7]),
+        is_owner=bool(row[8]),
+        owner_seen_at=row[9],
+        updated_at=int(row[10]),
+        stored=True,
+    )
 
 
 def _validate_tool_names(names: Iterable[str]) -> frozenset[str]:
@@ -439,6 +598,16 @@ def _validate_principal_key(principal_key: str) -> str:
     return principal_key
 
 
+def valid_principal_key(value: object) -> str | None:
+    """``value`` if it is a well-formed principal key, else None (never raises)."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return _validate_principal_key(value)
+    except ValueError:
+        return None
+
+
 def _resolve_principal(principal_key: str, object_id: str | None) -> str:
     """The key to use: ``principal_key`` itself, or the adapter's ``(tenant, object)`` pair."""
     if object_id is None:
@@ -609,7 +778,7 @@ class TokenStore:
                 if row is None:
                     conn.execute(_SCHEMA_TOKENS)
                     self._migrate_columns(conn)
-                    conn.execute(_SCHEMA_TOOL_PREFS)
+                    self._create_side_tables(conn)
                     conn.execute(
                         "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
                         (str(SCHEMA_VERSION),),
@@ -628,7 +797,7 @@ class TokenStore:
                         )
                     conn.execute(_SCHEMA_TOKENS)
                     self._migrate_columns(conn)
-                    conn.execute(_SCHEMA_TOOL_PREFS)
+                    self._create_side_tables(conn)
                     if version < SCHEMA_VERSION:
                         conn.execute(
                             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
@@ -643,6 +812,14 @@ class TokenStore:
             os.chmod(self._path, 0o600)
 
         self._verify_keyring()
+
+    @staticmethod
+    def _create_side_tables(conn: sqlite3.Connection) -> None:
+        """The tables keyed by principal: tool switches, access status and its history."""
+        conn.execute(_SCHEMA_TOOL_PREFS)
+        conn.execute(_SCHEMA_PRINCIPAL_STATUS)
+        conn.execute(_SCHEMA_STATUS_EVENTS)
+        conn.execute(_SCHEMA_STATUS_EVENTS_INDEX)
 
     @staticmethod
     def _migrate_columns(conn: sqlite3.Connection) -> None:
@@ -803,6 +980,10 @@ class TokenStore:
         gave for the token (epoch seconds, used only for a reminder): an integer
         sets it, ``None`` clears it, and leaving it out keeps the stored value (the
         account page always passes it, so replacing a token replaces the hint).
+
+        A disabled principal (see :meth:`disable_principal`) cannot be enrolled:
+        :class:`PrincipalDisabledError` is raised, checked in the same transaction
+        as the write.
         """
         if principal_key is not None:
             if tenant_id is not None or object_id is not None:
@@ -830,6 +1011,15 @@ class TokenStore:
         )
         now = self._now()
         with self._write() as conn:
+            # Checked in the same transaction as the write, so an enrollment that
+            # races an administrator's disable either lands first (and the principal
+            # is disabled right after) or is refused; it can never be saved for a
+            # principal that is already disabled.
+            gate = conn.execute(
+                "SELECT status FROM principal_status WHERE principal_key = ?", (key,)
+            ).fetchone()
+            if gate is not None and gate[0] == STATUS_DISABLED:
+                raise PrincipalDisabledError("this principal is disabled")
             conn.execute(
                 "INSERT INTO canvas_tokens (tenant_id, object_id, key_id, nonce,"
                 " ciphertext, canvas_user_id, canvas_user_name,"
@@ -878,6 +1068,12 @@ class TokenStore:
         return _info_from_row(row)
 
     def delete(self, principal_key: str, object_id: str | None = None) -> bool:
+        """Remove the enrollment row.
+
+        This is housekeeping or a self-disconnect, never an authorization decision:
+        it does not touch ``principal_status``, so a disabled principal stays
+        disabled and an active one may enroll again.
+        """
         key = _resolve_principal(principal_key, object_id)
         with self._write() as conn:
             cur = conn.execute(
@@ -984,6 +1180,275 @@ class TokenStore:
                 )
         except (sqlite3.Error, ValueError, OSError):
             return
+
+    # -- access status: the authorization decision ------------------------------
+
+    @staticmethod
+    def _fetch_status(conn: sqlite3.Connection, key: str) -> PrincipalStatus | None:
+        row = conn.execute(
+            f"SELECT {_PRINCIPAL_STATUS_COLUMNS} FROM principal_status WHERE principal_key = ?",
+            (key,),
+        ).fetchone()
+        return None if row is None else _status_from_row(row)
+
+    @staticmethod
+    def _record_event(
+        conn: sqlite3.Connection,
+        key: str,
+        action: str,
+        actor: str | None,
+        reason: str | None,
+        epoch: int,
+        now: int,
+    ) -> None:
+        conn.execute(
+            "INSERT INTO principal_status_events"
+            " (principal_key, action, actor, reason, session_epoch, at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (key, action, actor, reason, epoch, now),
+        )
+
+    @staticmethod
+    def _actor_name(actor: Actor) -> str:
+        """The recorded name of an actor; a non-operator actor must be a principal key."""
+        if isinstance(actor, _Operator):
+            return OPERATOR_ACTOR
+        return _validate_principal_key(actor)
+
+    def _require_owner_actor(self, conn: sqlite3.Connection, actor: Actor) -> None:
+        """Re-evaluate, inside the transaction, that the actor is an active owner now.
+
+        The operator at the host needs no identity. Anyone else must have a stored
+        row that is active and flagged owner: an owner who was disabled, or whose
+        owner role a later sign-in no longer showed, cannot act, whatever their
+        browser session still says.
+        """
+        if isinstance(actor, _Operator):
+            return
+        current = self._fetch_status(conn, _validate_principal_key(actor))
+        if current is None or current.disabled or not current.is_owner:
+            raise AccessActionRefused(AccessActionRefused.NOT_OWNER)
+
+    def get_principal_status(
+        self, principal_key: str, object_id: str | None = None
+    ) -> PrincipalStatus:
+        """The access status of a principal; active at epoch 0 when nothing is stored."""
+        key = _resolve_principal(principal_key, object_id)
+        with self._connection() as conn:
+            found = self._fetch_status(conn, key)
+        return found if found is not None else PrincipalStatus(key)
+
+    def list_principal_statuses(self) -> list[PrincipalStatus]:
+        """Every stored status row (disabled principals and known owners)."""
+        with self._connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_PRINCIPAL_STATUS_COLUMNS} FROM principal_status"
+                " ORDER BY principal_key"
+            ).fetchall()
+        return [_status_from_row(r) for r in rows]
+
+    def count_active_owners(self) -> int:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM principal_status WHERE is_owner = 1 AND status = ?",
+                (STATUS_ACTIVE,),
+            ).fetchone()
+        return int(row[0])
+
+    def record_sign_in(
+        self, principal_key: str, object_id: str | None = None, *, is_owner: bool
+    ) -> PrincipalStatus:
+        """Record a verified ``/account`` sign-in; returns the status to apply to it.
+
+        Notes whether the fresh id_token showed the owner role (a change is written
+        to the history). Never changes the status or the epoch: a disabled principal
+        comes back disabled and the caller refuses the sign-in. A non-owner without a
+        row leaves no row.
+        """
+        key = _resolve_principal(principal_key, object_id)
+        now = self._now()
+        with self._write() as conn:
+            row = self._fetch_status(conn, key)
+            if row is None:
+                if not is_owner:
+                    return PrincipalStatus(key)
+                conn.execute(
+                    "INSERT INTO principal_status (principal_key, is_owner, owner_seen_at,"
+                    " updated_at) VALUES (?, 1, ?, ?)",
+                    (key, now, now),
+                )
+                self._record_event(conn, key, EVENT_OWNER_GAINED, None, "sign_in", 0, now)
+            else:
+                conn.execute(
+                    "UPDATE principal_status SET is_owner = ?, owner_seen_at = ?,"
+                    " updated_at = ? WHERE principal_key = ?",
+                    (1 if is_owner else 0, now, now, key),
+                )
+                if row.is_owner != is_owner:
+                    self._record_event(
+                        conn,
+                        key,
+                        EVENT_OWNER_GAINED if is_owner else EVENT_OWNER_LOST,
+                        None,
+                        "sign_in",
+                        row.session_epoch,
+                        now,
+                    )
+            found = self._fetch_status(conn, key)
+        assert found is not None
+        change = None
+        if row is None or row.is_owner != is_owner:
+            change = EVENT_OWNER_GAINED if is_owner else EVENT_OWNER_LOST
+        return replace(found, owner_change=change)
+
+    def demote_owner(
+        self, principal_key: str, object_id: str | None = None, *, evidence_issued_at: int
+    ) -> bool:
+        """Clear the stored owner flag on evidence from a request token; True if cleared.
+
+        The evidence is the issue time of a verified access token that carries no
+        owner role. It counts only if it is newer than the last sign-in that was
+        recorded, so a token issued before a promotion cannot undo it. This path can
+        only ever lower the flag; raising it needs a fresh sign-in.
+        """
+        key = _resolve_principal(principal_key, object_id)
+        now = self._now()
+        with self._write() as conn:
+            row = self._fetch_status(conn, key)
+            if row is None or not row.is_owner:
+                return False
+            if evidence_issued_at <= (row.owner_seen_at or 0):
+                return False
+            conn.execute(
+                "UPDATE principal_status SET is_owner = 0, updated_at = ?"
+                " WHERE principal_key = ?",
+                (now, key),
+            )
+            self._record_event(
+                conn, key, EVENT_OWNER_LOST, None, "access_token_roles", row.session_epoch, now
+            )
+        return True
+
+    def disable_principal(
+        self,
+        principal_key: str,
+        object_id: str | None = None,
+        *,
+        actor: Actor,
+        reason: str,
+        allow_last_owner: bool = False,
+    ) -> bool:
+        """Administratively disable a principal; True if this call changed it.
+
+        The principal cannot sign in to ``/account``, cannot enroll, and every MCP
+        request is refused, until an owner (or the operator) enables it again.
+        Every ``/account`` session issued before is invalidated (``session_epoch``
+        is bumped). The enrollment row, if any, is kept untouched.
+
+        ``actor`` is the acting owner's principal key or :data:`OPERATOR`. An owner
+        actor is re-checked inside the transaction (still active and an owner) and
+        cannot disable themselves. Disabling the last active owner is refused unless
+        ``allow_last_owner``; the check and the write are one transaction, so two
+        owners cannot disable each other concurrently. Already disabled: returns
+        False and changes nothing.
+        """
+        key = _resolve_principal(principal_key, object_id)
+        if reason not in DISABLE_REASONS:
+            raise ValueError("unknown disable reason")
+        by = self._actor_name(actor)
+        now = self._now()
+        with self._write() as conn:
+            self._require_owner_actor(conn, actor)
+            if not isinstance(actor, _Operator) and by == key:
+                raise AccessActionRefused(AccessActionRefused.SELF)
+            row = self._fetch_status(conn, key)
+            if row is not None and row.disabled:
+                return False
+            if row is not None and row.is_owner and not allow_last_owner:
+                others = conn.execute(
+                    "SELECT COUNT(*) FROM principal_status"
+                    " WHERE is_owner = 1 AND status = ? AND principal_key != ?",
+                    (STATUS_ACTIVE, key),
+                ).fetchone()[0]
+                if others == 0:
+                    raise AccessActionRefused(AccessActionRefused.LAST_OWNER)
+            names = conn.execute(
+                "SELECT entra_display_name, entra_upn FROM canvas_tokens"
+                " WHERE principal_key = ?",
+                (key,),
+            ).fetchone()
+            display_name, upn = (names[0], names[1]) if names is not None else ("", "")
+            conn.execute(
+                "INSERT INTO principal_status (principal_key, status, disabled_reason,"
+                " disabled_at, disabled_by, display_name, upn, session_epoch, is_owner,"
+                " owner_seen_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, NULL, ?)"
+                " ON CONFLICT (principal_key) DO UPDATE SET"
+                " status = excluded.status, disabled_reason = excluded.disabled_reason,"
+                " disabled_at = excluded.disabled_at, disabled_by = excluded.disabled_by,"
+                " display_name = excluded.display_name, upn = excluded.upn,"
+                " session_epoch = principal_status.session_epoch + 1,"
+                " updated_at = excluded.updated_at",
+                (key, STATUS_DISABLED, reason, now, by, display_name, upn, now),
+            )
+            epoch = int(
+                conn.execute(
+                    "SELECT session_epoch FROM principal_status WHERE principal_key = ?",
+                    (key,),
+                ).fetchone()[0]
+            )
+            self._record_event(conn, key, EVENT_DISABLED, by, reason, epoch, now)
+        return True
+
+    def enable_principal(
+        self, principal_key: str, object_id: str | None = None, *, actor: Actor
+    ) -> bool:
+        """Lift a disablement; True if this call changed it.
+
+        Only an active owner (re-checked inside the transaction) or the operator.
+        Bumps ``session_epoch`` again, so no session from before or during the
+        disablement comes back. The user's enrollment, if kept, is used again as it
+        is; a removed one has to be enrolled again.
+        """
+        key = _resolve_principal(principal_key, object_id)
+        by = self._actor_name(actor)
+        now = self._now()
+        with self._write() as conn:
+            self._require_owner_actor(conn, actor)
+            row = self._fetch_status(conn, key)
+            if row is None or not row.disabled:
+                return False
+            conn.execute(
+                "UPDATE principal_status SET status = ?, disabled_reason = NULL,"
+                " disabled_at = NULL, disabled_by = NULL, display_name = '', upn = '',"
+                " session_epoch = session_epoch + 1, updated_at = ?"
+                " WHERE principal_key = ?",
+                (STATUS_ACTIVE, now, key),
+            )
+            self._record_event(conn, key, EVENT_ENABLED, by, None, row.session_epoch + 1, now)
+        return True
+
+    def list_status_events(
+        self,
+        principal_key: str | None = None,
+        object_id: str | None = None,
+        *,
+        limit: int = 50,
+    ) -> list[StatusEvent]:
+        """The newest status transitions first, for one principal or for all."""
+        sql = (
+            "SELECT id, principal_key, action, actor, reason, session_epoch, at"
+            " FROM principal_status_events"
+        )
+        args: list[Any] = []
+        if principal_key is not None:
+            sql += " WHERE principal_key = ?"
+            args.append(_resolve_principal(principal_key, object_id))
+        sql += " ORDER BY id DESC LIMIT ?"
+        args.append(max(1, min(int(limit), 1000)))
+        with self._connection() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return [StatusEvent(*r) for r in rows]
 
     # -- per-user write-tool preferences -------------------------------------
 

@@ -691,7 +691,7 @@ class TestAdminHealth:
         sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
         text = self.owner_page(h).text
         assert text.count('action="/account/admin/invalidate"') == 1
-        assert text.count('action="/account/admin/revoke"') == 3
+        assert text.count('action="/account/admin/remove"') == 3
 
     def test_marking_invalid_needs_an_owner_origin_and_csrf(self, h: Harness) -> None:
         seed(h)

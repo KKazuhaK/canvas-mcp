@@ -184,6 +184,73 @@ class TestEnrollment:
         assert stack.seen == []
 
 
+class TestDisablement:
+    """An administrator's disablement is checked on every request, before Canvas is reached."""
+
+    @staticmethod
+    def _disable(stack, oid: str = OID_A) -> None:
+        from canvas_mcp.core.selfhost.token_store import (
+            DISABLE_REASON_OPERATOR,
+            OPERATOR,
+        )
+
+        stack.runtime.store.disable_principal(
+            TENANT, oid, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR
+        )
+        stack.runtime.access.invalidate()
+
+    def test_a_disabled_user_is_refused_on_every_request_and_canvas_is_never_called(self, stack):
+        assert call_tool(stack, "bearer-A", "list_courses")["isError"] is False
+        stack.seen.clear()
+        self._disable(stack)
+        for method, params in (
+            ("tools/call", {"name": "list_courses", "arguments": {}}),
+            ("tools/list", {}),
+            ("initialize", {}),
+        ):
+            response = rpc(stack, "bearer-A", method, params)
+            assert response.status_code == 403, method
+            assert "disabled by an administrator" in response.json()["error"]
+        assert stack.seen == []
+
+    def test_other_users_keep_working(self, stack):
+        self._disable(stack, OID_A)
+        assert call_tool(stack, "bearer-B", "list_courses")["isError"] is False
+
+    def test_removing_the_enrollment_of_a_disabled_user_changes_nothing(self, stack):
+        self._disable(stack)
+        assert stack.runtime.store.delete(TENANT, OID_A) is True
+        response = rpc(stack, "bearer-A", "tools/call", {"name": "list_courses", "arguments": {}})
+        assert response.status_code == 403
+
+    def test_a_change_from_another_process_is_noticed_within_the_cache_ttl(self, stack, monkeypatch):
+        from canvas_mcp.core.selfhost.token_store import (
+            DISABLE_REASON_OPERATOR,
+            OPERATOR,
+        )
+
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(stack.runtime.access, "_clock", lambda: clock["now"])
+        assert call_tool(stack, "bearer-A", "list_courses")["isError"] is False
+        # The operator CLI is a second process: it cannot invalidate our cache.
+        stack.runtime.store.disable_principal(
+            TENANT, OID_A, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR
+        )
+        clock["now"] += 1
+        assert call_tool(stack, "bearer-A", "list_courses")["isError"] is False  # inside the bound
+        clock["now"] += 10
+        response = rpc(stack, "bearer-A", "tools/call", {"name": "list_courses", "arguments": {}})
+        assert response.status_code == 403
+
+    def test_enabling_restores_the_kept_enrollment(self, stack):
+        from canvas_mcp.core.selfhost.token_store import OPERATOR
+
+        self._disable(stack)
+        stack.runtime.store.enable_principal(TENANT, OID_A, actor=OPERATOR)
+        stack.runtime.access.invalidate()
+        assert call_tool(stack, "bearer-A", "list_courses")["isError"] is False
+
+
 class TestPerUserCredentialsAndIsolation:
     def test_each_user_reaches_canvas_with_their_own_token(self, stack):
         text_a = text_of(call_tool(stack, "bearer-A", "list_courses"))

@@ -57,7 +57,7 @@ Key points:
 - Who can use it: accounts assigned to the Entra app role `Canvas.User` (or your own `Canvas.Owner`).
 - Each person enrolls their own Canvas token at `/account`. From then on the AI always uses the **caller's own** token; there is no server-level Canvas credential at all.
 - Canvas tokens are stored encrypted in `/data` and the key lives only in `.env`, so leaking a backup of the data volume on its own does not leak the tokens.
-- The audit log is **off by default**: events are written, and the `audit/` directory is created, only if you set `LOG_ACCESS_EVENTS=true` in `.env`. Even when it is on, enrolling, replacing or deleting a Canvas token at `/account` does not write an audit log entry (to find out who enrolled and when, look at the created and updated times in `token_admin list`). What it does write about tokens are health events (`event_type` `canvas_token`): a token marked invalid with its reason, the outcome of a re-check, an administrator marking a token invalid, and a Canvas user change that was detected or confirmed. They carry the principal key and a short code, never a token, a name or an e-mail address. A user switching write tools on or off at `/account` writes a `write_tools` event (`changed`, `cleared`, or `refused` when the sign-in was too old), with the principal key and the tool names only.
+- The audit log is **off by default**: events are written, and the `audit/` directory is created, only if you set `LOG_ACCESS_EVENTS=true` in `.env`. Even when it is on, enrolling or replacing a Canvas token at `/account` does not write an audit log entry (to find out who enrolled and when, look at the created and updated times in `token_admin list`). What it does write about tokens are health events (`event_type` `canvas_token`): a token marked invalid with its reason, the outcome of a re-check, an administrator marking a token invalid, and a Canvas user change that was detected or confirmed. They carry the principal key and a short code, never a token, a name or an e-mail address. Access decisions write `principal_status` events: a user disabled or enabled (with the acting owner's key, or `operator`), an owner gained or lost, a disabled user refused at sign-in or enrollment, a refused disable, an owner removing an enrollment, and a user deleting their own token (`self_disconnected`); the same transitions are always kept in the token database (`token_admin history`). A user switching write tools on or off at `/account` writes a `write_tools` event (`changed`, `cleared`, or `refused` when the sign-in was too old), with the principal key and the tool names only.
 
 ## Prerequisites
 
@@ -377,7 +377,9 @@ Open `https://canvas.mcp.kazuhahub.com/account`:
 
 If the server offers more than one school (see below), step 3 also has a school choice: pick a featured school or search for yours. The status card shows which school you are enrolled at.
 
-After signing in, an owner also gets an `/account/admin` link: it lists everyone's enrollment status (without tokens) and can revoke someone's enrollment.
+After signing in, an owner also gets an `/account/admin` link: it lists everyone's enrollment status (without tokens) and has four separate actions: **Disable user** / **Enable user** (the access decision), **Remove enrollment** (deletes the stored Canvas token only) and **Mark as invalid** (asks the user for a new token). What each one means, and how fast it takes effect, is in [Revoking a user](#revoking-a-user).
+
+Deleting your own token (**Delete my token**) is a self-disconnect: it removes only your own Canvas token, and you can enroll again whenever you like. It is not, and cannot be used as, a way around a disablement.
 
 ### When a Canvas token stops working
 
@@ -388,7 +390,7 @@ A Canvas token can be revoked, expire or be regenerated at any time. The server 
 - **On `/account`.** The user sees a banner with the date it stopped working, where to create a new token in Canvas and a link to the school's `/profile/settings`, and a **Check again** button (once a minute) that tests the stored token once and restores it if Canvas accepts it again, which corrects a wrong guess. Enrolling a new token also restores access; the other settings are kept.
 - **Expiry reminder.** The token form has an optional **Token expires on** date. It is only a reminder: `/account` shows a notice for the last 7 days before that date.
 - **Different Canvas user.** If the new token belongs to a different Canvas user at the same school than the one enrolled so far, the page asks for an explicit confirmation before saving, and the change is logged.
-- **For owners.** `/account/admin` lists the status, the reason, when the token became invalid and when it was last verified, can show only the enrollments that need a new token (with a count), and has **Mark as invalid** for an enrollment you want the user to redo (reason `revoked_by_admin`; the user cannot undo this with Check again, only by enrolling a new token).
+- **For owners.** `/account/admin` lists the status, the reason, when the token became invalid and when it was last verified, can show only the enrollments that need a new token (with a count), and has **Mark as invalid** for an enrollment you want the user to redo (reason `revoked_by_admin`; the user cannot undo this with Check again, only by enrolling a new token). That only asks for a new token; to cut a person off use **Disable user**.
 
 ### Write tools: each user opts in
 
@@ -403,7 +405,7 @@ Whether a write tool can act for a user is the intersection of four things:
 
 Details:
 
-- The switches are stored per user in the table `user_tool_prefs` of the same token database (created on first start; the schema version stays 2). Only explicit tool names are stored, there is no "all". Replacing or deleting a Canvas token, or an invalid token, does not change them.
+- The switches are stored per user in the table `user_tool_prefs` of the same token database (created on first start; adding it did not change the schema version). Only explicit tool names are stored, there is no "all". Replacing or deleting a Canvas token, or an invalid token, does not change them.
 - A tool the operator adds to `ALLOWED_WRITE_TOOLS` later is **not** switched on for anyone. A tool the operator removes stops working for everyone at once; if a user had it on, their choice is kept and takes effect again if the operator allows the tool again. Code execution can never be switched on by a user (and the server refuses to start with it enabled in this mode).
 - **Only the signed-in browser page can change the switches** (session, CSRF token, `Origin` check). No MCP tool reads or changes them, so a prompt-injected model cannot turn a tool on. **Turning a tool on needs a sign-in from the last 10 minutes** (otherwise the page asks the user to sign in again); turning tools off never does, and **Turn all off** clears everything.
 - On the MCP side, a call to a tool the user has not turned on is refused before the tool runs, with a message that points to `/account`; tools that are off are also left out of the tool list (and out of `search_canvas_tools`). The preferences are read once per request and cached for up to 30 seconds per user, and the cache is dropped as soon as the user saves, so a change normally takes effect on the next request. With several server processes, another process may take up to 30 seconds. If the preferences cannot be read, write tools stay off for that request.
@@ -429,7 +431,7 @@ How it behaves:
 - **No `CANVAS_API_URL`**: you must set at least one featured school or `CANVAS_SCHOOL_SEARCH=true`, or the server refuses to start.
 - **Enrolling**: the form sends the chosen host together with the token. The server accepts the host only if it is featured, or if search is on and the directory lists that exact domain (it re-queries the directory with the host itself and requires a case-insensitive exact match, never a partial one). It then checks the host name (a lowercase DNS name: no IP address, port, `localhost` or `.local`/`.internal`-style names), resolves it, and refuses it if any address is private, loopback, link-local, multicast, reserved or a cloud metadata address. Only after all of that is the token verified with `GET https://<host>/api/v1/users/self` and stored together with the host. The default school is trusted as configured and skips the DNS and address checks, so private or on-premises Canvas installs keep working.
 - **Every request** goes to the user's own school, and cached Canvas data is never shared across schools. If the stored school is no longer allowed by the current settings (removed from the featured list while search is off, or search turned off for a searched school), the user is treated as not enrolled and has to enroll again at `/account`. Turning search off therefore signs out everyone whose school came from a search.
-- **Integrity**: the Canvas host is part of the associated data of the AES-GCM encryption, so editing the host in the database makes the token undecryptable instead of sending it to another school. The token database schema is version 2; the first start after the upgrade migrates it in place. An older image refuses a version 2 database, so a rollback needs the backup you took before upgrading.
+- **Integrity**: the Canvas host is part of the associated data of the AES-GCM encryption, so editing the host in the database makes the token undecryptable instead of sending it to another school. The first start after the upgrade migrates the token database in place (schema version 2 at that point, version 3 today, see [Upgrading](#upgrading)); an older image refuses a newer database, so a rollback needs the backup you took before upgrading.
 - **Where to see it**: the status card on `/account`, the School column on `/account/admin`, and the last column of `python -m canvas_mcp.core.selfhost.token_admin list` (`-` means a legacy row on the default school).
 
 Privacy and reachability: with `CANVAS_SCHOOL_SEARCH=true`, what a user types into the school search is sent to Instructure (`canvas.instructure.com`), and enrolling at a searched school needs the server to reach `canvas.instructure.com` over HTTPS as well as the school itself. If the directory is unreachable, searching and enrolling at searched schools fail closed (featured schools still work). Addresses are checked only when a user enrolls. Later requests re-resolve the school's host without re-checking it, so a school whose DNS later points to a private address is not blocked at that point. Only list or accept schools you are comfortable sending your users' tokens to.
@@ -463,6 +465,13 @@ Upgrading to the version with multiple schools migrates the token database (`/da
 
 The version with per-user write-tool switches adds the `user_tool_prefs` table to the same database on first start (no schema version change, and it is safe to repeat). After the upgrade, **no user has any write tool turned on**, even if you already had `ALLOWED_WRITE_TOOLS` set: each user turns on what they want at `/account`. An older image ignores the table and would offer the full `ALLOWED_WRITE_TOOLS` list to everybody, so roll back only deliberately.
 
+The version with **access control** (disable and enable users, see [Revoking a user](#revoking-a-user)) moves the token database to **schema version 3**: it adds the tables `principal_status` (who is disabled, the session epoch, the owner flag) and `principal_status_events` (the history of every change). The migration is automatic and safe to repeat; existing enrollments, tool switches and sessions are untouched, and nobody is disabled afterwards. Two things to know:
+
+- **Open `/account` sessions are replaced.** The session cookie format changed (it now carries the user's session epoch), so everyone signs in again once after the upgrade, which takes seconds. MCP connections are not affected.
+- **An older image refuses a version 3 database on purpose.** It would not know about disablements and would serve users you disabled. Roll back only together with the backup taken before the upgrade, and expect disabled users to be active again in the old version.
+
+`/account/admin` no longer has a **Revoke** button: it was a deletion of the enrollment row, which is not an access decision (the user could simply enroll again). It is now **Remove enrollment** (same effect, honest name) next to the new **Disable user**; the form posts to `/account/admin/remove`. The CLI command `token_admin revoke` still works as an alias of `remove`.
+
 ## Secret rotation
 
 ### Canvas token key ring (`CANVAS_TOKEN_KEYS`)
@@ -479,7 +488,11 @@ Common operations commands (run inside the container):
 ```bash
 docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin check
 docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin list
-docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin revoke <tenant-id> <object-id>
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin disable <tenant-id> <object-id>   # cut a user off
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin enable <tenant-id> <object-id>    # lift a disablement
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin access     # disabled users and known owners
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin history    # every disable, enable and owner change
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin remove <tenant-id> <object-id>    # delete the stored Canvas token only
 ```
 
 ### Other secrets
@@ -505,6 +518,8 @@ docker run --rm -v canvas-mcp-data:/data -v "$PWD":/backup alpine \
 docker compose start
 ```
 
+A restore brings back the **access decisions as they were in the backup**: a user you disabled after the backup was taken is active again after restoring it. After any restore, run `token_admin access` and disable again whoever should still be disabled (`token_admin history` shows what the restored database knows).
+
 If you do not want to stop the service, you can back up just the token store: `sqlite3 /data/canvas-mcp/tokens.sqlite3 '.backup /backup/tokens.sqlite3'` (run it in an environment that can reach that volume).
 
 Restore: first run `docker volume inspect canvas-mcp-data` (the volume must be the one the service is using; on a fresh deployment, create it first with `docker compose up --no-start`), stop the service, extract the archive into that volume (`docker run --rm -v canvas-mcp-data:/data -v "$PWD":/backup alpine tar xzf /backup/<file>.tgz -C /data`), then confirm the directory owner is uid 10001 (`chown -R 10001:10001 /data`, run in the same temporary container), and then `docker compose up -d`.
@@ -513,11 +528,44 @@ Restore: first run `docker volume inspect canvas-mcp-data` (the volume must be t
 
 ## Revoking a user
 
-1. **In Entra**: remove them from the assigned group (or from the app's "Users and groups").
-2. On their user page, click **Revoke sessions** so the refresh tokens already issued stop working.
-3. **In `/account/admin`**, delete their enrollment row. This stops their tool calls **immediately** (the service no longer has their token).
+Revoking is an **access decision**, not the deletion of a database row. An owner (or the operator) *disables* the user. The decision is stored in the token database next to, but apart from, the enrollment, and it is checked again on every sign-in, every `/account` request, every enrollment and every MCP request. Deleting the enrollment row changes nothing about it, and neither does the user deleting their own token, signing in again or re-enrolling.
 
-A note on delay: if you do only steps 1 and 2, an access token that has already been issued stays usable for its lifetime, and is usually rejected (AADSTS50105) at the next refresh with Entra after the Entra access token lifetime (about 60 to 90 minutes) runs out. For immediate effect, always do step 3 as well. It is also advisable for the person being revoked to delete their access token in Canvas themselves.
+| Action | Where | What it does |
+|---|---|---|
+| **Disable user** | `/account/admin`, or `token_admin disable` | The user cannot sign in at `/account`, cannot enroll or replace a token, and every MCP request they make (any token, any client) is refused with HTTP 403 before any Canvas credential is loaded. Every open `/account` session of theirs stops working. The stored Canvas token is kept encrypted but never used. Stays in force until an owner or the operator enables the user again. |
+| **Enable user** | `/account/admin`, or `token_admin enable` | Lifts it. Sessions from before the change stay dead (the user signs in again). A kept enrollment works again as it is; a removed one is enrolled again. |
+| **Remove enrollment** | `/account/admin`, or `token_admin remove` | Deletes the stored Canvas token only. If the user is not disabled they can enroll again straight away. Use it after **Disable user** when you also want the encrypted token gone from the database. |
+| **Mark as invalid** | `/account/admin` | Asks the user for a new token (reason `revoked_by_admin`). Not an access decision. |
+| **Delete my token** | the user's own `/account` | A self-disconnect. Only removes their own token; they may enroll again. |
+
+Who may do what:
+
+- **Only owners** (the Entra role named by `ENTRA_OWNER_ROLE`, normally `Canvas.Owner`) can disable and enable from the browser, and the **operator** with shell access to the data volume can do the same with the CLI. Users cannot lift their own disablement, and an owner who is disabled can no longer act.
+- **An owner cannot disable themselves**, and nobody (owner or not) can disable the **last active owner**; the check and the write are one database transaction, so two owners cannot disable each other at the same moment. The operator can force it with `token_admin disable ... --allow-last-owner` (break-glass), and if you are ever left without an owner, sign in with an account that has the Entra owner role (this records it again) or use the CLI.
+- **Owner status is re-checked, not remembered.** The owner role in the browser session is only a snapshot. The admin page and every admin action need a sign-in from the **last 10 minutes** (the same window as turning a write tool on) and a stored owner flag that a sign-in recorded, and the database re-checks inside the transaction that the acting owner is still an active owner. The stored flag is lowered at the owner's next sign-in without the role, or by an MCP request whose token was issued after their last sign-in and no longer carries the role (a token issued earlier cannot undo a promotion). The server only learns about an owner role being *added* when that person signs in.
+
+### Revoking someone, in order
+
+1. **Disable the user** (`/account/admin` → **Disable user**, or `token_admin disable <tenant-id> <object-id>`). This is the step that takes effect at once.
+2. Optional: **Remove enrollment**, to delete their encrypted Canvas token from the database.
+3. In Entra, remove them from the assigned group (or from the app's "Users and groups"), and on their user page click **Revoke sessions** so refresh tokens already issued stop working. This stops Entra from issuing new tokens to them.
+4. Ask the person to delete their access token in Canvas themselves (Account → Settings → Approved Integrations), or do it for them if you can. That is the only thing that makes the Canvas token itself worthless; the server cannot do it.
+
+### How fast each change takes effect
+
+| Change | When it is enforced | Why |
+|---|---|---|
+| Disable or enable in the admin page | **At once** in the server process that handled it. A second worker process notices within **5 seconds**. | The MCP side caches each user's access status for 5 seconds and drops the entry on a change made in the same process. |
+| Disable or enable with `token_admin` | Within **5 seconds** (the CLI is another process and cannot clear the server's cache). | Same cache. |
+| The user's `/account` session | **On the next request**, with no cache. | The session cookie carries the user's session epoch, and every request reads the stored status. Disabling or enabling changes the epoch. |
+| A request already running | It **finishes**. A tool call that starts later in the same request is refused; a Canvas operation that was already sent is **not cancelled** and may complete at Canvas. | The check runs before each request and before each tool call, never inside a Canvas call. |
+| An MCP token issued earlier, or one refreshed later | Refused on every request while the user is disabled. | The decision is looked up by the user's identity, not by the token. A refresh at Entra may still succeed, but the new token buys nothing. |
+| A server restart | The decision survives (it is in the database). | |
+| **Removing the user or their role in Entra only** | Their MCP access keeps working until the Entra **access token lifetime** ends, normally **60 to 90 minutes** (the token the server issued expires with it); at the next refresh Entra applies the removal (usually `AADSTS50105`). Roles in an already issued token stay as they were until then. | Entra does not cancel tokens it already issued, and this server cannot ask it to. This is why step 1 above exists: disable first. |
+| An owner losing the Entra owner role | Admin pages and actions stop at the latest **10 minutes** after that owner's last sign-in; earlier if their next sign-in or MCP token shows the role gone. | The owner window above. |
+| A user losing the Entra role, `/account` | Their open session lasts at most `ACCOUNT_SESSION_TTL_SECONDS` (default 15 minutes, never renewed); signing in again is refused by Entra's role check. | The session is a sealed cookie with a fixed lifetime. |
+
+Every change is recorded: the transitions (disabled, enabled, owner gained or lost, with who did it) are written in the same database transaction to `principal_status_events` (read them with `token_admin history`; this also covers the CLI, which has no audit log of its own), and with `LOG_ACCESS_EVENTS=true` they are emitted as audit events of type `principal_status` (the principal key, the actor's key or `operator`, and a short code; never a name, e-mail address or token). Refused attempts (a disabled user trying to sign in or enroll, an owner trying to disable themselves) are audited too.
 
 ## Troubleshooting
 
@@ -528,6 +576,7 @@ A note on delay: if you do only steps 1 and 2, an access token that has already 
 | The sign-in page shows **AADSTS50105** | The enterprise application has "Assignment required" on and this user has not been assigned |
 | **421** | The reverse proxy is not forwarding the `Host` header, or the domain being visited is not the one in `PUBLIC_BASE_URL`. For nginx add `proxy_set_header Host $host;` |
 | A tool returns an "**enroll** ..." message | The user has not enrolled a Canvas token yet (or the enrolled token cannot be decrypted). Have them enroll or re-enroll at `/account` |
+| Sign-in or a tool says **disabled by an administrator** (HTTP 403 on the MCP endpoint) | An owner or the operator disabled this user. Only an owner (`/account/admin` → **Enable user**) or `token_admin enable` can lift it; deleting the token or enrolling again does not. See [Revoking a user](#revoking-a-user) |
 | A tool says **Canvas rejected your stored access token** | The token was revoked, expired or regenerated in Canvas and the server confirmed it. The user creates a new token in Canvas and enrolls it at `/account` (the banner there explains how). If Canvas was only briefly wrong, **Check again** on `/account` restores it |
 | A write tool returns "**is turned off for your account**" | The server allows the tool, but this user has not turned it on. They open `/account`, sign in, tick it under **Write tools** and save (turning on needs a sign-in from the last 10 minutes), then start a new chat or reconnect the connector so the app refreshes its tool list |
 | The user wants a write tool but it is shown as "**not offered on this server**" | It is not in `ALLOWED_WRITE_TOOLS`, or it is not registered (for `STUDENT_WRITE_TOOLS` tools, also check that list and `CANVAS_ROLE`). The operator decides; users cannot turn it on |

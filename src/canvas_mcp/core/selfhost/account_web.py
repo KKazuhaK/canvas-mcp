@@ -33,6 +33,18 @@ Security notes:
   section (POST, CSRF, Origin). Turning anything on needs a session issued within
   the last ten minutes; turning off never does. Only this page can change the
   switches (see :mod:`.tool_prefs`).
+* Access is an authorization decision, not an enrollment row. An owner can
+  *disable* a user (and enable them again); that is stored apart from the token row
+  (``principal_status``), so removing the row never lets a disabled user back in.
+  Deleting your own token is only a self-disconnect: you may enroll again. The
+  session cookie carries the user's ``session_epoch``; every request re-reads the
+  stored status, so a session is rejected the moment the user is disabled or the
+  epoch changes (no cache here: the delay is zero for this page). The owner role in
+  the cookie is a snapshot and is not trusted by itself: owner pages and actions need
+  a sign-in from the last ten minutes *and* the stored owner flag, and the store
+  re-checks that the acting owner is still an active owner inside the transaction
+  that disables or enables someone. An owner cannot disable themselves or the last
+  active owner.
 """
 
 from __future__ import annotations
@@ -51,7 +63,7 @@ import urllib.parse
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -66,6 +78,7 @@ from starlette.routing import Route
 
 from canvas_mcp.core import audit
 from canvas_mcp.core.dates import output_timezone
+from canvas_mcp.core.selfhost.principal_access import PrincipalAccessCache
 from canvas_mcp.core.selfhost.schools import (
     MAX_QUERY_CHARS,
     MIN_QUERY_CHARS,
@@ -82,14 +95,20 @@ from canvas_mcp.core.selfhost.schools import (
 )
 from canvas_mcp.core.selfhost.token_health import TokenHealth
 from canvas_mcp.core.selfhost.token_store import (
+    DISABLE_REASON_ADMIN,
+    DISABLE_REASON_OPERATOR,
     REASON_CANVAS_TOKEN_REJECTED,
     REASON_DECRYPT_FAILED,
     REASON_REVOKED_BY_ADMIN,
     STATUS_INVALID,
+    AccessActionRefused,
     EnrollmentInfo,
+    PrincipalDisabledError,
+    PrincipalStatus,
     TokenDecryptionError,
     TokenStore,
     ToolPrefs,
+    valid_principal_key,
 )
 from canvas_mcp.core.selfhost.tool_prefs import (
     OTHER_GROUP,
@@ -113,7 +132,9 @@ _TOKEN_DELETE_PATH = "/account/token/delete"
 _TOKEN_RECHECK_PATH = "/account/token/recheck"
 _LOGOUT_PATH = "/account/logout"
 _ADMIN_PATH = "/account/admin"
-_ADMIN_REVOKE_PATH = "/account/admin/revoke"
+_ADMIN_REMOVE_PATH = "/account/admin/remove"
+_ADMIN_DISABLE_PATH = "/account/admin/disable"
+_ADMIN_ENABLE_PATH = "/account/admin/enable"
 _ADMIN_INVALIDATE_PATH = "/account/admin/invalidate"
 _SCHOOLS_PATH = "/account/schools"
 _WRITE_TOOLS_PATH = "/account/write-tools"
@@ -138,6 +159,13 @@ _RECHECK_LIMIT_ATTEMPTS = 1
 _RECHECK_LIMIT_WINDOW_SECONDS = 60
 # Turning a write tool ON needs a session issued this recently (OFF never does).
 _FRESH_SIGN_IN_SECONDS = 600
+# The admin pages and actions need a sign-in this recent, so an owner whose Entra
+# role was removed loses them within this time even if the stored flag is stale.
+_OWNER_FRESH_SECONDS = _FRESH_SIGN_IN_SECONDS
+# Session cookie format. Version 2 carries the session epoch; older cookies are refused.
+_SESSION_VERSION = 2
+# Where the verified session of a request is kept (in the ASGI scope).
+_SESSION_SCOPE_KEY = "canvas_mcp.session"
 # One checkbox per offered write tool plus the CSRF token and a button.
 _WRITE_FORM_MAX_FIELDS = 120
 _EXPIRY_REMINDER_DAYS = 7
@@ -285,6 +313,15 @@ class _Session:
     # When the sign-in happened (epoch seconds); 0 for a cookie that carries none,
     # which counts as "not recent".
     iat: int = 0
+    # The user's session epoch at sign-in; valid only while the stored epoch equals it.
+    ep: int = 0
+
+
+class _StoreUnavailable(Exception):
+    """The access status could not be read, so no session can be trusted (fail closed)."""
+
+
+_UNAVAILABLE = object()
 
 
 class _RateLimiter:
@@ -644,10 +681,12 @@ class _AccountApp:
         health: TokenHealth | None = None,
         write_tools: WriteToolCatalog | None = None,
         tool_prefs: ToolPrefsCache | None = None,
+        access: PrincipalAccessCache | None = None,
     ) -> None:
         self.cfg = cfg
         self.write_tools = write_tools
         self.tool_prefs = tool_prefs
+        self.access = access
         self.schools = cfg.schools
         self.base = cfg.public_base_url.rstrip("/")
         self.tenant = cfg.tenant_id.lower()
@@ -696,7 +735,9 @@ class _AccountApp:
             (_TOKEN_RECHECK_PATH, {"POST": self.recheck_token}),
             (_LOGOUT_PATH, {"POST": self.logout}),
             (_ADMIN_PATH, {"GET": self.admin}),
-            (_ADMIN_REVOKE_PATH, {"POST": self.admin_revoke}),
+            (_ADMIN_REMOVE_PATH, {"POST": self.admin_remove}),
+            (_ADMIN_DISABLE_PATH, {"POST": self.admin_disable}),
+            (_ADMIN_ENABLE_PATH, {"POST": self.admin_enable}),
             (_ADMIN_INVALIDATE_PATH, {"POST": self.admin_invalidate}),
             (_SCHOOLS_PATH, {"GET": self.schools_page}),
             (_WRITE_TOOLS_PATH, {"POST": self.save_write_tools}),
@@ -708,10 +749,17 @@ class _AccountApp:
 
     def _endpoint(self, handlers: dict[str, Handler]) -> Handler:
         async def endpoint(request: Request) -> Response:
+            session: _Session | None = None
+            try:
+                session = await self._resolve_session(request)
+                request.scope[_SESSION_SCOPE_KEY] = session
+            except Exception as exc:  # noqa: BLE001 - fail closed, never leak details
+                logger.error("account session check failed: %s", type(exc).__name__)
+                request.scope[_SESSION_SCOPE_KEY] = _UNAVAILABLE
             ctx = _RenderContext(
                 lang=_choose_lang(request),
                 path=self._toggle_path(request),
-                session=self.session_from(request),
+                session=session,
             )
             token = _RENDER.set(ctx)
             try:
@@ -736,6 +784,10 @@ class _AccountApp:
             return response
         try:
             return await handler(request)
+        except _StoreUnavailable:
+            return self.message_page(
+                503, _bi("暂时无法读取令牌库。", "The token store is unavailable.")
+            )
         except Exception as exc:  # noqa: BLE001 - never leak details
             logger.error("account request failed: %s", type(exc).__name__)
             return self.message_page(
@@ -796,12 +848,12 @@ class _AccountApp:
 
     def session_from(self, request: Request) -> _Session | None:
         payload = self.codec.unseal(SESSION_COOKIE, request.cookies.get(SESSION_COOKIE))
-        if payload is None or payload.get("v") != 1:
+        if payload is None or payload.get("v") != _SESSION_VERSION:
             return None
         try:
             tid, oid = payload["tid"], payload["oid"]
             name, upn, csrf = payload["name"], payload["upn"], payload["csrf"]
-            owner, exp = payload["owner"], payload["exp"]
+            owner, exp, epoch = payload["owner"], payload["exp"], payload["ep"]
         except KeyError:
             return None
         if not (
@@ -813,6 +865,9 @@ class _AccountApp:
             and isinstance(owner, bool)
             and isinstance(exp, int)
             and not isinstance(exp, bool)
+            and isinstance(epoch, int)
+            and not isinstance(epoch, bool)
+            and epoch >= 0
         ):
             return None
         if (
@@ -824,7 +879,33 @@ class _AccountApp:
             return None
         raw_iat = payload.get("iat")
         iat = raw_iat if isinstance(raw_iat, int) and not isinstance(raw_iat, bool) else 0
-        return _Session(tid, oid.lower(), name, upn, owner, csrf, exp, iat)
+        return _Session(tid, oid.lower(), name, upn, owner, csrf, exp, iat, epoch)
+
+    async def _resolve_session(self, request: Request) -> _Session | None:
+        """The session in the cookie, accepted only if the stored decision still allows it.
+
+        Read from the database on every request (no cache): the session must be
+        refused as soon as the user is disabled or the epoch moved on. The owner
+        flag in the cookie is a snapshot, so it is kept only while the stored owner
+        flag agrees. A database error raises, and the caller fails closed.
+        """
+        cookie = self.session_from(request)
+        if cookie is None:
+            return None
+        stored = await anyio.to_thread.run_sync(
+            self.store.get_principal_status, self._principal_key(cookie)
+        )
+        if stored.disabled or stored.session_epoch != cookie.ep:
+            return None
+        return replace(cookie, owner=cookie.owner and stored.is_owner)
+
+    @staticmethod
+    def _session_of(request: Request) -> _Session | None:
+        """The verified session of this request (see :meth:`_resolve_session`)."""
+        value = request.scope.get(_SESSION_SCOPE_KEY)
+        if value is _UNAVAILABLE:
+            raise _StoreUnavailable
+        return value if isinstance(value, _Session) else None
 
     def _signed_in_recently(self, session: _Session) -> bool:
         """True when this session was issued within the last ``_FRESH_SIGN_IN_SECONDS``."""
@@ -839,7 +920,7 @@ class _AccountApp:
     # -- GET /account --------------------------------------------------------
 
     async def page(self, request: Request) -> Response:
-        session = self.session_from(request)
+        session = self._session_of(request)
         if session is None:
             return self.signed_out_page()
         try:
@@ -1193,7 +1274,8 @@ class _AccountApp:
                 f"{self._school_notice(info)}"
                 f'<form method="post" action="{_TOKEN_DELETE_PATH}">'
                 f"{_csrf_field(session.csrf)}"
-                f'<button class="btn danger sm" type="submit">{_bi("删除我的令牌", "Delete my token")}</button>'
+                f'<button class="btn danger sm" type="submit">{_bi("删除我的令牌", "Delete my token")}</button> '
+                f'<span class="muted small">{_bi("这只会断开你的 Canvas 令牌，你随时可以重新绑定。", "This only disconnects your own Canvas token. You can enroll again at any time.")}</span>'
                 "</form></section>"
             )
             # Collapsed unless the last attempt failed (so the error and the form
@@ -1262,7 +1344,7 @@ class _AccountApp:
         )
 
     async def schools_page(self, request: Request) -> Response:
-        session = self.session_from(request)
+        session = self._session_of(request)
         if session is None:
             return self.redirect(ACCOUNT_PATH, 303)
         if not self.schools.search_enabled:
@@ -1477,11 +1559,38 @@ class _AccountApp:
                 403, _bi("此账号不可使用。", "This account cannot be used.")
             )
 
+        sign_in_key = f"entra:{self.tenant}:{principal.object_id.lower()}"
+        try:
+            standing = await anyio.to_thread.run_sync(
+                functools.partial(
+                    self.store.record_sign_in, sign_in_key, is_owner=bool(principal.is_owner)
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("account sign-in status check failed: %s", type(exc).__name__)
+            return self.message_page(
+                503, _bi("暂时无法读取令牌库。", "The token store is unavailable.")
+            )
+        if standing.owner_change is not None:
+            audit.log_principal_event(standing.owner_change, sign_in_key, reason="sign_in")
+        if standing.disabled:
+            logger.warning("account sign-in refused: principal disabled oid=%s", principal.object_id.lower())
+            audit.log_principal_event(
+                "sign_in_refused", sign_in_key, reason=standing.disabled_reason
+            )
+            return self.message_page(
+                403,
+                _bi(
+                    "你的访问权限已被管理员停用。请联系服务器所有者恢复。",
+                    "Your access to this server was disabled by an administrator. Contact the server owner to have it restored.",
+                ),
+            )
+
         issued = int(now)
         sealed = self.codec.seal(
             SESSION_COOKIE,
             {
-                "v": 1,
+                "v": _SESSION_VERSION,
                 "tid": self.tenant,
                 "oid": principal.object_id.lower(),
                 "name": principal.display_name[:200],
@@ -1490,6 +1599,7 @@ class _AccountApp:
                 "iat": issued,
                 "exp": issued + self.cfg.session_ttl_seconds,
                 "csrf": secrets.token_urlsafe(32),
+                "ep": standing.session_epoch,
             },
         )
         logger.info(
@@ -1637,13 +1747,15 @@ class _AccountApp:
         self, request: Request, *, owner_only: bool = False, max_fields: int = 10
     ) -> tuple[_Session, dict[str, str]] | Response:
         """Session, Origin, content type, size and CSRF checks for a POST."""
-        session = self.session_from(request)
+        session = self._session_of(request)
         if session is None:
             if owner_only:
                 return self.message_page(403, _bi("无权访问。", "Forbidden."))
             return self.redirect(ACCOUNT_PATH, 303)
-        if owner_only and not session.owner:
-            return self.message_page(403, _bi("无权访问。", "Forbidden."))
+        if owner_only:
+            refusal = self._owner_refusal(session)
+            if refusal is not None:
+                return refusal
         if request.headers.get("origin") != self.base:
             return self.message_page(
                 403, _bi("请求来源不被允许。", "The request origin is not allowed.")
@@ -1767,6 +1879,16 @@ class _AccountApp:
                     expires_hint_at=expiry,
                 )
             )
+        except PrincipalDisabledError:
+            # Disabled after the session was checked: the store refused the write.
+            audit.log_principal_event("enroll_refused", self._principal_key(session))
+            return self.message_page(
+                403,
+                _bi(
+                    "你的访问权限已被管理员停用，无法绑定令牌。",
+                    "Your access to this server was disabled by an administrator, so a token cannot be saved.",
+                ),
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error("account token save failed: %s", type(exc).__name__)
             return await self._token_error(
@@ -1884,8 +2006,12 @@ class _AccountApp:
         if isinstance(guarded, Response):
             return guarded
         session, _form = guarded
-        await anyio.to_thread.run_sync(self.store.delete, session.tid, session.oid)
+        # A self-disconnect: it removes the user's own token and nothing else. It is
+        # not an authorization decision, so it does not touch the access status.
+        removed = await anyio.to_thread.run_sync(self.store.delete, session.tid, session.oid)
         logger.info("account token deleted tid=%s oid=%s", session.tid, session.oid)
+        if removed:
+            audit.log_principal_event("self_disconnected", self._principal_key(session))
         return self.redirect(ACCOUNT_PATH, 303)
 
     async def recheck_token(self, request: Request) -> Response:
@@ -2286,7 +2412,44 @@ class _AccountApp:
             return _bi("管理员标记为失效", "Marked invalid by an administrator")
         return "-"
 
-    def _admin_status(self, row: EnrollmentInfo) -> str:
+    def _owner_refusal(self, session: _Session | None) -> Response | None:
+        """A refusal page unless this is an owner who signed in recently, else None.
+
+        The cookie's owner flag is only a snapshot (already combined with the stored
+        flag by :meth:`_resolve_session`); the Entra role is re-evaluated by requiring
+        a sign-in from the last ``_OWNER_FRESH_SECONDS``.
+        """
+        if session is None or not session.owner:
+            return self.message_page(403, _bi("无权访问。", "Forbidden."))
+        if not self._signed_in_recently(session):
+            return self.message_page(
+                403,
+                _bi(
+                    "为了安全，管理功能需要最近 10 分钟内的登录。请退出后重新登录，再试一次。",
+                    "For your security, the admin pages need a sign-in from the last 10 minutes. Sign out, sign in again and retry.",
+                ),
+            )
+        return None
+
+    @staticmethod
+    def _disabled_by_label(status: PrincipalStatus) -> str:
+        if status.disabled_reason == DISABLE_REASON_OPERATOR:
+            return _bi("由服务器运维停用", "Disabled by the server operator")
+        return _bi("由管理员停用", "Disabled by an administrator")
+
+    def _admin_status(self, row: EnrollmentInfo | None, access: PrincipalStatus) -> str:
+        if access.disabled:
+            token_line = ""
+            if row is not None and row.status == STATUS_INVALID:
+                token_line = f'<br><span class="muted">{self._reason_label(row.invalid_reason)}</span>'
+            return (
+                f"<strong>{_bi('已停用', 'Disabled')}</strong><br>"
+                f'<span class="muted">{self._disabled_by_label(access)}</span><br>'
+                f'<span class="muted">{_bi("停用时间", "Disabled since")}: '
+                f"{_e(_fmt_ts(access.disabled_at))}</span>{token_line}"
+            )
+        if row is None:
+            return _bi("正常", "Active")
         if row.status != STATUS_INVALID:
             return _bi("正常", "Active")
         return (
@@ -2296,51 +2459,132 @@ class _AccountApp:
             f"{_e(_fmt_ts(row.invalid_since))}</span>"
         )
 
-    async def admin(self, request: Request) -> Response:
-        session = self.session_from(request)
-        if session is None or not session.owner:
-            return self.message_page(403, _bi("无权访问。", "Forbidden."))
-        all_rows = await anyio.to_thread.run_sync(self.store.list_enrollments)
-        needing = [row for row in all_rows if row.status == STATUS_INVALID]
-        only_needing = request.query_params.get("filter") == _FILTER_NEEDS_REENROLL
-        rows = needing if only_needing else all_rows
-        lines: list[str] = []
-        for row in rows:
-            invalidate = ""
-            if row.status != STATUS_INVALID:
-                invalidate = (
-                    f'<form method="post" action="{_ADMIN_INVALIDATE_PATH}">'
-                    f"{_csrf_field(session.csrf)}"
-                    f'<input type="hidden" name="tenant_id" value="{_e(row.tenant_id)}">'
-                    f'<input type="hidden" name="object_id" value="{_e(row.object_id)}">'
-                    f'<button class="btn secondary sm" type="submit">{_bi("标记为失效", "Mark as invalid")}</button>'
-                    "</form>"
-                )
-            lines.append(
-                "<tr>"
-                f'<td data-label="{_e(_bi("Entra 用户", "Entra user"))}">'
-                f"{_e(row.entra_display_name)}<br>"
-                f'<span class="muted">{_e(row.entra_upn)}</span>'
-                '<details class="tech">'
-                f"<summary>{_bi('技术信息', 'Technical details')}</summary><dl>"
-                f"<dt>{_bi('租户', 'Tenant')}</dt><dd><code>{_e(row.tenant_id)}</code></dd>"
-                f"<dt>{_bi('对象 ID', 'Object')}</dt><dd><code>{_e(row.object_id)}</code></dd>"
-                f"<dt>{_bi('绑定时间', 'Enrolled')}</dt><dd>{_e(_fmt_ts(row.created_at))}</dd>"
-                f"<dt>{_bi('更新时间', 'Updated')}</dt><dd>{_e(_fmt_ts(row.updated_at))}</dd>"
-                "</dl></details></td>"
-                f'<td data-label="{_e(_bi("Canvas 用户", "Canvas user"))}">'
-                f'{_e(row.canvas_user_name)}<br><span class="muted">id {_e(row.canvas_user_id)}</span></td>'
-                f'<td data-label="{_e(_bi("学校", "School"))}">{self._admin_school(row)}</td>'
-                f'<td data-label="{_e(_bi("状态", "Status"))}">{self._admin_status(row)}</td>'
-                f'<td data-label="{_e(_bi("最近验证", "Last verified"))}">{_e(_fmt_ts(row.last_verified_at))}</td>'
-                f'<td data-label="{_e(_bi("最近使用", "Last used"))}">{_e(_fmt_ts(row.last_used_at))}</td>'
-                f'<td class="act">{invalidate}<form method="post" action="{_ADMIN_REVOKE_PATH}">'
-                f"{_csrf_field(session.csrf)}"
+    def _admin_actions(
+        self,
+        session: _Session,
+        key: str,
+        row: EnrollmentInfo | None,
+        access: PrincipalStatus,
+    ) -> str:
+        forms: list[str] = []
+        csrf = _csrf_field(session.csrf)
+        if row is not None and row.status != STATUS_INVALID and not access.disabled:
+            forms.append(
+                f'<form method="post" action="{_ADMIN_INVALIDATE_PATH}">{csrf}'
                 f'<input type="hidden" name="tenant_id" value="{_e(row.tenant_id)}">'
                 f'<input type="hidden" name="object_id" value="{_e(row.object_id)}">'
-                f'<button class="btn danger sm" type="submit">{_bi("撤销", "Revoke")}</button>'
-                "</form></td></tr>"
+                f'<button class="btn secondary sm" type="submit">{_bi("标记为失效", "Mark as invalid")}</button>'
+                "</form>"
             )
+        if access.disabled:
+            forms.append(
+                f'<form method="post" action="{_ADMIN_ENABLE_PATH}">{csrf}'
+                f'<input type="hidden" name="principal_key" value="{_e(key)}">'
+                f'<button class="btn sm" type="submit">{_bi("重新启用用户", "Enable user")}</button>'
+                "</form>"
+            )
+        elif key == self._principal_key(session):
+            forms.append(f'<span class="muted small">{_bi("（你自己）", "(you)")}</span>')
+        else:
+            forms.append(
+                f'<form method="post" action="{_ADMIN_DISABLE_PATH}">{csrf}'
+                f'<input type="hidden" name="principal_key" value="{_e(key)}">'
+                f'<button class="btn danger sm" type="submit">{_bi("停用用户", "Disable user")}</button>'
+                "</form>"
+            )
+        if row is not None:
+            forms.append(
+                f'<form method="post" action="{_ADMIN_REMOVE_PATH}">{csrf}'
+                f'<input type="hidden" name="tenant_id" value="{_e(row.tenant_id)}">'
+                f'<input type="hidden" name="object_id" value="{_e(row.object_id)}">'
+                f'<button class="btn secondary sm" type="submit">{_bi("移除绑定", "Remove enrollment")}</button>'
+                "</form>"
+            )
+        return "".join(forms)
+
+    def _admin_row(
+        self,
+        session: _Session,
+        key: str,
+        row: EnrollmentInfo | None,
+        access: PrincipalStatus,
+    ) -> str:
+        if row is not None:
+            who = (
+                f"{_e(row.entra_display_name)}<br>"
+                f'<span class="muted">{_e(row.entra_upn)}</span>'
+            )
+            tenant, oid = row.tenant_id, row.object_id
+            canvas = (
+                f'{_e(row.canvas_user_name)}<br><span class="muted">id {_e(row.canvas_user_id)}</span>'
+            )
+            school = self._admin_school(row)
+            enrolled = (
+                f"<dt>{_bi('绑定时间', 'Enrolled')}</dt><dd>{_e(_fmt_ts(row.created_at))}</dd>"
+                f"<dt>{_bi('更新时间', 'Updated')}</dt><dd>{_e(_fmt_ts(row.updated_at))}</dd>"
+            )
+            verified = _e(_fmt_ts(row.last_verified_at))
+            used = _e(_fmt_ts(row.last_used_at))
+        else:
+            who = (
+                f"{_e(access.display_name)}<br>"
+                f'<span class="muted">{_e(access.upn)}</span>'
+            )
+            parts = key.split(":")
+            tenant, oid = (parts[1], parts[2]) if len(parts) == 3 else ("", key)
+            canvas = '<span class="muted">-</span>'
+            school = '<span class="muted">-</span>'
+            enrolled = (
+                f"<dt>{_bi('绑定', 'Enrollment')}</dt>"
+                f"<dd>{_bi('没有保存的令牌', 'no saved token')}</dd>"
+            )
+            verified = "-"
+            used = "-"
+        return (
+            "<tr>"
+            f'<td data-label="{_e(_bi("Entra 用户", "Entra user"))}">{who}'
+            '<details class="tech">'
+            f"<summary>{_bi('技术信息', 'Technical details')}</summary><dl>"
+            f"<dt>{_bi('租户', 'Tenant')}</dt><dd><code>{_e(tenant)}</code></dd>"
+            f"<dt>{_bi('对象 ID', 'Object')}</dt><dd><code>{_e(oid)}</code></dd>"
+            f"{enrolled}"
+            "</dl></details></td>"
+            f'<td data-label="{_e(_bi("Canvas 用户", "Canvas user"))}">{canvas}</td>'
+            f'<td data-label="{_e(_bi("学校", "School"))}">{school}</td>'
+            f'<td data-label="{_e(_bi("状态", "Status"))}">{self._admin_status(row, access)}</td>'
+            f'<td data-label="{_e(_bi("最近验证", "Last verified"))}">{verified}</td>'
+            f'<td data-label="{_e(_bi("最近使用", "Last used"))}">{used}</td>'
+            f'<td class="act">{self._admin_actions(session, key, row, access)}</td></tr>'
+        )
+
+    async def admin(self, request: Request) -> Response:
+        session = self._session_of(request)
+        refusal = self._owner_refusal(session)
+        if session is None or refusal is not None:
+            return refusal or self.message_page(403, _bi("无权访问。", "Forbidden."))
+        all_rows = await anyio.to_thread.run_sync(self.store.list_enrollments)
+        statuses = {
+            st.principal_key: st
+            for st in await anyio.to_thread.run_sync(self.store.list_principal_statuses)
+        }
+        needing = [row for row in all_rows if row.status == STATUS_INVALID]
+        only_needing = request.query_params.get("filter") == _FILTER_NEEDS_REENROLL
+        entries: list[tuple[str, EnrollmentInfo | None, PrincipalStatus]] = []
+        seen: set[str] = set()
+        for row in needing if only_needing else all_rows:
+            key = row.principal_key or f"entra:{row.tenant_id}:{row.object_id}".lower()
+            seen.add(key)
+            entries.append((key, row, statuses.get(key) or PrincipalStatus(key)))
+        if not only_needing:
+            # A disabled user whose enrollment row is gone must still be listed, or
+            # nobody could enable them again.
+            entries.extend(
+                (key, None, st)
+                for key, st in statuses.items()
+                if st.disabled and key not in seen
+            )
+        disabled_total = sum(1 for st in statuses.values() if st.disabled)
+        lines = [self._admin_row(session, key, row, st) for key, row, st in entries]
         if lines:
             table = (
                 '<section class="card tablecard"><table><thead><tr>'
@@ -2364,9 +2608,9 @@ class _AccountApp:
                 f"<p>{_bi('还没有用户绑定令牌。', 'No enrollments yet.')}</p></section>"
             )
         count_text = _bi(
-            "{count} 个绑定需要重新录入令牌（共 {total} 个）。",
-            "{count} of {total} enrollments need a new token.",
-        ).format(count=len(needing), total=len(all_rows))
+            "{count} 个绑定需要重新录入令牌（共 {total} 个），{disabled} 个用户已停用。",
+            "{count} of {total} enrollments need a new token. {disabled} user(s) disabled.",
+        ).format(count=len(needing), total=len(all_rows), disabled=disabled_total)
         if only_needing:
             filter_link = (
                 f'<a href="{_ADMIN_PATH}">{_bi("显示全部", "Show all")}</a>'
@@ -2376,10 +2620,20 @@ class _AccountApp:
                 f'<a href="{_ADMIN_PATH}?filter={_FILTER_NEEDS_REENROLL}">'
                 f'{_bi("只看需要重新绑定的", "Show only those that need re-enroll")}</a>'
             )
+        explain = (
+            '<section class="card"><ul>'
+            f"<li><strong>{_bi('停用用户', 'Disable user')}</strong>: "
+            f"{_bi('禁止此人登录本页、绑定令牌和使用任何 MCP 工具，直到所有者重新启用。已签发的令牌和已登录的会话也会失效。保存的 Canvas 令牌不会被删除。', 'blocks this person from signing in here, enrolling a token and using any MCP tool until an owner enables them again. Tokens already issued and sessions already open stop working. The saved Canvas token is not deleted.')}</li>"
+            f"<li><strong>{_bi('移除绑定', 'Remove enrollment')}</strong>: "
+            f"{_bi('只删除保存的 Canvas 令牌。对方仍可重新绑定，除非已被停用。', 'deletes the saved Canvas token only. The person can enroll again unless they are disabled.')}</li>"
+            "</ul>"
+            f'<p class="muted small">{_bi("用户自己删除令牌只是断开自己的连接，与停用无关。你不能停用自己，也不能停用最后一位仍在启用的所有者。", "A user deleting their own token is only a self-disconnect and is not a disablement. You cannot disable yourself or the last active owner.")}</p></section>'
+        )
         body = (
             _header(session)
             + f"<h1>{_bi('已绑定的用户', 'Enrollments')}</h1>"
             + f'<p class="muted">{count_text} {filter_link}</p>'
+            + explain
             + table
             + f'<p><a href="{ACCOUNT_PATH}">{_bi("返回账户页", "Back to account")}</a></p>'
         )
@@ -2430,7 +2684,12 @@ class _AccountApp:
         )
         return self.redirect(_ADMIN_PATH, 303)
 
-    async def admin_revoke(self, request: Request) -> Response:
+    async def admin_remove(self, request: Request) -> Response:
+        """Owner action: delete a user's stored token. Not an access decision.
+
+        The user can enroll again unless an owner has disabled them; use
+        ``admin_disable`` to cut someone off.
+        """
         guarded = await self._guard_post(request, owner_only=True)
         if isinstance(guarded, Response):
             return guarded
@@ -2441,13 +2700,107 @@ class _AccountApp:
             return self.message_page(
                 400, _bi("用户标识不正确。", "Invalid user identifier.")
             )
-        await anyio.to_thread.run_sync(self.store.delete, tid, oid)
+        removed = await anyio.to_thread.run_sync(self.store.delete, tid, oid)
+        if removed:
+            audit.log_principal_event(
+                "enrollment_removed",
+                f"entra:{tid}:{oid}".lower(),
+                actor=self._principal_key(session),
+            )
         logger.info(
-            "account admin revoke by oid=%s target tid=%s oid=%s",
+            "account admin remove enrollment by oid=%s target tid=%s oid=%s",
             session.oid,
             tid.lower(),
             oid.lower(),
         )
+        return self.redirect(_ADMIN_PATH, 303)
+
+    def _refused_page(self, code: str) -> Response:
+        """The page for an access change the store refused."""
+        if code == AccessActionRefused.LAST_OWNER:
+            return self.message_page(
+                409,
+                _bi(
+                    "不能停用最后一位仍在启用的所有者。请先添加或启用另一位所有者。",
+                    "You cannot disable the last active owner. Add or enable another owner first.",
+                ),
+            )
+        if code == AccessActionRefused.SELF:
+            return self.message_page(
+                400, _bi("你不能停用自己的账号。", "You cannot disable your own account.")
+            )
+        return self.message_page(403, _bi("无权访问。", "Forbidden."))
+
+    def _access_changed(self, key: str) -> None:
+        """Make this process notice an access change at once (others within the cache TTL)."""
+        if self.access is not None:
+            self.access.invalidate(key)
+
+    async def admin_disable(self, request: Request) -> Response:
+        """Owner action: disable a user. They are refused everywhere until re-enabled."""
+        guarded = await self._guard_post(request, owner_only=True)
+        if isinstance(guarded, Response):
+            return guarded
+        session, form = guarded
+        target = valid_principal_key(form.get("principal_key"))
+        if target is None:
+            return self.message_page(
+                400, _bi("用户标识不正确。", "Invalid user identifier.")
+            )
+        actor = self._principal_key(session)
+        try:
+            changed = await anyio.to_thread.run_sync(
+                functools.partial(
+                    self.store.disable_principal,
+                    target,
+                    actor=actor,
+                    reason=DISABLE_REASON_ADMIN,
+                )
+            )
+        except AccessActionRefused as exc:
+            audit.log_principal_event("refused", target, actor=actor, outcome=exc.code)
+            return self._refused_page(exc.code)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("account admin disable failed: %s", type(exc).__name__)
+            return self.message_page(
+                503, _bi("暂时无法保存这项更改。", "The change could not be saved right now.")
+            )
+        self._access_changed(target)
+        if changed:
+            audit.log_principal_event(
+                "disabled", target, actor=actor, reason=DISABLE_REASON_ADMIN
+            )
+        logger.info("account admin disable by oid=%s target=%s changed=%s", session.oid, target, changed)
+        return self.redirect(_ADMIN_PATH, 303)
+
+    async def admin_enable(self, request: Request) -> Response:
+        """Owner action: lift a disablement. The user signs in again to get a new session."""
+        guarded = await self._guard_post(request, owner_only=True)
+        if isinstance(guarded, Response):
+            return guarded
+        session, form = guarded
+        target = valid_principal_key(form.get("principal_key"))
+        if target is None:
+            return self.message_page(
+                400, _bi("用户标识不正确。", "Invalid user identifier.")
+            )
+        actor = self._principal_key(session)
+        try:
+            changed = await anyio.to_thread.run_sync(
+                functools.partial(self.store.enable_principal, target, actor=actor)
+            )
+        except AccessActionRefused as exc:
+            audit.log_principal_event("refused", target, actor=actor, outcome=exc.code)
+            return self._refused_page(exc.code)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("account admin enable failed: %s", type(exc).__name__)
+            return self.message_page(
+                503, _bi("暂时无法保存这项更改。", "The change could not be saved right now.")
+            )
+        self._access_changed(target)
+        if changed:
+            audit.log_principal_event("enabled", target, actor=actor)
+        logger.info("account admin enable by oid=%s target=%s changed=%s", session.oid, target, changed)
         return self.redirect(_ADMIN_PATH, 303)
 
 
@@ -2468,6 +2821,7 @@ def build_account_routes(
     health: TokenHealth | None = None,
     write_tools: WriteToolCatalog | None = None,
     tool_prefs: ToolPrefsCache | None = None,
+    access: PrincipalAccessCache | None = None,
 ) -> list[Route]:
     """Build the /account Starlette routes.
 
@@ -2477,6 +2831,8 @@ def build_account_routes(
     build their own when none is given. ``write_tools`` lists the write tools the
     server offers (the "Write tools" section is hidden without it) and
     ``tool_prefs`` is the cache the MCP side reads, dropped when a user saves.
+    ``access`` is the MCP side's access cache, dropped for a user whenever an owner
+    disables or enables them (without it the MCP side notices within its TTL).
     """
     app = _AccountApp(
         cfg,
@@ -2491,6 +2847,7 @@ def build_account_routes(
         health,
         write_tools,
         tool_prefs,
+        access,
     )
     return app.routes()
 

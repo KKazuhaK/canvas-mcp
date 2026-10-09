@@ -22,6 +22,7 @@ from ..token_health import set_token_health_monitor
 from .edge_guard import SelfhostEdgeGuard
 from .identity import ClaimsPolicy, authorize_id_token_claims
 from .oauth import cull_expired_oauth_state
+from .principal_access import PrincipalAccessCache
 from .request_context import SelfhostRequestContextMiddleware
 from .schools import SchoolPolicy, is_blocked_hostname
 from .settings import SelfhostConfigError, SelfhostSettings
@@ -41,7 +42,9 @@ class SelfhostRuntime:
     """What the running server shares: settings, token store, claim policy, token health.
 
     ``tool_prefs`` caches each user's write-tool switches for the MCP side; the
-    account page drops a user's entry when they change a switch.
+    account page drops a user's entry when they change a switch. ``access`` caches
+    whether each principal is allowed to use the server at all; the account page
+    drops an entry when an owner disables or enables a user.
     """
 
     settings: SelfhostSettings
@@ -49,6 +52,7 @@ class SelfhostRuntime:
     policy: ClaimsPolicy
     health: TokenHealth
     tool_prefs: ToolPrefsCache
+    access: PrincipalAccessCache
 
 
 def _writable_directory_problem(name: str, path: Path) -> str | None:
@@ -200,6 +204,7 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         policy=policy,
         health=health,
         tool_prefs=ToolPrefsCache(store),
+        access=PrincipalAccessCache(store),
     )
 
 
@@ -228,7 +233,11 @@ def install_selfhost(
         return [tool.name for tool in await mcp.list_tools(run_middleware=False)]
 
     mcp.add_middleware(
-        SelfhostCredentialGate(account_url=settings.account_url, write_ceiling=ceiling)
+        SelfhostCredentialGate(
+            account_url=settings.account_url,
+            write_ceiling=ceiling,
+            access=runtime.access,
+        )
     )
     # The Canvas client confirms a suspected dead token through this service.
     set_token_health_monitor(runtime.health)
@@ -249,6 +258,7 @@ def install_selfhost(
         health=runtime.health,
         write_tools=WriteToolCatalog(ceiling=ceiling, list_registered=registered_tool_names),
         tool_prefs=runtime.tool_prefs,
+        access=runtime.access,
         **account_options,
     )
 
@@ -284,6 +294,8 @@ def build_selfhost_asgi_app(
                 account_url=settings.account_url,
                 health=runtime.health,
                 tool_prefs=runtime.tool_prefs,
+                access=runtime.access,
+                owners=runtime.store,
             )
         ],
         host_origin_protection=True,

@@ -247,6 +247,48 @@ def log_token_event(
     _emit(event)
 
 
+def log_principal_event(
+    action: str,
+    principal_key: str,
+    *,
+    actor: str | None = None,
+    reason: str | None = None,
+    outcome: str | None = None,
+) -> None:
+    """Audit a change to whether a principal may use the server.
+
+    Records the principal key (an opaque identity string, never a name, e-mail
+    address or token) and short closed-set codes. The same transitions are also kept
+    in the token database (``principal_status_events``), which is the record that
+    covers the operator CLI.
+
+    Args:
+        action: "disabled", "enabled", "owner_gained", "owner_lost" (state
+            transitions), "refused" (an access change that was not made),
+            "sign_in_refused", "enroll_refused" (a disabled principal tried),
+            "self_disconnected" (a user deleted their own token) or
+            "enrollment_removed" (an owner removed an enrollment row).
+        principal_key: The subject.
+        actor: Principal key of the owner who did it, or "operator" for the CLI.
+        reason: Why (closed set, for example "admin_disabled").
+        outcome: Why a change was refused ("last_owner", "self", "not_owner").
+    """
+    if not _access_events_enabled:
+        return
+    event: dict[str, Any] = {
+        "event_type": "principal_status",
+        "action": action,
+        "principal": principal_key,
+    }
+    if actor:
+        event["actor"] = actor
+    if reason:
+        event["reason"] = reason
+    if outcome:
+        event["outcome"] = outcome
+    _emit(event)
+
+
 def log_write_tools_event(
     action: str,
     principal_key: str,

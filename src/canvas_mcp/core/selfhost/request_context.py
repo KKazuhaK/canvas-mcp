@@ -14,6 +14,14 @@ with that token. Each request also starts a shared token-health object, so a
 token found dead part-way through (see :mod:`canvas_mcp.core.token_health`) stops
 the rest of that request's Canvas calls.
 
+Before any of that, the caller's access status is checked (see
+:mod:`.principal_access`): a principal an administrator disabled gets a 403 for
+every MCP request, whatever token it presents, so an already issued or freshly
+refreshed token buys nothing. If the status cannot be read, the request is refused
+(503) rather than let through. The check is cached for a few seconds, so a change
+made by another process is noticed within that time; a request already past the
+check is not interrupted.
+
 The caller's own write-tool switches (what they turned on at ``/account``) are
 loaded into the request too, for the credential gate; if they cannot be read,
 no write tool is enabled for that request.
@@ -26,6 +34,7 @@ nothing falls back to the server's default school.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 from collections.abc import Mapping
@@ -35,6 +44,7 @@ import anyio.to_thread
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from .. import audit
 from ..credentials import (
     RequestCredentials,
     RequestTokenState,
@@ -49,11 +59,13 @@ from ..credentials import (
 )
 from ..logging import log_error, log_warning
 from .identity import ClaimsDenied, ClaimsPolicy, evaluate_entra_claims
+from .principal_access import access_disabled_message, access_unavailable_message
 from .schools import SchoolPolicy
 from .token_store import (
     REASON_DECRYPT_FAILED,
     REASON_REVOKED_BY_ADMIN,
     STATUS_INVALID,
+    PrincipalStatus,
     TokenDecryptionError,
 )
 
@@ -86,6 +98,20 @@ class ToolPrefsReader(Protocol):
     """The slice of the preferences cache the middleware uses (synchronous)."""
 
     def enabled(self, principal_key: str) -> frozenset[str]: ...
+
+
+class AccessChecker(Protocol):
+    """The slice of the access cache the middleware uses (synchronous)."""
+
+    def status(self, principal_key: str) -> PrincipalStatus: ...
+
+    def invalidate(self, principal_key: str | None = None) -> None: ...
+
+
+class OwnerLedger(Protocol):
+    """The slice of the token store that records an owner role seen to be gone."""
+
+    def demote_owner(self, principal_key: str, *, evidence_issued_at: int) -> bool: ...
 
 
 class CanvasTokenReader(Protocol):
@@ -170,6 +196,8 @@ class SelfhostRequestContextMiddleware:
         account_url: str,
         health: TokenInvalidator | None = None,
         tool_prefs: ToolPrefsReader | None = None,
+        access: AccessChecker | None = None,
+        owners: OwnerLedger | None = None,
     ) -> None:
         self.app = app
         self.mcp_path = mcp_path
@@ -179,6 +207,8 @@ class SelfhostRequestContextMiddleware:
         self.account_url = account_url
         self.health = health
         self.tool_prefs = tool_prefs
+        self.access = access
+        self.owners = owners
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -217,6 +247,11 @@ class SelfhostRequestContextMiddleware:
                 await _send_json(send, 403, verdict.message)
                 return
 
+            refusal = await self._access_refusal(verdict, claims)
+            if refusal is not None:
+                await _send_json(send, refusal[0], refusal[1])
+                return
+
             set_request_principal(verdict)
             set_request_token_state(RequestTokenState())
             set_request_tool_prefs(await self._load_tool_prefs(verdict.key))
@@ -226,6 +261,53 @@ class SelfhostRequestContextMiddleware:
             await self.app(scope, receive, send)
         finally:
             clear_http_request_context()
+
+    async def _access_refusal(
+        self, verdict: Any, claims: Mapping[str, Any]
+    ) -> tuple[int, str] | None:
+        """``(status, message)`` if this principal may not use the server, else None."""
+        if self.access is None:
+            return None
+        try:
+            status = await anyio.to_thread.run_sync(self.access.status, verdict.key)
+        except Exception:  # noqa: BLE001 - fail closed; the error text is not logged
+            log_error("principal access check failed", entra_oid=verdict.object_id)
+            return 503, access_unavailable_message()
+        if status.disabled:
+            log_warning(
+                "MCP request denied", reason="principal_disabled", entra_oid=verdict.object_id
+            )
+            return 403, access_disabled_message()
+        await self._note_owner_role_gone(verdict, claims, status)
+        return None
+
+    async def _note_owner_role_gone(
+        self, verdict: Any, claims: Mapping[str, Any], status: PrincipalStatus
+    ) -> None:
+        """Lower the stored owner flag when a verified token proves the role is gone.
+
+        Only ever lowers it, and only on a token issued after the last recorded
+        sign-in (see ``TokenStore.demote_owner``). Never raises.
+        """
+        if self.owners is None or not status.is_owner or verdict.is_owner:
+            return
+        issued = claims.get("iat")
+        if not isinstance(issued, int | float) or isinstance(issued, bool):
+            return
+        try:
+            changed = await anyio.to_thread.run_sync(
+                functools.partial(
+                    self.owners.demote_owner, verdict.key, evidence_issued_at=int(issued)
+                )
+            )
+            if changed:
+                audit.log_principal_event(
+                    "owner_lost", verdict.key, reason="access_token_roles"
+                )
+                if self.access is not None:
+                    self.access.invalidate(verdict.key)
+        except Exception:  # noqa: BLE001 - bookkeeping must never change the answer
+            pass
 
     async def _load_tool_prefs(self, principal_key: str) -> RequestToolPrefs:
         """The write tools this caller switched on; nothing enabled when they cannot be read."""

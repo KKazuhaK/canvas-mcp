@@ -275,3 +275,109 @@ def test_a_version_1_database_is_migrated_by_the_cli_and_stays_manageable(env, m
     assert token_admin.main(["revoke", TID, OID_A]) == 0
     assert "revoked 1 enrollment" in capsys.readouterr().out
     assert token_admin.main(["revoke", TID, OID_A]) == 1
+
+
+# -- disable / enable: the authorization decision --------------------------------
+
+KEY_A = f"entra:{TID}:{OID_A}"
+KEY_B = f"entra:{TID}:{OID_B}"
+
+
+def test_disable_blocks_and_survives_deleting_the_enrollment(env, capsys) -> None:
+    from canvas_mcp.core.selfhost.token_store import PrincipalDisabledError
+
+    store = _seed(env)
+    assert token_admin.main(["disable", TID.upper(), OID_A.upper()]) == 0
+    assert "disabled 1 user" in capsys.readouterr().out
+    assert store.get_principal_status(KEY_A).disabled
+    assert store.get_principal_status(KEY_A).disabled_by == "operator"
+    assert token_admin.main(["remove", TID, OID_A]) == 0  # remove the token as well
+    capsys.readouterr()
+    assert store.get_principal_status(KEY_A).disabled  # still disabled
+    with pytest.raises(PrincipalDisabledError):
+        store.put(
+            tenant_id=TID, object_id=OID_A, api_token=TOKEN_A, canvas_user_id="1",
+            canvas_user_name="n", entra_display_name="n", entra_upn="n@example.test",
+        )
+
+
+def test_disable_twice_and_enable(env, capsys) -> None:
+    store = _seed(env)
+    assert token_admin.main(["disable", TID, OID_A]) == 0
+    assert token_admin.main(["disable", TID, OID_A]) == 0
+    assert "already disabled" in capsys.readouterr().out
+    assert token_admin.main(["enable", TID, OID_A]) == 0
+    assert "enabled 1 user" in capsys.readouterr().out
+    assert not store.get_principal_status(KEY_A).disabled
+    assert token_admin.main(["enable", TID, OID_A]) == 1  # nothing to enable
+    assert "not disabled" in capsys.readouterr().out
+
+
+def test_disable_and_enable_reject_non_guids(env, capsys) -> None:
+    _seed(env)
+    assert token_admin.main(["disable", "nope", OID_A]) == 2
+    assert token_admin.main(["enable", TID, "nope"]) == 2
+    assert "GUID" in capsys.readouterr().err
+
+
+def test_the_last_owner_needs_the_break_glass_flag(env, capsys) -> None:
+    store = _seed(env)
+    store.record_sign_in(KEY_A, is_owner=True)
+    assert token_admin.main(["disable", TID, OID_A]) == 3
+    assert "last active owner" in capsys.readouterr().err
+    assert not store.get_principal_status(KEY_A).disabled
+    store.record_sign_in(KEY_B, is_owner=True)
+    assert token_admin.main(["disable", TID, OID_A]) == 0  # a second owner exists
+    capsys.readouterr()
+    assert token_admin.main(["disable", TID, OID_B]) == 3  # B is the last one now
+    capsys.readouterr()
+    assert token_admin.main(["disable", TID, OID_B, "--allow-last-owner"]) == 0
+    assert store.count_active_owners() == 0
+
+
+def test_access_lists_disabled_users_and_owners_without_secrets(env, capsys) -> None:
+    store = _seed(env)
+    store.record_sign_in(KEY_B, is_owner=True)
+    token_admin.main(["disable", TID, OID_A])
+    capsys.readouterr()
+    assert token_admin.main(["access"]) == 0
+    captured = capsys.readouterr()
+    rows = [line.split("\t") for line in captured.out.splitlines()]
+    assert [r[0] for r in rows] == [KEY_A, KEY_B]
+    assert rows[0][1:3] == ["disabled", "-"] and rows[0][4:6] == ["operator", "operator_disabled"]
+    assert rows[1][1:3] == ["active", "owner"]
+    _no_secrets(captured.out, captured.err)
+
+
+def test_history_records_the_cli_transitions(env, capsys) -> None:
+    _seed(env)
+    token_admin.main(["disable", TID, OID_A])
+    token_admin.main(["enable", TID, OID_A])
+    capsys.readouterr()
+    assert token_admin.main(["history", TID, OID_A]) == 0
+    lines = [line.split("\t") for line in capsys.readouterr().out.splitlines()]
+    assert [(r[2], r[3]) for r in lines] == [("enabled", "operator"), ("disabled", "operator")]
+    assert token_admin.main(["history"]) == 0
+    assert len(capsys.readouterr().out.splitlines()) == 2
+    assert token_admin.main(["history", TID]) == 2
+
+
+def test_check_reports_the_access_state(env, capsys) -> None:
+    store = _seed(env)
+    store.record_sign_in(KEY_B, is_owner=True)
+    token_admin.main(["disable", TID, OID_A])
+    capsys.readouterr()
+    assert token_admin.main(["check"]) == 0
+    out = capsys.readouterr().out
+    assert "disabled users: 1" in out and "active owners seen: 1" in out
+
+
+def test_remove_and_revoke_only_delete_the_token_and_say_so(env, capsys) -> None:
+    store = _seed(env)
+    assert token_admin.main(["remove", TID, OID_A]) == 0
+    captured = capsys.readouterr()
+    assert "removed 1 enrollment" in captured.out
+    assert "can enroll again" in captured.err and "disable" in captured.err
+    assert not store.get_principal_status(KEY_A).disabled
+    assert token_admin.main(["revoke", TID, OID_B]) == 0
+    assert "revoked 1 enrollment" in capsys.readouterr().out

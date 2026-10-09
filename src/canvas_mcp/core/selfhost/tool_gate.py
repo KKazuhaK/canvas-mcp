@@ -8,13 +8,22 @@ It also enforces the per-user opt-in for write tools (see :mod:`.tool_prefs`):
 a call to a write tool the user has not switched on at ``/account`` is refused
 here, before the tool runs. That is the security boundary. The tool list hides
 those tools from the model too, which only saves it from trying them.
+
+When given the access cache (see :mod:`.principal_access`), it also refuses every
+call and read of a principal an administrator disabled. The request-context
+middleware already refuses such a request up front; this is the second check, made
+at the moment of each tool call, so a request that is already running cannot start a
+further tool call after the change (the cache bounds how late another process's
+change is noticed). A call whose Canvas requests were already sent is not
+cancelled.
 """
 
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
-from typing import Any
+from typing import Any, Protocol
 
+import anyio.to_thread
 import mcp.types as mt
 from fastmcp.exceptions import ResourceError, ToolError
 from fastmcp.resources import ResourceResult
@@ -30,6 +39,8 @@ from ..credentials import (
     missing_credentials_message,
 )
 from ..logging import log_error
+from .principal_access import access_disabled_message, access_unavailable_message
+from .token_store import PrincipalStatus
 from .tool_prefs import (
     WriteDecision,
     decide,
@@ -42,8 +53,30 @@ _NOT_SIGNED_IN = "Not signed in."
 _IDENTITY_MISMATCH = "Identity check failed; reconnect the connector."
 
 
-def _check_request_context(error_type: type[Exception]) -> None:
-    """Raise ``error_type`` unless this request has a consistent identity and a token."""
+class AccessChecker(Protocol):
+    """The slice of the access cache the gate uses (synchronous)."""
+
+    def status(self, principal_key: str) -> PrincipalStatus: ...
+
+
+async def _check_access(access: AccessChecker | None, error_type: type[Exception]) -> None:
+    """Raise ``error_type`` if the principal of this request is disabled (or unreadable)."""
+    if access is None:
+        return
+    principal = get_request_principal()
+    if principal is None:
+        raise error_type(_NOT_SIGNED_IN)
+    try:
+        status = await anyio.to_thread.run_sync(access.status, principal.key)
+    except Exception:  # noqa: BLE001 - fail closed; the error text is not logged
+        log_error("principal access check failed")
+        raise error_type(access_unavailable_message()) from None
+    if status.disabled:
+        raise error_type(access_disabled_message())
+
+
+def _check_identity(error_type: type[Exception]) -> None:
+    """Raise ``error_type`` unless the verified token and the request context agree."""
     principal = get_request_principal()
     if principal is None:
         raise error_type(_NOT_SIGNED_IN)
@@ -56,6 +89,9 @@ def _check_request_context(error_type: type[Exception]) -> None:
         log_error("identity mismatch between access token and request context")
         raise error_type(_IDENTITY_MISMATCH)
 
+
+def _check_credentials(error_type: type[Exception]) -> None:
+    """Raise ``error_type`` unless this request carries a usable Canvas credential."""
     if get_request_credentials() is None:
         # Also the answer for a token marked invalid: the request context mounts
         # no credentials for it and carries the re-enroll message instead, so
@@ -80,7 +116,9 @@ class SelfhostCredentialGate(Middleware):
         *,
         account_url: str | None = None,
         write_ceiling: Collection[str] | None = None,
+        access: AccessChecker | None = None,
     ) -> None:
+        self._access = access
         self._account_url = account_url
         self._ceiling: frozenset[str] | None = (
             None if write_ceiling is None else frozenset(write_ceiling)
@@ -108,7 +146,9 @@ class SelfhostCredentialGate(Middleware):
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        _check_request_context(ToolError)
+        _check_identity(ToolError)
+        await _check_access(self._access, ToolError)
+        _check_credentials(ToolError)
         self._check_write_tool(context.message.name)
         return await call_next(context)
 
@@ -131,5 +171,7 @@ class SelfhostCredentialGate(Middleware):
         context: MiddlewareContext[mt.ReadResourceRequestParams],
         call_next: CallNext[mt.ReadResourceRequestParams, ResourceResult],
     ) -> ResourceResult:
-        _check_request_context(ResourceError)
+        _check_identity(ResourceError)
+        await _check_access(self._access, ResourceError)
+        _check_credentials(ResourceError)
         return await call_next(context)

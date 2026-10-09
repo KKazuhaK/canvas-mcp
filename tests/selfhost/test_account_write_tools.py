@@ -541,7 +541,7 @@ class TestSignInAge:
         old_style = codec.seal(
             SESSION_COOKIE,
             {
-                "v": 1, "tid": TID, "oid": OID, "name": "Ada", "upn": "a@example.test",
+                "v": 2, "ep": 0, "tid": TID, "oid": OID, "name": "Ada", "upn": "a@example.test",
                 "owner": False, "exp": int(r.h.now) + 900, "csrf": csrf,
             },
         )
@@ -557,7 +557,7 @@ class TestSignInAge:
         forged = codec.seal(
             SESSION_COOKIE,
             {
-                "v": 1, "tid": TID, "oid": OID, "name": "Ada", "upn": "a@example.test",
+                "v": 2, "ep": 0, "tid": TID, "oid": OID, "name": "Ada", "upn": "a@example.test",
                 "owner": False, "iat": int(r.h.now) + 100_000, "exp": int(r.h.now) + 900, "csrf": csrf,
             },
         )

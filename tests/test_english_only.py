@@ -53,6 +53,7 @@ ENDONYM_ONLY_FILES = (
 ZH_RENDERING_TESTS = {
     "tests/selfhost/test_account_web.py": "asserts the Chinese rendering of the server-rendered pages",
     "tests/selfhost/test_account_schools.py": "asserts the Chinese rendering of the school picker",
+    "tests/selfhost/test_account_access_lifecycle.py": "asserts the Chinese rendering of the admin disable and enable actions",
     "web/src/i18n/i18n.test.ts": "asserts the Chinese strings the i18n setup loads",
     "web/src/router/documentTitle.test.tsx": "asserts the Chinese document title",
     "web/src/router/routing.test.tsx": "asserts the Chinese UI after switching language",

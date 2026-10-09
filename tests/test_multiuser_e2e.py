@@ -656,7 +656,7 @@ class TestMcpAsTwoUsers:
         assert world.browser.enroll(USER_A).status_code == 303  # enrolling fixes it at once
         assert call_tool(world.client, bearer, "list_courses")["isError"] is False
 
-    def test_revoking_an_enrollment_stops_tool_calls_immediately(self, enrolled):
+    def test_removing_an_enrollment_stops_tool_calls_until_the_user_enrolls_again(self, enrolled):
         bearer_a = enrolled.browser.bearer_for(USER_A)
         assert call_tool(enrolled.client, bearer_a, "list_courses")["isError"] is False
 
@@ -665,7 +665,7 @@ class TestMcpAsTwoUsers:
         assert admin.status_code == 200
         assert USER_A.oid in admin.text and USER_B.oid in admin.text
         assert USER_A.canvas_token not in admin.text and USER_B.canvas_token not in admin.text
-        revoke = enrolled.client.post("/account/admin/revoke", data={
+        revoke = enrolled.client.post("/account/admin/remove", data={
             "csrf": enrolled.browser.csrf("/account/admin"), "tenant_id": TENANT, "object_id": USER_A.oid,
         }, headers=ORIGIN, follow_redirects=False)
         assert revoke.status_code == 303
@@ -674,6 +674,84 @@ class TestMcpAsTwoUsers:
         assert result["isError"] is True and f"{BASE}/account" in text_of(result)
         bearer_b = enrolled.browser.bearer_for(USER_B)
         assert call_tool(enrolled.client, bearer_b, "list_courses")["isError"] is False
+
+    def test_disabling_a_user_is_an_access_decision_that_deleting_rows_cannot_undo(self, enrolled):
+        """The reported sequence, end to end through the real OAuth, MCP and /account stack."""
+        user_a_key = f"entra:{TENANT}:{USER_A.oid}"
+        bearer_a = enrolled.browser.bearer_for(USER_A)
+        assert call_tool(enrolled.client, bearer_a, "list_courses")["isError"] is False
+        # User A has a sealed /account session that is still valid.
+        assert enrolled.browser.account_sign_in(USER_A).status_code == 303
+        a_session = enrolled.client.cookies.get("__Host-cmcp_session")
+        assert a_session
+
+        # The owner disables A and also removes the stored token.
+        assert enrolled.browser.account_sign_in(OWNER).status_code == 303
+        csrf = enrolled.browser.csrf("/account/admin")
+        disable = enrolled.client.post("/account/admin/disable", data={
+            "csrf": csrf, "principal_key": user_a_key,
+        }, headers=ORIGIN, follow_redirects=False)
+        assert disable.status_code == 303
+        remove = enrolled.client.post("/account/admin/remove", data={
+            "csrf": csrf, "tenant_id": TENANT, "object_id": USER_A.oid,
+        }, headers=ORIGIN, follow_redirects=False)
+        assert remove.status_code == 303
+        assert enrolled.runtime.store.info(user_a_key) is None
+        enrolled.canvas.seen.clear()
+
+        # The MCP token A already holds is refused, on every kind of request, at once.
+        for method, params in (("tools/call", {"name": "list_courses", "arguments": {}}), ("tools/list", None)):
+            refused = rpc(enrolled.client, bearer_a, method, params)
+            assert refused.status_code == 403, refused.text
+            assert "disabled by an administrator" in refused.json()["error"]
+        # A brand-new MCP authorization for A yields a token that is refused too.
+        fresh_bearer, _ = enrolled.browser.mcp_authorize(USER_A)
+        if fresh_bearer is not None:
+            assert rpc(enrolled.client, fresh_bearer, "tools/list").status_code == 403
+        assert enrolled.canvas.seen == []
+
+        # The still-valid sealed session cannot put the row back.
+        enrolled.browser.fresh_session()
+        enrolled.client.cookies.set("__Host-cmcp_session", a_session, domain="canvas.example.test", path="/")
+        assert "Sign in with Microsoft" in enrolled.client.get("/account").text
+        replay = enrolled.client.post("/account/token", data={
+            "csrf": "x", "canvas_token": USER_A.canvas_token,
+        }, headers=ORIGIN, follow_redirects=False)
+        assert replay.status_code == 303
+        assert enrolled.runtime.store.info(user_a_key) is None
+        # Signing in again is refused with a clear message, so no new session starts.
+        refused_sign_in = enrolled.browser.account_sign_in(USER_A)
+        assert refused_sign_in.status_code == 403 and "disabled by an administrator" in refused_sign_in.text
+
+        # B is untouched throughout.
+        bearer_b = enrolled.browser.bearer_for(USER_B)
+        assert call_tool(enrolled.client, bearer_b, "list_courses")["isError"] is False
+
+        # An owner lifts it: A signs in again (the old session stays dead), enrolls, and the
+        # bearer A held all along works again.
+        assert enrolled.browser.account_sign_in(OWNER).status_code == 303
+        csrf = enrolled.browser.csrf("/account/admin")
+        enable = enrolled.client.post("/account/admin/enable", data={
+            "csrf": csrf, "principal_key": user_a_key,
+        }, headers=ORIGIN, follow_redirects=False)
+        assert enable.status_code == 303
+        enrolled.browser.fresh_session()
+        enrolled.client.cookies.set("__Host-cmcp_session", a_session, domain="canvas.example.test", path="/")
+        assert "Sign in with Microsoft" in enrolled.client.get("/account").text
+        assert enrolled.browser.enroll(USER_A).status_code == 303
+        assert call_tool(enrolled.client, bearer_a, "list_courses")["isError"] is False
+
+    def test_a_user_deleting_their_own_token_may_enroll_again(self, enrolled):
+        user_a_key = f"entra:{TENANT}:{USER_A.oid}"
+        assert enrolled.browser.account_sign_in(USER_A).status_code == 303
+        deleted = enrolled.client.post("/account/token/delete", data={
+            "csrf": enrolled.browser.csrf(),
+        }, headers=ORIGIN, follow_redirects=False)
+        assert deleted.status_code == 303
+        assert enrolled.runtime.store.info(user_a_key) is None
+        assert not enrolled.runtime.store.get_principal_status(user_a_key).disabled
+        assert enrolled.browser.enroll(USER_A).status_code == 303
+        assert enrolled.runtime.store.get(TENANT, USER_A.oid) is not None
 
     def test_a_non_owner_cannot_open_the_admin_page(self, enrolled):
         enrolled.browser.account_sign_in(USER_A)

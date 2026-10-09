@@ -277,7 +277,7 @@ def test_container_port_health_path_and_mcp_path_match_the_code():
 def test_token_admin_commands_in_the_docs_exist():
     readme = (SELFHOST / "README.md").read_text(encoding="utf-8")
     source = (SRC / "core" / "selfhost" / "token_admin.py").read_text(encoding="utf-8")
-    for command in set(re.findall(r"token_admin (check|list|revoke|rotate)\b", readme)):
+    for command in set(re.findall(r"token_admin (check|list|revoke|remove|disable|enable|access|history|rotate)\b", readme)):
         assert f'add_parser("{command}"' in source
 
 

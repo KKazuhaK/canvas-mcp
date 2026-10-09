@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from canvas_mcp.core.selfhost import token_store as token_store_module
 from canvas_mcp.core.selfhost.token_store import (
+    SCHEMA_VERSION,
     EnrollmentInfo,
     Keyring,
     KeyringError,
@@ -343,8 +344,8 @@ class TestInitialize:
         with _raw(store) as conn:
             assert conn.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
-            ).fetchone() == ("2",)
-            conn.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+            ).fetchone() == (str(SCHEMA_VERSION),)
+            conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
         with pytest.raises(TokenStoreError, match="newer"):
             store.initialize()
         with _raw(store) as conn:
@@ -655,7 +656,7 @@ class TestMigration:
         with _raw(s) as conn:
             assert conn.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
-            ).fetchone() == ("2",)
+            ).fetchone() == (str(SCHEMA_VERSION),)
             columns = [r[1] for r in conn.execute("PRAGMA table_info(canvas_tokens)")]
         assert columns.count("canvas_host") == 1
         got = s.get(TID, OID_A)
@@ -706,7 +707,7 @@ class TestMigration:
 
     def test_future_versions_are_still_refused(self, store: TokenStore) -> None:
         with _raw(store) as conn:
-            conn.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+            conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
         with pytest.raises(TokenStoreError, match="newer"):
             store.initialize()
 
@@ -1027,7 +1028,7 @@ class TestPrincipalMigration:
         with _raw(s) as conn:
             assert conn.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
-            ).fetchone() == ("2",)
+            ).fetchone() == (str(SCHEMA_VERSION),)
             index = conn.execute(
                 "SELECT sql FROM sqlite_master WHERE name = 'canvas_tokens_principal_key'"
             ).fetchone()

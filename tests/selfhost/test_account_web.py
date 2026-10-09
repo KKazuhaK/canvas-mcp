@@ -287,7 +287,7 @@ class TestSignedOut:
             "/account/token/delete",
             "/account/logout",
             "/account/admin",
-            "/account/admin/revoke",
+            "/account/admin/remove",
         ],
     )
     def test_head_and_put_are_405(self, h: Harness, path: str) -> None:
@@ -613,7 +613,7 @@ class TestSession:
         forged = other.seal(
             SESSION_COOKIE,
             {
-                "v": 1, "tid": TID, "oid": OID, "name": "x", "upn": "x",
+                "v": 2, "ep": 0, "tid": TID, "oid": OID, "name": "x", "upn": "x",
                 "owner": True, "iat": int(h.now), "exp": int(h.now) + 600, "csrf": "c",
             },
         )
@@ -982,27 +982,27 @@ class TestAdmin:
         assert "2027-01-15 08:00 UTC" in text
         assert f'name="object_id" value="{OID_2}"' in text
         assert f'name="tenant_id" value="{TID}"' in text
-        assert 'action="/account/admin/revoke"' in text
+        assert 'action="/account/admin/remove"' in text
         assert re.search(r'name="csrf" value="[^"]+"', text)
 
     def test_revoke_requires_owner_origin_and_csrf(self, h: Harness) -> None:
         self._enroll(h, OID_2, "bob@example.test", "Bob", "9~" + "S" * 60)
         target = {"tenant_id": TID, "object_id": OID_2}
         # signed out
-        assert post_form(h, "/account/admin/revoke", {"csrf": "x", **target}).status_code == 403
+        assert post_form(h, "/account/admin/remove", {"csrf": "x", **target}).status_code == 403
         # regular user
         sign_in(h)
         csrf = csrf_of(h)
-        assert post_form(h, "/account/admin/revoke", {"csrf": csrf, **target}).status_code == 403
+        assert post_form(h, "/account/admin/remove", {"csrf": csrf, **target}).status_code == 403
         assert h.store.count() == 1
         # owner
         sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
         csrf = csrf_of(h)
-        assert post_form(h, "/account/admin/revoke", {"csrf": "bad", **target}).status_code == 403
-        assert post_form(h, "/account/admin/revoke", {"csrf": csrf, **target}, origin=None).status_code == 403
-        assert post_form(h, "/account/admin/revoke", {"csrf": csrf, **target}, origin="https://evil.example").status_code == 403
+        assert post_form(h, "/account/admin/remove", {"csrf": "bad", **target}).status_code == 403
+        assert post_form(h, "/account/admin/remove", {"csrf": csrf, **target}, origin=None).status_code == 403
+        assert post_form(h, "/account/admin/remove", {"csrf": csrf, **target}, origin="https://evil.example").status_code == 403
         assert h.store.count() == 1
-        response = post_form(h, "/account/admin/revoke", {"csrf": csrf, **target})
+        response = post_form(h, "/account/admin/remove", {"csrf": csrf, **target})
         assert response.status_code == 303
         assert response.headers["location"] == "/account/admin"
         assert h.store.count() == 0
@@ -1020,7 +1020,7 @@ class TestAdmin:
         self._enroll(h, OID_2, "bob@example.test", "Bob", "9~" + "S" * 60)
         sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
         csrf = csrf_of(h)
-        response = post_form(h, "/account/admin/revoke", {"csrf": csrf, **fields})
+        response = post_form(h, "/account/admin/remove", {"csrf": csrf, **fields})
         assert response.status_code == 400
         assert h.store.count() == 1
 
@@ -1752,11 +1752,11 @@ class TestAdminLayout:
         assert TID not in outside and OID_2 not in outside
         assert "Bob E" in outside and "bob@example.test" in outside
         assert "Bob C" in after and "id 77" in after
-        # The Revoke form (POST + CSRF + the two ids) is outside the details.
-        assert 'method="post" action="/account/admin/revoke"' in after
+        # The Remove enrollment form (POST + CSRF + the two ids) is outside the details.
+        assert 'method="post" action="/account/admin/remove"' in after
         assert 'name="csrf"' in after and f'name="object_id" value="{OID_2}"' in after
         assert f'name="tenant_id" value="{TID}"' in after
-        assert "Revoke" in after
+        assert "Remove enrollment" in after
 
     def test_stacked_card_labels_come_from_the_page_language(self, h: Harness) -> None:
         self._enroll(h)
@@ -1853,7 +1853,9 @@ class TestRegistration:
             "/account/token/recheck",
             "/account/logout",
             "/account/admin",
-            "/account/admin/revoke",
+            "/account/admin/remove",
+            "/account/admin/disable",
+            "/account/admin/enable",
             "/account/admin/invalidate",
             "/account/schools",
             "/account/write-tools",
@@ -1955,7 +1957,7 @@ class TestTokenHealthChinese:
         text = h.client.get("/account/admin", params=ZH).text
         assert "<th>状态</th>" in text and "<th>最近验证</th>" in text
         assert "需重新绑定" in text and "Canvas 拒绝了令牌" in text and "失效时间" in text
-        assert "1 个绑定需要重新录入令牌（共 2 个）。" in text
+        assert "1 个绑定需要重新录入令牌（共 2 个），0 个用户已停用。" in text
         assert "标记为失效" in text and "只看需要重新绑定的" in text
         assert "Needs re-enroll" not in text and "Mark as invalid" not in text
         filtered = h.client.get("/account/admin", params={"filter": "needs_reenroll", **ZH}).text
