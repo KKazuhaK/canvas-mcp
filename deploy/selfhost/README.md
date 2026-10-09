@@ -57,7 +57,7 @@ Key points:
 - Who can use it: accounts assigned to the Entra app role `Canvas.User` (or your own `Canvas.Owner`).
 - Each person enrolls their own Canvas token at `/account`. From then on the AI always uses the **caller's own** token; there is no server-level Canvas credential at all.
 - Canvas tokens are stored encrypted in `/data` and the key lives only in `.env`, so leaking a backup of the data volume on its own does not leak the tokens.
-- The audit log is **off by default**: events are written, and the `audit/` directory is created, only if you set `LOG_ACCESS_EVENTS=true` in `.env`. Even when it is on, enrolling, replacing or deleting a Canvas token at `/account` does not write an audit log entry at the moment (to find out who enrolled and when, look at the created and updated times in `token_admin list`).
+- The audit log is **off by default**: events are written, and the `audit/` directory is created, only if you set `LOG_ACCESS_EVENTS=true` in `.env`. Even when it is on, enrolling, replacing or deleting a Canvas token at `/account` does not write an audit log entry (to find out who enrolled and when, look at the created and updated times in `token_admin list`). What it does write about tokens are health events (`event_type` `canvas_token`): a token marked invalid with its reason, the outcome of a re-check, an administrator marking a token invalid, and a Canvas user change that was detected or confirmed. They carry the principal key and a short code, never a token, a name or an e-mail address.
 
 ## Prerequisites
 
@@ -379,6 +379,17 @@ If the server offers more than one school (see below), step 3 also has a school 
 
 After signing in, an owner also gets an `/account/admin` link: it lists everyone's enrollment status (without tokens) and can revoke someone's enrollment.
 
+### When a Canvas token stops working
+
+A Canvas token can be revoked, expire or be regenerated at any time. The server notices and stops using it instead of failing on every request:
+
+- **Detection.** A Canvas `401` is only a suspicion, because Canvas also answers `401` when a working token lacks permission for something. It counts as a suspicion only if it carries a `WWW-Authenticate` header or its error text says the access token is invalid or expired. The server then makes one check call, `GET <school>/api/v1/users/self`, with that same token (at most one at a time per user, and not again for 60 seconds). Only a `401` from that call marks the token **invalid**. If the call succeeds, the first `401` was a permission problem and is reported as such; a Canvas outage, a timeout or any `5xx` never changes anything.
+- **Effect.** An invalid token is never sent to Canvas again: tool calls return a short message that tells the user to enroll a new token at `/account`, and the rest of the request (paged or parallel calls) stops at once. A stored token that cannot be decrypted is marked invalid the same way (reason `decrypt_failed`).
+- **On `/account`.** The user sees a banner with the date it stopped working, where to create a new token in Canvas and a link to the school's `/profile/settings`, and a **Check again** button (once a minute) that tests the stored token once and restores it if Canvas accepts it again, which corrects a wrong guess. Enrolling a new token also restores access; the other settings are kept.
+- **Expiry reminder.** The token form has an optional **Token expires on** date. It is only a reminder: `/account` shows a notice for the last 7 days before that date.
+- **Different Canvas user.** If the new token belongs to a different Canvas user at the same school than the one enrolled so far, the page asks for an explicit confirmation before saving, and the change is logged.
+- **For owners.** `/account/admin` lists the status, the reason, when the token became invalid and when it was last verified, can show only the enrollments that need a new token (with a count), and has **Mark as invalid** for an enrollment you want the user to redo (reason `revoked_by_admin`; the user cannot undo this with Check again, only by enrolling a new token).
+
 > **React UI (in development).** `/account` is being rewritten as a React single-page app, with the source in `web/` in the repository (see `web/README.md`). `Dockerfile.selfhost` already builds it and puts the output in the image at `/app/web-dist`, but the server does **not** serve those files yet: what you see now is still the server-rendered page described above, and neither the deployment nor the runtime behavior has changed.
 
 ## Multiple schools (optional)
@@ -494,6 +505,7 @@ A note on delay: if you do only steps 1 and 2, an access token that has already 
 | The sign-in page shows **AADSTS50105** | The enterprise application has "Assignment required" on and this user has not been assigned |
 | **421** | The reverse proxy is not forwarding the `Host` header, or the domain being visited is not the one in `PUBLIC_BASE_URL`. For nginx add `proxy_set_header Host $host;` |
 | A tool returns an "**enroll** ..." message | The user has not enrolled a Canvas token yet (or the enrolled token cannot be decrypted). Have them enroll or re-enroll at `/account` |
+| A tool says **Canvas rejected your stored access token** | The token was revoked, expired or regenerated in Canvas and the server confirmed it. The user creates a new token in Canvas and enrolls it at `/account` (the banner there explains how). If Canvas was only briefly wrong, **Check again** on `/account` restores it |
 | The container exits right after starting | `docker compose logs` lists all the configuration problems (without secret values). Common causes: a required setting is missing, `CANVAS_API_TOKEN` or `MCP_ACCESS_KEYS` is set, a key in `CANVAS_TOKEN_KEYS` is not 32 bytes, or a row in the volume uses a kid that has been removed |
 | Adding the connector in claude.ai fails, but the browser can open the site | The service has to fetch the client metadata document (CIMD) from claude.ai's egress, and also needs outbound access to claude.ai from the server. Check that the server can reach the internet and that Cloudflare is not blocking `160.79.104.0/21` (see the Cloudflare section) |
 | You see a Cloudflare challenge page, or OAuth / tool calls get 403 / 5xx | Turn off Bot Fight / Super Bot Fight, do not challenge `/mcp`, `/token`, `/register` or `/.well-known/*`, and add the allow rule for `160.79.104.0/21` |
