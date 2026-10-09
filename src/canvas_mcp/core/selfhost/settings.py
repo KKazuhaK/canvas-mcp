@@ -90,8 +90,8 @@ class SelfhostSettings:
     featured_schools: tuple[FeaturedSchool, ...] = ()
     school_search: bool = False
     # Whether course metadata, policy decisions, pseudonyms and discussion hints
-    # live only inside one request (the default; stricter than the upstream HTTP
-    # modes, which cache policies, pseudonyms and hints process-wide by token hash)
+    # live only inside one request (the default; stricter than upstream, which keeps
+    # policies, pseudonyms and hints in process-wide maps shared by all callers)
     # or are cached per principal across requests (explicit opt-in).
     course_state: Literal["request_local", "per_principal"] = "request_local"
 

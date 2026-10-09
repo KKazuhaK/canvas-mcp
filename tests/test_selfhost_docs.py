@@ -589,9 +589,10 @@ def test_readme_records_what_the_oauth_proxy_does_with_replayed_codes_and_refres
 
 
 def test_the_docs_do_not_claim_request_local_equals_upstream_for_every_kind_of_state(env_text, readme):
-    # Upstream HTTP modes cache policy decisions, pseudonyms and discussion hints
-    # process-wide by token hash; only the course list and aliases are request-local
-    # there. request_local is stricter, and the text may be quoted upstream.
+    # Upstream keeps policy decisions, pseudonyms and discussion hints in process-wide
+    # maps shared by all callers (keyed by course, user or topic id, not by caller);
+    # only the course list and aliases are request-local there. request_local is
+    # stricter, and the text may be quoted upstream, so it must not misdescribe upstream.
     root = Path(__file__).resolve().parents[1]
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     settings_py = (root / "src" / "canvas_mcp" / "core" / "selfhost" / "settings.py").read_text(encoding="utf-8")
@@ -601,7 +602,9 @@ def test_the_docs_do_not_claim_request_local_equals_upstream_for_every_kind_of_s
     assert "the default, like the upstream HTTP modes" not in settings_py
     for text in (env_text, readme, settings_py):
         flat = " ".join(text.replace("#", " ").split())
-        assert "stricter than" in flat and ("token hash" in flat or "hash of the token" in flat)
+        assert "stricter than" in flat and "shared by all callers" in flat
+        # Upstream does not key these caches by a token hash; never say it does.
+        assert "process-wide by token hash" not in flat
     assert "stricter than upstream" in changelog
 
 
