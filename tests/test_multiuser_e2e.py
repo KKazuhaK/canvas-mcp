@@ -237,6 +237,15 @@ class FakeCanvas:
 # ------------------------------------------------------------------------- browser
 
 
+@dataclass(frozen=True)
+class McpGrant:
+    """What an MCP client holds after the browser step: its client id, PKCE verifier and one-use code."""
+
+    client_id: str
+    verifier: str
+    code: str
+
+
 class Browser:
     """What a person's browser and MCP client do, step by step, against the app."""
 
@@ -263,18 +272,45 @@ class Browser:
             self._dcr_client_id = response.json()["client_id"]
         return self._dcr_client_id
 
+    def authorize_params(self, verifier: str, state: str, **overrides: str | None) -> dict[str, str]:
+        """The query of a well-formed /authorize request; an override of None removes a field."""
+        params: dict[str, str | None] = {
+            "response_type": "code", "client_id": self.register(), "redirect_uri": CLAUDE_CALLBACK,
+            "code_challenge": _b64url(hashlib.sha256(verifier.encode()).digest()),
+            "code_challenge_method": "S256", "state": state,
+            "scope": "Canvas.Access", "resource": f"{BASE}/mcp",
+            **overrides,
+        }
+        return {key: value for key, value in params.items() if value is not None}
+
     def mcp_authorize(self, user: EntraUser) -> tuple[str | None, httpx.Response]:
         """Run the OAuth dance for ``user``. Returns (FastMCP bearer or None, last response)."""
+        grant, response = self.mcp_authorization_code(user)
+        if grant is None:
+            return None, response
+        token = self.exchange_code(grant)
+        if token.status_code != 200:
+            return None, token
+        return token.json()["access_token"], token
+
+    def exchange_code(self, grant: McpGrant, **overrides: str | None) -> httpx.Response:
+        """POST /token for an authorization code; an override of None removes a field."""
+        form: dict[str, str | None] = {
+            "grant_type": "authorization_code", "code": grant.code, "client_id": grant.client_id,
+            "redirect_uri": CLAUDE_CALLBACK, "code_verifier": grant.verifier,
+            **overrides,
+        }
+        return self.client.post("/token", data={key: value for key, value in form.items() if value is not None})
+
+    def mcp_authorization_code(self, user: EntraUser) -> tuple[McpGrant | None, httpx.Response]:
+        """Run the OAuth dance up to the client's one-use authorization code, without redeeming it."""
         self.fresh_session()
         client_id = self.register()
         verifier = secrets.token_urlsafe(48)
-        challenge = _b64url(hashlib.sha256(verifier.encode()).digest())
         state = secrets.token_urlsafe(8)
-        authorize = self.client.get("/authorize", params={
-            "response_type": "code", "client_id": client_id, "redirect_uri": CLAUDE_CALLBACK,
-            "code_challenge": challenge, "code_challenge_method": "S256", "state": state,
-            "scope": "Canvas.Access", "resource": f"{BASE}/mcp",
-        }, follow_redirects=False)
+        authorize = self.client.get(
+            "/authorize", params=self.authorize_params(verifier, state), follow_redirects=False
+        )
         assert authorize.status_code == 302, authorize.text
         consent_url = authorize.headers["location"]
         assert urllib.parse.urlsplit(consent_url).path == "/consent"
@@ -305,13 +341,7 @@ class Browser:
         redirect = urllib.parse.urlsplit(callback.headers["location"])
         returned = dict(urllib.parse.parse_qsl(redirect.query))
         assert returned["state"] == state
-        token = self.client.post("/token", data={
-            "grant_type": "authorization_code", "code": returned["code"], "client_id": client_id,
-            "redirect_uri": CLAUDE_CALLBACK, "code_verifier": verifier,
-        })
-        if token.status_code != 200:
-            return None, token
-        return token.json()["access_token"], token
+        return McpGrant(client_id=client_id, verifier=verifier, code=returned["code"]), callback
 
     def bearer_for(self, user: EntraUser) -> str:
         bearer, response = self.mcp_authorize(user)
@@ -833,6 +863,199 @@ class TestMcpAsTwoUsers:
     def test_a_non_owner_cannot_open_the_admin_page(self, enrolled):
         enrolled.browser.account_sign_in(USER_A)
         assert enrolled.client.get("/account/admin").status_code == 403
+
+
+def assert_invalid_grant(response: httpx.Response) -> None:
+    """A refused code or refresh token. FastMCP answers 401 (the MCP spec's "re-authenticate"), RFC 6749 says 400."""
+    assert response.status_code in (400, 401), response.text
+    assert response.json()["error"] == "invalid_grant", response.text
+
+
+class TestOAuthProxyHardening:
+    """FastMCP's OAuth proxy, as configured here, against replayed and malformed requests.
+
+    These run the real FastMCP ``AzureProvider`` and MCP SDK handlers (nothing on our side is
+    stubbed), so they pin the behaviour of the locked FastMCP, not only of this repository.
+    """
+
+    # ----- G3: the authorization code is single use
+
+    def test_an_authorization_code_replayed_at_token_is_invalid_grant(self, enrolled):
+        grant, _ = enrolled.browser.mcp_authorization_code(USER_A)
+        assert grant is not None
+
+        first = enrolled.browser.exchange_code(grant)
+        assert first.status_code == 200, first.text
+
+        replay = enrolled.browser.exchange_code(grant)
+        assert_invalid_grant(replay)
+        assert "access_token" not in replay.text and "refresh_token" not in replay.text
+
+    def test_a_replayed_code_is_refused_without_a_second_upstream_exchange(self, enrolled):
+        grant, _ = enrolled.browser.mcp_authorization_code(USER_A)
+        assert grant is not None
+        enrolled.browser.exchange_code(grant)
+        before = len(enrolled.entra.token_requests)
+        assert_invalid_grant(enrolled.browser.exchange_code(grant))
+        assert len(enrolled.entra.token_requests) == before
+
+    def test_a_replayed_code_does_not_revoke_what_the_first_exchange_issued(self, enrolled):
+        """RFC 6749 4.1.2 only says SHOULD revoke. FastMCP does not: the first client keeps its tokens."""
+        grant, _ = enrolled.browser.mcp_authorization_code(USER_A)
+        assert grant is not None
+        first = enrolled.browser.exchange_code(grant)
+        bearer, refresh_token = first.json()["access_token"], first.json()["refresh_token"]
+
+        assert_invalid_grant(enrolled.browser.exchange_code(grant))
+        assert call_tool(enrolled.client, bearer, "list_courses")["isError"] is False
+        refreshed = enrolled.client.post("/token", data={
+            "grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": grant.client_id,
+        })
+        assert refreshed.status_code == 200, refreshed.text
+
+    def test_another_clients_id_cannot_redeem_the_code(self, enrolled):
+        grant, _ = enrolled.browser.mcp_authorization_code(USER_A)
+        assert grant is not None
+        other = enrolled.client.post("/register", json={
+            "client_name": "another connector", "redirect_uris": [CLAUDE_CALLBACK],
+            "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        })
+        assert other.status_code == 201, other.text
+        assert_invalid_grant(enrolled.browser.exchange_code(grant, client_id=other.json()["client_id"]))
+
+    # ----- G3: PKCE is required, S256 only
+
+    def test_authorize_without_a_code_challenge_is_refused(self, world):
+        verifier, state = secrets.token_urlsafe(48), secrets.token_urlsafe(8)
+        response = world.client.get(
+            "/authorize",
+            params=world.browser.authorize_params(verifier, state, code_challenge=None),
+            follow_redirects=False,
+        )
+        self._assert_refused_before_consent(world, response, state)
+
+    def test_authorize_without_a_code_challenge_but_with_a_method_is_refused(self, world):
+        verifier, state = secrets.token_urlsafe(48), secrets.token_urlsafe(8)
+        response = world.client.get(
+            "/authorize",
+            params=world.browser.authorize_params(
+                verifier, state, code_challenge=None, code_challenge_method="S256"
+            ),
+            follow_redirects=False,
+        )
+        self._assert_refused_before_consent(world, response, state)
+
+    @pytest.mark.parametrize("method", ["plain", "S512", "s256", ""])
+    def test_authorize_with_any_method_but_s256_is_refused(self, world, method):
+        verifier, state = secrets.token_urlsafe(48), secrets.token_urlsafe(8)
+        # With "plain" the challenge would be the verifier itself.
+        response = world.client.get(
+            "/authorize",
+            params=world.browser.authorize_params(
+                verifier, state, code_challenge=verifier, code_challenge_method=method
+            ),
+            follow_redirects=False,
+        )
+        self._assert_refused_before_consent(world, response, state)
+
+    def test_token_without_a_code_verifier_or_with_a_wrong_one_is_refused(self, enrolled):
+        grant, _ = enrolled.browser.mcp_authorization_code(USER_A)
+        assert grant is not None
+        missing = enrolled.browser.exchange_code(grant, code_verifier=None)
+        assert missing.status_code == 400 and missing.json()["error"] == "invalid_request"
+        wrong = enrolled.browser.exchange_code(grant, code_verifier=secrets.token_urlsafe(48))
+        assert_invalid_grant(wrong)
+        assert "access_token" not in missing.text + wrong.text
+        # Refusing a bad verifier does not burn the code: the real client can still finish.
+        assert enrolled.browser.exchange_code(grant).status_code == 200
+
+    @staticmethod
+    def _assert_refused_before_consent(world, response: httpx.Response, state: str) -> None:
+        """Refused as an OAuth error: no consent page, no hand-off to Entra, no code, state echoed."""
+        location = response.headers.get("location", "")
+        if response.status_code in (301, 302, 303, 307, 308):
+            # An error delivered to the client's own registered redirect URI.
+            assert location.startswith(CLAUDE_CALLBACK + "?"), location
+            query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(location).query))
+            assert query["error"] == "invalid_request", location
+            assert query.get("state") == state
+            assert "code" not in query
+        else:
+            assert response.status_code == 400, response.text
+            assert response.json()["error"] == "invalid_request"
+        assert "/consent" not in location and ENTRA_HOST not in location
+        assert world.entra.token_requests == []
+        assert world.entra.unexpected == []
+
+    # ----- G3: refresh-token rotation
+
+    @staticmethod
+    def _refresh(world, refresh_token: str, client_id: str) -> httpx.Response:
+        return world.client.post("/token", data={
+            "grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": client_id,
+        })
+
+    def test_a_rotated_refresh_token_is_refused_but_its_family_is_not_revoked(self, enrolled):
+        """Records what FastMCP 4.0.x does when an already-rotated refresh token comes back.
+
+        The reused token is refused (``invalid_grant``) and never reaches Entra. FastMCP does
+        NOT treat the reuse as theft: the newer refresh token of the same family and the access
+        tokens already issued keep working. The server's own access decision (disable) is what
+        cuts a user off, not the refresh family.
+        """
+        grant, _ = enrolled.browser.mcp_authorization_code(USER_A)
+        assert grant is not None
+        issued = enrolled.browser.exchange_code(grant).json()
+        refresh_1, bearer_1 = issued["refresh_token"], issued["access_token"]
+
+        rotated = self._refresh(enrolled, refresh_1, grant.client_id)
+        assert rotated.status_code == 200, rotated.text
+        refresh_2, bearer_2 = rotated.json()["refresh_token"], rotated.json()["access_token"]
+        assert refresh_2 != refresh_1 and bearer_2 != bearer_1
+
+        upstream_before = len(enrolled.entra.token_requests)
+        reused = self._refresh(enrolled, refresh_1, grant.client_id)
+        assert_invalid_grant(reused)
+        assert "access_token" not in reused.text and "refresh_token" not in reused.text
+        assert len(enrolled.entra.token_requests) == upstream_before  # refused locally
+
+        # FINDING: no family revocation. Everything issued before and after still works.
+        assert call_tool(enrolled.client, bearer_1, "list_courses")["isError"] is False
+        assert call_tool(enrolled.client, bearer_2, "list_courses")["isError"] is False
+        newer = self._refresh(enrolled, refresh_2, grant.client_id)
+        assert newer.status_code == 200, newer.text
+        # And the chain keeps rotating: the token just used is now the refused one.
+        assert_invalid_grant(self._refresh(enrolled, refresh_2, grant.client_id))
+
+    def test_a_refresh_token_cannot_be_redeemed_by_another_client(self, enrolled):
+        grant, _ = enrolled.browser.mcp_authorization_code(USER_A)
+        assert grant is not None
+        refresh_token = enrolled.browser.exchange_code(grant).json()["refresh_token"]
+        other = enrolled.client.post("/register", json={
+            "client_name": "another connector", "redirect_uris": [CLAUDE_CALLBACK],
+            "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        })
+        assert_invalid_grant(self._refresh(enrolled, refresh_token, other.json()["client_id"]))
+        # The owner's token is untouched by the failed attempt.
+        assert self._refresh(enrolled, refresh_token, grant.client_id).status_code == 200
+
+    def test_disabling_the_user_stops_the_whole_refresh_family_from_buying_anything(self, enrolled):
+        """The access decision ignores the token family, so a disabled user's fresh tokens are refused."""
+        user_key = f"entra:{TENANT}:{USER_A.oid}"
+        grant, _ = enrolled.browser.mcp_authorization_code(USER_A)
+        assert grant is not None
+        issued = enrolled.browser.exchange_code(grant).json()
+        assert enrolled.browser.account_sign_in(OWNER).status_code == 303
+        assert enrolled.client.post("/account/admin/disable", data={
+            "csrf": enrolled.browser.csrf("/account/admin"), "principal_key": user_key,
+        }, headers=ORIGIN, follow_redirects=False).status_code == 303
+
+        refreshed = self._refresh(enrolled, issued["refresh_token"], grant.client_id)
+        assert refreshed.status_code == 200  # FastMCP and Entra still honour the refresh
+        for bearer in (issued["access_token"], refreshed.json()["access_token"]):
+            assert rpc(enrolled.client, bearer, "tools/list").status_code == 403
 
 
 class TestRefusedUsers:
