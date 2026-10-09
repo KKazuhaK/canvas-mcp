@@ -42,7 +42,11 @@ from typing import Any, NamedTuple
 
 from .client import make_canvas_request
 from .config import get_config
-from .credentials import current_principal_key, register_credential_purge_listener
+from .credentials import (
+    current_principal_key,
+    register_credential_purge_listener,
+    request_local_principal_state,
+)
 from .logging import log_warning
 
 _KEY_AGENT_WRITES = "agent_writes"
@@ -97,11 +101,25 @@ def _forget_principal_policies(principal_key: str) -> None:
 register_credential_purge_listener(_forget_principal_policies)
 
 
-def _evict_expired_policies() -> None:
+def _policy_store() -> dict[tuple[str, str], tuple[float, CoursePolicy]]:
+    """Where the current caller's policy decisions are kept.
+
+    The process-wide map, except for a principal whose course state is
+    request-local (``SELFHOST_COURSE_STATE``): its decisions live in its request
+    and are gone with it.
+    """
+    local = request_local_principal_state()
+    if local is not None:
+        store: dict[tuple[str, str], tuple[float, CoursePolicy]] = local.setdefault("policies", {})
+        return store
+    return _policy_cache
+
+
+def _evict_expired_policies(store: dict[tuple[str, str], tuple[float, CoursePolicy]]) -> None:
     """Drop timed-out cache entries so the map cannot grow without bound."""
     now = time.monotonic()
-    for key in [k for k, (expiry, _) in _policy_cache.items() if expiry < now]:
-        _policy_cache.pop(key, None)
+    for key in [k for k, (expiry, _) in store.items() if expiry < now]:
+        store.pop(key, None)
 
 
 def _strip_html(body: str) -> str:
@@ -270,7 +288,8 @@ async def get_course_policy(course_id: str | int) -> CoursePolicy:
     key = str(course_id)
     cache_key = (current_principal_key(), key)
 
-    cached = _policy_cache.get(cache_key)
+    store = _policy_store()
+    cached = store.get(cache_key)
     if cached and cached[0] > time.monotonic():
         return cached[1]
 
@@ -323,8 +342,8 @@ async def get_course_policy(course_id: str | int) -> CoursePolicy:
     # Evict on write. Callers choose the course id, so on a long-running hosted
     # server a stream of made-up ids would otherwise grow this map forever, even
     # though every one of those lookups was denied.
-    _evict_expired_policies()
-    _policy_cache[cache_key] = (time.monotonic() + ttl, policy)
+    _evict_expired_policies(store)
+    store[cache_key] = (time.monotonic() + ttl, policy)
     return policy
 
 

@@ -63,6 +63,7 @@ from ..credentials import (
     set_missing_credentials_message,
     set_request_credential_generation,
     set_request_credentials,
+    set_request_local_principal_state,
     set_request_principal,
     set_request_token_state,
     set_request_tool_prefs,
@@ -71,6 +72,7 @@ from ..logging import log_error, log_warning
 from .identity import ClaimsDenied, ClaimsPolicy, evaluate_entra_claims
 from .principal_access import access_disabled_message, access_unavailable_message
 from .schools import SchoolPolicy
+from .settings import COURSE_STATE_PER_PRINCIPAL, COURSE_STATE_REQUEST_LOCAL
 from .token_store import (
     REASON_DECRYPT_FAILED,
     REASON_REVOKED_BY_ADMIN,
@@ -216,8 +218,11 @@ class SelfhostRequestContextMiddleware:
         tool_prefs: ToolPrefsReader | None = None,
         access: AccessChecker | None = None,
         owners: OwnerLedger | None = None,
+        course_state: str = COURSE_STATE_REQUEST_LOCAL,
     ) -> None:
         self.app = app
+        # Anything but the explicit opt-in keeps the course state request-local.
+        self.request_local_state = course_state != COURSE_STATE_PER_PRINCIPAL
         self.mcp_path = mcp_path
         self.policy = policy
         self.store = store
@@ -271,6 +276,7 @@ class SelfhostRequestContextMiddleware:
                 return
 
             set_request_principal(verdict)
+            set_request_local_principal_state(self.request_local_state)
             set_request_token_state(RequestTokenState())
             set_request_tool_prefs(await self._load_tool_prefs(verdict.key))
             await self._attach_canvas_credentials(

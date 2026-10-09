@@ -59,8 +59,10 @@ TOKENS = {
 }
 
 
-@pytest.fixture
-def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNamespace]:
+@pytest.fixture(params=["request_local", "per_principal"])
+def stack(
+    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_course_list: None
+) -> Iterator[SimpleNamespace]:
     monkeypatch.setattr(fastmcp.settings, "home", tmp_path / "fastmcp")
     monkeypatch.setenv("CANVAS_API_URL", CANVAS)
     for name in ("CANVAS_API_TOKEN", "CANVAS_ROLE"):
@@ -78,6 +80,7 @@ def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNam
         "CANVAS_TOKEN_KEYS": "k1:" + base64.b64encode(bytes(32)).decode(),
         "FASTMCP_HOME": str(tmp_path / "fastmcp"),
         "SELFHOST_DATA_DIR": str(tmp_path / "data"),
+        "SELFHOST_COURSE_STATE": request.param,
     })
     runtime = prepare_selfhost(settings)
     for oid, token in CANVAS_TOKEN.items():
@@ -105,7 +108,7 @@ def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNam
 
     with respx.mock(assert_all_called=False) as router, TestClient(app, base_url=BASE) as client:
         router.route(host="canvas.example.edu").mock(side_effect=canvas)
-        yield SimpleNamespace(client=client, runtime=runtime, seen=seen)
+        yield SimpleNamespace(client=client, runtime=runtime, seen=seen, course_state=request.param)
     reset_config()
 
 

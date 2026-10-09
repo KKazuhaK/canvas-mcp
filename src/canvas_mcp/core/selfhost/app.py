@@ -326,6 +326,7 @@ def build_selfhost_asgi_app(
                 tool_prefs=runtime.tool_prefs,
                 access=runtime.access,
                 owners=runtime.store,
+                course_state=settings.course_state,
             )
         ],
         host_origin_protection=True,

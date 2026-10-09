@@ -15,6 +15,8 @@ from canvas_mcp.core.credentials import (
     get_request_principal,
     is_http_request_active,
     missing_credentials_message,
+    request_local_principal_state,
+    uses_request_local_course_state,
 )
 from canvas_mcp.core.selfhost.identity import ClaimsPolicy
 from canvas_mcp.core.selfhost.request_context import (
@@ -411,3 +413,93 @@ class TestCleanup:
         probe = Probe()
         await _run(_middleware(probe, FakeStore({(TENANT, OID_A): SECRET_TOKEN})), "/healthz")
         assert probe.seen["message"] == "Canvas token required for HTTP request"
+
+
+class TestCourseStateScope:
+    """``course_state`` decides whether the request's course state is request-local."""
+
+    @staticmethod
+    async def _observe(**options: Any) -> dict[str, Any]:
+        """Run one authenticated request; report what the inner app saw."""
+        seen: dict[str, Any] = {}
+
+        async def app(scope, receive, send) -> None:
+            seen["local"] = uses_request_local_course_state()
+            seen["bag"] = request_local_principal_state()
+            seen["principal"] = get_request_principal()
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        middleware = SelfhostRequestContextMiddleware(
+            app,
+            mcp_path="/mcp",
+            policy=POLICY,
+            store=FakeStore({(TENANT, OID_A): SECRET_TOKEN}),
+            schools=SchoolPolicy.pinned(CANVAS_URL),
+            account_url=ACCOUNT_URL,
+            **options,
+        )
+        await _run(middleware, user=_user(_claims()))
+        return seen
+
+    @pytest.mark.parametrize("options", [{}, {"course_state": "request_local"}])
+    async def test_request_local_is_the_default(self, options):
+        seen = await self._observe(**options)
+        assert seen["principal"] is not None
+        assert seen["local"] is True
+        assert seen["bag"] == {}
+        # Gone with the request.
+        assert uses_request_local_course_state() is False
+        assert request_local_principal_state() is None
+
+    async def test_per_principal_is_the_explicit_opt_in(self):
+        seen = await self._observe(course_state="per_principal")
+        assert seen["principal"] is not None
+        assert seen["local"] is False
+        assert seen["bag"] is None
+
+    async def test_an_unrecognised_value_never_widens_the_scope(self):
+        assert (await self._observe(course_state="global"))["local"] is True
+
+    async def test_a_request_without_a_verified_principal_is_request_local_either_way(self):
+        seen: dict[str, Any] = {}
+
+        async def app(scope, receive, send) -> None:
+            seen["local"] = uses_request_local_course_state()
+            seen["bag"] = request_local_principal_state()
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        middleware = SelfhostRequestContextMiddleware(
+            app,
+            mcp_path="/mcp",
+            policy=POLICY,
+            store=FakeStore(),
+            schools=SchoolPolicy.pinned(CANVAS_URL),
+            account_url=ACCOUNT_URL,
+            course_state="per_principal",
+        )
+        await _run(middleware, "/account")
+        assert seen == {"local": True, "bag": None}
+
+    async def test_each_request_gets_its_own_scratch_space(self):
+        bags: list[dict[str, Any]] = []
+
+        async def app(scope, receive, send) -> None:
+            bag = request_local_principal_state()
+            assert bag is not None
+            bags.append(bag)
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        middleware = SelfhostRequestContextMiddleware(
+            app,
+            mcp_path="/mcp",
+            policy=POLICY,
+            store=FakeStore({(TENANT, OID_A): SECRET_TOKEN}),
+            schools=SchoolPolicy.pinned(CANVAS_URL),
+            account_url=ACCOUNT_URL,
+        )
+        await _run(middleware, user=_user(_claims()))
+        await _run(middleware, user=_user(_claims()))
+        assert len(bags) == 2 and bags[0] is not bags[1]

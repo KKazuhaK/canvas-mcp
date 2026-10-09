@@ -20,7 +20,11 @@ import re
 from collections import OrderedDict
 from typing import Any
 
-from .credentials import current_principal_key, register_credential_purge_listener
+from .credentials import (
+    current_principal_key,
+    register_credential_purge_listener,
+    request_local_principal_state,
+)
 
 # Pseudonym cache, one dict per principal (keyed by current_principal_key())
 # and each keyed by (prefix, real_id). Per principal so that one user's count
@@ -33,7 +37,15 @@ _anonymization_cache: OrderedDict[str, dict[tuple[str, str], str]] = OrderedDict
 
 
 def _principal_cache(*, create: bool) -> dict[tuple[str, str], str] | None:
-    """The current principal's pseudonym map (made on demand when ``create``)."""
+    """The current principal's pseudonym map (made on demand when ``create``).
+
+    A principal whose course state is request-local (``SELFHOST_COURSE_STATE``)
+    gets a map that lives in its request and is gone with it; the process-wide
+    maps below are not touched.
+    """
+    local = request_local_principal_state()
+    if local is not None:
+        return local.setdefault("pseudonyms", {}) if create else local.get("pseudonyms")
     key = current_principal_key()
     cache = _anonymization_cache.get(key)
     if cache is not None:
@@ -574,6 +586,10 @@ def get_anonymization_stats() -> dict[str, Any]:
 
 def clear_anonymization_cache() -> None:
     """Clear the current principal's anonymization cache (use when switching courses/contexts)."""
+    local = request_local_principal_state()
+    if local is not None:
+        local.pop("pseudonyms", None)
+        return
     _anonymization_cache.pop(current_principal_key(), None)
 
 

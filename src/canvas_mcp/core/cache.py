@@ -67,9 +67,11 @@ def current_cache_state() -> CourseCacheState:
     An HTTP request without a verified principal (the upstream token, access-key
     and Easy Auth modes) gets a throwaway state that is never registered:
     its course metadata must not outlive the request, so nothing written to
-    it can be read by a later request. Only stdio (``"local"``) and the
-    self-hosted ``entra-oauth`` principals have a registered, persistent one,
-    keyed by the principal, the school and the credential generation (see
+    it can be read by a later request. The same holds for the self-hosted
+    ``entra-oauth`` principals unless the operator opted in to
+    ``SELFHOST_COURSE_STATE=per_principal``. Only stdio (``"local"``) and those
+    opted-in principals have a registered, persistent state, keyed by the
+    principal, the school and the credential generation (see
     ``current_principal_key``): replacing or removing the Canvas token starts an
     empty cache. A request that is still running on a token that has since been
     replaced (a stale generation) gets a throwaway state too, so it can neither

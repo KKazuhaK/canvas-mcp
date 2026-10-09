@@ -401,8 +401,15 @@ def _register_widget_tool(mcp: FastMCP, deleted: list[str]) -> None:
         return f"Deleted widget {widget_id}"
 
 
-@pytest.fixture
-def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNamespace]:
+@pytest.fixture(params=["request_local", "per_principal"])
+def world(
+    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_course_list: None
+) -> Iterator[SimpleNamespace]:
+    """The whole stack, once per ``SELFHOST_COURSE_STATE`` value.
+
+    ``real_course_list`` lets the course resolver read ``/courses`` through the
+    real client from the fake Canvas (a request-local request re-reads it).
+    """
     monkeypatch.setattr(fastmcp.settings, "test_mode", True)  # cheap key stretching only
     monkeypatch.setattr(fastmcp.settings, "home", tmp_path / "fastmcp")
     monkeypatch.setenv("CANVAS_API_URL", CANVAS)
@@ -421,6 +428,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNam
         "CANVAS_TOKEN_KEYS": "k1:" + base64.b64encode(bytes(range(32, 64))).decode(),
         "FASTMCP_HOME": str(tmp_path / "fastmcp"),
         "SELFHOST_DATA_DIR": str(tmp_path / "data"),
+        "SELFHOST_COURSE_STATE": request.param,
     })
     runtime = prepare_selfhost(settings)
     config: Any = SimpleNamespace(canvas_api_url=f"{CANVAS}/api/v1")
@@ -466,7 +474,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNam
         router.route(host=CANVAS_HOST).mock(side_effect=canvas.handle)
         yield SimpleNamespace(
             client=client, browser=Browser(client, entra), entra=entra, canvas=canvas,
-            runtime=runtime, deleted=deleted, mcp=mcp,
+            runtime=runtime, deleted=deleted, mcp=mcp, course_state=request.param,
         )
     assert entra.unexpected == [], "the app called an endpoint the fake Entra does not serve"
     reset_config()
@@ -571,6 +579,21 @@ class TestMcpAsTwoUsers:
         mine = call_tool(enrolled.client, bearer_a, "get_course_details", {"course_identifier": "ICS 33"})
         assert "Intermediate Python" in text_of(mine)
         assert ("/api/v1/courses/101", USER_A.canvas_token) in enrolled.canvas.seen
+
+    def test_the_configured_course_state_decides_what_outlives_a_request(self, enrolled):
+        user_a_key = f"entra:{TENANT}:{USER_A.oid}"
+        bearer_a = enrolled.browser.bearer_for(USER_A)
+        for _ in range(2):
+            mine = call_tool(enrolled.client, bearer_a, "get_course_details", {"course_identifier": "ICS 33"})
+            assert "Intermediate Python" in text_of(mine)
+        lists = [token for path, token in enrolled.canvas.seen if path == "/api/v1/courses"]
+        remembered = [key for key in cache._STATES if key.startswith(user_a_key)]
+        if enrolled.course_state == "request_local":
+            assert lists == [USER_A.canvas_token] * 2  # each request resolved the alias itself
+            assert remembered == []
+        else:
+            assert lists == [USER_A.canvas_token]  # the second request used the principal's cache
+            assert len(remembered) == 1
 
     def test_write_confirmation_state_does_not_leak_between_users(self, enrolled):
         bearer_a = enrolled.browser.bearer_for(USER_A)
@@ -1018,7 +1041,10 @@ class TestCredentialLifecycle:
         call_tool(enrolled.client, bearer_a, "list_courses")  # learns the alias under this credential
         mine = call_tool(enrolled.client, bearer_a, "get_course_details", {"course_identifier": "ICS 33"})
         assert "Intermediate Python" in text_of(mine)
-        assert any(key.startswith(user_a_key) for key in cache._STATES)
+        # Request-local: nothing outlives the request. Per principal: the alias is cached.
+        assert any(key.startswith(user_a_key) for key in cache._STATES) is (
+            enrolled.course_state == "per_principal"
+        )
         before = enrolled.runtime.store.credential_generation(user_a_key)
 
         assert enrolled.browser.account_sign_in(USER_A).status_code == 303
@@ -1029,13 +1055,16 @@ class TestCredentialLifecycle:
         assert enrolled.browser.enroll(USER_A).status_code == 303
         assert enrolled.runtime.store.credential_generation(user_a_key) == before + 2
 
-        # The alias learned under the old credential is gone: it is not served again.
-        stale = call_tool(enrolled.client, bearer_a, "get_course_details", {"course_identifier": "ICS 33"})
-        assert "Intermediate Python" not in text_of(stale)
-        # The new credential learns it for itself.
+        # The first request under the new credential drops whatever the old one cached,
+        # and the new credential learns the course for itself.
         call_tool(enrolled.client, bearer_a, "list_courses")
         again = call_tool(enrolled.client, bearer_a, "get_course_details", {"course_identifier": "ICS 33"})
         assert "Intermediate Python" in text_of(again)
+        assert [key for key in cache._STATES if key.startswith(user_a_key)] == (
+            [f"{user_a_key}|{CANVAS}/api/v1|g{before + 2}"]
+            if enrolled.course_state == "per_principal"
+            else []
+        )
 
 
 class TestHostProtection:

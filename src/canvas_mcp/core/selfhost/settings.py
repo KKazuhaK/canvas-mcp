@@ -23,6 +23,12 @@ AUTH_MODE_ENV = "MCP_AUTH_MODE"
 AUTH_MODE_ENTRA = "entra-oauth"
 AUTH_MODE_LEGACY = "legacy"
 
+COURSE_STATE_ENV = "SELFHOST_COURSE_STATE"
+COURSE_STATE_REQUEST_LOCAL = "request_local"
+COURSE_STATE_PER_PRINCIPAL = "per_principal"
+COURSE_STATES = (COURSE_STATE_REQUEST_LOCAL, COURSE_STATE_PER_PRINCIPAL)
+DEFAULT_COURSE_STATE = COURSE_STATE_REQUEST_LOCAL
+
 DEFAULT_API_SCOPE = "Canvas.Access"
 DEFAULT_REQUIRED_ROLE = "Canvas.User"
 DEFAULT_OWNER_ROLE = "Canvas.Owner"
@@ -83,6 +89,10 @@ class SelfhostSettings:
     fastmcp_home: Path
     featured_schools: tuple[FeaturedSchool, ...] = ()
     school_search: bool = False
+    # Whether course metadata, policy decisions, pseudonyms and discussion hints
+    # live only inside one request (the default, like the upstream HTTP modes) or
+    # are cached per principal across requests (explicit opt-in).
+    course_state: Literal["request_local", "per_principal"] = "request_local"
 
     mcp_path: ClassVar[str] = "/mcp"
 
@@ -287,6 +297,22 @@ def _parse_bool(name: str, raw: str, problems: list[str]) -> bool:
     return False
 
 
+def _parse_course_state(
+    raw: str, problems: list[str]
+) -> Literal["request_local", "per_principal"]:
+    """``request_local`` (the default) or ``per_principal``; anything else is refused."""
+    value = raw.strip().lower()
+    if not value or value == COURSE_STATE_REQUEST_LOCAL:
+        return "request_local"
+    if value == COURSE_STATE_PER_PRINCIPAL:
+        return "per_principal"
+    problems.append(
+        f"{COURSE_STATE_ENV} must be '{COURSE_STATE_REQUEST_LOCAL}' (the default) "
+        f"or '{COURSE_STATE_PER_PRINCIPAL}'"
+    )
+    return "request_local"
+
+
 def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSettings:
     """Parse and validate every variable of the mode, reporting all problems at once."""
     source = os.environ if env is None else env
@@ -380,6 +406,7 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
 
     featured = _parse_featured_schools(get("CANVAS_FEATURED_SCHOOLS"), problems)
     school_search = _parse_bool("CANVAS_SCHOOL_SEARCH", get("CANVAS_SCHOOL_SEARCH"), problems)
+    course_state = _parse_course_state(get(COURSE_STATE_ENV), problems)
 
     if problems or base is None:
         raise SelfhostConfigError(problems)
@@ -402,4 +429,5 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
         fastmcp_home=Path(home_raw),
         featured_schools=featured,
         school_search=school_search,
+        course_state=course_state,
     )

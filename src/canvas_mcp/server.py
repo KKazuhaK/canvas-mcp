@@ -600,6 +600,7 @@ def _selfhost_summary(settings: SelfhostSettings) -> list[str]:
         "  Canvas schools: featured="
         + (", ".join(school.host for school in settings.featured_schools) or "none")
         + f", search={'on' if settings.school_search else 'off'}",
+        f"  Course state: {settings.course_state}",
     ]
 
 

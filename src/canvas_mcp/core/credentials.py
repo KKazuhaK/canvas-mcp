@@ -21,6 +21,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,14 @@ _request_tool_prefs: ContextVar[RequestToolPrefs | None] = ContextVar(
     "request_tool_prefs", default=None
 )
 
+# The scratch space of one request of a verified principal whose course state is
+# request-local (``SELFHOST_COURSE_STATE=request_local``); None otherwise. It is a
+# plain dict created once per request by the request middleware, so every task the
+# request starts shares it, and it is dropped with the request.
+_request_local_principal_state: ContextVar[dict[str, Any] | None] = ContextVar(
+    "request_local_principal_state", default=None
+)
+
 
 def get_request_tool_prefs() -> RequestToolPrefs | None:
     """The caller's write-tool preferences for this request; None if none were loaded."""
@@ -174,15 +183,41 @@ def set_http_request_active(active: bool = True) -> None:
 def uses_request_local_course_state() -> bool:
     """True when course metadata must live and die with the current request.
 
-    That is every HTTP request without a verified principal: the upstream
-    ``X-Canvas-Token`` / access-key / Easy Auth modes. Each such request
+    That is every HTTP request without a verified principal (the upstream
+    ``X-Canvas-Token`` / access-key / Easy Auth modes), and every request of a
+    verified principal in the self-hosted ``entra-oauth`` mode when it runs with
+    ``SELFHOST_COURSE_STATE=request_local`` (the default). Each such request
     resolves course aliases and labels under its own Canvas credential and
-    publishes nothing into process-wide state. Only the self-hosted
-    ``entra-oauth`` mode (a verified ``RequestPrincipal``) keeps a per-principal
+    publishes nothing into process-wide state. Only ``entra-oauth`` with the
+    explicit opt-in ``SELFHOST_COURSE_STATE=per_principal`` keeps a per-principal
     course cache across requests, and stdio (no HTTP request) keeps its single
     process-wide cache.
     """
-    return _http_request_active.get() and _request_principal.get() is None
+    if not _http_request_active.get():
+        return False
+    return _request_principal.get() is None or _request_local_principal_state.get() is not None
+
+
+def set_request_local_principal_state(enabled: bool) -> Token[dict[str, Any] | None]:
+    """Start (or leave off) the request-local state of the current principal.
+
+    Called by the request middleware right after it publishes the verified
+    principal, with ``True`` for ``SELFHOST_COURSE_STATE=request_local``. A
+    principal published without this call keeps per-principal state.
+    """
+    return _request_local_principal_state.set({} if enabled else None)
+
+
+def request_local_principal_state() -> dict[str, Any] | None:
+    """The current request's scratch space, or None when state is per principal.
+
+    Anything a process-wide cache would keep for a principal across requests
+    (course-policy decisions, pseudonym maps, discussion hints) goes in here
+    instead while it is not None: it ends with the request.
+    """
+    if _request_principal.get() is None:
+        return None
+    return _request_local_principal_state.get()
 
 
 def get_request_principal() -> RequestPrincipal | None:
@@ -365,4 +400,5 @@ def clear_http_request_context() -> None:
     _request_token_state.set(None)
     _request_tool_prefs.set(None)
     _request_credential_generation.set(None)
+    _request_local_principal_state.set(None)
     _request_course_labels.set(None)

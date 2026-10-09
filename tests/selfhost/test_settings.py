@@ -9,6 +9,8 @@ import pytest
 from canvas_mcp.core.selfhost.settings import (
     AUTH_MODE_ENTRA,
     AUTH_MODE_ENV,
+    COURSE_STATE_ENV,
+    DEFAULT_COURSE_STATE,
     DEFAULT_REDIRECT_URIS,
     SelfhostConfigError,
     SelfhostSettings,
@@ -362,3 +364,28 @@ class TestSchoolSearch:
     def test_anything_else_is_refused(self, value):
         problems = _problems(CANVAS_SCHOOL_SEARCH=value)
         assert problems == ["CANVAS_SCHOOL_SEARCH must be true or false"]
+
+
+class TestCourseState:
+    def test_the_default_is_request_local(self):
+        assert DEFAULT_COURSE_STATE == "request_local"
+        assert load_selfhost_settings(_env()).course_state == "request_local"
+
+    def test_the_variable_name(self):
+        assert COURSE_STATE_ENV == "SELFHOST_COURSE_STATE"
+
+    @pytest.mark.parametrize("value", ["", "request_local", "REQUEST_LOCAL", " request_local "])
+    def test_request_local_spellings(self, value):
+        assert load_selfhost_settings(_env(SELFHOST_COURSE_STATE=value)).course_state == "request_local"
+
+    @pytest.mark.parametrize("value", ["per_principal", "PER_PRINCIPAL", " per_principal "])
+    def test_per_principal_is_an_explicit_opt_in(self, value):
+        assert load_selfhost_settings(_env(SELFHOST_COURSE_STATE=value)).course_state == "per_principal"
+
+    @pytest.mark.parametrize("value", ["per-principal", "principal", "true", "1", "global", "none"])
+    def test_anything_else_is_refused_without_echoing_the_value(self, value):
+        problems = _problems(SELFHOST_COURSE_STATE=value)
+        assert len(problems) == 1
+        assert "SELFHOST_COURSE_STATE" in problems[0]
+        assert "request_local" in problems[0] and "per_principal" in problems[0]
+        assert value not in problems[0].replace("per_principal", "").replace("request_local", "")

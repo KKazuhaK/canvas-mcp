@@ -12,7 +12,11 @@ from mcp.types import ToolAnnotations
 from ..core.cache import get_course_code, get_course_id
 from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.config import get_config
-from ..core.credentials import current_principal_key, register_credential_purge_listener
+from ..core.credentials import (
+    current_principal_key,
+    register_credential_purge_listener,
+    request_local_principal_state,
+)
 from ..core.dates import format_date, parse_date, truncate_text
 from ..core.guarded_edit import (
     BodyGuard,
@@ -406,13 +410,27 @@ def _forget_principal_unservable(principal_key: str) -> None:
 register_credential_purge_listener(_forget_principal_unservable)
 
 
+def _unservable_store() -> dict[tuple[str, str, str], float]:
+    """Where the current caller's unservable-topic hints are kept.
+
+    The process-wide map, except for a principal whose course state is
+    request-local (``SELFHOST_COURSE_STATE``): its hints live in its request.
+    """
+    local = request_local_principal_state()
+    if local is not None:
+        store: dict[tuple[str, str, str], float] = local.setdefault("unservable_topics", {})
+        return store
+    return _unservable_topics
+
+
 def _is_known_unservable(prefix: str, topic_id: str | int) -> bool:
     key = (current_principal_key(), prefix, str(topic_id))
-    expires = _unservable_topics.get(key)
+    store = _unservable_store()
+    expires = store.get(key)
     if expires is None:
         return False
     if time.monotonic() >= expires:
-        del _unservable_topics[key]
+        del store[key]
         return False
     return True
 
@@ -427,7 +445,7 @@ async def _known_unservable_discussion(
         return None
     discussion, _reason = await _read_discussion_via_graphql(course_id, topic_id, group_id)
     if discussion is None:
-        _unservable_topics.pop((current_principal_key(), prefix, str(topic_id)), None)
+        _unservable_store().pop((current_principal_key(), prefix, str(topic_id)), None)
     return discussion
 
 
@@ -452,7 +470,7 @@ async def _read_unservable_topic(
         return None, _unservable_topic_message(prefix, topic_id, match)
     discussion, reason = await _read_discussion_via_graphql(course_id, topic_id, group_id)
     if discussion is not None:
-        _unservable_topics[(current_principal_key(), prefix, str(topic_id))] = (
+        _unservable_store()[(current_principal_key(), prefix, str(topic_id))] = (
             time.monotonic() + _UNSERVABLE_TOPIC_TTL_SECONDS
         )
         return discussion, None
