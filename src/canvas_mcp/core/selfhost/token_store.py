@@ -1838,6 +1838,7 @@ class TokenStore:
         with self._db.write() as conn:
             self._require_owner_actor(conn, actor)
             row = self._repos.accounts.get(conn, account_id, for_update=True)
+            self._pause("after_account_read")
             if row is None or row[1] != STATUS_PENDING:
                 return False
             self._repos.accounts.activate(
@@ -1860,6 +1861,7 @@ class TokenStore:
         with self._db.write() as conn:
             self._require_owner_actor(conn, actor)
             row = self._repos.accounts.get(conn, account_id, for_update=True)
+            self._pause("after_account_read")
             if row is None or row[1] != STATUS_PENDING:
                 return False
             epoch = self._repos.accounts.disable(

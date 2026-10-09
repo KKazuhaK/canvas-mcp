@@ -92,6 +92,7 @@ def put_row(
 class Harness:
     client: TestClient
     store: TokenStore
+    identity: IdentityService | None = None
     now: float = 1_800_000_000.0
     claims: dict[str, Any] = field(default_factory=dict)
     verifier_result: str = "claims"  # "claims" | "none" | "raise"
@@ -133,6 +134,7 @@ def build_harness(
     *,
     cfg: AccountConfig | None = None,
     identity: Any = None,
+    policy: Any = POLICY,
     **route_kwargs: Any,
 ) -> Harness:
     """A signed-out harness; ``route_kwargs`` (directory, resolve_host, ...) go to the routes."""
@@ -140,7 +142,8 @@ def build_harness(
     store = make_store(tmp_path / "tokens.sqlite3", keyring, clock=lambda: 1_800_000_000)
     store.initialize()
     harness = Harness(client=None, store=store)  # type: ignore[arg-type]
-    identity = identity or make_identity(store)
+    identity = identity or make_identity(store, policy)
+    harness.identity = identity
 
     async def verify(_token: str) -> Mapping[str, Any] | None:
         if harness.verifier_result == "raise":
