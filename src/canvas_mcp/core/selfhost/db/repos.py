@@ -15,7 +15,15 @@ from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import Connection
 
 from . import schema as t
-from .ports import Row
+from .ports import (
+    CanvasTokenRepo,
+    CredentialGenerationRepo,
+    MetaRepo,
+    PrefsRepo,
+    PrincipalEventRepo,
+    PrincipalStatusRepo,
+    Row,
+)
 
 Dialect = Literal["sqlite", "postgresql"]
 
@@ -562,16 +570,20 @@ class SqlMetaRepo:
 
 
 class Repositories:
-    """The repositories of one dialect, bundled for the store."""
+    """The repositories of one dialect, bundled for the store.
+
+    The attributes are annotated with the interfaces of :mod:`.ports`, so a type
+    checker proves the SQL implementations satisfy them.
+    """
 
     def __init__(self, dialect: Dialect) -> None:
         self.dialect: Dialect = dialect
-        self.tokens = SqlCanvasTokenRepo(dialect)
-        self.generations = SqlCredentialGenerationRepo(dialect)
-        self.status = SqlPrincipalStatusRepo(dialect)
-        self.events = SqlPrincipalEventRepo()
-        self.prefs = SqlPrefsRepo(dialect)
-        self.meta = SqlMetaRepo()
+        self.tokens: CanvasTokenRepo = SqlCanvasTokenRepo(dialect)
+        self.generations: CredentialGenerationRepo = SqlCredentialGenerationRepo(dialect)
+        self.status: PrincipalStatusRepo = SqlPrincipalStatusRepo(dialect)
+        self.events: PrincipalEventRepo = SqlPrincipalEventRepo()
+        self.prefs: PrefsRepo = SqlPrefsRepo(dialect)
+        self.meta: MetaRepo = SqlMetaRepo()
 
 
 __all__ = [

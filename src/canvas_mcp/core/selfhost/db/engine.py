@@ -222,16 +222,27 @@ class Database:
         """A short write that callers may let fail (``touch``, ``mark_verified``).
 
         SQLite: one deferred transaction, no Python lock (as the single autocommit
-        statement it replaces). PostgreSQL: a write transaction with a short lock
-        timeout; ``lock=False`` skips the global writer lock for an update whose
-        correctness does not depend on other writers.
+        statement it replaces). PostgreSQL with ``lock=False``: one autocommit
+        statement, for an update whose correctness does not depend on other writers.
+        PostgreSQL with ``lock=True``: a write transaction that takes the writer lock
+        first, with a short lock timeout, because the statement compares a credential
+        generation that a concurrent enrollment may be changing.
         """
         if self.kind == "sqlite":
             with self.guard():
                 yield from self._sqlite_tx("DEFERRED")
+        elif not lock:
+            # One autocommit statement: no transaction, no extra round trips. This
+            # runs on every MCP request (``touch``), so it has to stay cheap.
+            with self.guard():
+                conn = self._engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+                try:
+                    yield conn
+                finally:
+                    conn.close()
         else:
             with self.guard():
-                yield from self._pg_tx(lock=lock, lock_timeout=PG_BEST_EFFORT_LOCK_TIMEOUT)
+                yield from self._pg_tx(lock=True, lock_timeout=PG_BEST_EFFORT_LOCK_TIMEOUT)
 
     def _sqlite_tx(self, mode: str) -> Iterator[Connection]:
         conn = self._engine.connect().execution_options(**{BEGIN_OPTION: mode})

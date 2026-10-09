@@ -47,6 +47,10 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /src
 
 # Dependencies first (cached until the lock file changes), then the project.
+# The selfhost extra (SQLAlchemy, Alembic) is the data layer; the postgres extra adds
+# psycopg's binary wheel, which bundles libpq, so no system packages are installed.
+# SQLAlchemy and Alembic serve both backends (SQLite is the default); psycopg is used
+# only when DATABASE_URL names PostgreSQL.
 # README.md and LICENSE are read by the build backend for package metadata.
 COPY pyproject.toml uv.lock README.md LICENSE ./
 RUN uv sync --frozen --no-dev --extra documents --extra selfhost --extra postgres --no-install-project
