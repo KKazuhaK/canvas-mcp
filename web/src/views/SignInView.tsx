@@ -6,8 +6,9 @@ import Card from '@mui/material/Card'
 import CardContent from '@mui/material/CardContent'
 import Skeleton from '@mui/material/Skeleton'
 import Typography from '@mui/material/Typography'
-import { Navigate, useSearchParams } from 'react-router'
+import { Navigate, useLocation, useSearchParams } from 'react-router'
 import { useTranslation } from 'react-i18next'
+import { isUnauthenticated } from '@/api/errors'
 import { signInUrl } from '@/api/endpoints'
 import ErrorNotice from '@/components/ErrorNotice'
 import McpUrlCard from '@/components/McpUrlCard'
@@ -15,6 +16,7 @@ import ProviderIcon from '@/components/ProviderIcon'
 import { useMe, useProviders } from '@/query/hooks'
 import { codeText } from '@/utils/errorText'
 import { SITE_BASE, sanitizeReturnTo } from '@/utils/returnTo'
+import { isSessionEnded } from '@/utils/sessionEnded'
 
 /** A provider's start URL must be a plain same-site path; anything else is not offered. */
 function isPlainPath(url: string): boolean {
@@ -34,13 +36,15 @@ function isPlainPath(url: string): boolean {
 export default function SignInView() {
   const { t } = useTranslation()
   const [params] = useSearchParams()
+  const sessionEnded = isSessionEnded(useLocation().state)
   const providers = useProviders()
   const me = useMe()
   const errorParam = params.get('error')
   const returnTo = sanitizeReturnTo(params.get('return_to'))
 
-  // Already signed in (for example a stale tab): go where the sign-in was headed.
-  if (me.data) {
+  // Already signed in (for example a stale tab): go where the sign-in was headed. A
+  // probe that now answers 401 keeps its last good data, but that person is signed out.
+  if (me.data && !isUnauthenticated(me.error)) {
     const inApp = returnTo ? returnTo.slice(SITE_BASE.length) || '/' : '/'
     return <Navigate to={inApp} replace />
   }
@@ -59,6 +63,13 @@ export default function SignInView() {
               {t('auth:login.subtitle')}
             </Typography>
           </Box>
+
+          {sessionEnded && errorParam === null ? (
+            <Alert severity="info" role="status">
+              <AlertTitle>{t('auth:login.sessionEnded.title')}</AlertTitle>
+              {t('auth:login.sessionEnded.body')}
+            </Alert>
+          ) : null}
 
           {errorParam !== null ? (
             <Alert severity="error" role="alert">

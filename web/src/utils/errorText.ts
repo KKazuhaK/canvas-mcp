@@ -13,7 +13,13 @@ export function codeOf(error: unknown): DisplayErrorCode {
 export function errorText(t: TFunction, error: unknown): string {
   if (error instanceof ApiError) {
     if (error.code === 'rate_limited' && typeof error.params.retry_after_s === 'number') {
-      return t('errors:rate_limited_wait', { retry_after_s: error.params.retry_after_s })
+      const seconds = error.params.retry_after_s
+      // "600 seconds" is hard to read; from a minute up, say minutes (rounded up, so the
+      // person never retries too early).
+      if (seconds >= 60) {
+        return t('errors:rate_limited_wait_minutes', { count: Math.ceil(seconds / 60) })
+      }
+      return t('errors:rate_limited_wait', { retry_after_s: seconds })
     }
     return t(`errors:${error.code}`)
   }

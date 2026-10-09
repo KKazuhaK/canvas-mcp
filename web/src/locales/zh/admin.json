@@ -74,6 +74,7 @@
     "you": "你",
     "noUsername": "无用户名",
     "neverLoggedIn": "从未",
+    "disabledSince": "停用于",
     "empty": "没有符合条件的账户。"
   },
   "enrollments": {
@@ -84,7 +85,9 @@
     "counts": "统计",
     "count": {
       "needing": "需要更换",
-      "total": "已保存的令牌"
+      "total": "已保存的令牌",
+      "disabled": "已停用账户",
+      "pending": "待审批账户"
     },
     "columns": {
       "account": "账户",
@@ -104,6 +107,7 @@
     "details": "技术详情",
     "enrolledAt": "绑定时间",
     "updatedAt": "更新时间",
+    "lastVerified": "最近验证",
     "invalidSince": "失效自",
     "accountId": "账户 id",
     "canvasUserId": "Canvas 用户 id",
@@ -141,6 +145,25 @@
     },
     "operator": "服务器运维",
     "system": "系统",
-    "empty": "没有审计记录。"
+    "empty": "没有审计记录。",
+    "noMatchesLoaded": "已加载的记录中没有匹配项。加载更多可查看更早的记录。",
+    "detail": {
+      "separator": "：",
+      "keys": {
+        "reason": "原因",
+        "canvas_host": "Canvas 主机",
+        "admitted_via": "准入方式",
+        "role": "角色",
+        "source": "来源",
+        "via": "途径",
+        "count": "数量",
+        "status": "状态",
+        "provider": "登录提供方",
+        "enabled": "已开启",
+        "disabled": "已关闭",
+        "school": "学校",
+        "version": "版本"
+      }
+    }
   }
 }

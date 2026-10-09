@@ -35,15 +35,29 @@ function isKnown(action: string): boolean {
   return (KNOWN_ACTIONS as readonly string[]).includes(action)
 }
 
-function detailValue(value: AuditDetailValue): string {
-  return Array.isArray(value) ? value.join(', ') : String(value)
+/** The detail keys the server writes; a key outside this list is shown as it is. */
+const KNOWN_DETAIL_KEYS = [
+  'reason',
+  'canvas_host',
+  'admitted_via',
+  'role',
+  'source',
+  'via',
+  'count',
+  'status',
+  'provider',
+  'enabled',
+  'disabled',
+  'school',
+  'version',
+] as const
+
+function isKnownDetailKey(key: string): boolean {
+  return (KNOWN_DETAIL_KEYS as readonly string[]).includes(key)
 }
 
-/** Detail is a flat map of short scalars (or string lists); render it as plain "key: value" text. */
-function detailText(entry: AuditEntry): string {
-  const parts = Object.entries(entry.detail).map(([k, v]) => `${k}: ${detailValue(v)}`)
-  if (entry.reason) parts.unshift(`reason: ${entry.reason}`)
-  return parts.length > 0 ? parts.join(', ') : '–'
+function detailValue(value: AuditDetailValue): string {
+  return Array.isArray(value) ? value.join(', ') : String(value)
 }
 
 /** /admin/audit: the audit log, newest first, 100 at a time. The action filter narrows the loaded entries. */
@@ -53,6 +67,17 @@ export default function AdminAuditView() {
   const audit = useAdminAudit()
   const loaded = audit.data?.pages.flatMap((page) => page.entries) ?? []
   const rows = loaded.filter((entry) => action === '' || entry.action === action)
+
+  /** Detail is a flat map of short scalars (or string lists): plain text, labelled in the viewer's language. */
+  function detailText(entry: AuditEntry): string {
+    const label = (key: string) => (isKnownDetailKey(key) ? t(`admin:audit.detail.keys.${key}`) : key)
+    const separator = t('admin:audit.detail.separator')
+    const parts = Object.entries(entry.detail).map(
+      ([key, value]) => `${label(key)}${separator}${detailValue(value)}`,
+    )
+    if (entry.reason) parts.unshift(`${label('reason')}${separator}${entry.reason}`)
+    return parts.length > 0 ? parts.join(', ') : '–'
+  }
 
   function actorText(entry: AuditEntry): string {
     if (entry.actor.kind === 'operator') return t('admin:audit.operator')
@@ -120,7 +145,10 @@ export default function AdminAuditView() {
       {audit.isPending ? <PageSkeleton /> : null}
       {audit.isError ? <ErrorNotice error={audit.error} onRetry={() => void audit.refetch()} /> : null}
       {audit.data && rows.length === 0 ? (
-        <Typography color="text.secondary">{t('admin:audit.empty')}</Typography>
+        <Typography color="text.secondary">
+          {/* A filter only looks at what is loaded: with more pages to load, "none" would be a guess. */}
+          {action !== '' && audit.hasNextPage ? t('admin:audit.noMatchesLoaded') : t('admin:audit.empty')}
+        </Typography>
       ) : null}
       {rows.length > 0 ? (
         <ResponsiveTable

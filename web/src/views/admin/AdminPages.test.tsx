@@ -1,7 +1,9 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { hardNavigate } from '@/utils/navigate'
+import { resources } from '@/i18n/options'
+import { useLanguage } from '@/stores/language'
 import { renderApp } from '@/test/renderWithProviders'
 import { errorBody, meFixture, recordRequests, scriptAdapter } from '@/test/fixtures'
 
@@ -50,6 +52,7 @@ describe('Admin accounts', () => {
 
     const dev = rowOf('Dev Example')
     expect(within(dev).getByText('Disabled by an owner')).toBeInTheDocument()
+    expect(within(dev).getByText(/Disabled since/)).toBeInTheDocument()
     expect(within(dev).getByRole('button', { name: 'Enable: Dev Example' })).toBeInTheDocument()
 
     // The owner's own row can mark its token invalid but cannot disable itself.
@@ -191,6 +194,23 @@ describe('Admin enrollments', () => {
     expect(within(rowOf('Bob Example')).getByRole('button', { name: 'Approve: Bob Example' })).toBeInTheDocument()
   })
 
+  it('keeps what the server-rendered page showed: last verified, disabled since, and every count', async () => {
+    await renderApp('/admin/enrollments', 'owner')
+    await screen.findByText('Bob Example')
+    const counts = screen.getByRole('group', { name: 'Totals' })
+    expect(within(counts).getByText('Need replacing: 1')).toBeInTheDocument()
+    expect(within(counts).getByText('Tokens stored: 2')).toBeInTheDocument()
+    expect(within(counts).getByText('Disabled accounts: 1')).toBeInTheDocument()
+    expect(within(counts).getByText('Pending accounts: 1')).toBeInTheDocument()
+
+    const dev = rowOf('Dev Example')
+    expect(within(dev).getByText(/Disabled since/)).toBeInTheDocument()
+    expect(dev.querySelector('time')).not.toBeNull()
+
+    const cleo = rowOf('Cleo Example')
+    expect(within(cleo).getByText('Last verified')).toBeInTheDocument()
+  })
+
   it('narrows to the tokens that need replacing through the server', async () => {
     const user = userEvent.setup()
     await renderApp('/admin/enrollments', 'owner')
@@ -276,9 +296,70 @@ describe('Admin audit log', () => {
       })
     })
     expect(await screen.findByText('Other')).toBeInTheDocument()
-    expect(screen.getByText(/tools: a_tool, b_tool, count: 2, flag: true/)).toBeInTheDocument()
+    // Known keys are labelled (here "Reason" and "Count"); an unknown key is shown as it is.
+    expect(
+      screen.getByText('Reason: admin_disabled, tools: a_tool, b_tool, Count: 2, flag: true'),
+    ).toBeInTheDocument()
     expect(screen.getByText('<img src=x onerror=alert(1)>')).toBeInTheDocument()
     expect(document.querySelector('img')).toBeNull()
+  })
+
+  it('labels the detail in the chosen language, not in English', async () => {
+    await renderApp('/admin/audit', 'owner', () => {
+      scriptAdapter((r) => {
+        if (r.url === '/me') return { status: 200, data: meFixture({ role: 'owner' }, { features: { ...meFixture().features, admin: true } }) }
+        return {
+          status: 200,
+          data: {
+            entries: [
+              {
+                id: 9,
+                at: '2026-01-01T00:00:00Z',
+                action: 'account_disabled',
+                actor: { kind: 'system', key: null, name: null },
+                target: null,
+                reason: 'admin_disabled',
+                detail: { count: 2 },
+              },
+            ],
+            next_cursor: null,
+          },
+        }
+      })
+    })
+    expect(await screen.findByText('Reason: admin_disabled, Count: 2')).toBeInTheDocument()
+    act(() => useLanguage.getState().setLanguage('zh'))
+    const zh = (resources.zh.admin as { audit: { detail: { separator: string; keys: Record<string, string> } } }).audit.detail
+    const text = `${zh.keys.reason}${zh.separator}admin_disabled, ${zh.keys.count}${zh.separator}2`
+    expect(await screen.findByText(text)).toBeInTheDocument()
+    expect(screen.queryByText(/Reason|Count/)).toBeNull()
+  })
+
+  it('does not claim the log is empty when the filter only saw the loaded pages', async () => {
+    const user = userEvent.setup()
+    await renderApp('/admin/audit', 'owner')
+    await screen.findByText('Approved account')
+    await user.click(screen.getByRole('combobox', { name: 'Action' }))
+    await user.click(await screen.findByRole('option', { name: 'Disabled account' }))
+    // Page one holds no such entry, but there is another page.
+    expect(await screen.findByText(/No matches in the entries loaded so far/)).toBeInTheDocument()
+    expect(screen.queryByText('No audit entries.')).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(screen.queryByText(/No matches in the entries loaded so far/)).toBeNull())
+    expect(screen.getAllByText('Disabled account').length).toBeGreaterThan(1)
+  })
+
+  it('says the log is empty when the filter matches nothing and nothing more can be loaded', async () => {
+    const user = userEvent.setup()
+    await renderApp('/admin/audit', 'owner', () => {
+      scriptAdapter((r) => {
+        if (r.url === '/me') return { status: 200, data: meFixture({ role: 'owner' }, { features: { ...meFixture().features, admin: true } }) }
+        return { status: 200, data: { entries: [], next_cursor: null } }
+      })
+    })
+    await user.click(await screen.findByRole('combobox', { name: 'Action' }))
+    await user.click(await screen.findByRole('option', { name: 'Disabled account' }))
+    expect(await screen.findByText('No audit entries.')).toBeInTheDocument()
   })
 
   it('filters the loaded entries by action', async () => {

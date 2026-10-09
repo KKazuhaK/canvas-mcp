@@ -17,6 +17,7 @@ import ErrorNotice from '@/components/ErrorNotice'
 import ExternalLink from '@/components/ExternalLink'
 import TimeText from '@/components/TimeText'
 import { useDeleteCanvasToken, useRecheckCanvasToken } from '@/query/hooks'
+import { useDisplayZone } from '@/stores/displayZone'
 import { useLanguage } from '@/stores/language'
 import { useToast } from '@/stores/toast'
 import { formatCalendarDate, formatDateTime } from '@/utils/time'
@@ -198,7 +199,8 @@ function ReplaceDisclosure({ defaultExpanded }: { defaultExpanded: boolean }) {
 function InvalidBanner({ canvas }: { canvas: CanvasTokenStatus }) {
   const { t } = useTranslation()
   const lang = useLanguage((s) => s.lang)
-  const since = formatDateTime(canvas.invalid_since, lang)
+  const zone = useDisplayZone((s) => s.zone)
+  const since = formatDateTime(canvas.invalid_since, lang, zone)
   const reason = canvas.invalid_reason ?? 'canvas_token_rejected'
   return (
     <Alert severity="warning" role="alert">

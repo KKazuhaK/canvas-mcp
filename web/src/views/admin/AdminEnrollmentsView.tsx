@@ -9,7 +9,7 @@ import type { AdminAccount, AdminEnrollmentFilter } from '@/api/types'
 import AdminActions from '@/components/admin/AdminActions'
 import ErrorNotice from '@/components/ErrorNotice'
 import ResponsiveTable, { type Column } from '@/components/ResponsiveTable'
-import { AccountStatusChip, TokenStateChip } from '@/components/StatusChips'
+import { AccountStatusChip, DisabledSince, TokenStateChip } from '@/components/StatusChips'
 import TimeText from '@/components/TimeText'
 import { useAdminEnrollments } from '@/query/hooks'
 import { PageSkeleton } from '../StateViews'
@@ -48,6 +48,12 @@ function EnrollmentDetails({ account }: { account: AdminAccount }) {
         <Typography component="dd" variant="caption" sx={{ m: 0 }}>
           <TimeText iso={enrollment.updated_at} />
         </Typography>
+        <Typography component="dt" variant="caption" color="text.secondary">
+          {t('admin:enrollments.lastVerified')}
+        </Typography>
+        <Typography component="dd" variant="caption" sx={{ m: 0 }}>
+          <TimeText iso={enrollment.last_verified_at} />
+        </Typography>
         {enrollment.invalid_since ? (
           <>
             <Typography component="dt" variant="caption" color="text.secondary">
@@ -85,6 +91,11 @@ export default function AdminEnrollmentsView() {
           {a.status !== 'active' ? (
             <Box sx={{ mt: 0.5 }}>
               <AccountStatusChip status={a.status} />
+              {a.status === 'disabled' ? (
+                <Box>
+                  <DisabledSince iso={a.disabled_at} />
+                </Box>
+              ) : null}
             </Box>
           ) : null}
         </Box>
@@ -164,6 +175,17 @@ export default function AdminEnrollmentsView() {
             size="small"
             variant="outlined"
             label={`${t('admin:enrollments.count.total')}: ${counts.total_enrollments}`}
+          />
+          <Chip
+            size="small"
+            variant="outlined"
+            label={`${t('admin:enrollments.count.disabled')}: ${counts.disabled}`}
+          />
+          <Chip
+            size="small"
+            variant="outlined"
+            color={counts.pending > 0 ? 'warning' : 'default'}
+            label={`${t('admin:enrollments.count.pending')}: ${counts.pending}`}
           />
         </Box>
       ) : null}

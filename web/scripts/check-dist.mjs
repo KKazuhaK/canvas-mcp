@@ -55,6 +55,13 @@ if (/javascript:/i.test(html)) fail('index.html contains a javascript: URL')
 if (/<style\b/i.test(html)) fail('index.html has an inline <style> (style-src allows it, but none is expected)')
 if (!/<meta name="referrer" content="no-referrer"/.test(html)) fail('missing <meta name="referrer" content="no-referrer">')
 if (!/<meta name="robots" content="noindex"/.test(html)) fail('missing <meta name="robots" content="noindex">')
+const noscript = /<noscript\b[^>]*>([\s\S]*?)<\/noscript>/i.exec(html)
+if (!noscript) fail('index.html has no <noscript> notice (a browser without JavaScript would get a blank page)')
+else {
+  const inner = noscript[1]
+  if (inner.replace(/<[^>]*>/g, '').trim() === '') fail('the <noscript> notice has no text')
+  if (/<(?:script|link|img|iframe|source)\b/i.test(inner)) fail('the <noscript> notice must be plain text, with no resources')
+}
 if (/<base\b/i.test(html)) fail('index.html has a <base> element; the mount path is fixed')
 
 for (const [, tag] of html.matchAll(/<(?:script|link|img|source|iframe)\b([^>]*)>/gi)) {

@@ -115,6 +115,26 @@ describe('WriteToolsView', () => {
     expect(hardNavigate).toHaveBeenCalledWith('/account/login?return_to=%2Faccount%2Fwrite-tools')
   })
 
+  it('does not stack the browser leave-site prompt on the sign-in-again button, and says what is lost', async () => {
+    const user = userEvent.setup()
+    await renderApp('/write-tools', 'stale-owner')
+    await user.click(await screen.findByRole('switch', { name: 'Submit assignment' }))
+    const leave = () => {
+      const event = new Event('beforeunload', { cancelable: true })
+      window.dispatchEvent(event)
+      return event.defaultPrevented
+    }
+    // With unsaved choices the guard is armed...
+    expect(leave()).toBe(true)
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await screen.findByText('Sign in again to continue')
+    // ...and stands down once the save was refused for a stale sign-in.
+    expect(leave()).toBe(false)
+    expect(screen.getByRole('note', { name: '' })).toHaveTextContent(
+      'you will need to turn your choices on again',
+    )
+  })
+
   it('turning a tool off never needs a fresh sign-in', async () => {
     const user = userEvent.setup()
     await renderApp('/write-tools', 'stale-owner')

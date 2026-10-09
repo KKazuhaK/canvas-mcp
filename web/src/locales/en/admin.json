@@ -74,6 +74,7 @@
     "you": "You",
     "noUsername": "No username",
     "neverLoggedIn": "Never",
+    "disabledSince": "Disabled since",
     "empty": "No accounts match."
   },
   "enrollments": {
@@ -84,7 +85,9 @@
     "counts": "Totals",
     "count": {
       "needing": "Need replacing",
-      "total": "Tokens stored"
+      "total": "Tokens stored",
+      "disabled": "Disabled accounts",
+      "pending": "Pending accounts"
     },
     "columns": {
       "account": "Account",
@@ -104,6 +107,7 @@
     "details": "Technical details",
     "enrolledAt": "Enrolled",
     "updatedAt": "Updated",
+    "lastVerified": "Last verified",
     "invalidSince": "Invalid since",
     "accountId": "Account id",
     "canvasUserId": "Canvas user id",
@@ -141,6 +145,25 @@
     },
     "operator": "Server operator",
     "system": "System",
-    "empty": "No audit entries."
+    "empty": "No audit entries.",
+    "noMatchesLoaded": "No matches in the entries loaded so far. Load more to look further back.",
+    "detail": {
+      "separator": ": ",
+      "keys": {
+        "reason": "Reason",
+        "canvas_host": "Canvas host",
+        "admitted_via": "Admitted via",
+        "role": "Role",
+        "source": "Source",
+        "via": "Via",
+        "count": "Count",
+        "status": "Status",
+        "provider": "Provider",
+        "enabled": "Turned on",
+        "disabled": "Turned off",
+        "school": "School",
+        "version": "Version"
+      }
+    }
   }
 }

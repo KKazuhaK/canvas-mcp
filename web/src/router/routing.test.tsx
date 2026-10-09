@@ -174,7 +174,18 @@ describe('account status gate', () => {
     const seen = recordRequests()
     await userEvent.setup().click(screen.getByRole('button', { name: 'Refresh' }))
     await waitFor(() => expect(seen.some((r) => r.url === '/me')).toBe(true))
-    expect(seen.filter((r) => r.url.startsWith('/me/'))).toEqual([])
+    // The sign-in history is the one /me/ read a pending account is allowed (and shown).
+    expect(seen.filter((r) => r.url.startsWith('/me/') && r.url !== '/me/login-history')).toEqual([])
+  })
+
+  it('shows a pending account its recent sign-ins, as the server-rendered page did', async () => {
+    await renderApp('/', 'pending')
+    await screen.findByText('Waiting for approval')
+    const history = await screen.findByRole('region', { name: 'Recent sign-ins' })
+    expect((await within(history).findAllByText('Account created')).length).toBeGreaterThan(0)
+    // Still no navigation, token form or write tools.
+    expect(screen.queryByRole('navigation', { name: 'Main navigation' })).toBeNull()
+    expect(screen.queryByLabelText(/Canvas access token/)).toBeNull()
   })
 })
 

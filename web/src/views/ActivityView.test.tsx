@@ -18,6 +18,29 @@ describe('Recent sign-ins', () => {
     expect(screen.queryByText('Device')).toBeNull()
   })
 
+  it('shows times in the zone the server displays, not the browser zone', async () => {
+    await renderApp('/activity', 'enrolled', () => {
+      scriptAdapter((r) =>
+        r.url === '/me'
+          ? {
+              status: 200,
+              data: meFixture({}, { server: { mcp_url: 'https://x.test/mcp', display_timezone: 'America/Los_Angeles' } }),
+            }
+          : r.url === '/providers'
+            ? { status: 200, data: { providers: [], mcp_url: 'https://x.test/mcp' } }
+            : {
+                status: 200,
+                data: {
+                  events: [
+                    { at: '2026-01-15T12:00:00Z', provider_id: 'entra', outcome: 'success', reason: null },
+                  ],
+                },
+              },
+      )
+    })
+    expect(await screen.findByText('Jan 15, 2026, 4:00 AM PST')).toBeInTheDocument()
+  })
+
   it('says so when there is no history', async () => {
     await renderApp('/activity', 'enrolled', () => {
       scriptAdapter((r) =>

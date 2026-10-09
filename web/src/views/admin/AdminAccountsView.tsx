@@ -9,7 +9,7 @@ import type { AdminAccount, AdminStatusFilter } from '@/api/types'
 import AdminActions from '@/components/admin/AdminActions'
 import ErrorNotice from '@/components/ErrorNotice'
 import ResponsiveTable, { type Column } from '@/components/ResponsiveTable'
-import { AccountStatusChip, TokenStateChip } from '@/components/StatusChips'
+import { AccountStatusChip, DisabledSince, TokenStateChip } from '@/components/StatusChips'
 import TimeText from '@/components/TimeText'
 import { useAdminAccounts } from '@/query/hooks'
 import { PageSkeleton } from '../StateViews'
@@ -104,6 +104,7 @@ export default function AdminAccountsView() {
               {t(`admin:accounts.disabledReason.${a.disabled_reason}`)}
             </Typography>
           ) : null}
+          {a.status === 'disabled' ? <DisabledSince iso={a.disabled_at} /> : null}
         </Box>
       ),
     },

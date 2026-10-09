@@ -1,6 +1,8 @@
 import Chip from '@mui/material/Chip'
 import { useTranslation } from 'react-i18next'
+import Typography from '@mui/material/Typography'
 import type { AdminAccountStatus, CanvasTokenState } from '@/api/types'
+import TimeText from '@/components/TimeText'
 
 const ACCOUNT_COLOR: Record<AdminAccountStatus, 'success' | 'warning' | 'default'> = {
   active: 'success',
@@ -30,5 +32,16 @@ export function TokenStateChip({ state }: { state: CanvasTokenState }) {
       color={TOKEN_COLOR[state]}
       label={t(`common:tokenState.${state}`)}
     />
+  )
+}
+
+/** "Disabled since <time>", for a disabled account that has a recorded time. */
+export function DisabledSince({ iso }: { iso: string | null | undefined }) {
+  const { t } = useTranslation()
+  if (!iso) return null
+  return (
+    <Typography variant="caption" color="text.secondary">
+      {t('admin:accounts.disabledSince')} <TimeText iso={iso} />
+    </Typography>
   )
 }

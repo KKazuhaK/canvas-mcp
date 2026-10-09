@@ -86,6 +86,30 @@ describe('Canvas token form', () => {
     expect(screen.getByText('Expires')).toBeInTheDocument()
   })
 
+  it('points at the expiry date when the server refuses it, and offers today as the earliest', async () => {
+    const user = userEvent.setup()
+    await renderApp('/token', 'fresh')
+    const token = await tokenInput()
+    const expiry = screen.getByLabelText(/Expiry date/)
+    expect(expiry).toHaveAttribute('min', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/))
+    await user.type(token, GOOD)
+    await user.type(expiry, '2020-01-01')
+    await user.click(screen.getByRole('button', { name: 'Verify and save' }))
+
+    expect(
+      await screen.findByText('That expiry date is not valid. Pick today or a later date.'),
+    ).toBeInTheDocument()
+    expect(expiry).toHaveAttribute('aria-invalid', 'true')
+    // The field-level text replaces the generic sentence.
+    expect(screen.queryByText(/Some of the information is not valid/)).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+
+    // Fixing the date clears the complaint.
+    await user.clear(expiry)
+    await user.type(expiry, '2031-02-03')
+    expect(expiry).not.toHaveAttribute('aria-invalid', 'true')
+  })
+
   it('clears the field after a server failure and shows the localized reason', async () => {
     const user = userEvent.setup()
     await renderApp('/token', 'fresh')

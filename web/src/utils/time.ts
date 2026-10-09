@@ -11,13 +11,45 @@ function parse(iso: string | null | undefined): Date | null {
   return Number.isNaN(date.getTime()) ? null : date
 }
 
-/** Absolute timestamp in the viewer's locale and time zone, or null if absent/invalid. */
-export function formatDateTime(iso: string | null | undefined, lang: Language): string | null {
+/** The IANA zone if this browser knows it, otherwise null (the browser's own zone is used then). */
+export function knownTimeZone(zone: string | null | undefined): string | null {
+  if (!zone) return null
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone })
+    return zone
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Absolute timestamp, or null if absent/invalid. In the viewer's locale; in the server's
+ * display time zone (with the zone's short name, so the zone is never a guess) when one
+ * is given, else in the browser's own zone.
+ */
+export function formatDateTime(
+  iso: string | null | undefined,
+  lang: Language,
+  zone?: string | null,
+): string | null {
   const date = parse(iso)
   if (!date) return null
+  const timeZone = knownTimeZone(zone)
+  if (timeZone === null) {
+    return new Intl.DateTimeFormat(intlLocale(lang), {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(date)
+  }
+  // dateStyle/timeStyle cannot be combined with a zone name, so spell the fields out.
   return new Intl.DateTimeFormat(intlLocale(lang), {
-    dateStyle: 'medium',
-    timeStyle: 'short',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone,
+    timeZoneName: 'short',
   }).format(date)
 }
 

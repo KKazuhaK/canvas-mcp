@@ -563,8 +563,11 @@ route('PUT /me/canvas-token', 'active', (c, s) => {
   if (!/^[A-Za-z0-9~._-]{20,512}$/.test(token)) return fail('token_invalid_format')
 
   const expires = c.body.expires_on
-  if (typeof expires === 'string' && expires !== '' && !/^\d{4}-\d{2}-\d{2}$/.test(expires)) {
-    return fail('validation_failed', { field: 'expires_on' })
+  if (typeof expires === 'string' && expires !== '') {
+    // Like the server: a real date, today or later.
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(expires) || expires < new Date().toISOString().slice(0, 10)) {
+      return fail('validation_failed', { field: 'expires_on' })
+    }
   }
 
   let school = SCHOOL

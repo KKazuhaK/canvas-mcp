@@ -116,6 +116,22 @@ describe('error text', () => {
     expect(errorText(t, new ApiError(429, 'rate_limited'))).toBe(resources.en.errors.rate_limited)
   })
 
+  it('says minutes, not hundreds of seconds, from a minute up (rounded up)', () => {
+    const t = i18next.t.bind(i18next)
+    const wait = (seconds: number) => errorText(t, new ApiError(429, 'rate_limited', { retry_after_s: seconds }))
+    expect(wait(600)).toBe('Too many requests. Try again in 10 minutes.')
+    expect(wait(60)).toBe('Too many requests. Try again in 1 minute.')
+    expect(wait(61)).toBe('Too many requests. Try again in 2 minutes.')
+    expect(wait(59)).toBe('Too many requests. Try again in 59 seconds.')
+    expect(wait(600)).not.toContain('600')
+  })
+
+  it('has the minutes text in Chinese as well', () => {
+    const zh = resources.zh.errors as Record<string, string>
+    expect(zh.rate_limited_wait_minutes_one).toContain('{{count}}')
+    expect(zh.rate_limited_wait_minutes_other).toContain('{{count}}')
+  })
+
   it('never prints a raw query value', () => {
     const t = i18next.t.bind(i18next)
     const text = codeText(t, '<img src=x onerror=alert(1)>')

@@ -15,6 +15,8 @@
   "not_found": "该项目已不存在。",
   "rate_limited": "请求过于频繁，请稍候再试。",
   "rate_limited_wait": "请求过于频繁，请在 {{retry_after_s}} 秒后重试。",
+  "rate_limited_wait_minutes_one": "请求过多，请在 {{count}} 分钟后重试。",
+  "rate_limited_wait_minutes_other": "请求过多，请在 {{count}} 分钟后重试。",
   "token_store_unavailable": "令牌存储暂时不可用，未保存任何内容。请稍后再试。",
   "internal_error": "服务器出了点问题，请重试。",
   "token_invalid_format": "这看起来不是 Canvas 访问令牌。请复制完整令牌后重试。",

@@ -9,6 +9,7 @@ import Switch from '@mui/material/Switch'
 import Typography from '@mui/material/Typography'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { isReauthRequired } from '@/api/errors'
 import type { WriteTool, WriteToolsResponse } from '@/api/types'
 import ConfirmDialog from '@/components/ConfirmDialog'
 import ErrorNotice from '@/components/ErrorNotice'
@@ -148,14 +149,18 @@ export default function WriteToolsView() {
   )
 
   // Dirty-state guard: warn before the tab is closed or reloaded with unsaved changes.
+  // It stands down once the save was refused for a stale sign-in: the person is about to
+  // follow the "Sign in again" button on purpose, and a second "Leave site?" prompt from
+  // the browser would only get in the way (the notice says what will be lost).
+  const signingInAgain = isReauthRequired(save.error)
   useEffect(() => {
-    if (!dirty) return
+    if (!dirty || signingInAgain) return
     const handler = (event: BeforeUnloadEvent) => {
       event.preventDefault()
     }
     window.addEventListener('beforeunload', handler)
     return () => window.removeEventListener('beforeunload', handler)
-  }, [dirty])
+  }, [dirty, signingInAgain])
 
   if (query.isPending || (query.data && !selected)) {
     return (
@@ -256,6 +261,11 @@ export default function WriteToolsView() {
         ) : null}
 
         {save.isError ? <ErrorNotice error={save.error} /> : null}
+        {signingInAgain ? (
+          <Typography variant="body2" color="text.secondary" role="note">
+            {t('account:writeTools.reauthNote')}
+          </Typography>
+        ) : null}
         {turnOff.isError && !confirmOff ? <ErrorNotice error={turnOff.error} /> : null}
 
         <Box

@@ -1,7 +1,9 @@
-import { screen } from '@testing-library/react'
+import { act, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { hardNavigate } from '@/utils/navigate'
 import { resources } from '@/i18n/options'
+import { http } from '@/api/client'
+import { keys } from '@/query/keys'
 import { renderApp } from '@/test/renderWithProviders'
 import { errorBody, scriptAdapter } from '@/test/fixtures'
 
@@ -149,5 +151,71 @@ describe('SignInView', () => {
     const { router } = await renderApp('/sign-in', 'enrolled')
     await screen.findByRole('navigation', { name: 'Main navigation' })
     expect(router.state.location.pathname).toBe('/')
+  })
+})
+
+/** The server after the session cookie expired: everything but the provider list says 401. */
+function endSession(): void {
+  scriptAdapter((r) =>
+    r.url === '/providers'
+      ? {
+          status: 200,
+          data: {
+            providers: [
+              { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/account/login' },
+            ],
+            mcp_url: 'https://x.test/mcp',
+          },
+        }
+      : { status: 401, data: errorBody('not_authenticated') },
+  )
+}
+
+describe('SignInView after the session ended mid-use', () => {
+  it('says so when an API call answers 401, and keeps return_to', async () => {
+    const { router } = await renderApp('/activity', 'enrolled')
+    await screen.findByRole('heading', { name: 'Recent sign-ins' })
+    endSession()
+    await act(async () => {
+      await http.get('/me/login-history').catch(() => undefined)
+    })
+    const notice = await screen.findByRole('status', { name: '' })
+    expect(notice).toHaveTextContent('Your session has ended')
+    expect(notice).toHaveTextContent('Anything you had typed but not saved was not kept.')
+    expect(router.state.location.pathname).toBe('/sign-in')
+    expect(router.state.location.search).toContain('return_to=%2Faccount%2Factivity')
+    // It is not the "sign-in failed" alert, and the sign-in button is still offered.
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(await screen.findByRole('link', { name: /Sign in with Microsoft/ })).toBeInTheDocument()
+  })
+
+  it('says so when the session probe starts answering 401 after it had worked', async () => {
+    const { router, client } = await renderApp('/activity', 'enrolled')
+    await screen.findByRole('heading', { name: 'Recent sign-ins' })
+    endSession()
+    await act(async () => {
+      await client.refetchQueries({ queryKey: keys.me })
+    })
+    expect(await screen.findByText('Your session has ended')).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe('/sign-in')
+  })
+
+  it('shows nothing of the sort to someone who was never signed in', async () => {
+    const { router } = await renderApp('/activity', 'signed-out')
+    await screen.findByRole('link', { name: /Sign in with Microsoft/ })
+    expect(router.state.location.pathname).toBe('/sign-in')
+    expect(screen.queryByText('Your session has ended')).toBeNull()
+  })
+
+  it('cannot be switched on from the address bar', async () => {
+    await renderApp('/sign-in?sessionEnded=true&error=', 'signed-out')
+    await screen.findByRole('link', { name: /Sign in with Microsoft/ })
+    expect(screen.queryByText('Your session has ended')).toBeNull()
+  })
+
+  it('has the same notice in Chinese', () => {
+    const zh = resources.zh.auth as { login: { sessionEnded: { title: string; body: string } } }
+    expect(zh.login.sessionEnded.title.length).toBeGreaterThan(0)
+    expect(zh.login.sessionEnded.body.length).toBeGreaterThan(0)
   })
 })

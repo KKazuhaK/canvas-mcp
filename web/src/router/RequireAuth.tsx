@@ -6,6 +6,7 @@ import { isUnauthenticated } from '@/api/errors'
 import { useMe } from '@/query/hooks'
 import { FullPageLoading } from '@/views/StateViews'
 import { loginPathFor } from '@/utils/returnTo'
+import { SESSION_ENDED_STATE } from '@/utils/sessionEnded'
 
 /**
  * Gate for every signed-in route. It reads the session from GET /me (React Query
@@ -18,7 +19,15 @@ export default function RequireAuth() {
 
   if (me.isPending) return <FullPageLoading />
   if (isUnauthenticated(me.error)) {
-    return <Navigate to={loginPathFor(location.pathname + location.search)} replace />
+    // Data in the cache means the session was good a moment ago and has now ended; a
+    // first visit by someone who never signed in gets no such message.
+    return (
+      <Navigate
+        to={loginPathFor(location.pathname + location.search)}
+        replace
+        state={me.data ? SESSION_ENDED_STATE : undefined}
+      />
+    )
   }
   if (me.isError) {
     return (

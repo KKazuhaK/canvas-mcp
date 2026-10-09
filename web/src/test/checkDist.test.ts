@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -27,7 +27,7 @@ function fakeDist(files: Record<string, string>): string {
 const GOOD_HTML = `<!doctype html><html><head>
 <meta name="referrer" content="no-referrer"><meta name="robots" content="noindex">
 <script type="module" crossorigin src="/account/assets/index-abc.js"></script>
-</head><body><div id="root"></div></body></html>`
+</head><body><div id="root"></div><noscript><p>This page needs JavaScript.</p></noscript></body></html>`
 
 afterAll(() => {
   for (const dir of created) rmSync(dir, { recursive: true, force: true })
@@ -50,6 +50,9 @@ describe('scripts/check-dist.mjs', () => {
     ['the dev mock module', GOOD_HTML, 'assets/index-abc.js', 'function installMockServer(){}'],
     ['mock fixtures', GOOD_HTML, 'assets/index-abc.js', 'const n = "Ada Example"'],
     ['a source map', GOOD_HTML, 'assets/index-abc.js.map', '{}'],
+    ['no <noscript> notice', GOOD_HTML.replace(/<noscript>.*<\/noscript>/, ''), 'assets/index-abc.js', 'x'],
+    ['an empty <noscript> notice', GOOD_HTML.replace(/<noscript>.*<\/noscript>/, '<noscript> </noscript>'), 'assets/index-abc.js', 'x'],
+    ['a <noscript> that loads an image', GOOD_HTML.replace('</noscript>', '<img src="/account/x.png"></noscript>'), 'assets/index-abc.js', 'x'],
   ])('rejects %s', (_label, html, extra, content) => {
     const files: Record<string, string> = { 'index.html': html, 'assets/index-abc.js': 'x' }
     files[extra] = content
@@ -97,4 +100,14 @@ describe('the production bundle never carries the dev mock', () => {
     expect(code, out).toBe(1)
     expect(out).toContain('dev-mock marker')
   }, 120_000)
+})
+
+describe('index.html source', () => {
+  it('carries a plain-text <noscript> notice, so a browser without JavaScript sees why', () => {
+    const html = readFileSync(join(ROOT, 'index.html'), 'utf8')
+    const notice = /<noscript>([\s\S]*?)<\/noscript>/.exec(html)?.[1] ?? ''
+    expect(notice).toContain('needs JavaScript')
+    expect(notice).toContain('ACCOUNT_UI=legacy')
+    expect(notice).not.toMatch(/<(?:script|link|img|iframe)/i)
+  })
 })

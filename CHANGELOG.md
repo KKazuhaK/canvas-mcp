@@ -36,7 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under `script-src 'self'`); a request that needs a recent sign-in shows a **Sign in again**
   button that returns to the same page. `Dockerfile.selfhost` builds it into `/app/web-dist`
   and CI has a `web` job; the image smoke test also checks that `/account/` serves the app
-  under its CSP and that `/account/login` still redirects to Microsoft.
+  under its CSP and that `/account/login` still redirects to Microsoft. Details: a request with
+  an HTTP method the API or the app does not list (`PROPFIND`, `TRACE`, anything custom) gets the
+  same JSON error or security headers as any other answer, not a bare 405; a session that ends
+  while the app is open returns to the sign-in page with a notice; a pending account sees its
+  recent sign-ins; times are shown in the server's display time zone (`TIMEZONE`), with the zone
+  name; the admin enrollments list shows last verified, disabled since and every count; a refused
+  expiry date is pointed out on its field; rate-limit waits are given in minutes; and a browser
+  without JavaScript sees a short notice instead of a blank page.
 - **Self-hosted multi-user mode (`MCP_AUTH_MODE=entra-oauth`).** An explicit opt-in
   mode where claude.ai, Claude Desktop and Claude Code connect through OAuth against
   your own Microsoft Entra tenant (FastMCP `AzureProvider`) and each person enrolls

@@ -1,5 +1,6 @@
 import { useEffect, type ReactNode } from 'react'
 import type { MeResponse } from '@/api/types'
+import { useDisplayZone } from '@/stores/displayZone'
 import { useLanguage } from '@/stores/language'
 import PendingView from '@/views/PendingView'
 import AccountLayout from './AccountLayout'
@@ -13,6 +14,13 @@ import AccountLayout from './AccountLayout'
 export default function AccountShell({ me, children }: { me: MeResponse; children?: ReactNode }) {
   const remembered = me.ui_locale
   const applyRemembered = useLanguage((s) => s.applyRemembered)
+  const setZone = useDisplayZone((s) => s.setZone)
+  const displayZone = me.server.display_timezone
+
+  // Times are shown in the zone the server uses for its own pages.
+  useEffect(() => {
+    setZone(displayZone)
+  }, [displayZone, setZone])
 
   // The language the server remembers (shared with the server-rendered pages) applies
   // only when this browser has no choice of its own yet.

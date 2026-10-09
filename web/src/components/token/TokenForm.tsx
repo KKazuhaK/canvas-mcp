@@ -22,6 +22,20 @@ interface IdentityChange {
   confirmation: string
 }
 
+/** Today as YYYY-MM-DD in the browser's own calendar, for the date input's `min`. */
+function todayLocal(): string {
+  const now = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+}
+
+/** The server refused the expiry date itself (a past or unreadable date). */
+function isExpiryRefusal(error: unknown): boolean {
+  return (
+    error instanceof ApiError && error.code === 'validation_failed' && error.params.field === 'expires_on'
+  )
+}
+
 function asText(value: string | number | undefined): string {
   return value === undefined ? '' : String(value)
 }
@@ -59,6 +73,7 @@ export default function TokenForm({
   const picker = schoolData?.mode === 'picker'
   const selection = picked !== undefined ? picked : schoolData ? initialSelection(schoolData) : null
   const needsSchool = picker && selection === null
+  const expiryRefused = isExpiryRefusal(error)
 
   async function send(confirmation: string | null) {
     const checked = checkTokenShape(value)
@@ -161,13 +176,17 @@ export default function TokenForm({
         name="expires_on"
         type="date"
         value={expiresOn}
-        onChange={(e) => setExpiresOn(e.target.value)}
+        onChange={(e) => {
+          setExpiresOn(e.target.value)
+          if (expiryRefused) setError(null)
+        }}
         disabled={pending || change !== null}
-        helperText={t('account:enroll.expiresHelper')}
-        slotProps={{ inputLabel: { shrink: true } }}
+        error={expiryRefused}
+        helperText={expiryRefused ? t('account:enroll.expiresInvalid') : t('account:enroll.expiresHelper')}
+        slotProps={{ inputLabel: { shrink: true }, htmlInput: { min: todayLocal() } }}
         sx={{ maxWidth: 260 }}
       />
-      {error ? <ErrorNotice error={error} /> : null}
+      {error && !expiryRefused ? <ErrorNotice error={error} /> : null}
       <Box>
         <Button
           type="submit"
