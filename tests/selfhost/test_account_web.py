@@ -1166,8 +1166,10 @@ class TestDataclasses:
 
 # -- language, layout and timestamps -------------------------------------------
 
-ZH = {"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"}
-EN = {"Accept-Language": "en-US,en;q=0.9"}
+# Pick a language for one GET request (the toggle link does the same).
+ZH = {"lang": "zh"}
+EN = {"lang": "en"}
+ZH_BROWSER = {"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"}
 CJK = re.compile("[\u4e00-\u9fff]")
 LANG_COOKIE_NAME = "canvas_mcp_lang"
 SOURCE = pathlib.Path(account_web.__file__)
@@ -1221,8 +1223,7 @@ class TestLanguageChoice:
         assert "Sign in with Microsoft" not in response.text
         assert_security_headers(response)
 
-    def test_query_param_beats_cookie_and_header(self, h: Harness) -> None:
-        h.client.headers.update(ZH)
+    def test_query_param_beats_cookie(self, h: Harness) -> None:
         use_lang(h, "zh")
         response = h.client.get(ACCOUNT_PATH, params={"lang": "en"})
         assert '<html lang="en">' in response.text
@@ -1237,49 +1238,37 @@ class TestLanguageChoice:
         use_lang(h, "en")
         assert "Sign in with Microsoft" in h.client.get(ACCOUNT_PATH).text
 
-    def test_cookie_beats_accept_language(self, h: Harness) -> None:
-        response = h.client.get(
-            ACCOUNT_PATH, headers={**ZH, "Cookie": f"{LANG_COOKIE_NAME}=en"}
-        )
-        assert '<html lang="en">' in response.text
-        response = h.client.get(
-            ACCOUNT_PATH, headers={**EN, "Cookie": f"{LANG_COOKIE_NAME}=zh"}
-        )
+    def test_cookie_selects_the_language(self, h: Harness) -> None:
+        response = h.client.get(ACCOUNT_PATH, headers={"Cookie": f"{LANG_COOKIE_NAME}=zh"})
         assert '<html lang="zh-CN">' in response.text
+        response = h.client.get(ACCOUNT_PATH, headers={"Cookie": f"{LANG_COOKIE_NAME}=en"})
+        assert '<html lang="en">' in response.text
 
     @pytest.mark.parametrize(
-        ("header", "expected"),
-        [
-            ("zh-CN,zh;q=0.9,en;q=0.8", "zh"),
-            ("zh", "zh"),
-            ("zh-TW", "zh"),
-            ("ZH-hans", "zh"),
-            ("en-US,en;q=0.9", "en"),
-            ("en-US,en;q=0.9,zh;q=0.8", "en"),
-            ("fr-FR,fr;q=0.9", "en"),
-            ("fr, zh;q=0.5", "zh"),
-            ("en;q=0.5, zh;q=0.9", "zh"),
-            ("zh;q=0, en", "en"),
-            ("zh;q=0", "en"),
-            ("zh;q=abc", "en"),
-            ("zh;q=nan", "en"),
-            ("*", "en"),
-            (";;;,,,", "en"),
-            ("", "en"),
-        ],
+        "header",
+        ["zh-CN,zh;q=0.9,en;q=0.8", "zh", "zh-TW", "ZH-hans", "fr, zh;q=0.5", "*", ""],
     )
-    def test_accept_language(self, h: Harness, header: str, expected: str) -> None:
+    def test_browser_language_is_ignored_english_is_the_default(
+        self, h: Harness, header: str
+    ) -> None:
+        """English unless the user picks Chinese: Accept-Language never switches it."""
         response = h.client.get(ACCOUNT_PATH, headers={"Accept-Language": header})
-        want = "zh-CN" if expected == "zh" else "en"
-        assert f'<html lang="{want}">' in response.text
+        assert '<html lang="en">' in response.text
+        assert "Sign in with Microsoft" in response.text
         assert LANG_COOKIE_NAME not in "".join(set_cookie_headers(response))
+
+    def test_a_chinese_browser_still_gets_chinese_after_picking_it(self, h: Harness) -> None:
+        h.client.headers.update(ZH_BROWSER)
+        assert '<html lang="en">' in h.client.get(ACCOUNT_PATH).text
+        use_lang(h, "zh")
+        assert '<html lang="zh-CN">' in h.client.get(ACCOUNT_PATH).text
 
     @pytest.mark.parametrize(
         "value",
         ["fr", "ZH", "zh-CN", "", "zh,en", " zh", "zh ", "<script>x</script>", "zh%00", "1", "null"],
     )
     def test_invalid_query_values_are_ignored(self, h: Harness, value: str) -> None:
-        response = h.client.get(ACCOUNT_PATH, params={"lang": value}, headers=EN)
+        response = h.client.get(ACCOUNT_PATH, params={"lang": value})
         assert '<html lang="en">' in response.text
         assert LANG_COOKIE_NAME not in "".join(set_cookie_headers(response))
         assert "<script>x" not in response.text
@@ -1287,7 +1276,7 @@ class TestLanguageChoice:
         response = h.client.get(
             ACCOUNT_PATH,
             params={"lang": value},
-            headers={**EN, "Cookie": f"{LANG_COOKIE_NAME}=zh"},
+            headers={"Cookie": f"{LANG_COOKIE_NAME}=zh"},
         )
         assert '<html lang="zh-CN">' in response.text
 
@@ -1296,7 +1285,7 @@ class TestLanguageChoice:
         self, h: Harness, value: str
     ) -> None:
         response = h.client.get(
-            ACCOUNT_PATH, headers={**EN, "Cookie": f"{LANG_COOKIE_NAME}={value}"}
+            ACCOUNT_PATH, headers={"Cookie": f"{LANG_COOKIE_NAME}={value}"}
         )
         assert '<html lang="en">' in response.text
         assert "<b>x</b>" not in response.text and "zzzzzz" not in response.text
@@ -1359,9 +1348,9 @@ class TestLanguageChoice:
         assert out.headers["location"] == "/account"
 
     def test_other_status_pages_follow_the_language_too(self, h: Harness) -> None:
-        response = h.client.put(ACCOUNT_PATH, headers=ZH)
+        response = h.client.put(ACCOUNT_PATH, headers={"Cookie": f"{LANG_COOKIE_NAME}=zh"})
         assert response.status_code == 405 and "不支持该请求方法" in response.text
-        response = h.client.put(ACCOUNT_PATH, headers=EN)
+        response = h.client.put(ACCOUNT_PATH, headers={"Cookie": f"{LANG_COOKIE_NAME}=en"})
         assert "Method not allowed" in response.text and not CJK.search(
             strip_chrome(response.text)
         )
@@ -1388,10 +1377,8 @@ class TestLanguageChoice:
         async def fetch(client: httpx.AsyncClient, lang: str) -> tuple[str, str]:
             response = await client.get(
                 ACCOUNT_PATH,
-                headers={
-                    "Accept-Language": lang,
-                    "Cookie": f"{SESSION_COOKIE}={session_cookie}",
-                },
+                params={"lang": lang},
+                headers={"Cookie": f"{SESSION_COOKIE}={session_cookie}"},
             )
             return lang, response.text
 
@@ -1505,10 +1492,10 @@ class TestLanguageToggle:
         return re.findall(r'href="([^"]*\?lang=[^"]*)"', text)
 
     def test_toggle_is_a_same_path_link_to_the_other_language(self, h: Harness) -> None:
-        text = h.client.get(ACCOUNT_PATH, headers=EN).text
+        text = h.client.get(ACCOUNT_PATH, params=EN).text
         assert self.toggles(text) == ["/account?lang=zh"]
         assert ">中文</a>" in text
-        text = h.client.get(ACCOUNT_PATH, headers=ZH).text
+        text = h.client.get(ACCOUNT_PATH, params=ZH).text
         assert self.toggles(text) == ["/account?lang=en"]
         assert ">English</a>" in text
 
@@ -1554,7 +1541,7 @@ class TestLanguageToggle:
 
     def test_header_for_signed_in_users(self, h: Harness) -> None:
         sign_in(h, name="Ada Lovelace")
-        text = h.client.get(ACCOUNT_PATH, headers=EN).text
+        text = h.client.get(ACCOUNT_PATH, params=EN).text
         header = re.search(r"<header.*?</header>", text, flags=re.S)
         assert header is not None
         head = header.group(0)
@@ -1562,7 +1549,7 @@ class TestLanguageToggle:
         assert 'action="/account/logout"' in head and 'name="csrf"' in head
         assert "Sign out" in head and "Admin" not in head  # not an owner
         sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
-        owner_text = h.client.get(ACCOUNT_PATH, headers=ZH).text
+        owner_text = h.client.get(ACCOUNT_PATH, params=ZH).text
         found = re.search(r"<header.*?</header>", owner_text, flags=re.S)
         assert found is not None
         owner_head = found.group(0)
@@ -1635,7 +1622,7 @@ class TestLayout:
             "/account/token",
             {"csrf": csrf_of(signed_in), "canvas_token": CANVAS_TOKEN},
         )
-        text = signed_in.client.get(ACCOUNT_PATH, headers=ZH).text
+        text = signed_in.client.get(ACCOUNT_PATH, params=ZH).text
         assert "<summary>替换令牌</summary>" in text
         assert "删除我的令牌" in text
 
@@ -1691,9 +1678,9 @@ class TestLayout:
         assert self._effective(".who", "overflow") == "hidden"
 
     def test_upn_is_visible_text_not_only_a_tooltip(self, signed_in: Harness) -> None:
-        en = signed_in.client.get(ACCOUNT_PATH, headers=EN).text
+        en = signed_in.client.get(ACCOUNT_PATH, params=EN).text
         assert '<p class="muted small acct">Microsoft account: ada@example.test</p>' in en
-        zh = signed_in.client.get(ACCOUNT_PATH, headers=ZH).text
+        zh = signed_in.client.get(ACCOUNT_PATH, params=ZH).text
         assert "Microsoft 账号: ada@example.test" in zh
 
     def test_upn_is_escaped(self, h: Harness) -> None:
@@ -1760,7 +1747,7 @@ class TestAdminLayout:
     def test_stacked_card_labels_come_from_the_page_language(self, h: Harness) -> None:
         self._enroll(h)
         sign_in(h, oid=OID_OWNER, roles=("Canvas.Owner",))
-        text = h.client.get("/account/admin", headers=ZH).text
+        text = h.client.get("/account/admin", params=ZH).text
         assert 'data-label="Entra 用户"' in text and 'data-label="Canvas 用户"' in text
         assert 'data-label="最近使用"' in text and "<summary>技术信息</summary>" in text
 

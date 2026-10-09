@@ -287,34 +287,6 @@ def _current_lang() -> str:
     return _render_context().lang
 
 
-def _accept_language(header: str | None) -> str | None:
-    """Best supported language from an Accept-Language header, or None.
-
-    Entries are ranked by q-value (ties keep header order); the first ranked
-    entry whose primary tag is ``zh`` or ``en`` wins, so ``fr, zh;q=0.5`` gives
-    ``zh`` while ``en-US, zh;q=0.8`` gives ``en``.
-    """
-    if not header:
-        return None
-    ranked: list[tuple[float, int, str]] = []
-    for index, part in enumerate(header[:1024].split(",")[:32]):
-        tag, *params = (piece.strip() for piece in part.split(";"))
-        quality = 1.0
-        for param in params:
-            key, _, value = param.partition("=")
-            if key.strip().lower() == "q":
-                try:
-                    quality = float(value.strip())
-                except ValueError:
-                    quality = 0.0
-        if not quality > 0:  # also rejects NaN
-            continue
-        primary = tag.split("-", 1)[0].strip().lower()
-        if primary in _LANGS:
-            ranked.append((-min(quality, 1.0), index, primary))
-    return min(ranked)[2] if ranked else None
-
-
 def _query_lang(request: Request) -> str | None:
     """A valid ``?lang=`` value on a GET request, else None (anything else is ignored)."""
     if request.method != "GET":
@@ -324,14 +296,18 @@ def _query_lang(request: Request) -> str | None:
 
 
 def _choose_lang(request: Request) -> str:
-    """?lang= (GET only), then the preference cookie, then Accept-Language, then 'en'."""
+    """?lang= (GET only), then the preference cookie, then English.
+
+    English is the default on purpose; the browser's Accept-Language is not
+    consulted, so Chinese appears only after the user picks it with the toggle.
+    """
     chosen = _query_lang(request)
     if chosen is not None:
         return chosen
     cookie = request.cookies.get(LANG_COOKIE)
     if cookie in _LANGS:
         return cookie
-    return _accept_language(request.headers.get("accept-language")) or _DEFAULT_LANG
+    return _DEFAULT_LANG
 
 
 # -- HTML --------------------------------------------------------------------
