@@ -93,7 +93,12 @@ class TestMode:
         assert uses_request_local_course_state() is False  # entra-oauth
 
 
-class TestUpstreamHttpIsRequestLocal:
+class TestUpstreamHttpCourseListAndLabelsAreRequestLocal:
+    """In the upstream-compatible HTTP modes the course list, aliases and labels live
+    only inside one request. Course-policy decisions, pseudonyms and discussion hints
+    are not covered here: upstream shares those process-wide, and this fork keys them
+    by a hash of the caller's token in these modes."""
+
     async def test_nothing_is_registered_and_every_request_reads_its_own_course_list(self, canvas):
         for _ in range(3):
             result = await fresh_request(
