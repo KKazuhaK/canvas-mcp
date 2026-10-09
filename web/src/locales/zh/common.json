@@ -7,12 +7,11 @@
     "copy": "复制",
     "copied": "已复制",
     "signIn": "登录",
+    "signInAgain": "重新登录",
     "signOut": "退出登录",
-    "signOutAll": "退出所有设备",
     "cancel": "取消",
     "confirm": "确认",
     "delete": "删除",
-    "revoke": "撤销",
     "save": "保存",
     "close": "关闭",
     "goHome": "返回首页",
@@ -24,8 +23,6 @@
     "home": "账户",
     "token": "Canvas 令牌",
     "writeTools": "写入工具",
-    "identities": "登录方式",
-    "connectedApps": "已连接的应用",
     "activity": "最近登录",
     "admin": "管理",
     "adminAccounts": "账户",
@@ -33,7 +30,10 @@
     "adminAudit": "审计日志"
   },
   "language": {
-    "names": { "en": "English", "zh": "中文" },
+    "names": {
+      "en": "English",
+      "zh": "中文"
+    },
     "switchTo": "切换语言为 {{name}}"
   },
   "theme": {
@@ -45,7 +45,13 @@
   "status": {
     "active": "正常",
     "pending": "待审批",
-    "disabled": "已停用"
+    "disabled": "已停用",
+    "missing": "无账户"
+  },
+  "tokenState": {
+    "none": "未绑定",
+    "active": "有效",
+    "invalid": "需要新令牌"
   },
   "role": {
     "owner": "所有者",

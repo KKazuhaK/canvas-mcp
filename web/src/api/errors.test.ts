@@ -6,35 +6,67 @@ import { resources } from '@/i18n/options'
 import { codeText, errorText } from '@/utils/errorText'
 
 describe('closed error code set', () => {
-  it('has the 24 server codes from the contract', () => {
+  it('has the server codes of the API plus the sign-in page codes', () => {
     expect([...API_ERROR_CODES].sort()).toEqual(
       [
-        'access_denied',
-        'canvas_unavailable',
-        'consent_expired',
-        'csrf_invalid',
-        'forbidden',
-        'grant_revoked',
-        'identity_in_use',
-        'internal_error',
-        'last_identity',
-        'link_requires_recent_login',
+        // session and transport
         'not_authenticated',
-        'not_found',
-        'not_provisioned',
+        'csrf_invalid',
         'origin_not_allowed',
+        'reauth_required',
+        'forbidden',
         'pending_approval',
-        'provider_error',
+        'access_disabled',
+        'method_not_allowed',
+        'unsupported_media_type',
+        'payload_too_large',
+        'malformed_request',
+        'validation_failed',
+        'not_found',
         'rate_limited',
-        'signups_paused',
-        'state_invalid',
+        'token_store_unavailable',
+        'internal_error',
+        // Canvas token
         'token_invalid_format',
         'token_rejected',
-        'token_store_unavailable',
-        'validation_failed',
+        'token_unreadable',
+        'canvas_unavailable',
+        'identity_change_required',
+        'recheck_not_allowed',
+        // schools
+        'school_required',
+        'school_invalid',
+        'school_not_offered',
+        'school_not_in_directory',
+        'school_unresolvable',
+        'school_address_blocked',
+        'school_selection_unverified',
+        'directory_unavailable',
+        // write tools
         'write_tool_not_allowed',
+        'write_tools_unavailable',
+        // admin
+        'last_owner',
+        'cannot_disable_self',
+        // only on the sign-in page
+        'state_invalid',
+        'provider_error',
+        'sign_in_incomplete',
+        'sign_in_unverified',
+        'wrong_tenant',
+        'wrong_client',
+        'bad_subject',
+        'bad_roles',
+        'access_denied',
+        'signups_paused',
       ].sort(),
     )
+  })
+
+  it('no longer knows the codes of features that are not built (identities, grants, consent)', () => {
+    for (const gone of ['not_provisioned', 'identity_in_use', 'last_identity', 'link_requires_recent_login', 'consent_expired', 'grant_revoked']) {
+      expect(isApiErrorCode(gone), gone).toBe(false)
+    }
   })
 
   it('accepts only members of the set', () => {
@@ -48,6 +80,7 @@ describe('closed error code set', () => {
 
   it('maps anything else to internal_error for display', () => {
     expect(displayCode('access_denied')).toBe('access_denied')
+    expect(displayCode('wrong_tenant')).toBe('wrong_tenant')
     expect(displayCode('<script>alert(1)</script>')).toBe('internal_error')
     expect(displayCode(null)).toBe('internal_error')
   })

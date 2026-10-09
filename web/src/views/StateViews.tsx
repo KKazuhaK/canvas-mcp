@@ -57,6 +57,11 @@ export function ForbiddenNotice() {
   return <StateNotice severity="warning" titleKey="common:states.forbidden.title" bodyKey="common:states.forbidden.body" />
 }
 
+/** Inline (inside an existing layout). */
+export function NotFoundNotice() {
+  return <StateNotice severity="info" titleKey="common:states.notFound.title" bodyKey="common:states.notFound.body" />
+}
+
 export function NotFoundView() {
   return (
     <PublicLayout>

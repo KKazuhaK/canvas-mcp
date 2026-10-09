@@ -6,8 +6,8 @@ import { toApiError } from './errors'
  *
  * - No Authorization header, no token refresh, nothing in localStorage: the
  *   session lives in an HttpOnly cookie the page cannot read.
- * - Mutating verbs carry X-CSRF-Token, taken from the in-memory result of
- *   GET /me. The value is never persisted anywhere.
+ * - Mutating verbs (and the school search GET) carry X-CSRF-Token, taken from the
+ *   in-memory result of GET /me. The value is never persisted anywhere.
  * - Every failure is rethrown as an ApiError, which holds only status, a closed
  *   code and numeric/short params. The axios error (and its `config.data`, which
  *   may carry a Canvas token) is dropped.
@@ -15,6 +15,13 @@ import { toApiError } from './errors'
 export const API_BASE_URL = '/account/api'
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
+/**
+ * GET routes that still need the CSRF header: the school search makes outbound
+ * calls and spends the per-account search budget, so the server treats it like a
+ * mutation.
+ */
+const CSRF_GET_PATHS = new Set(['/me/schools/search'])
 
 let csrfToken: string | null = null
 
@@ -52,7 +59,9 @@ export const http = axios.create({
 
 http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   const method = (config.method ?? 'get').toUpperCase()
-  if (MUTATING_METHODS.has(method) && csrfToken !== null) {
+  const needsCsrf =
+    MUTATING_METHODS.has(method) || (method === 'GET' && CSRF_GET_PATHS.has(config.url ?? ''))
+  if (needsCsrf && csrfToken !== null) {
     config.headers.set('X-CSRF-Token', csrfToken)
   }
   return config

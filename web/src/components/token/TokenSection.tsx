@@ -14,11 +14,12 @@ import { Trans, useTranslation } from 'react-i18next'
 import type { CanvasTokenStatus } from '@/api/types'
 import ConfirmDialog from '@/components/ConfirmDialog'
 import ErrorNotice from '@/components/ErrorNotice'
+import ExternalLink from '@/components/ExternalLink'
 import TimeText from '@/components/TimeText'
-import { useDeleteCanvasToken, useVerifyCanvasToken } from '@/query/hooks'
+import { useDeleteCanvasToken, useRecheckCanvasToken } from '@/query/hooks'
 import { useLanguage } from '@/stores/language'
 import { useToast } from '@/stores/toast'
-import { formatDateTime } from '@/utils/time'
+import { formatCalendarDate, formatDateTime } from '@/utils/time'
 import TokenForm from './TokenForm'
 
 function EnrollCard() {
@@ -60,9 +61,11 @@ function Detail({ label, children }: { label: string; children: ReactNode }) {
 
 function EnrolledCard({ canvas }: { canvas: CanvasTokenStatus }) {
   const { t } = useTranslation()
-  const verify = useVerifyCanvasToken()
+  const lang = useLanguage((s) => s.lang)
+  const recheck = useRecheckCanvasToken()
   const remove = useDeleteCanvasToken()
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const expires = formatCalendarDate(canvas.expires_on, lang)
 
   return (
     <Card component="section" aria-labelledby="enrolled-title">
@@ -83,8 +86,29 @@ function EnrolledCard({ canvas }: { canvas: CanvasTokenStatus }) {
               </Typography>
             ) : null}
           </Detail>
+          {canvas.school ? (
+            <Detail label={t('account:enrolled.school')}>
+              {canvas.school.name}
+              {canvas.school.name !== canvas.school.host ? (
+                <Typography component="span" variant="body2" color="text.secondary">
+                  {' '}
+                  ({canvas.school.host})
+                </Typography>
+              ) : null}
+              {!canvas.school.offered ? (
+                <Typography component="span" variant="body2" color="warning.main">
+                  {' '}
+                  {t('account:enrolled.schoolNotOffered')}
+                </Typography>
+              ) : null}
+            </Detail>
+          ) : null}
+          {expires ? <Detail label={t('account:enrolled.expires')}>{expires}</Detail> : null}
           <Detail label={t('account:enrolled.lastUsed')}>
             <TimeText iso={canvas.last_used_at} />
+          </Detail>
+          <Detail label={t('account:enrolled.lastVerified')}>
+            <TimeText iso={canvas.last_verified_at} />
           </Detail>
           <Detail label={t('account:enrolled.enrolled')}>
             <TimeText iso={canvas.enrolled_at} />
@@ -92,24 +116,31 @@ function EnrolledCard({ canvas }: { canvas: CanvasTokenStatus }) {
           <Detail label={t('account:enrolled.updated')}>
             <TimeText iso={canvas.updated_at} />
           </Detail>
-          <Detail label={t('account:enrolled.lastChecked')}>
-            <TimeText iso={canvas.last_checked_at} />
-          </Detail>
         </Box>
-        {verify.isError ? <ErrorNotice error={verify.error} /> : null}
+        {canvas.settings_url ? (
+          <Typography variant="body2">
+            <ExternalLink href={canvas.settings_url}>{t('account:enrolled.settingsLink')}</ExternalLink>
+          </Typography>
+        ) : null}
+        {recheck.isError ? <ErrorNotice error={recheck.error} /> : null}
         {remove.isError && !confirmOpen ? <ErrorNotice error={remove.error} /> : null}
         <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-          <Button
-            variant="outlined"
-            disabled={verify.isPending}
-            onClick={() =>
-              verify.mutate(undefined, {
-                onSuccess: () => useToast.getState().show(t('account:enrolled.rechecked')),
-              })
-            }
-          >
-            {verify.isPending ? t('account:enrolled.rechecking') : t('account:enrolled.recheck')}
-          </Button>
+          {canvas.recheck_allowed ? (
+            <Button
+              variant="outlined"
+              disabled={recheck.isPending}
+              onClick={() =>
+                recheck.mutate(undefined, {
+                  onSuccess: ({ result }) =>
+                    useToast
+                      .getState()
+                      .show(t(result === 'restored' ? 'account:enrolled.restored' : 'account:enrolled.unchanged')),
+                })
+              }
+            >
+              {recheck.isPending ? t('account:enrolled.rechecking') : t('account:enrolled.recheck')}
+            </Button>
+          ) : null}
           <Button color="error" onClick={() => setConfirmOpen(true)}>
             {t('account:enrolled.delete.button')}
           </Button>
@@ -164,27 +195,44 @@ function ReplaceDisclosure({ defaultExpanded }: { defaultExpanded: boolean }) {
   )
 }
 
-/** The Canvas token UI for every enrollment state. Shared by the home page and /token. */
-export default function TokenSection({ canvas }: { canvas: CanvasTokenStatus }) {
+function InvalidBanner({ canvas }: { canvas: CanvasTokenStatus }) {
   const { t } = useTranslation()
   const lang = useLanguage((s) => s.lang)
+  const since = formatDateTime(canvas.invalid_since, lang)
+  const reason = canvas.invalid_reason ?? 'canvas_token_rejected'
+  return (
+    <Alert severity="warning" role="alert">
+      <AlertTitle>{t(`account:invalid.${reason}.title`)}</AlertTitle>
+      {t(`account:invalid.${reason}.body`)}
+      {since ? ` ${t('account:invalid.since', { date: since })}` : ''}
+    </Alert>
+  )
+}
 
+function ExpiryBanner({ canvas }: { canvas: CanvasTokenStatus }) {
+  const { t } = useTranslation()
+  const lang = useLanguage((s) => s.lang)
+  if (canvas.expiry_notice === 'none') return null
+  const date = formatCalendarDate(canvas.expires_on, lang) ?? ''
+  const passed = canvas.expiry_notice === 'passed'
+  return (
+    <Alert severity={passed ? 'warning' : 'info'} role="note">
+      <AlertTitle>{passed ? t('account:expiry.passedTitle') : t('account:expiry.soonTitle')}</AlertTitle>
+      {passed ? t('account:expiry.passedBody', { date }) : t('account:expiry.soonBody', { date })}
+    </Alert>
+  )
+}
+
+/** The Canvas token UI for every enrollment state. Shared by the home page and /token. */
+export default function TokenSection({ canvas }: { canvas: CanvasTokenStatus }) {
   if (canvas.state === 'none') return <EnrollCard />
 
-  const sinceText = formatDateTime(canvas.invalid_since, lang)
   return (
     <Box sx={{ display: 'grid', gap: 2 }}>
-      {canvas.state === 'invalid' ? (
-        <Alert severity="warning" role="alert">
-          <AlertTitle>{t('account:invalid.title')}</AlertTitle>
-          {sinceText
-            ? t('account:invalid.body', { date: sinceText })
-            : t('account:invalid.bodyNoDate')}
-        </Alert>
-      ) : null}
-      {canvas.state === 'unknown' ? <Alert severity="info" role="note">{t('account:unknown.body')}</Alert> : null}
+      {canvas.state === 'invalid' ? <InvalidBanner canvas={canvas} /> : null}
+      <ExpiryBanner canvas={canvas} />
       <EnrolledCard canvas={canvas} />
-      {/* Open by default when Canvas rejected the stored token: the fix is the next step. */}
+      {/* Open by default when the stored token is unusable: the fix is the next step. */}
       <ReplaceDisclosure key={canvas.state} defaultExpanded={canvas.state === 'invalid'} />
     </Box>
   )

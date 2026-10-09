@@ -4,10 +4,16 @@
     "signedInAs": "当前登录：{{name}}"
   },
   "school": {
-    "title": "学校",
     "label": "学校",
-    "value": "默认 Canvas 站点",
-    "body": "选择学校的功能即将推出。目前你的令牌会在本服务器所配置的 Canvas 站点上校验。"
+    "pickHelper": "你的令牌所属的 Canvas 站点。",
+    "searchFirst": "请先搜索你的学校。",
+    "noneOffered": "本服务器暂未列出任何学校。",
+    "searchLabel": "搜索其他学校",
+    "searchHelper": "{{min}} 到 {{max}} 个字符，例如学校名称。",
+    "search": "搜索",
+    "searching": "搜索中…",
+    "results": "搜索结果",
+    "noResults": "没有匹配的学校。"
   },
   "enroll": {
     "title": "绑定你的 Canvas 令牌",
@@ -19,21 +25,33 @@
     "warning": "绝不要把令牌粘贴到 Claude 对话里。",
     "field": "Canvas 访问令牌",
     "helper": "{{min}} 到 {{max}} 个字符。令牌会先在 Canvas 上校验，加密保存，之后不会再显示。",
+    "expires": "到期日期（可选）",
+    "expiresHelper": "你在 Canvas 中设置的日期。仅用于在令牌失效前提醒你。",
     "submit": "验证并保存",
     "submitting": "验证中…",
-    "saved": "Canvas 令牌已保存。"
+    "saved": "Canvas 令牌已保存。",
+    "identityChange": {
+      "title": "要换成另一个 Canvas 用户吗？",
+      "body": "这个令牌属于 {{next}}，而当前绑定的令牌属于 {{enrolled}}。继续的话，Claude 之后会以 {{next}} 的身份读取 Canvas。",
+      "confirm": "替换令牌"
+    }
   },
   "enrolled": {
     "title": "Canvas 令牌已绑定",
     "canvasUser": "Canvas 用户",
     "canvasUserId": "id {{id}}",
+    "school": "学校",
+    "schoolNotOffered": "（本服务器已不再提供）",
+    "expires": "到期日期",
     "lastUsed": "最近使用",
+    "lastVerified": "最近一次与 Canvas 核对",
     "enrolled": "绑定时间",
     "updated": "更新时间",
-    "lastChecked": "最近检查",
+    "settingsLink": "打开学校的 Canvas 设置页",
     "recheck": "重新检查令牌",
     "rechecking": "检查中…",
-    "rechecked": "已检查令牌。",
+    "restored": "Canvas 又接受这个令牌了。",
+    "unchanged": "没有变化。",
     "replace": {
       "summary": "替换令牌",
       "submit": "验证并替换"
@@ -46,18 +64,30 @@
     }
   },
   "invalid": {
-    "title": "Canvas 拒绝了你的令牌",
-    "body": "自 {{date}} 起，Canvas 一直拒绝你的令牌。在你替换令牌之前，Claude 的 Canvas 工具将保持禁用。",
-    "bodyNoDate": "Canvas 拒绝了你的令牌。在你替换令牌之前，Claude 的 Canvas 工具将保持禁用。",
-    "replaceCta": "替换令牌"
+    "since": "自 {{date}} 起。",
+    "canvas_token_rejected": {
+      "title": "Canvas 拒绝了你的令牌",
+      "body": "在你替换令牌之前，Claude 的 Canvas 工具将保持禁用。如果 Canvas 又接受了这个令牌，可以重新检查。"
+    },
+    "decrypt_failed": {
+      "title": "无法读取已保存的令牌",
+      "body": "在你添加新令牌之前，Claude 的 Canvas 工具将保持禁用。"
+    },
+    "revoked_by_admin": {
+      "title": "管理员停用了你的令牌",
+      "body": "在你添加新令牌之前，Claude 的 Canvas 工具将保持禁用。"
+    }
   },
-  "unknown": {
-    "body": "刚才无法在 Canvas 上校验此令牌。请稍后重新检查。"
+  "expiry": {
+    "soonTitle": "你的 Canvas 令牌即将到期",
+    "soonBody": "你记录的到期日期是 {{date}}。请在此之前在 Canvas 创建新令牌并替换这个。",
+    "passedTitle": "你记录的到期日期已过",
+    "passedBody": "你记录的到期日期是 {{date}}。Canvas 现在可能会拒绝它，请换成新令牌。"
   },
   "writeTools": {
     "title": "写入工具",
     "intro": "除非你启用特定的工具，否则 Claude 只能读取 Canvas，不能以你的身份做修改。每个工具默认关闭。",
-    "serverDisabled": "服务器所有者尚未启用写入工具，因此下面的工具都无法开启。",
+    "serverDisabled": "本服务器没有开放任何写入工具，因此下面的工具都无法开启。",
     "layers": {
       "title": "由谁决定",
       "server": "服务器允许",
@@ -66,8 +96,9 @@
       "courseNote": "按课程逐个判断"
     },
     "layersNote": "只有三方都同意，工具才会运行。预览、确认、课程策略以及你所用客户端的批准提示，对每一次修改依然有效。",
+    "freshNote": "开启工具需要最近 10 分钟内登录过，关闭则不需要。AI 应用可能会缓存工具列表，修改后请开启新的对话。",
     "groups": {
-      "planner_calendar": {
+      "planner": {
         "title": "计划与日历",
         "body": "你自己的备注、计划打勾和个人日历事件。"
       },
@@ -79,23 +110,33 @@
         "title": "模块完成",
         "body": "把模块条目标记为已完成。"
       },
-      "messages": {
+      "inbox": {
         "title": "消息",
         "body": "发送并回复 Canvas 收件箱消息。"
+      },
+      "other": {
+        "title": "其他写入工具",
+        "body": "本服务器提供的其他会修改内容的工具。"
       }
     },
-    "risk": {
-      "low": "低风险",
-      "medium": "中风险",
-      "high": "高风险"
+    "effect": {
+      "canvas_write": "修改 Canvas",
+      "local_write": "在服务器上写文件"
     },
     "sendsAsYou": "以你的名义发送",
-    "notAllowed": "本服务器不允许",
+    "notAllowed": "本服务器未开放",
+    "keptNotOffered": "已开启，但本服务器已不再开放",
+    "keptList": "已保留但本服务器未开放：",
     "unsaved": "有未保存的更改。",
     "discard": "放弃更改",
     "save": "保存更改",
     "saving": "保存中…",
     "saved": "写入工具已保存。",
+    "unchanged": "没有变化。",
+    "turnAllOff": "全部关闭",
+    "turnAllOffTitle": "关闭所有写入工具？",
+    "turnAllOffBody": "Claude 将恢复为只读。以后可以再重新开启。",
+    "allOff": "所有写入工具已关闭。",
     "tools": {
       "submit_assignment": {
         "label": "提交作业",
@@ -144,62 +185,29 @@
     },
     "unknownTool": "此版本的应用没有这个工具的说明。"
   },
-  "identities": {
-    "title": "登录方式",
-    "intro": "你可以用来登录此账户的提供方。",
-    "currentSession": "当前会话",
-    "verified": "邮箱已验证",
-    "unverified": "邮箱未验证",
-    "linked": "绑定于 {{date}}",
-    "lastLogin": "最近登录 {{date}}",
-    "neverLoggedIn": "从未用于登录",
-    "linkTitle": "绑定其他提供方",
-    "linkWith": "绑定 {{name}}",
-    "noLinkable": "没有其他可绑定的提供方。",
-    "unlink": "解除绑定",
-    "unlinkLast": "不能解除你唯一的登录方式。",
-    "unlinkConfirmTitle": "解除绑定 {{name}}？",
-    "unlinkConfirmBody": "之后你将无法再用它登录此账户。",
-    "unlinked": "已解除登录方式的绑定。",
-    "reauth": {
-      "title": "请重新登录以绑定提供方",
-      "body": "出于安全考虑，绑定需要最近 10 分钟内登录过。",
-      "cta": "重新登录"
-    }
-  },
-  "grants": {
-    "title": "已连接的应用",
-    "intro": "可以以你的身份使用 Canvas MCP 的应用。撤销某个应用会立即切断它的访问。",
-    "emptyTitle": "还没有连接任何应用",
-    "emptyBody": "在 Claude 中添加下方的连接器地址即可连接应用。",
-    "connected": "连接于 {{date}}",
-    "lastUsed": "最近使用 {{date}}",
-    "neverUsed": "从未使用",
-    "revokedOn": "已于 {{date}} 撤销",
-    "revoke": "撤销",
-    "confirmTitle": "撤销 {{client}} 的访问权限？",
-    "confirmBody": "在你再次批准之前，{{client}} 将无法使用。",
-    "done": "已撤销访问权限。"
-  },
   "activity": {
     "title": "最近登录",
-    "intro": "你最近 20 次登录尝试。",
+    "intro": "你最近 20 次登录。",
     "columns": {
       "time": "时间",
       "provider": "提供方",
       "result": "结果",
-      "reason": "原因",
-      "ip": "IP 地址",
-      "device": "设备"
+      "reason": "原因"
     },
     "outcome": {
       "success": "已登录",
-      "denied": "被拒绝",
-      "error": "出错"
+      "pending": "等待审批",
+      "refused": "被拒绝"
     },
-    "ipUnknown": "未知",
+    "reason": {
+      "account_created": "账户已创建",
+      "activated": "账户已获批准",
+      "access_disabled": "访问已被关闭",
+      "signups_paused": "暂停注册",
+      "pending_approval": "等待审批"
+    },
     "empty": "还没有登录记录。",
     "sessionsTitle": "会话",
-    "sessionsBody": "退出所有设备会结束所有会话，包括当前这个。"
+    "sessionsBody": "退出登录会结束这台设备上的会话。"
   }
 }

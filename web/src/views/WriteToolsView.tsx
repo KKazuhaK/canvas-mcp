@@ -9,22 +9,18 @@ import Switch from '@mui/material/Switch'
 import Typography from '@mui/material/Typography'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { RiskLevel, WriteTool, WriteToolGroup, WriteToolsResponse } from '@/api/types'
+import type { WriteTool, WriteToolsResponse } from '@/api/types'
+import ConfirmDialog from '@/components/ConfirmDialog'
 import ErrorNotice from '@/components/ErrorNotice'
 import PageHeader from '@/components/PageHeader'
-import { useSaveWriteTools, useWriteTools } from '@/query/hooks'
+import { useSaveWriteTools, useTurnOffWriteTools, useWriteTools } from '@/query/hooks'
 import { useToast } from '@/stores/toast'
 import { PageSkeleton } from './StateViews'
 
-const GROUP_ORDER: WriteToolGroup[] = ['planner_calendar', 'submissions', 'modules', 'messages']
-const RISK_COLOR: Record<RiskLevel, 'success' | 'warning' | 'error'> = {
-  low: 'success',
-  medium: 'warning',
-  high: 'error',
-}
-
 function enabledSet(data: WriteToolsResponse): Set<string> {
-  return new Set(data.tools.filter((tool) => tool.enabled).map((tool) => tool.name))
+  return new Set(
+    data.groups.flatMap((group) => group.tools.filter((tool) => tool.enabled).map((tool) => tool.name)),
+  )
 }
 
 function sameSet(a: Set<string>, b: Set<string>): boolean {
@@ -58,6 +54,9 @@ function LayerExplainer() {
         <Typography variant="body2" color="text.secondary">
           {t('account:writeTools.layersNote')}
         </Typography>
+        <Typography variant="body2" color="text.secondary">
+          {t('account:writeTools.freshNote')}
+        </Typography>
       </CardContent>
     </Card>
   )
@@ -65,11 +64,13 @@ function LayerExplainer() {
 
 function ToolRow({
   tool,
+  groupId,
   checked,
   disabled,
   onToggle,
 }: {
   tool: WriteTool
+  groupId: string
   checked: boolean
   disabled: boolean
   onToggle: (next: boolean) => void
@@ -89,7 +90,7 @@ function ToolRow({
         justifyContent: 'space-between',
         gap: 2,
         py: 1.5,
-        opacity: tool.server_allowed ? 1 : 0.7,
+        opacity: tool.offered ? 1 : 0.7,
       }}
     >
       <Box sx={{ minWidth: 0 }}>
@@ -103,14 +104,17 @@ function ToolRow({
           <Chip
             size="small"
             variant="outlined"
-            color={RISK_COLOR[tool.risk]}
-            label={t(`account:writeTools.risk.${tool.risk}`)}
+            color={tool.effect === 'local_write' ? 'warning' : 'default'}
+            label={t(`account:writeTools.effect.${tool.effect}`)}
           />
-          {tool.group === 'messages' ? (
+          {groupId === 'inbox' ? (
             <Chip size="small" color="warning" label={t('account:writeTools.sendsAsYou')} />
           ) : null}
-          {!tool.server_allowed ? (
-            <Chip size="small" label={t('account:writeTools.notAllowed')} />
+          {!tool.offered ? (
+            <Chip
+              size="small"
+              label={tool.enabled ? t('account:writeTools.keptNotOffered') : t('account:writeTools.notAllowed')}
+            />
           ) : null}
         </Box>
       </Box>
@@ -129,7 +133,9 @@ export default function WriteToolsView() {
   const { t } = useTranslation()
   const query = useWriteTools()
   const save = useSaveWriteTools()
+  const turnOff = useTurnOffWriteTools()
   const [selected, setSelected] = useState<Set<string> | null>(null)
+  const [confirmOff, setConfirmOff] = useState(false)
 
   // Seed (and re-seed after a save) from the server's answer.
   useEffect(() => {
@@ -170,7 +176,8 @@ export default function WriteToolsView() {
 
   const data = query.data
   const current = selected as Set<string>
-  const locked = !data.server_enabled
+  const busy = save.isPending || turnOff.isPending
+  const anyOn = enabledSet(data).size > 0
 
   function toggle(name: string, next: boolean) {
     setSelected((prev) => {
@@ -182,11 +189,18 @@ export default function WriteToolsView() {
   }
 
   function onSave() {
-    // Only names the server allows are sent; the server rejects the rest anyway.
-    const allowed = new Set(data.tools.filter((tool) => tool.server_allowed).map((tool) => tool.name))
-    const names = [...current].filter((name) => allowed.has(name)).sort()
+    // Only tools the server offers are sent; a tool that is on but no longer offered
+    // stays as it is (the server keeps it), and "Turn all off" is how it goes away.
+    const offered = new Set(
+      data.groups.flatMap((group) => group.tools.filter((tool) => tool.offered).map((tool) => tool.name)),
+    )
+    const names = [...current].filter((name) => offered.has(name)).sort()
+    turnOff.reset()
     save.mutate(names, {
-      onSuccess: () => useToast.getState().show(t('account:writeTools.saved')),
+      onSuccess: ({ result }) =>
+        useToast
+          .getState()
+          .show(t(result === 'saved' ? 'account:writeTools.saved' : 'account:writeTools.unchanged')),
     })
   }
 
@@ -194,28 +208,32 @@ export default function WriteToolsView() {
     <>
       <PageHeader title={t('account:writeTools.title')} subtitle={t('account:writeTools.intro')} />
       <Box sx={{ display: 'grid', gap: 2 }}>
-        {locked ? <Alert severity="warning" role="note">{t('account:writeTools.serverDisabled')}</Alert> : null}
+        {!data.offered_any ? (
+          <Alert severity="warning" role="note">
+            {t('account:writeTools.serverDisabled')}
+          </Alert>
+        ) : null}
         <LayerExplainer />
 
-        {GROUP_ORDER.map((group) => {
-          const tools = data.tools.filter((tool) => tool.group === group)
-          if (tools.length === 0) return null
+        {data.groups.map((group) => {
+          if (group.tools.length === 0) return null
           return (
-            <Card key={group} component="section" aria-labelledby={`group-${group}`}>
+            <Card key={group.id} component="section" aria-labelledby={`group-${group.id}`}>
               <CardContent>
-                <Typography id={`group-${group}`} variant="h3" component="h2">
-                  {t(`account:writeTools.groups.${group}.title`)}
+                <Typography id={`group-${group.id}`} variant="h3" component="h2">
+                  {t(`account:writeTools.groups.${group.id}.title`)}
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
-                  {t(`account:writeTools.groups.${group}.body`)}
+                  {t(`account:writeTools.groups.${group.id}.body`)}
                 </Typography>
                 <Box component="ul" sx={{ listStyle: 'none', m: 0, p: 0, mt: 1 }}>
-                  {tools.map((tool) => (
+                  {group.tools.map((tool) => (
                     <ToolRow
                       key={tool.name}
                       tool={tool}
+                      groupId={group.id}
                       checked={current.has(tool.name)}
-                      disabled={locked || !tool.server_allowed || save.isPending}
+                      disabled={!data.editable || !tool.offered || busy}
                       onToggle={(next) => toggle(tool.name, next)}
                     />
                   ))}
@@ -225,7 +243,20 @@ export default function WriteToolsView() {
           )
         })}
 
+        {data.kept_not_offered.length > 0 ? (
+          <Typography variant="body2" color="text.secondary">
+            {t('account:writeTools.keptList')}{' '}
+            {data.kept_not_offered.map((name, index) => (
+              <span key={name}>
+                {index > 0 ? ', ' : ''}
+                <code>{name}</code>
+              </span>
+            ))}
+          </Typography>
+        ) : null}
+
         {save.isError ? <ErrorNotice error={save.error} /> : null}
+        {turnOff.isError && !confirmOff ? <ErrorNotice error={turnOff.error} /> : null}
 
         <Box
           sx={{
@@ -239,17 +270,13 @@ export default function WriteToolsView() {
             bgcolor: 'background.default',
           }}
         >
-          <Button
-            variant="contained"
-            disabled={!dirty || save.isPending || locked}
-            onClick={onSave}
-          >
+          <Button variant="contained" disabled={!dirty || busy || !data.editable} onClick={onSave}>
             {save.isPending ? t('account:writeTools.saving') : t('account:writeTools.save')}
           </Button>
           {dirty ? (
             <>
               <Button
-                disabled={save.isPending}
+                disabled={busy}
                 onClick={() => {
                   save.reset()
                   setSelected(enabledSet(data))
@@ -262,8 +289,35 @@ export default function WriteToolsView() {
               </Typography>
             </>
           ) : null}
+          {anyOn ? (
+            <Button color="error" disabled={busy} onClick={() => setConfirmOff(true)} sx={{ ml: 'auto' }}>
+              {t('account:writeTools.turnAllOff')}
+            </Button>
+          ) : null}
         </Box>
       </Box>
+
+      <ConfirmDialog
+        open={confirmOff}
+        title={t('account:writeTools.turnAllOffTitle')}
+        body={t('account:writeTools.turnAllOffBody')}
+        confirmLabel={t('account:writeTools.turnAllOff')}
+        pending={turnOff.isPending}
+        error={turnOff.error}
+        onClose={() => {
+          turnOff.reset()
+          setConfirmOff(false)
+        }}
+        onConfirm={() => {
+          save.reset()
+          turnOff.mutate(undefined, {
+            onSuccess: () => {
+              setConfirmOff(false)
+              useToast.getState().show(t('account:writeTools.allOff'))
+            },
+          })
+        }}
+      />
     </>
   )
 }

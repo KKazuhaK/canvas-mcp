@@ -10,7 +10,6 @@ import type { MeResponse } from '@/api/types'
 import ErrorNotice from '@/components/ErrorNotice'
 import McpUrlCard from '@/components/McpUrlCard'
 import PageHeader from '@/components/PageHeader'
-import SchoolCard from '@/components/token/SchoolCard'
 import TokenSection from '@/components/token/TokenSection'
 import AccountShell from '@/layouts/AccountShell'
 import PublicLayout from '@/layouts/PublicLayout'
@@ -28,7 +27,7 @@ function SignedOutHome() {
           </Typography>
           <Typography>{t('auth:signedOut.body')}</Typography>
           <div>
-            <Button component={RouterLink} to="/login" variant="contained" size="large">
+            <Button component={RouterLink} to="/sign-in" variant="contained" size="large">
               {t('auth:signedOut.cta')}
             </Button>
           </div>
@@ -46,13 +45,11 @@ function AccountHome({ me }: { me: MeResponse }) {
       <PageHeader
         title={t('account:home.title')}
         subtitle={t('account:home.signedInAs', {
-          name: me.account.email ?? me.account.display_name,
+          name: me.account.username || me.account.display_name,
         })}
       />
       <Box sx={{ display: 'grid', gap: 2 }}>
-        <TokenSection canvas={me.canvas} />
-        {/* Extension point: the school picker card (see SchoolCard). */}
-        <SchoolCard />
+        {me.canvas ? <TokenSection canvas={me.canvas} /> : null}
         <McpUrlCard />
       </Box>
     </>

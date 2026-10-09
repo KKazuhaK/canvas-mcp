@@ -3,48 +3,62 @@ import Button from '@mui/material/Button'
 import MenuItem from '@mui/material/MenuItem'
 import TextField from '@mui/material/TextField'
 import Typography from '@mui/material/Typography'
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { AuditAction, AuditEntry } from '@/api/types'
+import type { AuditDetailValue, AuditEntry } from '@/api/types'
 import ErrorNotice from '@/components/ErrorNotice'
 import ResponsiveTable, { type Column } from '@/components/ResponsiveTable'
 import TimeText from '@/components/TimeText'
 import { useAdminAudit } from '@/query/hooks'
-import { useDebounced } from '@/utils/useDebounced'
 import { PageSkeleton } from '../StateViews'
 
-const ACTIONS: AuditAction[] = [
-  'login',
-  'approve',
-  'disable',
-  'enable',
-  'set_role',
-  'link',
-  'unlink',
-  'write_tool_toggle',
-  'token_enroll',
-  'token_delete',
-  'grant_revoke',
-  'enrollment_revoke',
-]
+/** The audit actions the server writes (token_store.AUDIT_ACTIONS); anything else shows as "Other". */
+const KNOWN_ACTIONS = [
+  'account_created',
+  'account_created_by_operator',
+  'account_activated',
+  'account_approved',
+  'account_denied',
+  'account_disabled',
+  'account_enabled',
+  'role_changed',
+  'token_enrolled',
+  'token_replaced',
+  'token_deleted',
+  'token_marked_invalid',
+  'write_tools_changed',
+  'schema_migrated',
+  'pending_purged',
+] as const
 
-/** Detail is a flat map of short scalars; render it as plain "key: value" text. */
-function detailText(detail: AuditEntry['detail']): string {
-  if (!detail) return '–'
-  return Object.entries(detail)
-    .map(([k, v]) => `${k}: ${String(v)}`)
-    .join(', ')
+function isKnown(action: string): boolean {
+  return (KNOWN_ACTIONS as readonly string[]).includes(action)
 }
 
-/** /admin/audit: filterable, cursor-paginated audit log. */
+function detailValue(value: AuditDetailValue): string {
+  return Array.isArray(value) ? value.join(', ') : String(value)
+}
+
+/** Detail is a flat map of short scalars (or string lists); render it as plain "key: value" text. */
+function detailText(entry: AuditEntry): string {
+  const parts = Object.entries(entry.detail).map(([k, v]) => `${k}: ${detailValue(v)}`)
+  if (entry.reason) parts.unshift(`reason: ${entry.reason}`)
+  return parts.length > 0 ? parts.join(', ') : '–'
+}
+
+/** /admin/audit: the audit log, newest first, 100 at a time. The action filter narrows the loaded entries. */
 export default function AdminAuditView() {
   const { t } = useTranslation()
-  const [action, setAction] = useState<AuditAction | ''>('')
-  const [actor, setActor] = useState('')
-  const debouncedActor = useDebounced(actor.trim(), 300)
-  const filters = useMemo(() => ({ action, actor: debouncedActor }), [action, debouncedActor])
-  const audit = useAdminAudit(filters)
-  const rows = audit.data?.pages.flatMap((page) => page.entries) ?? []
+  const [action, setAction] = useState('')
+  const audit = useAdminAudit()
+  const loaded = audit.data?.pages.flatMap((page) => page.entries) ?? []
+  const rows = loaded.filter((entry) => action === '' || entry.action === action)
+
+  function actorText(entry: AuditEntry): string {
+    if (entry.actor.kind === 'operator') return t('admin:audit.operator')
+    if (entry.actor.kind === 'system') return t('admin:audit.system')
+    return entry.actor.name ?? entry.actor.key ?? '–'
+  }
 
   const columns: Column<AuditEntry>[] = [
     {
@@ -56,24 +70,24 @@ export default function AdminAuditView() {
     {
       key: 'actor',
       header: t('admin:audit.columns.actor'),
-      render: (e) => e.actor_name ?? t('admin:audit.system'),
+      render: (e) => actorText(e),
     },
     {
       key: 'action',
       header: t('admin:audit.columns.action'),
-      render: (e) => t(`admin:audit.actions.${e.action}`),
+      render: (e) => (isKnown(e.action) ? t(`admin:audit.actions.${e.action}`) : t('admin:audit.actions.other')),
     },
     {
       key: 'target',
       header: t('admin:audit.columns.target'),
-      render: (e) => e.target_name ?? '–',
+      render: (e) => (e.target ? (e.target.name ?? e.target.key) : '–'),
     },
     {
       key: 'detail',
       header: t('admin:audit.columns.detail'),
       render: (e) => (
         <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>
-          {detailText(e.detail)}
+          {detailText(e)}
         </Typography>
       ),
     },
@@ -90,23 +104,17 @@ export default function AdminAuditView() {
           select
           label={t('admin:audit.actionFilter')}
           value={action}
-          onChange={(e) => setAction(e.target.value as AuditAction | '')}
-          sx={{ flex: '1 1 220px' }}
+          onChange={(e) => setAction(e.target.value)}
+          helperText={t('admin:audit.filterNote')}
+          sx={{ flex: '1 1 260px', maxWidth: 360 }}
         >
           <MenuItem value="">{t('admin:audit.allActions')}</MenuItem>
-          {ACTIONS.map((a) => (
+          {KNOWN_ACTIONS.map((a) => (
             <MenuItem key={a} value={a}>
               {t(`admin:audit.actions.${a}`)}
             </MenuItem>
           ))}
         </TextField>
-        <TextField
-          size="small"
-          label={t('admin:audit.actorFilter')}
-          value={actor}
-          onChange={(e) => setActor(e.target.value)}
-          sx={{ flex: '1 1 220px' }}
-        />
       </Box>
 
       {audit.isPending ? <PageSkeleton /> : null}
@@ -119,7 +127,7 @@ export default function AdminAuditView() {
           label={t('admin:audit.title')}
           columns={columns}
           rows={rows}
-          rowKey={(e) => e.id}
+          rowKey={(e) => String(e.id)}
         />
       ) : null}
       {audit.hasNextPage ? (

@@ -1,6 +1,4 @@
 import AdminPanelSettingsIcon from '@mui/icons-material/AdminPanelSettings'
-import AppsIcon from '@mui/icons-material/Apps'
-import FingerprintIcon from '@mui/icons-material/Fingerprint'
 import HistoryIcon from '@mui/icons-material/History'
 import HomeIcon from '@mui/icons-material/Home'
 import KeyIcon from '@mui/icons-material/Key'
@@ -24,7 +22,7 @@ import Typography from '@mui/material/Typography'
 import { useState, type ElementType, type ReactNode } from 'react'
 import { NavLink, Link as RouterLink, Outlet } from 'react-router'
 import { useTranslation } from 'react-i18next'
-import type { MeResponse } from '@/api/types'
+import type { Features, MeResponse } from '@/api/types'
 import LanguageToggle from '@/components/LanguageToggle'
 import ThemeToggle from '@/components/ThemeToggle'
 import { useLogout } from '@/query/hooks'
@@ -40,14 +38,20 @@ interface NavItem {
   end?: boolean
 }
 
-const NAV: NavItem[] = [
-  { to: '/', labelKey: 'common:nav.home', Icon: HomeIcon, end: true },
-  { to: '/token', labelKey: 'common:nav.token', Icon: KeyIcon },
-  { to: '/write-tools', labelKey: 'common:nav.writeTools', Icon: TuneIcon },
-  { to: '/identities', labelKey: 'common:nav.identities', Icon: FingerprintIcon },
-  { to: '/connected-apps', labelKey: 'common:nav.connectedApps', Icon: AppsIcon },
-  { to: '/activity', labelKey: 'common:nav.activity', Icon: HistoryIcon },
-]
+/** The nav the server's feature flags allow: a screen it does not serve is not listed. */
+function navFor(features: Features): NavItem[] {
+  return [
+    { to: '/', labelKey: 'common:nav.home', Icon: HomeIcon, end: true },
+    { to: '/token', labelKey: 'common:nav.token', Icon: KeyIcon },
+    ...(features.write_tools
+      ? [{ to: '/write-tools', labelKey: 'common:nav.writeTools', Icon: TuneIcon }]
+      : []),
+    { to: '/activity', labelKey: 'common:nav.activity', Icon: HistoryIcon },
+    ...(features.admin
+      ? [{ to: '/admin', labelKey: 'common:nav.admin', Icon: AdminPanelSettingsIcon }]
+      : []),
+  ]
+}
 
 /**
  * Signed-in shell: top bar, left nav on md+, a drawer below that. Rendered
@@ -57,21 +61,16 @@ export default function AccountLayout({ me, children }: { me: MeResponse; childr
   const { t } = useTranslation()
   const [mobileOpen, setMobileOpen] = useState(false)
   const logout = useLogout()
-  const isOwner = me.account.role === 'owner'
+  const isOwner = me.features.admin
   const active = me.account.status === 'active'
 
   function signOut() {
-    logout.mutate(false, {
+    logout.mutate(undefined, {
       onError: (error) => useToast.getState().show(errorText(t, error), 'error'),
     })
   }
 
-  const items: NavItem[] = [
-    ...NAV,
-    ...(isOwner
-      ? [{ to: '/admin', labelKey: 'common:nav.admin', Icon: AdminPanelSettingsIcon }]
-      : []),
-  ]
+  const items = navFor(me.features)
 
   const nav = (
     <Box component="nav" aria-label={t('common:nav.main')} sx={{ pt: 1 }}>
@@ -136,7 +135,7 @@ export default function AccountLayout({ me, children }: { me: MeResponse; childr
             {t('common:brand')}
           </Typography>
           <Box sx={{ flex: 1 }} />
-          <Tooltip title={me.account.email ?? displayName}>
+          <Tooltip title={me.account.username || displayName}>
             <Typography
               variant="body2"
               noWrap

@@ -1,93 +1,118 @@
 {
   "title": "Admin",
   "ownerOnly": "Only owners can see the admin pages.",
+  "actions": {
+    "approve": "Approve",
+    "deny": "Deny",
+    "disable": "Disable",
+    "enable": "Enable",
+    "mark_invalid": "Mark token invalid",
+    "remove_enrollment": "Remove token"
+  },
+  "confirm": {
+    "deny": {
+      "title": "Deny {{name}}?",
+      "body": "The account is turned down and cannot sign in. You can enable it again later."
+    },
+    "disable": {
+      "title": "Disable {{name}}?",
+      "body": "They will be signed out and unable to use the server until you enable them again."
+    },
+    "mark_invalid": {
+      "title": "Mark the token of {{name}} invalid?",
+      "body": "Claude's Canvas tools stop working for them until they add a new token."
+    },
+    "remove_enrollment": {
+      "title": "Remove the Canvas token of {{name}}?",
+      "body": "The stored token is deleted and they have to enroll again."
+    }
+  },
+  "done": {
+    "approve": "Account approved.",
+    "deny": "Account denied.",
+    "disable": "Account disabled.",
+    "enable": "Account enabled.",
+    "mark_invalid": "Token marked invalid.",
+    "remove_enrollment": "Token removed."
+  },
+  "unchanged": "Nothing changed.",
   "accounts": {
     "title": "Accounts",
-    "search": "Search name or email",
+    "search": "Search name or username",
     "statusFilter": "Status",
     "allStatuses": "All",
+    "counts": "Totals",
+    "count": {
+      "total": "Accounts",
+      "active": "Active",
+      "pending": "Pending",
+      "disabled": "Disabled",
+      "owners": "Owners"
+    },
     "columns": {
       "account": "Account",
       "status": "Status",
       "role": "Role",
-      "providers": "Providers",
       "canvas": "Canvas token",
-      "grants": "Apps",
       "lastLogin": "Last sign-in",
       "actions": "Actions"
     },
-    "canvasState": {
-      "none": "Not enrolled",
-      "valid": "Valid",
-      "invalid": "Needs re-enrollment",
-      "unknown": "Unchecked"
+    "disabledReason": {
+      "admin_disabled": "Disabled by an owner",
+      "operator_disabled": "Disabled by the server operator",
+      "approval_denied": "Approval denied"
     },
-    "noEmail": "No email",
+    "details": {
+      "summary": "Technical details",
+      "provider": "Provider",
+      "tenant": "Directory",
+      "subject": "Subject",
+      "accountId": "Account id",
+      "created": "Created",
+      "approved": "Approved"
+    },
+    "you": "You",
+    "noUsername": "No username",
     "neverLoggedIn": "Never",
-    "actions": {
-      "approve": "Approve",
-      "disable": "Disable",
-      "enable": "Enable",
-      "makeOwner": "Make owner",
-      "makeUser": "Make user",
-      "revokeGrants": "Revoke apps",
-      "unlinkIdentity": "Unlink sign-in"
-    },
-    "confirm": {
-      "disableTitle": "Disable {{name}}?",
-      "disableBody": "They will be signed out and unable to use the server until you enable them again.",
-      "revokeGrantsTitle": "Revoke every app for {{name}}?",
-      "revokeGrantsBody": "All connected apps stop working for this account until they are approved again.",
-      "unlinkTitle": "Unlink a sign-in method for {{name}}?",
-      "unlinkBody": "Pick the provider to remove. They can no longer sign in with it.",
-      "unlinkField": "Provider",
-      "setRoleTitle": "Change the role of {{name}}?",
-      "setRoleOwner": "{{name}} will be able to see and change every account on this server.",
-      "setRoleUser": "{{name}} will lose access to the admin pages."
-    },
-    "done": {
-      "approve": "Account approved.",
-      "disable": "Account disabled.",
-      "enable": "Account enabled.",
-      "set_role": "Role changed.",
-      "unlink_identity": "Sign-in method unlinked.",
-      "revoke_grants": "Apps revoked."
-    },
     "empty": "No accounts match."
   },
   "enrollments": {
     "title": "Canvas enrollments",
-    "filter": "State",
-    "filterAll": "All",
+    "filter": "Show",
+    "filterAll": "All accounts and tokens",
+    "filterNeeding": "Tokens that need replacing",
+    "counts": "Totals",
+    "count": {
+      "needing": "Need replacing",
+      "total": "Tokens stored"
+    },
     "columns": {
       "account": "Account",
       "canvasUser": "Canvas user",
-      "state": "State",
+      "school": "School",
+      "state": "Token",
       "lastUsed": "Last used",
       "actions": "Actions"
     },
-    "state": {
-      "none": "Not enrolled",
-      "valid": "Valid",
-      "invalid": "Needs re-enrollment",
-      "unknown": "Unchecked"
+    "notEnrolled": "Not enrolled",
+    "schoolNotOffered": "No longer offered",
+    "reason": {
+      "canvas_token_rejected": "Rejected by Canvas",
+      "decrypt_failed": "Could not be decrypted",
+      "revoked_by_admin": "Marked invalid by an administrator"
     },
     "details": "Technical details",
     "enrolledAt": "Enrolled",
     "updatedAt": "Updated",
-    "invalidSince": "Rejected since",
+    "invalidSince": "Invalid since",
     "accountId": "Account id",
     "canvasUserId": "Canvas user id",
-    "revoke": "Revoke",
-    "confirmTitle": "Revoke the Canvas token of {{name}}?",
-    "confirmBody": "The stored token is deleted and they have to enroll again.",
-    "done": "Enrollment revoked.",
-    "empty": "No enrollments yet."
+    "empty": "No enrollments to show."
   },
   "audit": {
     "title": "Audit log",
     "actionFilter": "Action",
-    "actorFilter": "Actor id",
+    "filterNote": "Filters the entries loaded so far.",
     "allActions": "All actions",
     "columns": {
       "time": "Time",
@@ -97,19 +122,24 @@
       "detail": "Detail"
     },
     "actions": {
-      "approve": "Approved account",
-      "disable": "Disabled account",
-      "enable": "Enabled account",
-      "set_role": "Changed role",
-      "link": "Linked sign-in",
-      "unlink": "Unlinked sign-in",
-      "write_tool_toggle": "Changed write tools",
-      "token_enroll": "Enrolled Canvas token",
-      "token_delete": "Deleted Canvas token",
-      "grant_revoke": "Revoked app",
-      "enrollment_revoke": "Revoked enrollment",
-      "login": "Signed in"
+      "account_created": "Account created",
+      "account_created_by_operator": "Account created by the operator",
+      "account_activated": "Account activated",
+      "account_approved": "Approved account",
+      "account_denied": "Denied account",
+      "account_disabled": "Disabled account",
+      "account_enabled": "Enabled account",
+      "role_changed": "Changed role",
+      "token_enrolled": "Enrolled Canvas token",
+      "token_replaced": "Replaced Canvas token",
+      "token_deleted": "Deleted Canvas token",
+      "token_marked_invalid": "Marked token invalid",
+      "write_tools_changed": "Changed write tools",
+      "schema_migrated": "Database upgraded",
+      "pending_purged": "Cleared pending accounts",
+      "other": "Other"
     },
+    "operator": "Server operator",
     "system": "System",
     "empty": "No audit entries."
   }

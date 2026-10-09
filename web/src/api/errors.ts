@@ -2,32 +2,54 @@ import { AxiosError } from 'axios'
 import type { ApiErrorCode, ErrorParams } from './types'
 
 // Exhaustive by construction: adding a code to ApiErrorCode without listing it
-// here fails the typecheck, and errors.test.ts then checks both locales.
+// here fails the typecheck, and errors.test.ts then checks both locales. The Python
+// test tests/selfhost/test_account_api_contract.py compares this table with the
+// server's own code lists.
 const CODE_SET: Record<ApiErrorCode, true> = {
-  access_denied: true,
-  not_provisioned: true,
-  pending_approval: true,
-  identity_in_use: true,
-  provider_error: true,
-  signups_paused: true,
-  state_invalid: true,
   not_authenticated: true,
-  forbidden: true,
   csrf_invalid: true,
   origin_not_allowed: true,
-  not_found: true,
+  reauth_required: true,
+  forbidden: true,
+  pending_approval: true,
+  access_disabled: true,
+  method_not_allowed: true,
+  unsupported_media_type: true,
+  payload_too_large: true,
+  malformed_request: true,
   validation_failed: true,
+  not_found: true,
   rate_limited: true,
+  token_store_unavailable: true,
+  internal_error: true,
   token_invalid_format: true,
   token_rejected: true,
+  token_unreadable: true,
   canvas_unavailable: true,
-  token_store_unavailable: true,
-  last_identity: true,
-  link_requires_recent_login: true,
-  consent_expired: true,
-  grant_revoked: true,
+  identity_change_required: true,
+  recheck_not_allowed: true,
+  school_required: true,
+  school_invalid: true,
+  school_not_offered: true,
+  school_not_in_directory: true,
+  school_unresolvable: true,
+  school_address_blocked: true,
+  school_selection_unverified: true,
+  directory_unavailable: true,
   write_tool_not_allowed: true,
-  internal_error: true,
+  write_tools_unavailable: true,
+  last_owner: true,
+  cannot_disable_self: true,
+  state_invalid: true,
+  provider_error: true,
+  sign_in_incomplete: true,
+  sign_in_unverified: true,
+  wrong_tenant: true,
+  wrong_client: true,
+  bad_subject: true,
+  bad_roles: true,
+  access_denied: true,
+  signups_paused: true,
 }
 
 export const API_ERROR_CODES = Object.keys(CODE_SET) as ApiErrorCode[]
@@ -103,4 +125,9 @@ export function toApiError(error: unknown): ApiError {
 
 export function isUnauthenticated(error: unknown): boolean {
   return error instanceof ApiError && error.status === 401 && error.code === 'not_authenticated'
+}
+
+/** The session is too old for this action (the 10-minute fresh-sign-in rule). */
+export function isReauthRequired(error: unknown): boolean {
+  return error instanceof ApiError && error.code === 'reauth_required'
 }

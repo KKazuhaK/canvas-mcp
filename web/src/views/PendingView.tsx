@@ -36,7 +36,7 @@ export default function PendingView() {
           >
             {t('common:actions.refresh')}
           </Button>
-          <Button onClick={() => logout.mutate(false)} disabled={logout.isPending}>
+          <Button onClick={() => logout.mutate()} disabled={logout.isPending}>
             {t('common:actions.signOut')}
           </Button>
         </Box>

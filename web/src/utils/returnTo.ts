@@ -1,86 +1,55 @@
-// Redirect safety. `return_to` and `txn` arrive in the query string, which anyone
-// can craft, so neither is used until it passes the validators in this file.
-// OAuth and consent hand-offs never use query parameters as a destination: they
-// navigate to a URL that came from the server's JSON (see safeRedirectTarget).
+// Redirect safety. `return_to` arrives in the query string, which anyone can craft,
+// so it is not used until it passes sanitizeReturnTo. These are the same rules the
+// server applies to /account/login?return_to= (sanitize_return_to in account_web.py),
+// which checks again before sealing the value into the sign-in cookie.
 
 const SITE_PREFIX = '/account'
-const PROBE_ORIGIN = 'https://return-to.invalid'
+const MAX_LENGTH = 512
+/** Server routes that are not SPA pages, so they are never a place to return to. */
+const FORBIDDEN_PREFIXES = ['/account/api', '/account/login', '/account/callback']
 // C0 controls, DEL and the C1 range: browsers strip some of these inside URLs,
 // which is how '/\t/evil.example' becomes '//evil.example'.
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/
+// eslint-disable-next-line no-control-regex
+const NOT_ASCII = /[^\u0000-\u007f]/
 
-function passesPathChecks(value: string): boolean {
-  if (value.length === 0 || value.length > 1024) return false
-  if (CONTROL_CHARS.test(value)) return false
-  if (value.includes('\\')) return false
-  if (!value.startsWith('/') || value.startsWith('//')) return false
-  return true
+function isClean(text: string): boolean {
+  if (text.length === 0 || text.length > MAX_LENGTH) return false
+  if (NOT_ASCII.test(text) || CONTROL_CHARS.test(text)) return false
+  if (text.includes('\\') || text.includes('//')) return false
+  const path = text.split(/[?#]/, 1)[0]
+  if (path !== SITE_PREFIX && !path.startsWith(`${SITE_PREFIX}/`)) return false
+  if (path.split('/').some((segment) => segment === '.' || segment === '..')) return false
+  const lowered = path.toLowerCase()
+  return !FORBIDDEN_PREFIXES.some((prefix) => lowered === prefix || lowered.startsWith(`${prefix}/`))
 }
 
 /**
- * Accepts only a same-site relative path inside the /account SPA and returns it
- * unchanged, or null. Rejects scheme-relative URLs ('//evil'), absolute URLs,
- * backslashes, control characters, encoded variants of those, and any path
- * outside /account (including /account-evil and /account/api/*, which are not
- * pages).
+ * Accepts only a same-site path inside the /account app and returns it unchanged,
+ * or null. At most 512 ASCII characters; it must start with /account and must not
+ * be the API, the login or the callback; no '//', backslash, control character or
+ * '.'/'..' segment; and all of that holds again after percent-decoding (repeatedly,
+ * so a double-encoded trick fails too).
  */
 export function sanitizeReturnTo(raw: string | null | undefined): string | null {
   if (typeof raw !== 'string') return null
-  if (!passesPathChecks(raw)) return null
-
-  let decoded: string
-  try {
-    decoded = decodeURIComponent(raw)
-  } catch {
-    return null
+  let candidate = raw
+  for (let round = 0; round < 4; round += 1) {
+    if (!isClean(candidate)) return null
+    let decoded: string
+    try {
+      decoded = decodeURIComponent(candidate)
+    } catch {
+      return null
+    }
+    if (decoded === candidate) return raw
+    candidate = decoded
   }
-  // The decoded form must pass the same checks, so '/%2fevil.example' and
-  // '/%5cevil.example' cannot smuggle a second slash or a backslash through.
-  if (!passesPathChecks(decoded)) return null
-
-  let parsed: URL
-  try {
-    parsed = new URL(raw, PROBE_ORIGIN)
-  } catch {
-    return null
-  }
-  if (parsed.origin !== PROBE_ORIGIN) return null
-
-  const path = parsed.pathname
-  const inSpa = path === SITE_PREFIX || path.startsWith(`${SITE_PREFIX}/`)
-  if (!inSpa) return null
-  if (path === `${SITE_PREFIX}/api` || path.startsWith(`${SITE_PREFIX}/api/`)) return null
-  if (path.split('/').some((segment) => segment === '..' || segment === '.')) return null
-  return raw
+  return null
 }
 
-const TXN_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
-
-/** Consent transaction ids are opaque tokens; anything else is dropped. */
-export function sanitizeTxn(raw: string | null | undefined): string | null {
-  return typeof raw === 'string' && TXN_PATTERN.test(raw) ? raw : null
-}
-
-/**
- * A destination the server handed back in JSON (consent redirect_url, IdP
- * authorize URL for linking). Only http(s) or a same-site path is accepted, so a
- * compromised response cannot navigate to javascript: or data: URLs.
- */
-export function safeRedirectTarget(raw: unknown): string | null {
-  if (typeof raw !== 'string' || raw.length === 0 || raw.length > 4096) return null
-  if (CONTROL_CHARS.test(raw)) return null
-  try {
-    const base = typeof window !== 'undefined' ? window.location.origin : PROBE_ORIGIN
-    const url = new URL(raw, base)
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null
-    return url.href
-  } catch {
-    return null
-  }
-}
-
-/** Only https links are rendered as links (client_uri, docs). */
+/** Only https links are rendered as links (the school's Canvas settings page). */
 export function safeHttpsUrl(raw: string | null | undefined): string | null {
   if (typeof raw !== 'string') return null
   try {
@@ -94,17 +63,27 @@ export function safeHttpsUrl(raw: string | null | undefined): string | null {
 /** Where the SPA is mounted. The router basename is stripped from its locations. */
 export const SITE_BASE = SITE_PREFIX
 
+/** The SPA's own sign-in page; the server-side redirect lives at /account/login. */
+export const SIGN_IN_PATH = '/sign-in'
+
 /**
- * In-app login path for a router location (basename already stripped). The
+ * In-app sign-in path for a router location (basename already stripped). The
  * `return_to` is the full site path, kept only if it passes sanitizeReturnTo.
  */
-export function loginPathFor(routerPath: string, txn?: string | null): string {
-  const query = new URLSearchParams()
-  const fromPath = /^\/consent\/([^/?#]+)/.exec(routerPath)?.[1]
-  const safeTxn = sanitizeTxn(txn ?? fromPath)
-  if (safeTxn) query.set('txn', safeTxn)
+export function loginPathFor(routerPath: string): string {
+  const pathOnly = routerPath.split(/[?#]/, 1)[0]
+  if (pathOnly === SIGN_IN_PATH) return SIGN_IN_PATH
   const target = sanitizeReturnTo(`${SITE_BASE}${routerPath === '/' ? '' : routerPath}`)
-  if (target && target !== SITE_BASE) query.set('return_to', target)
-  const qs = query.toString()
-  return `/login${qs ? `?${qs}` : ''}`
+  if (target && target !== SITE_BASE) {
+    return `${SIGN_IN_PATH}?${new URLSearchParams({ return_to: target }).toString()}`
+  }
+  return SIGN_IN_PATH
+}
+
+/** The page the browser is on, as a validated return_to (null on the sign-in page or anything unsafe). */
+export function currentReturnTo(): string | null {
+  if (typeof window === 'undefined') return null
+  const { pathname, search } = window.location
+  if (pathname === '/account/sign-in') return null
+  return sanitizeReturnTo(`${pathname}${search}`)
 }

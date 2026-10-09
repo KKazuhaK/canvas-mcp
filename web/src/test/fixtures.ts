@@ -1,33 +1,68 @@
 import { AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
 import { http } from '@/api/client'
-import type { ApiErrorCode, MeResponse } from '@/api/types'
+import type { ApiErrorCode, CanvasTokenStatus, MeResponse } from '@/api/types'
 
 // Small, obviously fake data for client-level tests. No real names, no tokens.
 
-export function meFixture(overrides: Partial<MeResponse['account']> = {}): MeResponse {
+export function canvasFixture(overrides: Partial<CanvasTokenStatus> = {}): CanvasTokenStatus {
+  return {
+    state: 'none',
+    canvas_user_id: null,
+    canvas_user_name: null,
+    school: null,
+    invalid_reason: null,
+    invalid_since: null,
+    recheck_allowed: false,
+    expires_on: null,
+    expiry_notice: 'none',
+    settings_url: null,
+    enrolled_at: null,
+    updated_at: null,
+    last_used_at: null,
+    last_verified_at: null,
+    ...overrides,
+  }
+}
+
+export function meFixture(
+  overrides: Partial<MeResponse['account']> = {},
+  rest: Partial<Omit<MeResponse, 'account'>> = {},
+): MeResponse {
   return {
     account: {
-      id: 'acct:00000000-0000-4000-8000-0000000000aa',
+      id: '00000000-0000-4000-8000-0000000000aa',
+      key: 'acct:00000000-0000-4000-8000-0000000000aa',
       display_name: 'Test User',
-      email: 'test.user@example.test',
+      username: 'test.user@example.test',
+      provider_id: 'entra',
       role: 'user',
       status: 'active',
-      created_at: '2026-01-01T00:00:00Z',
       ...overrides,
     },
     csrf_token: 'test-csrf-token',
-    session_issued_at: '2026-01-01T00:00:00Z',
-    canvas: {
-      state: 'none',
-      canvas_user_id: null,
-      canvas_user_name: null,
-      enrolled_at: null,
-      updated_at: null,
-      last_used_at: null,
-      last_checked_at: null,
-      invalid_since: null,
+    session: {
+      issued_at: '2026-01-01T00:00:00Z',
+      expires_at: '2026-01-02T00:00:00Z',
+      fresh_until: null,
+      fresh: false,
+      fresh_window_s: 600,
     },
-    write_tools_enabled_count: 0,
+    canvas: canvasFixture(),
+    write_tools: { offered: 0, enabled: 0 },
+    features: {
+      school_picker: false,
+      school_search: false,
+      write_tools: true,
+      admin: false,
+      identities: false,
+      connected_apps: false,
+      consent: false,
+      logout_everywhere: false,
+      role_management: false,
+    },
+    ui_locale: null,
+    server: { mcp_url: 'https://x.test/mcp', display_timezone: 'UTC' },
+    ...rest,
   }
 }
 
@@ -36,6 +71,7 @@ export interface RecordedRequest {
   url: string
   headers: Record<string, string>
   data: unknown
+  params?: unknown
 }
 
 type Reply = { status: number; data?: unknown }
@@ -53,6 +89,7 @@ export function scriptAdapter(
         Object.entries(config.headers.toJSON()).map(([k, v]) => [k.toLowerCase(), String(v)]),
       ),
       data: config.data,
+      params: config.params,
     }
     seen.push(request)
     const { status, data } = await reply(request)
@@ -79,6 +116,7 @@ export function recordRequests(): RecordedRequest[] {
         Object.entries(config.headers.toJSON()).map(([k, v]) => [k.toLowerCase(), String(v)]),
       ),
       data: config.data,
+      params: config.params,
     })
     return inner(config)
   }

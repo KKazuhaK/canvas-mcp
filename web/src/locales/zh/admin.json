@@ -1,93 +1,118 @@
 {
   "title": "管理",
   "ownerOnly": "只有所有者可以查看管理页面。",
+  "actions": {
+    "approve": "批准",
+    "deny": "拒绝",
+    "disable": "停用",
+    "enable": "启用",
+    "mark_invalid": "标记令牌失效",
+    "remove_enrollment": "删除令牌"
+  },
+  "confirm": {
+    "deny": {
+      "title": "拒绝 {{name}}？",
+      "body": "该账户会被拒绝，无法登录。以后可以重新启用。"
+    },
+    "disable": {
+      "title": "停用 {{name}}？",
+      "body": "对方会被退出登录，在你重新启用之前无法使用本服务器。"
+    },
+    "mark_invalid": {
+      "title": "将 {{name}} 的令牌标记为失效？",
+      "body": "在对方添加新令牌之前，Claude 的 Canvas 工具对其不可用。"
+    },
+    "remove_enrollment": {
+      "title": "删除 {{name}} 的 Canvas 令牌？",
+      "body": "已保存的令牌会被删除，对方需要重新绑定。"
+    }
+  },
+  "done": {
+    "approve": "账户已批准。",
+    "deny": "账户已拒绝。",
+    "disable": "账户已停用。",
+    "enable": "账户已启用。",
+    "mark_invalid": "令牌已标记为失效。",
+    "remove_enrollment": "令牌已删除。"
+  },
+  "unchanged": "没有变化。",
   "accounts": {
     "title": "账户",
-    "search": "搜索姓名或邮箱",
+    "search": "搜索姓名或用户名",
     "statusFilter": "状态",
     "allStatuses": "全部",
+    "counts": "统计",
+    "count": {
+      "total": "账户",
+      "active": "正常",
+      "pending": "待审批",
+      "disabled": "已停用",
+      "owners": "所有者"
+    },
     "columns": {
       "account": "账户",
       "status": "状态",
       "role": "角色",
-      "providers": "登录提供方",
       "canvas": "Canvas 令牌",
-      "grants": "应用",
       "lastLogin": "最近登录",
       "actions": "操作"
     },
-    "canvasState": {
-      "none": "未绑定",
-      "valid": "有效",
-      "invalid": "需要重新绑定",
-      "unknown": "未检查"
+    "disabledReason": {
+      "admin_disabled": "已被所有者停用",
+      "operator_disabled": "已被服务器运维停用",
+      "approval_denied": "审批被拒绝"
     },
-    "noEmail": "无邮箱",
+    "details": {
+      "summary": "技术详情",
+      "provider": "提供方",
+      "tenant": "目录",
+      "subject": "主体",
+      "accountId": "账户 id",
+      "created": "创建时间",
+      "approved": "批准时间"
+    },
+    "you": "你",
+    "noUsername": "无用户名",
     "neverLoggedIn": "从未",
-    "actions": {
-      "approve": "批准",
-      "disable": "停用",
-      "enable": "启用",
-      "makeOwner": "设为所有者",
-      "makeUser": "设为普通用户",
-      "revokeGrants": "撤销应用",
-      "unlinkIdentity": "解除登录绑定"
-    },
-    "confirm": {
-      "disableTitle": "停用 {{name}}？",
-      "disableBody": "对方会被退出登录，在你重新启用之前无法使用本服务器。",
-      "revokeGrantsTitle": "撤销 {{name}} 的所有应用？",
-      "revokeGrantsBody": "在重新批准之前，此账户已连接的所有应用都将停止工作。",
-      "unlinkTitle": "解除 {{name}} 的一种登录方式？",
-      "unlinkBody": "选择要移除的提供方。对方将无法再用它登录。",
-      "unlinkField": "提供方",
-      "setRoleTitle": "更改 {{name}} 的角色？",
-      "setRoleOwner": "{{name}} 将可以查看并修改本服务器上的所有账户。",
-      "setRoleUser": "{{name}} 将失去管理页面的访问权限。"
-    },
-    "done": {
-      "approve": "账户已批准。",
-      "disable": "账户已停用。",
-      "enable": "账户已启用。",
-      "set_role": "角色已更改。",
-      "unlink_identity": "已解除登录方式的绑定。",
-      "revoke_grants": "已撤销应用。"
-    },
     "empty": "没有符合条件的账户。"
   },
   "enrollments": {
     "title": "Canvas 令牌绑定",
-    "filter": "状态",
-    "filterAll": "全部",
+    "filter": "显示",
+    "filterAll": "全部账户和令牌",
+    "filterNeeding": "需要更换的令牌",
+    "counts": "统计",
+    "count": {
+      "needing": "需要更换",
+      "total": "已保存的令牌"
+    },
     "columns": {
       "account": "账户",
       "canvasUser": "Canvas 用户",
-      "state": "状态",
+      "school": "学校",
+      "state": "令牌",
       "lastUsed": "最近使用",
       "actions": "操作"
     },
-    "state": {
-      "none": "未绑定",
-      "valid": "有效",
-      "invalid": "需要重新绑定",
-      "unknown": "未检查"
+    "notEnrolled": "未绑定",
+    "schoolNotOffered": "已不再提供",
+    "reason": {
+      "canvas_token_rejected": "Canvas 拒绝",
+      "decrypt_failed": "无法解密",
+      "revoked_by_admin": "管理员标记为失效"
     },
     "details": "技术详情",
     "enrolledAt": "绑定时间",
     "updatedAt": "更新时间",
-    "invalidSince": "被拒绝自",
+    "invalidSince": "失效自",
     "accountId": "账户 id",
     "canvasUserId": "Canvas 用户 id",
-    "revoke": "撤销",
-    "confirmTitle": "撤销 {{name}} 的 Canvas 令牌？",
-    "confirmBody": "已保存的令牌会被删除，对方需要重新绑定。",
-    "done": "已撤销绑定。",
-    "empty": "还没有绑定记录。"
+    "empty": "没有可显示的绑定记录。"
   },
   "audit": {
     "title": "审计日志",
     "actionFilter": "操作",
-    "actorFilter": "操作者 id",
+    "filterNote": "只筛选已加载的记录。",
     "allActions": "全部操作",
     "columns": {
       "time": "时间",
@@ -97,19 +122,24 @@
       "detail": "详情"
     },
     "actions": {
-      "approve": "批准账户",
-      "disable": "停用账户",
-      "enable": "启用账户",
-      "set_role": "更改角色",
-      "link": "绑定登录方式",
-      "unlink": "解除登录绑定",
-      "write_tool_toggle": "更改写入工具",
-      "token_enroll": "绑定 Canvas 令牌",
-      "token_delete": "删除 Canvas 令牌",
-      "grant_revoke": "撤销应用",
-      "enrollment_revoke": "撤销绑定",
-      "login": "登录"
+      "account_created": "创建账户",
+      "account_created_by_operator": "运维创建账户",
+      "account_activated": "账户已激活",
+      "account_approved": "批准账户",
+      "account_denied": "拒绝账户",
+      "account_disabled": "停用账户",
+      "account_enabled": "启用账户",
+      "role_changed": "更改角色",
+      "token_enrolled": "绑定 Canvas 令牌",
+      "token_replaced": "替换 Canvas 令牌",
+      "token_deleted": "删除 Canvas 令牌",
+      "token_marked_invalid": "标记令牌失效",
+      "write_tools_changed": "更改写入工具",
+      "schema_migrated": "数据库已升级",
+      "pending_purged": "清理待审批账户",
+      "other": "其他"
     },
+    "operator": "服务器运维",
     "system": "系统",
     "empty": "没有审计记录。"
   }

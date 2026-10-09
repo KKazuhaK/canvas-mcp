@@ -2,11 +2,8 @@ import { createBrowserRouter, createMemoryRouter, type RouteObject } from 'react
 import AdminLayout from '@/layouts/AdminLayout'
 import PublicLayout from '@/layouts/PublicLayout'
 import ActivityView from '@/views/ActivityView'
-import ConnectedAppsView from '@/views/ConnectedAppsView'
-import ConsentView from '@/views/ConsentView'
 import HomeView from '@/views/HomeView'
-import IdentitiesView from '@/views/IdentitiesView'
-import LoginView from '@/views/LoginView'
+import SignInView from '@/views/SignInView'
 import { NotFoundView, RouteError } from '@/views/StateViews'
 import TokenView from '@/views/TokenView'
 import WriteToolsView from '@/views/WriteToolsView'
@@ -15,6 +12,7 @@ import AdminAuditView from '@/views/admin/AdminAuditView'
 import AdminEnrollmentsView from '@/views/admin/AdminEnrollmentsView'
 import DocumentTitle from './DocumentTitle'
 import RequireAuth from './RequireAuth'
+import RequireFeature from './RequireFeature'
 import RequireOwner from './RequireOwner'
 
 /** The SPA is served under /account; locations inside the router are relative to it. */
@@ -28,8 +26,9 @@ export const routes: RouteObject[] = [
       {
         element: <PublicLayout />,
         children: [
-          { path: 'login', element: <LoginView />, handle: { titleKey: 'common:actions.signIn' } },
-          { path: 'consent/:txn', element: <ConsentView /> },
+          // The server-side sign-in lives at /account/login and /account/callback (not
+          // routes of this app); this page is where a failed sign-in comes back to.
+          { path: 'sign-in', element: <SignInView />, handle: { titleKey: 'common:actions.signIn' } },
         ],
       },
       // `/` chooses its own frame: signed-out landing or the account page.
@@ -38,9 +37,12 @@ export const routes: RouteObject[] = [
         element: <RequireAuth />,
         children: [
           { path: 'token', element: <TokenView />, handle: { titleKey: 'common:nav.token' } },
-          { path: 'write-tools', element: <WriteToolsView />, handle: { titleKey: 'common:nav.writeTools' } },
-          { path: 'identities', element: <IdentitiesView />, handle: { titleKey: 'common:nav.identities' } },
-          { path: 'connected-apps', element: <ConnectedAppsView />, handle: { titleKey: 'common:nav.connectedApps' } },
+          {
+            element: <RequireFeature feature="write_tools" />,
+            children: [
+              { path: 'write-tools', element: <WriteToolsView />, handle: { titleKey: 'common:nav.writeTools' } },
+            ],
+          },
           { path: 'activity', element: <ActivityView />, handle: { titleKey: 'common:nav.activity' } },
           {
             element: <RequireOwner />,

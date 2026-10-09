@@ -1,26 +1,29 @@
-import type { ReactNode } from 'react'
+import { useEffect, type ReactNode } from 'react'
 import type { MeResponse } from '@/api/types'
-import DisabledView from '@/views/DisabledView'
+import { useLanguage } from '@/stores/language'
 import PendingView from '@/views/PendingView'
 import AccountLayout from './AccountLayout'
 
 /**
- * The signed-in frame plus the account-status gate. A pending or disabled
- * account sees only its status screen: no token form, no write tools, no nav.
- * With no children it renders the matched child route.
+ * The signed-in frame plus the account-status gate. A pending account sees only
+ * its status screen: no token form, no write tools, no nav. (A disabled account is
+ * signed out by the server, so it never gets this far.) With no children it
+ * renders the matched child route.
  */
 export default function AccountShell({ me, children }: { me: MeResponse; children?: ReactNode }) {
+  const remembered = me.ui_locale
+  const applyRemembered = useLanguage((s) => s.applyRemembered)
+
+  // The language the server remembers (shared with the server-rendered pages) applies
+  // only when this browser has no choice of its own yet.
+  useEffect(() => {
+    if (remembered !== null) applyRemembered(remembered)
+  }, [remembered, applyRemembered])
+
   if (me.account.status === 'pending') {
     return (
       <AccountLayout me={me}>
         <PendingView />
-      </AccountLayout>
-    )
-  }
-  if (me.account.status === 'disabled') {
-    return (
-      <AccountLayout me={me}>
-        <DisabledView />
       </AccountLayout>
     )
   }

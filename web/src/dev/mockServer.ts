@@ -6,9 +6,14 @@
 // everything it imports are dropped; scripts/check-dist.mjs fails the build if
 // any marker from this file or its fixtures appears in dist/.
 //
-// It swaps the axios adapter, so the real interceptors (CSRF header, error
-// normalisation) still run. State is in memory and resets on reload. Pick a
-// scenario with `?mock=<name>` on the first page load.
+// It is generated from the same types as the real client: every handler is
+// registered under a key of the `Contract` table (api/contract.ts) and must return
+// that route's response type, so the mock cannot drift from the wire shapes. It
+// mirrors the server's pipeline too (session, pending gate, owner gate with the
+// fresh-sign-in rule, CSRF header, closed error codes), so the screens exercise the
+// same paths as against the real server. It swaps the axios adapter, so the real
+// interceptors (CSRF header, error normalisation) still run. State is in memory
+// and resets on reload. Pick a scenario with `?mock=<name>` on the first page load.
 
 import {
   AxiosError,
@@ -16,20 +21,27 @@ import {
   type AxiosResponse,
   type InternalAxiosRequestConfig,
 } from 'axios'
+import type { ResponseOf, RouteKey } from '@/api/contract'
+import { splitRoute } from '@/api/contract'
 import type {
   AdminAccount,
-  AdminEnrollment,
+  AdminAction,
+  AdminActionResponse,
+  ApiErrorBody,
   ApiErrorCode,
   AuditEntry,
   CanvasTokenStatus,
   ErrorParams,
-  Grant,
-  Identity,
+  Features,
+  InvalidReason,
   LoginEvent,
   MeResponse,
-  Provider,
-  ProvidersResponse,
+  SchoolsResponse,
+  UiLocale,
   WriteTool,
+  WriteToolGroup,
+  WriteToolGroupId,
+  WriteToolsResponse,
 } from '@/api/types'
 
 export const MOCK_SCENARIOS = [
@@ -37,196 +49,455 @@ export const MOCK_SCENARIOS = [
   'fresh',
   'signed-out',
   'pending',
-  'disabled',
   'invalid',
   'token-invalid',
+  'revoked',
+  'expiring',
+  'picker',
+  'identity-change',
   'owner',
+  'stale-owner',
+  'no-write-tools',
   'error-503',
   'rate-limited',
-  'single-provider',
-  'no-provider',
 ] as const
 export type MockScenario = (typeof MOCK_SCENARIOS)[number]
 
 const MOCK_CSRF = 'mock-csrf-token-not-a-secret'
-const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
+const SELF_ID = '00000000-0000-4000-8000-000000000001'
+const acct = (n: number) => `00000000-0000-4000-8000-00000000000${n}`
+const ago = (minutes: number) =>
+  new Date(Date.now() - minutes * 60_000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+const inDays = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10)
 
-const PROVIDERS: Provider[] = [
-  { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft' },
-  { id: 'google', kind: 'oidc', name: 'Google', icon: 'google' },
-  { id: 'github', kind: 'github_oauth2', name: 'GitHub', icon: 'github' },
+const SCHOOL = { host: 'canvas.example.edu', name: 'Example University', offered: true }
+const SEARCHABLE = [
+  { host: 'canvas.example.edu', name: 'Example University' },
+  { host: 'learn.sample.edu', name: 'Sample College' },
+  { host: 'canvas.demo.edu', name: 'Demo State University' },
 ]
+
+// ---- fixtures ---------------------------------------------------------------
 
 function emptyCanvas(): CanvasTokenStatus {
   return {
     state: 'none',
     canvas_user_id: null,
     canvas_user_name: null,
+    school: null,
+    invalid_reason: null,
+    invalid_since: null,
+    recheck_allowed: false,
+    expires_on: null,
+    expiry_notice: 'none',
+    settings_url: null,
     enrolled_at: null,
     updated_at: null,
     last_used_at: null,
-    last_checked_at: null,
-    invalid_since: null,
+    last_verified_at: null,
   }
 }
 
-function validCanvas(): CanvasTokenStatus {
+function activeCanvas(): CanvasTokenStatus {
   return {
-    state: 'valid',
-    canvas_user_id: 1234567,
+    state: 'active',
+    canvas_user_id: '1234567',
     canvas_user_name: 'Ada Example',
+    school: SCHOOL,
+    invalid_reason: null,
+    invalid_since: null,
+    recheck_allowed: false,
+    expires_on: inDays(60),
+    expiry_notice: 'none',
+    settings_url: `https://${SCHOOL.host}/profile/settings`,
     enrolled_at: ago(60 * 24 * 6),
     updated_at: ago(60 * 24 * 6),
     last_used_at: ago(20),
-    last_checked_at: ago(20),
-    invalid_since: null,
+    last_verified_at: ago(20),
   }
 }
 
-const WRITE_TOOLS: WriteTool[] = [
-  { name: 'create_planner_note', group: 'planner_calendar', risk: 'low', server_allowed: true, enabled: true },
-  { name: 'update_planner_note', group: 'planner_calendar', risk: 'low', server_allowed: true, enabled: false },
-  { name: 'delete_planner_note', group: 'planner_calendar', risk: 'medium', server_allowed: true, enabled: false },
-  { name: 'mark_planner_item_complete', group: 'planner_calendar', risk: 'low', server_allowed: true, enabled: false },
-  { name: 'create_personal_calendar_event', group: 'planner_calendar', risk: 'low', server_allowed: true, enabled: false },
-  { name: 'delete_personal_calendar_event', group: 'planner_calendar', risk: 'medium', server_allowed: true, enabled: false },
-  { name: 'submit_assignment', group: 'submissions', risk: 'high', server_allowed: true, enabled: false },
-  { name: 'comment_on_my_submission', group: 'submissions', risk: 'medium', server_allowed: true, enabled: false },
-  { name: 'mark_module_item_done', group: 'modules', risk: 'low', server_allowed: false, enabled: false },
-  { name: 'send_message', group: 'messages', risk: 'high', server_allowed: true, enabled: true },
-  { name: 'reply_to_conversation', group: 'messages', risk: 'high', server_allowed: true, enabled: false },
+function invalidCanvas(reason: InvalidReason): CanvasTokenStatus {
+  return {
+    ...activeCanvas(),
+    state: 'invalid',
+    invalid_reason: reason,
+    invalid_since: ago(60 * 30),
+    recheck_allowed: reason !== 'revoked_by_admin',
+  }
+}
+
+type ToolSeed = [name: string, group: WriteToolGroupId, offered: boolean, enabled: boolean, local?: boolean]
+const TOOL_SEEDS: ToolSeed[] = [
+  ['create_planner_note', 'planner', true, true],
+  ['update_planner_note', 'planner', true, false],
+  ['delete_planner_note', 'planner', true, false],
+  ['mark_planner_item_complete', 'planner', true, false],
+  ['create_personal_calendar_event', 'planner', true, false],
+  ['delete_personal_calendar_event', 'planner', true, false],
+  ['submit_assignment', 'submissions', true, false],
+  ['comment_on_my_submission', 'submissions', true, false],
+  ['mark_module_item_done', 'modules', false, false],
+  ['send_message', 'inbox', true, true],
+  ['reply_to_conversation', 'inbox', true, false],
+  ['update_syllabus', 'other', true, false],
+  ['download_course_file', 'other', true, false, true],
 ]
+const GROUP_ORDER: WriteToolGroupId[] = ['planner', 'submissions', 'modules', 'inbox', 'other']
+
+interface MockTool {
+  name: string
+  group: WriteToolGroupId
+  offered: boolean
+  enabled: boolean
+  local: boolean
+}
 
 interface MockState {
   scenario: MockScenario
   signedIn: boolean
+  fresh: boolean
   me: MeResponse
-  writeTools: WriteTool[]
-  identities: Identity[]
-  grants: Grant[]
+  canvas: CanvasTokenStatus
+  tools: MockTool[]
+  hasCatalog: boolean
+  schools: SchoolsResponse
   history: LoginEvent[]
   accounts: AdminAccount[]
-  enrollments: AdminEnrollment[]
   audit: AuditEntry[]
 }
 
+function accountRow(
+  n: number,
+  name: string,
+  username: string,
+  status: AdminAccount['status'],
+  extra: Partial<AdminAccount> = {},
+): AdminAccount {
+  return {
+    id: acct(n),
+    key: `acct:${acct(n)}`,
+    display_name: name,
+    username,
+    role: 'user',
+    status,
+    disabled_reason: null,
+    disabled_at: null,
+    created_at: ago(60 * 24 * (10 - n)),
+    approved_at: status === 'pending' ? null : ago(60 * 24 * (9 - n)),
+    last_login_at: status === 'pending' ? null : ago(60 * n),
+    is_self: false,
+    identity: { provider_id: 'entra', tenant_id: 'tenant-demo', subject: `subject-${n}` },
+    enrollment: null,
+    actions: [],
+    ...extra,
+  }
+}
+
+function enrollmentOf(
+  name: string,
+  id: string,
+  invalid: InvalidReason | null,
+): NonNullable<AdminAccount['enrollment']> {
+  return {
+    canvas_user_name: name,
+    canvas_user_id: id,
+    school: { ...SCHOOL, is_default: true },
+    state: invalid ? 'invalid' : 'active',
+    invalid_reason: invalid,
+    invalid_since: invalid ? ago(60 * 29) : null,
+    last_verified_at: ago(60),
+    last_used_at: ago(60 * 3),
+    created_at: ago(60 * 24 * 4),
+    updated_at: ago(60 * 24 * 4),
+  }
+}
+
+/** What the server offers for one row (the legacy `_admin_actions`, as the API computes it). */
+function actionsFor(row: AdminAccount): AdminAction[] {
+  if (row.status === 'pending') return ['approve', 'deny']
+  const actions: AdminAction[] = []
+  if (row.enrollment && row.enrollment.state !== 'invalid' && row.status === 'active') {
+    actions.push('mark_invalid')
+  }
+  if (row.status === 'disabled') actions.push('enable')
+  else if (row.status === 'missing') {
+    // an enrollment without an account can only be removed
+  } else if (!row.is_self) actions.push('disable')
+  if (row.enrollment) actions.push('remove_enrollment')
+  return actions
+}
+
+function auditEntry(
+  id: number,
+  action: string,
+  actor: AuditEntry['actor'],
+  target: AuditEntry['target'],
+  detail: AuditEntry['detail'] = {},
+  reason: string | null = null,
+): AuditEntry {
+  return { id, at: ago(id * 37), action, actor, target, reason, detail }
+}
+
 function buildState(scenario: MockScenario): MockState {
-  const owner = scenario === 'owner'
+  const owner = scenario === 'owner' || scenario === 'stale-owner'
+  const pending = scenario === 'pending'
+  const picker = scenario === 'picker'
+
   const canvas =
-    scenario === 'fresh' || scenario === 'error-503' || scenario === 'rate-limited' || scenario === 'pending' || scenario === 'disabled'
+    scenario === 'fresh' || scenario === 'picker' || scenario === 'error-503' || scenario === 'rate-limited'
       ? emptyCanvas()
       : scenario === 'invalid' || scenario === 'token-invalid'
-        ? { ...validCanvas(), state: 'invalid' as const, invalid_since: ago(60 * 30) }
-        : validCanvas()
+        ? invalidCanvas('canvas_token_rejected')
+        : scenario === 'revoked'
+          ? invalidCanvas('revoked_by_admin')
+          : scenario === 'expiring'
+            ? { ...activeCanvas(), expires_on: inDays(3), expiry_notice: 'soon' as const }
+            : pending
+              ? emptyCanvas()
+              : activeCanvas()
+
+  const features: Features = {
+    school_picker: picker,
+    school_search: picker,
+    write_tools: !pending && scenario !== 'no-write-tools',
+    admin: owner,
+    identities: false,
+    connected_apps: false,
+    consent: false,
+    logout_everywhere: false,
+    role_management: false,
+  }
+  const tools: MockTool[] = TOOL_SEEDS.map(([name, group, offered, enabled, local]) => ({
+    name,
+    group,
+    offered,
+    enabled,
+    local: local === true,
+  }))
+  const fresh = scenario !== 'stale-owner'
   const me: MeResponse = {
     account: {
-      id: 'acct:00000000-0000-4000-8000-000000000001',
+      id: SELF_ID,
+      key: `acct:${SELF_ID}`,
       display_name: 'Ada Example',
-      email: 'ada@example.edu',
+      username: 'ada@example.edu',
+      provider_id: 'entra',
       role: owner ? 'owner' : 'user',
-      status: scenario === 'pending' ? 'pending' : scenario === 'disabled' ? 'disabled' : 'active',
-      created_at: ago(60 * 24 * 7),
+      status: pending ? 'pending' : 'active',
     },
     csrf_token: MOCK_CSRF,
-    session_issued_at: ago(3),
-    canvas,
-    write_tools_enabled_count: 0,
+    session: {
+      issued_at: ago(3),
+      expires_at: ago(-60 * 8),
+      fresh_until: fresh ? ago(-7) : null,
+      fresh,
+      fresh_window_s: 600,
+    },
+    canvas: pending ? null : canvas,
+    write_tools: null,
+    features,
+    ui_locale: null,
+    server: { mcp_url: `${window.location.origin}/mcp`, display_timezone: 'America/Los_Angeles' },
   }
-  const writeTools = WRITE_TOOLS.map((tool) => ({ ...tool }))
-  me.write_tools_enabled_count = writeTools.filter((t) => t.enabled).length
+
+  const schools: SchoolsResponse = picker
+    ? {
+        mode: 'picker',
+        choices: [
+          { host: 'canvas.example.edu', name: 'Example University', source: 'featured' },
+          { host: 'learn.sample.edu', name: 'Sample College', source: 'featured' },
+        ],
+        selected: 'canvas.example.edu',
+        sole: null,
+        search_enabled: true,
+      }
+    : {
+        mode: 'fixed',
+        choices: [],
+        selected: null,
+        sole: { host: SCHOOL.host, name: SCHOOL.name },
+        search_enabled: false,
+      }
+
+  const selfRow = accountRow(1, 'Ada Example', 'ada@example.edu', 'active', {
+    id: SELF_ID,
+    key: `acct:${SELF_ID}`,
+    role: owner ? 'owner' : 'user',
+    is_self: true,
+    enrollment: canvas.state === 'none' ? null : enrollmentOf('Ada Example', '1234567', null),
+  })
+  const accounts = [
+    selfRow,
+    accountRow(2, 'Bob Example', 'bob@example.edu', 'pending'),
+    accountRow(3, 'Cleo Example', 'cleo@example.edu', 'active', {
+      enrollment: enrollmentOf('Cleo Example', '7654321', 'canvas_token_rejected'),
+    }),
+    accountRow(4, 'Dev Example', 'dev@example.edu', 'disabled', {
+      disabled_reason: 'admin_disabled',
+      disabled_at: ago(60 * 24 * 2),
+    }),
+  ]
+  for (const row of accounts) row.actions = actionsFor(row)
+
+  const self = { kind: 'account' as const, key: selfRow.key, name: 'Ada Example' }
+  const cleo = { key: `acct:${acct(3)}`, name: 'Cleo Example' }
+  const audit = [
+    auditEntry(7, 'account_created', { kind: 'system', key: null, name: null }, { key: `acct:${acct(2)}`, name: 'Bob Example' }, {}, 'pending_approval'),
+    auditEntry(6, 'token_enrolled', { kind: 'account', key: cleo.key, name: cleo.name }, cleo, { school: SCHOOL.host }),
+    auditEntry(5, 'account_approved', self, cleo),
+    auditEntry(4, 'write_tools_changed', self, null, { enabled: ['create_planner_note', 'send_message'], count: 2 }),
+    auditEntry(3, 'account_disabled', self, { key: `acct:${acct(4)}`, name: 'Dev Example' }, {}, 'admin_disabled'),
+    auditEntry(2, 'role_changed', { kind: 'operator', key: null, name: null }, { key: selfRow.key, name: 'Ada Example' }, { role: 'owner' }),
+    auditEntry(1, 'schema_migrated', { kind: 'system', key: null, name: null }, null, { version: 5 }),
+  ]
 
   return {
     scenario,
     signedIn: scenario !== 'signed-out',
+    fresh,
     me,
-    writeTools,
-    identities: [
-      {
-        id: 'ident-1',
-        provider_id: 'entra',
-        provider_name: 'Microsoft',
-        display: 'ada@example.edu',
-        email: 'ada@example.edu',
-        email_verified: true,
-        linked_at: ago(60 * 24 * 7),
-        last_login_at: ago(3),
-        is_current_session: true,
-      },
-      {
-        id: 'ident-2',
-        provider_id: 'github',
-        provider_name: 'GitHub',
-        display: 'ada-example',
-        email: null,
-        email_verified: false,
-        linked_at: ago(60 * 24 * 2),
-        last_login_at: null,
-        is_current_session: false,
-      },
-    ],
-    grants: [
-      {
-        id: 'g_01',
-        client_name: 'Claude',
-        client_id: 'cl_demo',
-        created_at: ago(60 * 24 * 5),
-        last_used_at: ago(20),
-        revoked_at: null,
-      },
-      {
-        id: 'g_02',
-        client_name: 'Example MCP Client',
-        client_id: 'cl_demo2',
-        created_at: ago(60 * 24 * 12),
-        last_used_at: null,
-        revoked_at: ago(60 * 24 * 3),
-      },
-    ],
+    canvas,
+    tools,
+    hasCatalog: scenario !== 'no-write-tools',
+    schools,
     history: [
-      { at: ago(3), provider_id: 'entra', outcome: 'success', reason: null, ip: '203.0.113.7', user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/130.0 Safari/537.36' },
-      { at: ago(60 * 20), provider_id: 'github', outcome: 'denied', reason: 'access_denied', ip: null, user_agent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15' },
-      { at: ago(60 * 48), provider_id: 'entra', outcome: 'error', reason: 'provider_error', ip: 'unknown', user_agent: null },
+      { at: ago(3), provider_id: 'entra', outcome: 'success', reason: null },
+      { at: ago(60 * 20), provider_id: 'entra', outcome: 'refused', reason: 'signups_paused' },
+      { at: ago(60 * 24 * 6), provider_id: 'entra', outcome: 'pending', reason: 'account_created' },
     ],
-    accounts: [
-      { id: me.account.id, display_name: 'Ada Example', email: 'ada@example.edu', role: owner ? 'owner' : 'user', status: 'active', providers: ['entra', 'github'], created_at: ago(60 * 24 * 7), last_login_at: ago(3), canvas_state: canvas.state, grants_count: 1 },
-      { id: 'acct:00000000-0000-4000-8000-000000000002', display_name: 'Bob Example', email: null, role: 'user', status: 'pending', providers: ['github'], created_at: ago(60 * 24), last_login_at: null, canvas_state: 'none', grants_count: 0 },
-      { id: 'acct:00000000-0000-4000-8000-000000000003', display_name: 'Cleo Example', email: 'cleo@example.edu', role: 'user', status: 'active', providers: ['google'], created_at: ago(60 * 24 * 4), last_login_at: ago(60 * 5), canvas_state: 'invalid', grants_count: 2 },
-      { id: 'acct:00000000-0000-4000-8000-000000000004', display_name: 'Dev Example', email: 'dev@example.edu', role: 'user', status: 'disabled', providers: ['entra'], created_at: ago(60 * 24 * 9), last_login_at: ago(60 * 24 * 8), canvas_state: 'unknown', grants_count: 0 },
-    ],
-    enrollments: [
-      { account_id: me.account.id, display_name: 'Ada Example', canvas_user_name: 'Ada Example', canvas_user_id: 1234567, state: 'valid', enrolled_at: ago(60 * 24 * 6), updated_at: ago(60 * 24 * 6), last_used_at: ago(20), invalid_since: null },
-      { account_id: 'acct:00000000-0000-4000-8000-000000000003', display_name: 'Cleo Example', canvas_user_name: 'Cleo Example', canvas_user_id: 7654321, state: 'invalid', enrolled_at: ago(60 * 24 * 4), updated_at: ago(60 * 24 * 4), last_used_at: ago(60 * 30), invalid_since: ago(60 * 29) },
-    ],
-    audit: [
-      { id: 'a1', at: ago(3), actor_account_id: me.account.id, actor_name: 'Ada Example', action: 'login', target_account_id: null, target_name: null, detail: { provider: 'entra' } },
-      { id: 'a2', at: ago(60 * 3), actor_account_id: me.account.id, actor_name: 'Ada Example', action: 'approve', target_account_id: 'acct:00000000-0000-4000-8000-000000000003', target_name: 'Cleo Example', detail: null },
-      { id: 'a3', at: ago(60 * 24), actor_account_id: null, actor_name: null, action: 'enrollment_revoke', target_account_id: 'acct:00000000-0000-4000-8000-000000000004', target_name: 'Dev Example', detail: { reason: 'expired' } },
-      { id: 'a4', at: ago(60 * 25), actor_account_id: 'acct:00000000-0000-4000-8000-000000000003', actor_name: 'Cleo Example', action: 'write_tool_toggle', target_account_id: null, target_name: null, detail: { enabled: 2 } },
-    ],
+    accounts,
+    audit,
   }
 }
 
-// ---- plumbing ---------------------------------------------------------------
+// ---- views ---------------------------------------------------------------------
 
-interface Reply {
-  status: number
-  data: unknown
+function toolView(tool: MockTool): WriteTool {
+  return {
+    name: tool.name,
+    offered: tool.offered,
+    enabled: tool.enabled,
+    enabled_at: tool.enabled ? ago(60 * 24) : null,
+    effect: tool.local ? 'local_write' : 'canvas_write',
+  }
 }
-const ok = (data: unknown, status = 200): Reply => ({ status, data })
-const noContent = (): Reply => ({ status: 204, data: '' })
-const fail = (status: number, code: ApiErrorCode, params?: ErrorParams): Reply => ({
-  status,
+
+function writeToolsView(state: MockState): WriteToolsResponse {
+  // The known groups are always listed; "other" only when it holds an offered tool.
+  const groups: WriteToolGroup[] = GROUP_ORDER.map((id) => ({
+    id,
+    tools: state.tools
+      .filter((tool) => tool.group === id && (id !== 'other' || tool.offered))
+      .map(toolView),
+  })).filter((group) => group.id !== 'other' || group.tools.length > 0)
+  return {
+    groups,
+    kept_not_offered: [],
+    offered_any: state.tools.some((tool) => tool.offered),
+    editable: state.tools.some((tool) => tool.offered || tool.enabled),
+  }
+}
+
+function meView(state: MockState): MeResponse {
+  const pending = state.me.account.status === 'pending'
+  const offered = state.tools.filter((tool) => tool.offered)
+  return {
+    ...state.me,
+    canvas: pending ? null : state.canvas,
+    write_tools:
+      pending || !state.hasCatalog
+        ? null
+        : { offered: offered.length, enabled: offered.filter((tool) => tool.enabled).length },
+  }
+}
+
+// ---- plumbing ---------------------------------------------------------------------
+
+interface Ok<T> {
+  status: number
+  data: T
+}
+interface Fail {
+  status: number
+  data: ApiErrorBody
+}
+type Reply<T> = Ok<T> | Fail
+
+const ok = <T>(data: T, status = 200): Ok<T> => ({ status, data })
+const noContent = (): Ok<void> => ({ status: 204, data: '' as unknown as void })
+const STATUS: Partial<Record<ApiErrorCode, number>> = {
+  not_authenticated: 401,
+  csrf_invalid: 403,
+  origin_not_allowed: 403,
+  reauth_required: 403,
+  forbidden: 403,
+  pending_approval: 403,
+  access_disabled: 403,
+  method_not_allowed: 405,
+  unsupported_media_type: 415,
+  payload_too_large: 413,
+  malformed_request: 400,
+  validation_failed: 422,
+  not_found: 404,
+  rate_limited: 429,
+  token_store_unavailable: 503,
+  internal_error: 500,
+  token_invalid_format: 422,
+  token_rejected: 422,
+  token_unreadable: 422,
+  canvas_unavailable: 503,
+  identity_change_required: 409,
+  recheck_not_allowed: 409,
+  school_required: 422,
+  school_invalid: 422,
+  school_not_offered: 422,
+  school_not_in_directory: 422,
+  school_unresolvable: 422,
+  school_address_blocked: 422,
+  school_selection_unverified: 422,
+  directory_unavailable: 503,
+  write_tool_not_allowed: 422,
+  write_tools_unavailable: 503,
+  last_owner: 409,
+  cannot_disable_self: 409,
+}
+const fail = (code: ApiErrorCode, params?: ErrorParams): Fail => ({
+  status: STATUS[code] ?? 500,
   data: { error: { code, ...(params ? { params } : {}) } },
 })
 
 interface Ctx {
   match: RegExpMatchArray
+  /** The parsed JSON body (unvalidated, like the server's raw object). */
   body: Record<string, unknown>
   query: URLSearchParams
 }
-type Handler = (ctx: Ctx, state: MockState) => Reply
+type Handler<K extends RouteKey> = (ctx: Ctx, state: MockState) => Reply<ResponseOf<K>>
+type Access = 'public' | 'session' | 'active' | 'owner'
 
-const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+interface RouteDef {
+  method: string
+  pattern: RegExp
+  access: Access
+  csrf: boolean
+  // The handler's context is typed per route at registration; the table holds them uniformly.
+  handler: (ctx: Ctx, state: MockState) => Reply<unknown>
+}
+
+const routes: RouteDef[] = []
+
+function route<K extends RouteKey>(key: K, access: Access, handler: Handler<K>): void {
+  const { method, path } = splitRoute(key)
+  routes.push({
+    method,
+    pattern: new RegExp(`^${path.replace('{id}', '([^/]+)')}$`),
+    access,
+    csrf: method !== 'GET' || key === 'GET /me/schools/search',
+    handler: handler as unknown as RouteDef['handler'],
+  })
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function parseBody(data: unknown): Record<string, unknown> {
@@ -241,254 +512,338 @@ function parseBody(data: unknown): Record<string, unknown> {
   return typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : {}
 }
 
-function paged<T>(items: T[], cursor: string | null, size: number): { page: T[]; next: string | null } {
-  const start = cursor ? Number.parseInt(cursor, 10) || 0 : 0
-  const page = items.slice(start, start + size)
-  const end = start + size
-  return { page, next: end < items.length ? String(end) : null }
+function onlyFields(body: Record<string, unknown>, allowed: string[]): Fail | null {
+  for (const field of Object.keys(body)) {
+    if (!allowed.includes(field)) return fail('validation_failed', { field })
+  }
+  return null
 }
 
-function syncAccountRow(state: MockState): void {
-  const row = state.accounts.find((a) => a.id === state.me.account.id)
-  if (row) row.canvas_state = state.me.canvas.state
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+function syncSelf(state: MockState): void {
+  const row = state.accounts[0]
+  row.enrollment =
+    state.canvas.state === 'none'
+      ? null
+      : enrollmentOf(
+          state.canvas.canvas_user_name ?? 'Ada Example',
+          state.canvas.canvas_user_id ?? '1234567',
+          state.canvas.state === 'invalid' ? state.canvas.invalid_reason : null,
+        )
+  row.actions = actionsFor(row)
 }
 
-const routes: { method: string; pattern: RegExp; admin?: boolean; handler: Handler }[] = [
-  {
-    method: 'GET',
-    pattern: /^\/me$/,
-    handler: (_c, s) => ok(s.me),
-  },
-  {
-    method: 'GET',
-    pattern: /^\/me\/canvas-token$/,
-    handler: (_c, s) => ok(s.me.canvas),
-  },
-  {
-    method: 'PUT',
-    pattern: /^\/me\/canvas-token$/,
-    handler: (c, s) => {
-      if (s.scenario === 'error-503') return fail(503, 'token_store_unavailable')
-      if (s.scenario === 'rate-limited') return fail(429, 'rate_limited', { retry_after_s: 30 })
-      const token = typeof c.body.canvas_token === 'string' ? c.body.canvas_token.trim() : ''
-      if (token.length < 20 || token.length > 512) return fail(422, 'token_invalid_format')
-      if (token.includes('rejected')) return fail(422, 'token_rejected')
-      if (token.includes('offline')) return fail(502, 'canvas_unavailable')
-      const now = new Date().toISOString()
-      s.me.canvas = {
-        state: 'valid',
-        canvas_user_id: 1234567,
-        canvas_user_name: 'Ada Example',
-        enrolled_at: s.me.canvas.enrolled_at ?? now,
-        updated_at: now,
-        last_used_at: s.me.canvas.last_used_at,
-        last_checked_at: now,
-        invalid_since: null,
-      }
-      syncAccountRow(s)
-      return ok(s.me.canvas)
-    },
-  },
-  {
-    method: 'DELETE',
-    pattern: /^\/me\/canvas-token$/,
-    handler: (_c, s) => {
-      if (s.scenario === 'error-503') return fail(503, 'token_store_unavailable')
-      s.me.canvas = emptyCanvas()
-      syncAccountRow(s)
-      return noContent()
-    },
-  },
-  {
-    method: 'POST',
-    pattern: /^\/me\/canvas-token\/verify$/,
-    handler: (_c, s) => {
-      if (s.scenario === 'rate-limited') return fail(429, 'rate_limited', { retry_after_s: 30 })
-      if (s.me.canvas.state === 'none') return fail(404, 'not_found')
-      s.me.canvas = { ...s.me.canvas, last_checked_at: new Date().toISOString() }
-      return ok(s.me.canvas)
-    },
-  },
-  {
-    method: 'GET',
-    pattern: /^\/me\/write-tools$/,
-    handler: (_c, s) => ok({ server_enabled: true, tools: s.writeTools }),
-  },
-  {
-    method: 'PUT',
-    pattern: /^\/me\/write-tools$/,
-    handler: (c, s) => {
-      const enabled = Array.isArray(c.body.enabled) ? (c.body.enabled as unknown[]).map(String) : []
-      const blocked = enabled.some((name) => !s.writeTools.find((t) => t.name === name)?.server_allowed)
-      if (blocked) return fail(403, 'write_tool_not_allowed')
-      for (const tool of s.writeTools) tool.enabled = enabled.includes(tool.name)
-      s.me.write_tools_enabled_count = enabled.length
-      return ok({ server_enabled: true, tools: s.writeTools })
-    },
-  },
-  {
-    method: 'GET',
-    pattern: /^\/me\/identities$/,
-    handler: (_c, s) => {
-      const linked = new Set(s.identities.map((i) => i.provider_id))
-      return ok({
-        identities: s.identities,
-        linkable_providers: PROVIDERS.filter((p) => !linked.has(p.id)),
-      })
-    },
-  },
-  {
-    method: 'POST',
-    pattern: /^\/me\/identities\/link\/([^/]+)$/,
-    handler: (c) => ok({ redirect_url: `/account/api/login/${c.match[1]}/start` }),
-  },
-  {
-    method: 'DELETE',
-    pattern: /^\/me\/identities\/([^/]+)$/,
-    handler: (c, s) => {
-      if (s.identities.length <= 1) return fail(409, 'last_identity')
-      const index = s.identities.findIndex((i) => i.id === c.match[1])
-      if (index < 0) return fail(404, 'not_found')
-      s.identities.splice(index, 1)
-      return noContent()
-    },
-  },
-  {
-    method: 'GET',
-    pattern: /^\/me\/grants$/,
-    handler: (_c, s) => ok({ grants: s.grants }),
-  },
-  {
-    method: 'DELETE',
-    pattern: /^\/me\/grants\/([^/]+)$/,
-    handler: (c, s) => {
-      const grant = s.grants.find((g) => g.id === c.match[1])
-      if (!grant) return fail(404, 'not_found')
-      if (grant.revoked_at) return fail(409, 'grant_revoked')
-      grant.revoked_at = new Date().toISOString()
-      return noContent()
-    },
-  },
-  {
-    method: 'GET',
-    pattern: /^\/me\/login-history$/,
-    handler: (_c, s) => ok({ events: s.history }),
-  },
-  {
-    method: 'POST',
-    pattern: /^\/session\/logout$/,
-    handler: (_c, s) => {
-      s.signedIn = false
-      return noContent()
-    },
-  },
-  {
-    method: 'GET',
-    pattern: /^\/consent\/([^/]+)$/,
-    handler: (c, s) => {
-      if (c.match[1] === 'expired') return fail(410, 'consent_expired')
-      if (c.match[1] !== 't_9f2') return fail(404, 'not_found')
-      return ok({
-        txn: 't_9f2',
-        client_name: 'Claude',
-        client_uri: 'https://claude.ai',
-        redirect_host: 'claude.ai',
-        scopes: ['canvas:read'],
-        account_display_name: s.me.account.display_name,
-        expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
-      })
-    },
-  },
-  {
-    method: 'POST',
-    pattern: /^\/consent\/([^/]+)$/,
-    handler: (c) => {
-      if (c.match[1] !== 't_9f2') return fail(404, 'not_found')
-      // Same-origin on purpose: local development must not navigate off-site.
-      return ok({ redirect_url: `/account/?consent=${c.body.decision === 'deny' ? 'denied' : 'allowed'}` })
-    },
-  },
-  {
-    method: 'GET',
-    pattern: /^\/admin\/accounts$/,
-    admin: true,
-    handler: (c, s) => {
-      const status = c.query.get('status')
-      const q = (c.query.get('q') ?? '').toLowerCase()
-      const filtered = s.accounts.filter(
-        (a) =>
-          (!status || a.status === status) &&
-          (!q || a.display_name.toLowerCase().includes(q) || (a.email ?? '').toLowerCase().includes(q)),
-      )
-      const { page, next } = paged(filtered, c.query.get('cursor'), 3)
-      return ok({ accounts: page, next_cursor: next })
-    },
-  },
-  {
-    method: 'POST',
-    pattern: /^\/admin\/accounts\/([^/]+)\/action$/,
-    admin: true,
-    handler: (c, s) => {
-      const account = s.accounts.find((a) => a.id === decodeURIComponent(c.match[1]))
-      if (!account) return fail(404, 'not_found')
-      switch (c.body.action) {
-        case 'approve':
-        case 'enable':
-          account.status = 'active'
-          break
-        case 'disable':
-          account.status = 'disabled'
-          break
-        case 'set_role':
-          account.role = c.body.role === 'owner' ? 'owner' : 'user'
-          break
-        case 'revoke_grants':
-          account.grants_count = 0
-          break
-        case 'unlink_identity':
-          account.providers = account.providers.filter((p) => p !== c.body.identity_id)
-          break
-        default:
-          return fail(422, 'validation_failed', { field: 'action' })
-      }
-      return ok(account)
-    },
-  },
-  {
-    method: 'GET',
-    pattern: /^\/admin\/enrollments$/,
-    admin: true,
-    handler: (_c, s) => ok({ enrollments: s.enrollments }),
-  },
-  {
-    method: 'DELETE',
-    pattern: /^\/admin\/enrollments\/([^/]+)$/,
-    admin: true,
-    handler: (c, s) => {
-      const id = decodeURIComponent(c.match[1])
-      const index = s.enrollments.findIndex((e) => e.account_id === id)
-      if (index < 0) return fail(404, 'not_found')
-      s.enrollments.splice(index, 1)
-      return noContent()
-    },
-  },
-  {
-    method: 'GET',
-    pattern: /^\/admin\/audit$/,
-    admin: true,
-    handler: (c, s) => {
-      const action = c.query.get('action')
-      const actor = c.query.get('actor')
-      const filtered = s.audit.filter(
-        (e) => (!action || e.action === action) && (!actor || e.actor_account_id === actor),
-      )
-      const { page, next } = paged(filtered, c.query.get('cursor'), 3)
-      return ok({ entries: page, next_cursor: next })
-    },
-  },
-]
+// ---- routes -----------------------------------------------------------------------
 
-function handle(state: MockState, config: InternalAxiosRequestConfig): Reply {
+route('GET /providers', 'public', (_c, s) =>
+  ok({
+    providers: [
+      { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/account/login' },
+    ],
+    mcp_url: s.me.server.mcp_url,
+  }),
+)
+
+route('GET /me', 'session', (_c, s) => ok(meView(s)))
+
+route('GET /me/canvas-token', 'active', (_c, s) => ok(s.canvas))
+
+route('PUT /me/canvas-token', 'active', (c, s) => {
+  const bad = onlyFields(c.body, [
+    'canvas_token',
+    'school',
+    'school_sig',
+    'expires_on',
+    'confirm_identity_change',
+  ])
+  if (bad) return bad
+  if (s.scenario === 'rate-limited') return fail('rate_limited', { retry_after_s: 30 })
+  const token = typeof c.body.canvas_token === 'string' ? c.body.canvas_token : ''
+  if (!/^[A-Za-z0-9~._-]{20,512}$/.test(token)) return fail('token_invalid_format')
+
+  const expires = c.body.expires_on
+  if (typeof expires === 'string' && expires !== '' && !/^\d{4}-\d{2}-\d{2}$/.test(expires)) {
+    return fail('validation_failed', { field: 'expires_on' })
+  }
+
+  let school = SCHOOL
+  if (s.schools.mode === 'picker') {
+    const host = typeof c.body.school === 'string' ? c.body.school : ''
+    if (host === '') return fail('school_required')
+    const featured = s.schools.choices.some((choice) => choice.host === host)
+    if (!featured) {
+      const found = SEARCHABLE.find((entry) => entry.host === host)
+      if (!found) return fail('school_not_in_directory')
+      if (c.body.school_sig !== `sig-${host}`) return fail('school_selection_unverified')
+      school = { host: found.host, name: found.name, offered: true }
+    } else {
+      const choice = s.schools.choices.find((entry) => entry.host === host)
+      school = { host, name: choice?.name ?? host, offered: true }
+    }
+  }
+
+  if (token.includes('rejected')) return fail('token_rejected')
+  if (token.includes('offline')) return fail('canvas_unavailable')
+  if (s.scenario === 'error-503') return fail('token_store_unavailable')
+
+  let name = 'Ada Example'
+  let canvasId = '1234567'
+  if (s.scenario === 'identity-change' && s.canvas.state !== 'none') {
+    if (c.body.confirm_identity_change !== 'mock-confirmation') {
+      return fail('identity_change_required', {
+        enrolled_user_name: 'Ada Example',
+        new_user_name: 'Zed Example',
+        confirmation: 'mock-confirmation',
+      })
+    }
+    name = 'Zed Example'
+    canvasId = '7777777'
+  }
+
+  const now = ago(0)
+  s.canvas = {
+    state: 'active',
+    canvas_user_id: canvasId,
+    canvas_user_name: name,
+    school,
+    invalid_reason: null,
+    invalid_since: null,
+    recheck_allowed: false,
+    expires_on: typeof expires === 'string' && expires !== '' ? expires : null,
+    expiry_notice: 'none',
+    settings_url: `https://${school.host}/profile/settings`,
+    enrolled_at: s.canvas.enrolled_at ?? now,
+    updated_at: now,
+    last_used_at: s.canvas.last_used_at,
+    last_verified_at: now,
+  }
+  syncSelf(s)
+  return ok(s.canvas)
+})
+
+route('DELETE /me/canvas-token', 'active', (_c, s) => {
+  if (s.scenario === 'error-503') return fail('token_store_unavailable')
+  s.canvas = emptyCanvas()
+  syncSelf(s)
+  return noContent()
+})
+
+route('POST /me/canvas-token/recheck', 'active', (_c, s) => {
+  if (s.scenario === 'rate-limited') return fail('rate_limited', { retry_after_s: 60 })
+  if (s.canvas.state === 'none') return fail('not_found')
+  if (s.canvas.invalid_reason === 'revoked_by_admin') return fail('recheck_not_allowed')
+  if (s.canvas.state === 'invalid') {
+    s.canvas = { ...s.canvas, state: 'active', invalid_reason: null, invalid_since: null, recheck_allowed: false, last_verified_at: ago(0) }
+    syncSelf(s)
+    return ok({ result: 'restored', canvas: s.canvas })
+  }
+  return ok({ result: 'unchanged', canvas: s.canvas })
+})
+
+route('GET /me/schools', 'active', (_c, s) => ok(s.schools))
+
+route('GET /me/schools/search', 'active', (c, s) => {
+  if (!s.schools.search_enabled) return fail('not_found')
+  const q = (c.query.get('q') ?? '').trim()
+  if (q.length < 2 || q.length > 64) return fail('validation_failed', { field: 'q', min: 2, max: 64 })
+  if (q.toLowerCase().includes('offline')) return fail('directory_unavailable')
+  const needle = q.toLowerCase()
+  const results = SEARCHABLE.filter(
+    (entry) => entry.name.toLowerCase().includes(needle) || entry.host.includes(needle),
+  ).map((entry) => ({ host: entry.host, name: entry.name, sig: `sig-${entry.host}` }))
+  return ok({ results })
+})
+
+route('GET /me/write-tools', 'active', (_c, s) =>
+  s.hasCatalog ? ok(writeToolsView(s)) : fail('not_found'),
+)
+
+route('PUT /me/write-tools', 'active', (c, s) => {
+  if (!s.hasCatalog) return fail('not_found')
+  const bad = onlyFields(c.body, ['enabled'])
+  if (bad) return bad
+  const raw = c.body.enabled
+  if (!Array.isArray(raw) || !raw.every((name) => typeof name === 'string')) {
+    return fail('validation_failed', { field: 'enabled' })
+  }
+  const names = raw as string[]
+  const known = new Set(s.tools.filter((tool) => tool.offered || tool.enabled).map((tool) => tool.name))
+  const unknown = names.find((name) => !known.has(name))
+  if (unknown !== undefined) return fail('write_tool_not_allowed', { tool: unknown })
+  const wanted = (tool: MockTool) => (tool.offered ? names.includes(tool.name) : tool.enabled)
+  const turnsOn = s.tools.some((tool) => !tool.enabled && wanted(tool))
+  if (turnsOn && !s.fresh) return fail('reauth_required', { max_age_s: 600 })
+  const changed = s.tools.some((tool) => tool.enabled !== wanted(tool))
+  for (const tool of s.tools) tool.enabled = wanted(tool)
+  return ok({ result: changed ? 'saved' : 'unchanged', ...writeToolsView(s) })
+})
+
+route('DELETE /me/write-tools', 'active', (_c, s) => {
+  if (!s.hasCatalog) return fail('not_found')
+  const changed = s.tools.some((tool) => tool.enabled)
+  for (const tool of s.tools) tool.enabled = false
+  return ok({ result: changed ? 'saved' : 'unchanged', ...writeToolsView(s) })
+})
+
+route('GET /me/login-history', 'session', (_c, s) => ok({ events: s.history }))
+
+route('PUT /me/ui-locale', 'session', (c, s) => {
+  const bad = onlyFields(c.body, ['locale'])
+  if (bad) return bad
+  const locale = c.body.locale
+  if (locale !== 'en' && locale !== 'zh') return fail('validation_failed', { field: 'locale' })
+  s.me.ui_locale = locale as UiLocale
+  return noContent()
+})
+
+route('POST /session/logout', 'session', (_c, s) => {
+  s.signedIn = false
+  return noContent()
+})
+
+route('GET /admin/accounts', 'owner', (c, s) => {
+  const status = c.query.get('status')
+  if (status !== null && !['active', 'pending', 'disabled'].includes(status)) {
+    return fail('validation_failed', { field: 'status' })
+  }
+  const shown = s.accounts
+    .filter((a) => status === null || a.status === status)
+    .sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1))
+  return ok({
+    accounts: shown.map((a) => ({ ...a })),
+    counts: {
+      total: s.accounts.length,
+      active: s.accounts.filter((a) => a.status === 'active').length,
+      pending: s.accounts.filter((a) => a.status === 'pending').length,
+      disabled: s.accounts.filter((a) => a.status === 'disabled').length,
+      owners: s.accounts.filter((a) => a.status === 'active' && a.role === 'owner').length,
+    },
+  })
+})
+
+route('GET /admin/enrollments', 'owner', (c, s) => {
+  const filter = c.query.get('filter') ?? 'all'
+  if (filter !== 'all' && filter !== 'needs_reenroll') return fail('validation_failed', { field: 'filter' })
+  const withToken = s.accounts.filter((a) => a.enrollment !== null)
+  const needing = withToken.filter((a) => a.enrollment?.state === 'invalid')
+  const rows =
+    filter === 'needs_reenroll'
+      ? needing
+      : [...withToken, ...s.accounts.filter((a) => a.enrollment === null && a.status !== 'active')]
+  rows.sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1))
+  return ok({
+    rows: rows.map((a) => ({ ...a })),
+    counts: {
+      needing: needing.length,
+      total_enrollments: withToken.length,
+      disabled: s.accounts.filter((a) => a.status === 'disabled').length,
+      pending: s.accounts.filter((a) => a.status === 'pending').length,
+    },
+  })
+})
+
+function findTarget(c: Ctx, s: MockState): AdminAccount | Fail {
+  const id = decodeURIComponent(c.match[1])
+  if (!UUID.test(id)) return fail('validation_failed', { field: 'id' })
+  return s.accounts.find((a) => a.id === id) ?? fail('not_found')
+}
+
+function accessAction(action: 'approve' | 'deny' | 'disable' | 'enable') {
+  return (c: Ctx, s: MockState): Reply<AdminActionResponse> => {
+    const target = findTarget(c, s)
+    if ('status' in target && 'data' in target) return target as Fail
+    const row = target as AdminAccount
+    let changed = false
+    switch (action) {
+      case 'approve':
+        if (row.status === 'pending') {
+          row.status = 'active'
+          row.approved_at = ago(0)
+          changed = true
+        }
+        break
+      case 'deny':
+        if (row.status === 'pending') {
+          row.status = 'disabled'
+          row.disabled_reason = 'approval_denied'
+          row.disabled_at = ago(0)
+          changed = true
+        }
+        break
+      case 'disable':
+        if (row.is_self) return fail('cannot_disable_self')
+        if (row.status === 'active') {
+          row.status = 'disabled'
+          row.disabled_reason = 'admin_disabled'
+          row.disabled_at = ago(0)
+          changed = true
+        }
+        break
+      case 'enable':
+        if (row.status === 'disabled') {
+          row.status = 'active'
+          row.disabled_reason = null
+          row.disabled_at = null
+          changed = true
+        }
+        break
+    }
+    row.actions = actionsFor(row)
+    return ok({ changed, account: { ...row } })
+  }
+}
+
+route('POST /admin/accounts/{id}/approve', 'owner', accessAction('approve'))
+route('POST /admin/accounts/{id}/deny', 'owner', accessAction('deny'))
+route('POST /admin/accounts/{id}/disable', 'owner', accessAction('disable'))
+route('POST /admin/accounts/{id}/enable', 'owner', accessAction('enable'))
+
+route('POST /admin/enrollments/{id}/mark-invalid', 'owner', (c, s) => {
+  const target = findTarget(c, s)
+  if ('status' in target && 'data' in target) return target as Fail
+  const row = target as AdminAccount
+  if (row.enrollment === null) return fail('not_found')
+  const changed = row.enrollment.state !== 'invalid'
+  row.enrollment = {
+    ...row.enrollment,
+    state: 'invalid',
+    invalid_reason: 'revoked_by_admin',
+    invalid_since: ago(0),
+  }
+  row.actions = actionsFor(row)
+  if (row.is_self) {
+    s.canvas = invalidCanvas('revoked_by_admin')
+  }
+  return ok({ changed, account: { ...row } })
+})
+
+route('DELETE /admin/enrollments/{id}', 'owner', (c, s) => {
+  const target = findTarget(c, s)
+  if ('status' in target && 'data' in target) return target as Fail
+  const row = target as AdminAccount
+  const changed = row.enrollment !== null
+  row.enrollment = null
+  row.actions = actionsFor(row)
+  if (row.is_self) s.canvas = emptyCanvas()
+  return ok({ changed, account: { ...row } })
+})
+
+const AUDIT_PAGE = 3
+route('GET /admin/audit', 'owner', (c, s) => {
+  const raw = c.query.get('before')
+  if (raw !== null && !/^\d{1,14}$/.test(raw)) return fail('validation_failed', { field: 'before' })
+  const older = s.audit.filter((entry) => raw === null || entry.id < Number(raw))
+  const page = older.slice(0, AUDIT_PAGE)
+  return ok({
+    entries: page,
+    next_cursor: page.length >= AUDIT_PAGE ? String(page[page.length - 1].id) : null,
+  })
+})
+
+// ---- the adapter -------------------------------------------------------------------
+
+function handle(state: MockState, config: InternalAxiosRequestConfig): Reply<unknown> {
   const method = (config.method ?? 'get').toUpperCase()
   const url = new URL(config.url ?? '/', 'http://mock.invalid')
   const query = new URLSearchParams(url.search)
@@ -499,33 +854,25 @@ function handle(state: MockState, config: InternalAxiosRequestConfig): Reply {
   }
   const path = url.pathname
 
-  if (method === 'GET' && path === '/providers') {
-    const list =
-      state.scenario === 'no-provider' ? [] : state.scenario === 'single-provider' ? PROVIDERS.slice(0, 1) : PROVIDERS
-    const body: ProvidersResponse = {
-      providers: list,
-      login_mode: 'open',
-      signups_paused: false,
-      mcp_url: `${window.location.origin}/mcp`,
+  const byPath = routes.filter((r) => r.pattern.test(path))
+  if (byPath.length === 0) return fail('not_found')
+  const found = byPath.find((r) => r.method === method)
+  if (!found) return fail('method_not_allowed')
+
+  if (found.access !== 'public') {
+    if (!state.signedIn) return fail('not_authenticated')
+    const pending = state.me.account.status === 'pending'
+    if ((found.access === 'active' || found.access === 'owner') && pending) {
+      return fail('pending_approval')
     }
-    return ok(body)
+    if (found.access === 'owner') {
+      if (state.me.account.role !== 'owner') return fail('forbidden')
+      if (!state.fresh) return fail('reauth_required', { max_age_s: 600 })
+    }
+    if (found.csrf && config.headers.get('X-CSRF-Token') !== MOCK_CSRF) return fail('csrf_invalid')
   }
-
-  if (!state.signedIn) return fail(401, 'not_authenticated')
-
-  if (MUTATING.has(method) && config.headers.get('X-CSRF-Token') !== MOCK_CSRF) {
-    return fail(403, 'csrf_invalid')
-  }
-
-  for (const route of routes) {
-    if (route.method !== method) continue
-    const match = path.match(route.pattern)
-    if (!match) continue
-    if (route.admin && state.me.account.role !== 'owner') return fail(403, 'forbidden')
-    if (state.me.account.status !== 'active' && !/^\/(me|session)/.test(path)) return fail(403, 'forbidden')
-    return route.handler({ match, body: parseBody(config.data), query }, state)
-  }
-  return fail(404, 'not_found')
+  const match = path.match(found.pattern) as RegExpMatchArray
+  return found.handler({ match, body: parseBody(config.data), query }, state)
 }
 
 export interface MockOptions {

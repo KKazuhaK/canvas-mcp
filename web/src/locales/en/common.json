@@ -7,12 +7,11 @@
     "copy": "Copy",
     "copied": "Copied",
     "signIn": "Sign in",
+    "signInAgain": "Sign in again",
     "signOut": "Sign out",
-    "signOutAll": "Sign out of all devices",
     "cancel": "Cancel",
     "confirm": "Confirm",
     "delete": "Delete",
-    "revoke": "Revoke",
     "save": "Save",
     "close": "Close",
     "goHome": "Back to home",
@@ -24,8 +23,6 @@
     "home": "Account",
     "token": "Canvas token",
     "writeTools": "Write tools",
-    "identities": "Sign-in methods",
-    "connectedApps": "Connected apps",
     "activity": "Recent sign-ins",
     "admin": "Admin",
     "adminAccounts": "Accounts",
@@ -33,7 +30,10 @@
     "adminAudit": "Audit log"
   },
   "language": {
-    "names": { "en": "English", "zh": "中文" },
+    "names": {
+      "en": "English",
+      "zh": "中文"
+    },
     "switchTo": "Switch language to {{name}}"
   },
   "theme": {
@@ -45,7 +45,13 @@
   "status": {
     "active": "Active",
     "pending": "Pending",
-    "disabled": "Disabled"
+    "disabled": "Disabled",
+    "missing": "No account"
+  },
+  "tokenState": {
+    "none": "Not enrolled",
+    "active": "Valid",
+    "invalid": "Needs a new token"
   },
   "role": {
     "owner": "Owner",

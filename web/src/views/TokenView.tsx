@@ -2,7 +2,6 @@ import Box from '@mui/material/Box'
 import { useTranslation } from 'react-i18next'
 import McpUrlCard from '@/components/McpUrlCard'
 import PageHeader from '@/components/PageHeader'
-import SchoolCard from '@/components/token/SchoolCard'
 import TokenSection from '@/components/token/TokenSection'
 import { useMe } from '@/query/hooks'
 import { PageSkeleton } from './StateViews'
@@ -16,8 +15,7 @@ export default function TokenView() {
       <PageHeader title={t('common:nav.token')} />
       {me.data ? (
         <Box sx={{ display: 'grid', gap: 2 }}>
-          <TokenSection canvas={me.data.canvas} />
-          <SchoolCard />
+          {me.data.canvas ? <TokenSection canvas={me.data.canvas} /> : null}
           <McpUrlCard />
         </Box>
       ) : (

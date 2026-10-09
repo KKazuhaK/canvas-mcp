@@ -6,56 +6,53 @@ import Card from '@mui/material/Card'
 import CardContent from '@mui/material/CardContent'
 import Skeleton from '@mui/material/Skeleton'
 import Typography from '@mui/material/Typography'
-import { useEffect, useRef } from 'react'
-import { useSearchParams } from 'react-router'
+import { Navigate, useSearchParams } from 'react-router'
 import { useTranslation } from 'react-i18next'
-import { loginStartUrl } from '@/api/endpoints'
+import { signInUrl } from '@/api/endpoints'
 import ErrorNotice from '@/components/ErrorNotice'
 import McpUrlCard from '@/components/McpUrlCard'
 import ProviderIcon from '@/components/ProviderIcon'
-import { useProviders } from '@/query/hooks'
+import { useMe, useProviders } from '@/query/hooks'
 import { codeText } from '@/utils/errorText'
-import { hardNavigate } from '@/utils/navigate'
-import { sanitizeReturnTo, sanitizeTxn } from '@/utils/returnTo'
+import { SITE_BASE, sanitizeReturnTo } from '@/utils/returnTo'
+
+/** A provider's start URL must be a plain same-site path; anything else is not offered. */
+function isPlainPath(url: string): boolean {
+  return /^\/[A-Za-z0-9/_-]{1,128}$/.test(url) && !url.includes('//')
+}
 
 /**
- * /login. One button per provider from GET /providers, each a plain link to the
- * full-page navigation /account/api/login/{id}/start. `txn` and `return_to` are
- * validated before they are passed on.
+ * /sign-in. One button per provider from GET /providers, each a plain link to the
+ * server-side sign-in redirect (a full-page navigation to /account/login, then the
+ * identity provider, then back). The server returns here with ?error=<code> when a
+ * sign-in fails; the code is mapped to fixed text and the raw value is never shown.
  *
- * Auto-redirect fires ONLY when exactly one provider is configured and there is
- * no ?error. That guard is what stops a failing provider from bouncing the
- * person back and forth forever.
+ * There is deliberately no automatic redirect to the provider: a person who just
+ * signed out, or whose browser drops the session cookie, would be bounced around
+ * in a loop.
  */
-export default function LoginView() {
+export default function SignInView() {
   const { t } = useTranslation()
   const [params] = useSearchParams()
   const providers = useProviders()
+  const me = useMe()
   const errorParam = params.get('error')
-  const txn = sanitizeTxn(params.get('txn'))
   const returnTo = sanitizeReturnTo(params.get('return_to'))
-  const fired = useRef(false)
 
-  const list = providers.data?.providers
-  const autoTarget =
-    list && list.length === 1 && errorParam === null
-      ? loginStartUrl(list[0].id, { txn, returnTo })
-      : null
-
-  useEffect(() => {
-    if (autoTarget !== null && !fired.current) {
-      fired.current = true
-      hardNavigate(autoTarget)
-    }
-  }, [autoTarget])
+  // Already signed in (for example a stale tab): go where the sign-in was headed.
+  if (me.data) {
+    const inApp = returnTo ? returnTo.slice(SITE_BASE.length) || '/' : '/'
+    return <Navigate to={inApp} replace />
+  }
 
   const data = providers.data
+  const offered = data?.providers.filter((provider) => isPlainPath(provider.start_url)) ?? []
   return (
     <>
-      <Card component="section" aria-labelledby="login-title">
+      <Card component="section" aria-labelledby="sign-in-title">
         <CardContent sx={{ display: 'grid', gap: 2 }}>
           <Box>
-            <Typography id="login-title" variant="h1" component="h1">
+            <Typography id="sign-in-title" variant="h1" component="h1">
               {t('auth:login.title')}
             </Typography>
             <Typography color="text.secondary" sx={{ mt: 0.5 }}>
@@ -70,11 +67,8 @@ export default function LoginView() {
             </Alert>
           ) : null}
 
-          {txn ? <Alert severity="info" role="note">{t('auth:login.consentHint')}</Alert> : null}
-
           {providers.isPending ? (
             <Box role="status" aria-label={t('common:states.loading')} sx={{ display: 'grid', gap: 1 }}>
-              <Skeleton variant="rounded" height={44} />
               <Skeleton variant="rounded" height={44} />
             </Box>
           ) : null}
@@ -87,32 +81,20 @@ export default function LoginView() {
             />
           ) : null}
 
-          {data?.signups_paused ? <Alert severity="info" role="note">{t('auth:login.signupsPaused')}</Alert> : null}
-          {data?.login_mode === 'invite_only' ? (
-            <Alert severity="info" role="note">{t('auth:login.inviteOnly')}</Alert>
-          ) : null}
-          {data?.login_mode === 'closed' ? <Alert severity="warning" role="note">{t('auth:login.closed')}</Alert> : null}
-
-          {data && data.providers.length === 0 ? (
+          {data && offered.length === 0 ? (
             <Alert severity="warning" role="note">
               <AlertTitle>{t('auth:login.noProviders.title')}</AlertTitle>
               {t('auth:login.noProviders.body')}
             </Alert>
           ) : null}
 
-          {autoTarget !== null && list ? (
-            <Alert severity="info" role="status">
-              {t('auth:login.redirecting', { name: list[0].name })}
-            </Alert>
-          ) : null}
-
-          {data && data.providers.length > 0 ? (
+          {offered.length > 0 ? (
             <Box component="ul" sx={{ listStyle: 'none', m: 0, p: 0, display: 'grid', gap: 1.5 }}>
-              {data.providers.map((provider) => (
+              {offered.map((provider) => (
                 <li key={provider.id}>
                   <Button
                     component="a"
-                    href={loginStartUrl(provider.id, { txn, returnTo })}
+                    href={signInUrl(provider.start_url, returnTo)}
                     variant="outlined"
                     size="large"
                     fullWidth

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AxiosError } from 'axios'
 import { clearCsrfToken, configureClient, http, setCsrfToken } from './client'
 import { ApiError } from './errors'
-import { getMe, logout, putCanvasToken, putWriteTools } from './endpoints'
+import { getMe, logout, putCanvasToken, putWriteTools, searchSchools } from './endpoints'
 import { errorBody, meFixture, scriptAdapter } from '@/test/fixtures'
 
 describe('http client', () => {
@@ -47,6 +47,15 @@ describe('http client', () => {
     await putWriteTools(['send_message'])
     expect(seen[1].headers['x-csrf-token']).toBe('test-csrf-token')
     expect(seen[2].headers['x-csrf-token']).toBe('test-csrf-token')
+  })
+
+  it('sends X-CSRF-Token on the school search GET too (the server counts it as a mutation)', async () => {
+    const seen = scriptAdapter(() => ({ status: 200, data: { results: [] } }))
+    setCsrfToken('csrf-abc')
+    await searchSchools('state')
+    await http.get('/me/schools')
+    expect(seen[0].headers['x-csrf-token']).toBe('csrf-abc')
+    expect(seen[1].headers['x-csrf-token']).toBeUndefined()
   })
 
   it('never sends an Authorization header', async () => {
@@ -109,7 +118,7 @@ describe('http client', () => {
     const secret = 'secret-canvas-token-value-1234567890'
     scriptAdapter(() => ({ status: 422, data: errorBody('token_rejected') }))
     setCsrfToken('csrf-abc')
-    const error = (await putCanvasToken(secret).catch((e: unknown) => e)) as ApiError
+    const error = (await putCanvasToken({ canvas_token: secret }).catch((e: unknown) => e)) as ApiError
     expect(error).toBeInstanceOf(ApiError)
     expect(error).not.toHaveProperty('config')
     expect(error).not.toHaveProperty('request')
@@ -126,7 +135,7 @@ describe('http client', () => {
     await http.get('/me').catch(() => undefined)
     expect(onUnauthorized).not.toHaveBeenCalled()
 
-    await http.get('/me/grants').catch(() => undefined)
+    await http.get('/me/login-history').catch(() => undefined)
     expect(onUnauthorized).toHaveBeenCalledTimes(1)
   })
 

@@ -4,32 +4,27 @@ import Card from '@mui/material/Card'
 import CardContent from '@mui/material/CardContent'
 import Chip from '@mui/material/Chip'
 import Typography from '@mui/material/Typography'
-import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { LoginEvent, LoginOutcome } from '@/api/types'
-import ConfirmDialog from '@/components/ConfirmDialog'
 import ErrorNotice from '@/components/ErrorNotice'
 import PageHeader from '@/components/PageHeader'
 import ResponsiveTable, { type Column } from '@/components/ResponsiveTable'
 import TimeText from '@/components/TimeText'
 import { useLoginHistory, useLogout, useProviders } from '@/query/hooks'
-import { summariseUserAgent } from '@/utils/time'
-import { codeText } from '@/utils/errorText'
 import { PageSkeleton } from './StateViews'
 
 const OUTCOME_COLOR: Record<LoginOutcome, 'success' | 'warning' | 'error'> = {
   success: 'success',
-  denied: 'warning',
-  error: 'error',
+  pending: 'warning',
+  refused: 'error',
 }
 
-/** /activity: the last 20 sign-in attempts, plus sign out and sign out everywhere. */
+/** /activity: the last 20 sign-ins, plus sign out. (No address or device: the server keeps none.) */
 export default function ActivityView() {
   const { t } = useTranslation()
   const history = useLoginHistory()
   const providers = useProviders()
   const logout = useLogout()
-  const [confirmAll, setConfirmAll] = useState(false)
 
   const providerName = (id: string) => providers.data?.providers.find((p) => p.id === id)?.name ?? id
 
@@ -59,17 +54,7 @@ export default function ActivityView() {
     {
       key: 'reason',
       header: t('account:activity.columns.reason'),
-      render: (e) => (e.reason ? codeText(t, e.reason) : '–'),
-    },
-    {
-      key: 'ip',
-      header: t('account:activity.columns.ip'),
-      render: (e) => (e.ip && e.ip !== 'unknown' ? e.ip : t('account:activity.ipUnknown')),
-    },
-    {
-      key: 'device',
-      header: t('account:activity.columns.device'),
-      render: (e) => summariseUserAgent(e.user_agent) ?? t('common:time.unknown'),
+      render: (e) => (e.reason ? t(`account:activity.reason.${e.reason}`) : '–'),
     },
   ]
 
@@ -89,7 +74,7 @@ export default function ActivityView() {
             label={t('account:activity.title')}
             columns={columns}
             rows={history.data.events}
-            rowKey={(e) => `${e.at}|${e.provider_id}|${e.outcome}`}
+            rowKey={(e) => `${e.at}|${e.provider_id}|${e.outcome}|${e.reason}`}
           />
         ) : null}
 
@@ -101,32 +86,15 @@ export default function ActivityView() {
             <Typography variant="body2" color="text.secondary">
               {t('account:activity.sessionsBody')}
             </Typography>
-            {logout.isError && !confirmAll ? <ErrorNotice error={logout.error} /> : null}
-            <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-              <Button variant="outlined" disabled={logout.isPending} onClick={() => logout.mutate(false)}>
+            {logout.isError ? <ErrorNotice error={logout.error} /> : null}
+            <Box>
+              <Button variant="outlined" disabled={logout.isPending} onClick={() => logout.mutate()}>
                 {t('common:actions.signOut')}
-              </Button>
-              <Button color="error" disabled={logout.isPending} onClick={() => setConfirmAll(true)}>
-                {t('common:actions.signOutAll')}
               </Button>
             </Box>
           </CardContent>
         </Card>
       </Box>
-
-      <ConfirmDialog
-        open={confirmAll}
-        title={t('common:actions.signOutAll')}
-        body={t('account:activity.sessionsBody')}
-        confirmLabel={t('common:actions.signOutAll')}
-        pending={logout.isPending}
-        error={logout.error}
-        onClose={() => {
-          logout.reset()
-          setConfirmAll(false)
-        }}
-        onConfirm={() => logout.mutate(true)}
-      />
     </>
   )
 }

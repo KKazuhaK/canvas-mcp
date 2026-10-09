@@ -37,6 +37,11 @@ function readStoredLanguage(): Language | null {
   }
 }
 
+/** True when the person already chose a language (a ?lang= link or the stored toggle). */
+export function hasExplicitLanguage(): boolean {
+  return readQueryLanguage() !== null || readStoredLanguage() !== null
+}
+
 /** ?lang= (explicit link) beats the stored toggle, which beats the English default. */
 export function readInitialLanguage(): Language {
   return readQueryLanguage() ?? readStoredLanguage() ?? DEFAULT_LANGUAGE
@@ -54,6 +59,12 @@ interface LanguageState {
   lang: Language
   /** The explicit toggle: persists the choice and switches i18n. */
   setLanguage: (lang: Language) => void
+  /**
+   * The language the server remembers for this person (the canvas_mcp_lang cookie,
+   * shared with the server-rendered pages). Applied for this page view only, and
+   * never over a choice the person already made in this browser.
+   */
+  applyRemembered: (lang: Language) => void
 }
 
 const initial = readInitialLanguage()
@@ -67,6 +78,12 @@ export const useLanguage = create<LanguageState>((set) => ({
     } catch {
       // Not persisted; the choice still applies for this page view.
     }
+    mirrorToDocument(lang)
+    if (i18next.isInitialized) void i18next.changeLanguage(lang)
+    set({ lang })
+  },
+  applyRemembered: (lang) => {
+    if (hasExplicitLanguage()) return
     mirrorToDocument(lang)
     if (i18next.isInitialized) void i18next.changeLanguage(lang)
     set({ lang })

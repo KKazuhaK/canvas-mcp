@@ -27,32 +27,16 @@ export function formatDate(iso: string | null | undefined, lang: Language): stri
   return new Intl.DateTimeFormat(intlLocale(lang), { dateStyle: 'medium' }).format(date)
 }
 
-/** Short summary of a User-Agent string, e.g. "Chrome on Windows". Never the raw string. */
-export function summariseUserAgent(ua: string | null | undefined): string | null {
-  if (!ua) return null
-  const browser =
-    /Edg\//.test(ua)
-      ? 'Edge'
-      : /OPR\/|Opera/.test(ua)
-        ? 'Opera'
-        : /Firefox\//.test(ua)
-          ? 'Firefox'
-          : /Chrome\//.test(ua)
-            ? 'Chrome'
-            : /Safari\//.test(ua)
-              ? 'Safari'
-              : null
-  const os = /Windows/.test(ua)
-    ? 'Windows'
-    : /Android/.test(ua)
-      ? 'Android'
-      : /iPhone|iPad|iOS/.test(ua)
-        ? 'iOS'
-        : /Mac OS X|Macintosh/.test(ua)
-          ? 'macOS'
-          : /Linux/.test(ua)
-            ? 'Linux'
-            : null
-  if (browser && os) return `${browser} / ${os}`
-  return browser ?? os
+/**
+ * A calendar date the server sends as YYYY-MM-DD (no time zone), shown as that
+ * same day in the viewer's locale. Parsed by hand so a UTC midnight can never slip
+ * to the previous day.
+ */
+export function formatCalendarDate(ymd: string | null | undefined, lang: Language): string | null {
+  if (!ymd) return null
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd)
+  if (!match) return null
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+  if (Number.isNaN(date.getTime())) return null
+  return new Intl.DateTimeFormat(intlLocale(lang), { dateStyle: 'medium' }).format(date)
 }

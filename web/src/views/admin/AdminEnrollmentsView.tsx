@@ -1,106 +1,141 @@
 import Box from '@mui/material/Box'
-import Button from '@mui/material/Button'
 import Chip from '@mui/material/Chip'
 import MenuItem from '@mui/material/MenuItem'
 import TextField from '@mui/material/TextField'
 import Typography from '@mui/material/Typography'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { AdminEnrollment, EnrollmentTokenState } from '@/api/types'
-import ConfirmDialog from '@/components/ConfirmDialog'
+import type { AdminAccount, AdminEnrollmentFilter } from '@/api/types'
+import AdminActions from '@/components/admin/AdminActions'
 import ErrorNotice from '@/components/ErrorNotice'
 import ResponsiveTable, { type Column } from '@/components/ResponsiveTable'
+import { AccountStatusChip, TokenStateChip } from '@/components/StatusChips'
 import TimeText from '@/components/TimeText'
-import { useAdminEnrollments, useRevokeEnrollment } from '@/query/hooks'
-import { useToast } from '@/stores/toast'
+import { useAdminEnrollments } from '@/query/hooks'
 import { PageSkeleton } from '../StateViews'
 
-const STATE_COLOR: Record<EnrollmentTokenState, 'success' | 'warning' | 'default'> = {
-  valid: 'success',
-  invalid: 'warning',
-  unknown: 'default',
-  none: 'default',
+function EnrollmentDetails({ account }: { account: AdminAccount }) {
+  const { t } = useTranslation()
+  const enrollment = account.enrollment
+  if (enrollment === null) return null
+  return (
+    <Box component="details" sx={{ mt: 0.5 }}>
+      <Typography component="summary" variant="caption" color="text.secondary" sx={{ cursor: 'pointer' }}>
+        {t('admin:enrollments.details')}
+      </Typography>
+      <Box component="dl" sx={{ m: 0, mt: 0.5, display: 'grid', gridTemplateColumns: 'auto 1fr', columnGap: 1.5, rowGap: 0.25 }}>
+        <Typography component="dt" variant="caption" color="text.secondary">
+          {t('admin:enrollments.accountId')}
+        </Typography>
+        <Typography component="dd" variant="caption" sx={{ m: 0, overflowWrap: 'anywhere' }}>
+          {account.id}
+        </Typography>
+        <Typography component="dt" variant="caption" color="text.secondary">
+          {t('admin:enrollments.canvasUserId')}
+        </Typography>
+        <Typography component="dd" variant="caption" sx={{ m: 0, overflowWrap: 'anywhere' }}>
+          {enrollment.canvas_user_id}
+        </Typography>
+        <Typography component="dt" variant="caption" color="text.secondary">
+          {t('admin:enrollments.enrolledAt')}
+        </Typography>
+        <Typography component="dd" variant="caption" sx={{ m: 0 }}>
+          <TimeText iso={enrollment.created_at} />
+        </Typography>
+        <Typography component="dt" variant="caption" color="text.secondary">
+          {t('admin:enrollments.updatedAt')}
+        </Typography>
+        <Typography component="dd" variant="caption" sx={{ m: 0 }}>
+          <TimeText iso={enrollment.updated_at} />
+        </Typography>
+        {enrollment.invalid_since ? (
+          <>
+            <Typography component="dt" variant="caption" color="text.secondary">
+              {t('admin:enrollments.invalidSince')}
+            </Typography>
+            <Typography component="dd" variant="caption" sx={{ m: 0 }}>
+              <TimeText iso={enrollment.invalid_since} />
+            </Typography>
+          </>
+        ) : null}
+      </Box>
+    </Box>
+  )
 }
-
-type Filter = EnrollmentTokenState | 'all'
 
 /** /admin/enrollments: who has a Canvas token stored, and whether Canvas still accepts it. */
 export default function AdminEnrollmentsView() {
   const { t } = useTranslation()
-  const query = useAdminEnrollments()
-  const revoke = useRevokeEnrollment()
-  const [filter, setFilter] = useState<Filter>('all')
-  const [target, setTarget] = useState<AdminEnrollment | null>(null)
+  const [filter, setFilter] = useState<AdminEnrollmentFilter>('all')
+  const query = useAdminEnrollments(filter)
+  const rows = query.data?.rows ?? []
+  const counts = query.data?.counts
 
-  const rows = (query.data?.enrollments ?? []).filter((e) => filter === 'all' || e.state === filter)
-
-  const columns: Column<AdminEnrollment>[] = [
+  const columns: Column<AdminAccount>[] = [
     {
       key: 'account',
       header: t('admin:enrollments.columns.account'),
       primary: true,
-      render: (e) => <Typography sx={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{e.display_name}</Typography>,
+      render: (a) => (
+        <Box>
+          <Typography sx={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{a.display_name}</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>
+            {a.username || t('admin:accounts.noUsername')}
+          </Typography>
+          {a.status !== 'active' ? (
+            <Box sx={{ mt: 0.5 }}>
+              <AccountStatusChip status={a.status} />
+            </Box>
+          ) : null}
+        </Box>
+      ),
     },
     {
       key: 'canvasUser',
       header: t('admin:enrollments.columns.canvasUser'),
-      render: (e) => e.canvas_user_name ?? t('common:time.unknown'),
+      render: (a) => a.enrollment?.canvas_user_name || t('admin:enrollments.notEnrolled'),
+    },
+    {
+      key: 'school',
+      header: t('admin:enrollments.columns.school'),
+      render: (a) => {
+        const school = a.enrollment?.school
+        if (!school) return '–'
+        return (
+          <Box>
+            <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>
+              {school.name}
+            </Typography>
+            {!school.offered ? (
+              <Typography variant="caption" color="warning.main">
+                {t('admin:enrollments.schoolNotOffered')}
+              </Typography>
+            ) : null}
+          </Box>
+        )
+      },
     },
     {
       key: 'state',
       header: t('admin:enrollments.columns.state'),
-      render: (e) => (
-        <Chip size="small" color={STATE_COLOR[e.state]} label={t(`admin:enrollments.state.${e.state}`)} />
+      render: (a) => (
+        <Box sx={{ display: 'grid', gap: 0.5, justifyItems: 'start' }}>
+          <TokenStateChip state={a.enrollment ? a.enrollment.state : 'none'} />
+          {a.enrollment?.invalid_reason ? (
+            <Typography variant="caption" color="text.secondary">
+              {t(`admin:enrollments.reason.${a.enrollment.invalid_reason}`)}
+            </Typography>
+          ) : null}
+        </Box>
       ),
     },
     {
       key: 'lastUsed',
       header: t('admin:enrollments.columns.lastUsed'),
-      render: (e) => (
+      render: (a) => (
         <Box>
-          <TimeText iso={e.last_used_at} />
-          <Box component="details" sx={{ mt: 0.5 }}>
-            <Typography component="summary" variant="caption" color="text.secondary" sx={{ cursor: 'pointer' }}>
-              {t('admin:enrollments.details')}
-            </Typography>
-            <Box component="dl" sx={{ m: 0, mt: 0.5, display: 'grid', gridTemplateColumns: 'auto 1fr', columnGap: 1.5, rowGap: 0.25 }}>
-              {[
-                [t('admin:enrollments.accountId'), e.account_id],
-                [t('admin:enrollments.canvasUserId'), e.canvas_user_id === null ? '–' : String(e.canvas_user_id)],
-              ].map(([label, value]) => (
-                <Box key={label} sx={{ display: 'contents' }}>
-                  <Typography component="dt" variant="caption" color="text.secondary">
-                    {label}
-                  </Typography>
-                  <Typography component="dd" variant="caption" sx={{ m: 0, overflowWrap: 'anywhere' }}>
-                    {value}
-                  </Typography>
-                </Box>
-              ))}
-              <Typography component="dt" variant="caption" color="text.secondary">
-                {t('admin:enrollments.enrolledAt')}
-              </Typography>
-              <Typography component="dd" variant="caption" sx={{ m: 0 }}>
-                <TimeText iso={e.enrolled_at} />
-              </Typography>
-              <Typography component="dt" variant="caption" color="text.secondary">
-                {t('admin:enrollments.updatedAt')}
-              </Typography>
-              <Typography component="dd" variant="caption" sx={{ m: 0 }}>
-                <TimeText iso={e.updated_at} />
-              </Typography>
-              {e.invalid_since ? (
-                <>
-                  <Typography component="dt" variant="caption" color="text.secondary">
-                    {t('admin:enrollments.invalidSince')}
-                  </Typography>
-                  <Typography component="dd" variant="caption" sx={{ m: 0 }}>
-                    <TimeText iso={e.invalid_since} />
-                  </Typography>
-                </>
-              ) : null}
-            </Box>
-          </Box>
+          <TimeText iso={a.enrollment?.last_used_at} />
+          <EnrollmentDetails account={a} />
         </Box>
       ),
     },
@@ -108,19 +143,7 @@ export default function AdminEnrollmentsView() {
       key: 'actions',
       header: t('admin:enrollments.columns.actions'),
       actions: true,
-      render: (e) => (
-        <Button
-          size="small"
-          color="error"
-          aria-label={`${t('admin:enrollments.revoke')}: ${e.display_name}`}
-          onClick={() => {
-            revoke.reset()
-            setTarget(e)
-          }}
-        >
-          {t('admin:enrollments.revoke')}
-        </Button>
-      ),
+      render: (a) => <AdminActions account={a} />,
     },
   ]
 
@@ -129,20 +152,31 @@ export default function AdminEnrollmentsView() {
       <Typography variant="h1" component="h1" sx={{ mb: 2 }}>
         {t('admin:enrollments.title')}
       </Typography>
+      {counts ? (
+        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 2 }} aria-label={t('admin:enrollments.counts')} role="group">
+          <Chip
+            size="small"
+            variant="outlined"
+            color={counts.needing > 0 ? 'warning' : 'default'}
+            label={`${t('admin:enrollments.count.needing')}: ${counts.needing}`}
+          />
+          <Chip
+            size="small"
+            variant="outlined"
+            label={`${t('admin:enrollments.count.total')}: ${counts.total_enrollments}`}
+          />
+        </Box>
+      ) : null}
       <TextField
         size="small"
         select
         label={t('admin:enrollments.filter')}
         value={filter}
-        onChange={(e) => setFilter(e.target.value as Filter)}
-        sx={{ mb: 2, minWidth: 220 }}
+        onChange={(e) => setFilter(e.target.value as AdminEnrollmentFilter)}
+        sx={{ mb: 2, minWidth: 240 }}
       >
         <MenuItem value="all">{t('admin:enrollments.filterAll')}</MenuItem>
-        {(['valid', 'invalid', 'unknown'] as const).map((s) => (
-          <MenuItem key={s} value={s}>
-            {t(`admin:enrollments.state.${s}`)}
-          </MenuItem>
-        ))}
+        <MenuItem value="needs_reenroll">{t('admin:enrollments.filterNeeding')}</MenuItem>
       </TextField>
 
       {query.isPending ? <PageSkeleton /> : null}
@@ -155,31 +189,9 @@ export default function AdminEnrollmentsView() {
           label={t('admin:enrollments.title')}
           columns={columns}
           rows={rows}
-          rowKey={(e) => e.account_id}
+          rowKey={(a) => a.id}
         />
       ) : null}
-
-      <ConfirmDialog
-        open={target !== null}
-        title={t('admin:enrollments.confirmTitle', { name: target?.display_name ?? '' })}
-        body={t('admin:enrollments.confirmBody')}
-        confirmLabel={t('admin:enrollments.revoke')}
-        pending={revoke.isPending}
-        error={revoke.error}
-        onClose={() => {
-          revoke.reset()
-          setTarget(null)
-        }}
-        onConfirm={() => {
-          if (!target) return
-          revoke.mutate(target.account_id, {
-            onSuccess: () => {
-              setTarget(null)
-              useToast.getState().show(t('admin:enrollments.done'))
-            },
-          })
-        }}
-      />
     </>
   )
 }
