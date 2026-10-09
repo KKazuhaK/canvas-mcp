@@ -730,18 +730,9 @@ class TokenStore:
         """
         from .db import migrate
 
-        if self._path is not None:
-            parent = self._path.parent
-            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            if os.name == "posix":
-                os.chmod(parent, 0o700)
-                # Create the file private from the start instead of chmod-after.
-                os.close(os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600))
-
+        self._db.prepare_storage()
         migrate.ensure_ready(self._db, auto=auto_migrate)
-
-        if self._path is not None and os.name == "posix":
-            os.chmod(self._path, 0o600)
+        self._db.tighten_storage()
 
         self._verify_keyring()
 

@@ -247,7 +247,13 @@ def _postgres_migration_lock(db: Database) -> Iterator[None]:
 
 
 def current(db: Database) -> MigrationStatus:
-    """The migration state, without migrating (``token_admin db current``)."""
+    """The migration state, without migrating (``token_admin db current``).
+
+    A SQLite file that does not exist yet is "uninitialized"; nothing is created.
+    """
+    path = db.sqlite_path
+    if path is not None and not path.exists():
+        return MigrationStatus("sqlite", None, None, head_revision(), STATE_UNINITIALIZED)
     with db.guard(), db.read() as conn:
         return read_status(conn)
 
@@ -256,6 +262,7 @@ def upgrade(db: Database, *, backup_to: pathlib.Path | None = None) -> tuple[Mig
     """Upgrade to head (``token_admin db upgrade``); returns the status before and after."""
     before = current(db)
     _refuse_unusable(before)
+    db.prepare_storage()
     if backup_to is not None:
         backup_sqlite(db, backup_to)
     ensure_ready(db, auto=True)

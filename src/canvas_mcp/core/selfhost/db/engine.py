@@ -32,8 +32,11 @@ fixed message and ``from None``; engines are created with ``hide_parameters``.
 from __future__ import annotations
 
 import hashlib
+import os
 import pathlib
+import sqlite3
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from typing import Any, Literal
@@ -160,6 +163,27 @@ class Database:
     def dispose(self) -> None:
         self._engine.dispose()
 
+    def prepare_storage(self) -> None:
+        """SQLite: create the private directory (0700) and file (0600) before first use.
+
+        The file is created private from the start instead of chmod-after. Does
+        nothing for PostgreSQL. Raises ``OSError`` if the location is unusable.
+        """
+        path = self._target.sqlite_path
+        if path is None:
+            return
+        parent = path.parent
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name == "posix":
+            os.chmod(parent, 0o700)
+            os.close(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
+
+    def tighten_storage(self) -> None:
+        """SQLite on POSIX: make sure the database file itself is 0600."""
+        path = self._target.sqlite_path
+        if path is not None and os.name == "posix":
+            os.chmod(path, 0o600)
+
     # -- error translation -------------------------------------------------
 
     @staticmethod
@@ -250,10 +274,29 @@ def _sqlite_on_connect(dbapi_connection: Any, record: Any) -> None:
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA busy_timeout=5000")
-        cursor.execute("PRAGMA journal_mode=WAL")
+        _enter_wal_mode(cursor)
         cursor.execute("PRAGMA synchronous=FULL")
     finally:
         cursor.close()
+
+
+def _enter_wal_mode(cursor: Any) -> None:
+    """Switch the file to WAL, waiting out a writer.
+
+    Changing the journal mode needs the database unlocked and SQLite reports
+    "locked" at once (the busy timeout does not apply) when another connection is in
+    the middle of a write, for example a second process creating the same new file.
+    Retry for as long as the busy timeout would have waited.
+    """
+    deadline = time.monotonic() + SQLITE_BUSY_TIMEOUT_SECONDS
+    while True:
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
 
 
 def _sqlite_on_begin(conn: Connection) -> None:
