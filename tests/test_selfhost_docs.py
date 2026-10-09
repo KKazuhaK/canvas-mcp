@@ -31,6 +31,7 @@ MUST_BE_UNSET = (
     "ENTRA_AUTH_ENABLED",
     "MCP_ALLOW_UNAUTHENTICATED",
     "ACCESS_REQUEST_ENABLED",
+    "FASTMCP_SSRF_TRUST_PROXY",
 )
 
 STUDENT_WRITE_TOOLS = (
@@ -550,3 +551,11 @@ def test_readme_states_what_the_scrub_and_the_guards_do_not_cover(readme):
     assert "owner_seen_at" in readme
     # Audit endpoints mask names, not only numbers.
     assert "page slugs" in readme
+
+
+def test_readme_lists_every_setting_that_must_stay_unset(readme):
+    marker = "Settings that must stay unset"
+    assert marker in readme
+    section = readme[readme.index(marker) : readme.index(marker) + 1500]
+    for name in MUST_BE_UNSET:
+        assert name in section, f"README does not list {name} among the settings that must stay unset"

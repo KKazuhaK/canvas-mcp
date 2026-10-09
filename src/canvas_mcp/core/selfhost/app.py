@@ -36,6 +36,9 @@ if TYPE_CHECKING:
 
 HEALTH_PATH = "/healthz"
 
+SSRF_TRUST_PROXY_ENV = "FASTMCP_SSRF_TRUST_PROXY"
+_FALSE_WORDS = frozenset({"", "0", "false", "f", "no", "n", "off"})
+
 
 @dataclass(frozen=True)
 class SelfhostRuntime:
@@ -106,6 +109,25 @@ def _school_problems(config: Config, settings: SelfhostSettings) -> list[str]:
     return problems
 
 
+def _ssrf_trust_proxy_enabled() -> bool:
+    """True when FastMCP's SSRF checks are switched to "trust the outbound proxy".
+
+    FastMCP fetches OAuth client metadata (CIMD) and the JWKS through its own
+    SSRF guard, which resolves the name and refuses private, loopback and
+    link-local addresses. ``FASTMCP_SSRF_TRUST_PROXY`` hands that job to an
+    outbound proxy and turns the address checks off. Any value except an
+    explicit false word counts as on, and the effective FastMCP setting is
+    checked as well as the environment, so an unparsable or unusual spelling
+    can never leave the guard disabled without the server noticing.
+    """
+    raw = os.environ.get(SSRF_TRUST_PROXY_ENV, "").strip().lower()
+    if raw not in _FALSE_WORDS:
+        return True
+    from fastmcp import settings as fastmcp_settings
+
+    return bool(getattr(fastmcp_settings, "ssrf_trust_proxy", False))
+
+
 def validate_selfhost_startup(config: Config, settings: SelfhostSettings) -> list[str]:
     """Every reason the server must refuse to start in this mode (empty = fine).
 
@@ -131,6 +153,14 @@ def validate_selfhost_startup(config: Config, settings: SelfhostSettings) -> lis
         problems.append("MCP_ALLOW_UNAUTHENTICATED must not be set in this mode")
     if config.access_request_enabled:
         problems.append("ACCESS_REQUEST_ENABLED must not be set in this mode")
+
+    if _ssrf_trust_proxy_enabled():
+        problems.append(
+            f"{SSRF_TRUST_PROXY_ENV} must not be set in this mode: it turns off "
+            "FastMCP's DNS and private-address checks on the OAuth client metadata "
+            "and key fetches that unauthenticated clients can trigger, and leaves "
+            "that protection to an outbound proxy this server cannot verify"
+        )
 
     allowed = {
         part.strip().lower()

@@ -121,6 +121,16 @@ class TestRefusals:
         if value.endswith("1234567890"):  # the secret-looking ones
             assert value not in caplog.text
 
+    @pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes", "on", " True ", "enabled", "2"])
+    def test_fastmcp_ssrf_trust_proxy_is_refused_for_any_truthy_value(self, entra_env, value, caplog):
+        """The proxy-trust switch turns off FastMCP's DNS and private-address checks
+        on the CIMD and JWKS fetches unauthenticated clients can trigger."""
+        mp = entra_env["monkeypatch"]
+        mp.setenv("FASTMCP_SSRF_TRUST_PROXY", value)
+        assert _run_main(mp, *HTTP).code == 1
+        assert "FASTMCP_SSRF_TRUST_PROXY" in caplog.text
+        assert "must not be set" in caplog.text
+
     def test_a_missing_canvas_url(self, entra_env):
         mp = entra_env["monkeypatch"]
         mp.delenv("CANVAS_API_URL")
@@ -223,6 +233,32 @@ class TestValidateStartup:
         for name in ("CANVAS_API_TOKEN", "MCP_ACCESS_KEYS", "ENTRA_AUTH_ENABLED"):
             assert name in text
         assert "tok-1234567890" not in text and "key-1234567890" not in text
+
+
+class TestSsrfTrustProxy:
+    @pytest.mark.parametrize("value", ["", "false", "FALSE", "0", "no", "off"])
+    def test_an_explicit_false_or_empty_value_is_fine(self, entra_env, value):
+        entra_env["monkeypatch"].setenv("FASTMCP_SSRF_TRUST_PROXY", value)
+        assert validate_selfhost_startup(config_module.get_config(), load_selfhost_settings()) == []
+
+    def test_unset_is_fine(self, entra_env):
+        entra_env["monkeypatch"].delenv("FASTMCP_SSRF_TRUST_PROXY", raising=False)
+        assert validate_selfhost_startup(config_module.get_config(), load_selfhost_settings()) == []
+
+    def test_the_message_names_the_variable_and_never_echoes_the_value(self, entra_env):
+        entra_env["monkeypatch"].setenv("FASTMCP_SSRF_TRUST_PROXY", "definitely-on")
+        problems = validate_selfhost_startup(config_module.get_config(), load_selfhost_settings())
+        assert len(problems) == 1
+        assert "FASTMCP_SSRF_TRUST_PROXY" in problems[0]
+        assert "definitely-on" not in problems[0]
+
+    def test_the_effective_fastmcp_setting_counts_even_without_the_variable(self, entra_env):
+        """FastMCP reads the variable once at import; the live setting is what decides."""
+        mp = entra_env["monkeypatch"]
+        mp.delenv("FASTMCP_SSRF_TRUST_PROXY", raising=False)
+        mp.setattr(fastmcp.settings, "ssrf_trust_proxy", True)
+        problems = validate_selfhost_startup(config_module.get_config(), load_selfhost_settings())
+        assert any("FASTMCP_SSRF_TRUST_PROXY" in problem for problem in problems)
 
 
 class TestHappyPath:

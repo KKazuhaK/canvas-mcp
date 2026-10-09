@@ -221,6 +221,8 @@ Recommended student configuration (already in `env.example`): `CANVAS_ROLE=stude
 
 At startup the service validates all settings; if any is missing or invalid it lists the problems and exits instead of running with a broken configuration.
 
+**Settings that must stay unset.** The service also refuses to start when any of these is set (the template lists them in comments only): `CANVAS_API_TOKEN`, `MCP_ACCESS_KEYS`, `ENTRA_AUTH_ENABLED`, `MCP_ALLOW_UNAUTHENTICATED`, `ACCESS_REQUEST_ENABLED`, `EXECUTE_TYPESCRIPT_ENABLED=true` (and `execute_typescript` in `ALLOWED_WRITE_TOOLS`), and `FASTMCP_SSRF_TRUST_PROXY`. The last one is a FastMCP switch that makes it trust an outbound HTTP proxy instead of resolving host names itself: FastMCP then stops refusing private, loopback and link-local addresses when it fetches OAuth client metadata (a client can send any `client_id` URL at `/authorize` without signing in) and signing keys, and leaves that protection to a proxy this server cannot check. Any value except an explicit false (`false`, `0`, `no`, `off`) or an empty value stops the start; so does the setting being on inside FastMCP by any other route. If your host forces all egress through a proxy, enforce the address rules there and keep this variable unset.
+
 ## Step 4: Reverse proxy (nginx / Caddy)
 
 The reverse proxy handles TLS and **must forward the `Host` header unchanged** (the service allows only the Host of `PUBLIC_BASE_URL` and returns 421 for everything else). Turn off buffering, because MCP uses streaming responses.
