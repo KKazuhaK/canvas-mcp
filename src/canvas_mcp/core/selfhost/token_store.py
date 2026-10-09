@@ -31,10 +31,12 @@ turns the pair into ``entra:<tenant>:<object>``.
 Schema version 2 adds the ``canvas_host`` and ``principal_key`` columns (the key
 is unique and backfilled for existing rows) and the status columns ``status``
 (``active`` or ``invalid``, default ``active``), ``invalid_reason``,
-``invalid_since``, ``last_verified_at`` and ``expires_hint_at``. They are
-reserved for token health tracking and do not change behaviour yet, except that
-saving a token marks the row ``active`` and verified. Opening an older database
-migrates it in place, idempotently. A version 2 database is refused by older
+``invalid_since``, ``last_verified_at`` and ``expires_hint_at``. They track the
+health of the stored token: saving a token marks the row ``active`` and verified,
+:meth:`TokenStore.mark_invalid` and :meth:`TokenStore.restore_active` move it
+between the two states, and an invalid row keeps its ciphertext so a successful
+re-check can restore it. Opening an older database migrates it in place,
+idempotently. A version 2 database is refused by older
 servers, so roll back only together with a backup taken before the upgrade.
 
 Keys come from ``CANVAS_TOKEN_KEYS`` (``kid:base64key[,kid:base64key...]``).
@@ -58,7 +60,8 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from enum import Enum
+from typing import Any, Literal
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -67,6 +70,14 @@ SCHEMA_VERSION = 2
 
 STATUS_ACTIVE = "active"
 STATUS_INVALID = "invalid"
+
+# Why a row is invalid: a closed set, stored in ``invalid_reason``.
+REASON_CANVAS_TOKEN_REJECTED = "canvas_token_rejected"
+REASON_DECRYPT_FAILED = "decrypt_failed"
+REASON_REVOKED_BY_ADMIN = "revoked_by_admin"
+INVALID_REASONS = frozenset(
+    {REASON_CANVAS_TOKEN_REJECTED, REASON_DECRYPT_FAILED, REASON_REVOKED_BY_ADMIN}
+)
 
 _KEY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 _GUID_RE = re.compile(
@@ -134,8 +145,18 @@ _ADDED_COLUMNS = (
 _INFO_COLUMNS = (
     "tenant_id, object_id, canvas_user_id, canvas_user_name, entra_display_name,"
     " entra_upn, key_id, created_at, updated_at, last_used_at, canvas_host,"
-    " principal_key"
+    " principal_key, status, invalid_reason, invalid_since, last_verified_at,"
+    " expires_hint_at"
 )
+_MAX_EXPIRES_HINT = 4_102_444_800  # 2100-01-01 UTC: a sanity bound, not a policy
+
+
+class _Unset(Enum):
+    UNSET = "unset"
+
+
+#: Pass as ``expires_hint_at`` to keep the stored hint when a row is saved again.
+KEEP_EXPIRY_HINT: Literal[_Unset.UNSET] = _Unset.UNSET
 
 
 class TokenStoreError(Exception):
@@ -167,6 +188,11 @@ class StoredToken:
     last_used_at: int | None
     canvas_host: str | None = None
     principal_key: str = ""
+    status: str = STATUS_ACTIVE
+    invalid_reason: str | None = None
+    invalid_since: int | None = None
+    last_verified_at: int | None = None
+    expires_hint_at: int | None = None
 
 
 @dataclass(frozen=True)
@@ -185,6 +211,11 @@ class EnrollmentInfo:
     last_used_at: int | None
     canvas_host: str | None = None
     principal_key: str = ""
+    status: str = STATUS_ACTIVE
+    invalid_reason: str | None = None
+    invalid_since: int | None = None
+    last_verified_at: int | None = None
+    expires_hint_at: int | None = None
 
 
 def _decode_key(text: str) -> bytes | None:
@@ -427,6 +458,11 @@ def _info_from_row(row: tuple[Any, ...]) -> EnrollmentInfo:
         last_used_at=row[9],
         canvas_host=row[10],
         principal_key=row[11] or "",
+        status=row[12] or STATUS_ACTIVE,
+        invalid_reason=row[13],
+        invalid_since=row[14],
+        last_verified_at=row[15],
+        expires_hint_at=row[16],
     )
 
 
@@ -594,7 +630,8 @@ class TokenStore:
                 "SELECT key_id, nonce, ciphertext, canvas_user_id,"
                 " canvas_user_name, entra_display_name, entra_upn,"
                 " created_at, updated_at, last_used_at, canvas_host,"
-                " tenant_id, object_id"
+                " tenant_id, object_id, status, invalid_reason, invalid_since,"
+                " last_verified_at, expires_hint_at"
                 " FROM canvas_tokens WHERE principal_key = ?",
                 (key,),
             ).fetchone()
@@ -626,6 +663,11 @@ class TokenStore:
             last_used_at=row[9],
             canvas_host=row[10],
             principal_key=key,
+            status=row[13] or STATUS_ACTIVE,
+            invalid_reason=row[14],
+            invalid_since=row[15],
+            last_verified_at=row[16],
+            expires_hint_at=row[17],
         )
 
     def info(self, principal_key: str, object_id: str | None = None) -> EnrollmentInfo | None:
@@ -664,6 +706,7 @@ class TokenStore:
         tenant_id: str | None = None,
         object_id: str | None = None,
         canvas_host: str | None = None,
+        expires_hint_at: int | None | Literal[_Unset.UNSET] = KEEP_EXPIRY_HINT,
     ) -> EnrollmentInfo:
         """Insert or replace a principal's enrollment, preserving ``created_at``.
 
@@ -671,7 +714,11 @@ class TokenStore:
         ``tenant_id`` and ``object_id``. ``canvas_host`` is the school the token
         belongs to (None only for the legacy single-school layout, which needs an
         ``entra:`` principal); it is bound into the encryption together with the
-        principal. Saving marks the row ``active`` and verified now.
+        principal. Saving marks the row ``active`` and verified now, and clears any
+        invalid reason. ``expires_hint_at`` is the optional expiry date the user
+        gave for the token (epoch seconds, used only for a reminder): an integer
+        sets it, ``None`` clears it, and leaving it out keeps the stored value (the
+        account page always passes it, so replacing a token replaces the hint).
         """
         if principal_key is not None:
             if tenant_id is not None or object_id is not None:
@@ -684,6 +731,14 @@ class TokenStore:
         host = _validate_host_value(canvas_host)
         if not isinstance(api_token, str) or not api_token:
             raise ValueError("api_token must be a non-empty string")
+        keep_hint = isinstance(expires_hint_at, _Unset)
+        hint: int | None = None if isinstance(expires_hint_at, _Unset) else expires_hint_at
+        if hint is not None and (
+            not isinstance(hint, int)
+            or isinstance(hint, bool)
+            or not 0 < hint <= _MAX_EXPIRES_HINT
+        ):
+            raise ValueError("expires_hint_at must be a positive epoch time")
         tid, oid = _legacy_columns(key)
         kid, nonce, ciphertext = self._keyring.encrypt(
             api_token.encode("utf-8"),
@@ -696,8 +751,8 @@ class TokenStore:
                 " ciphertext, canvas_user_id, canvas_user_name,"
                 " entra_display_name, entra_upn, created_at, updated_at,"
                 " last_used_at, canvas_host, principal_key, status,"
-                " last_verified_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)"
+                " last_verified_at, expires_hint_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)"
                 " ON CONFLICT (principal_key) DO UPDATE SET"
                 " key_id = excluded.key_id, nonce = excluded.nonce,"
                 " ciphertext = excluded.ciphertext,"
@@ -709,6 +764,8 @@ class TokenStore:
                 " status = excluded.status,"
                 " invalid_reason = NULL, invalid_since = NULL,"
                 " last_verified_at = excluded.last_verified_at,"
+                " expires_hint_at = CASE WHEN ? THEN canvas_tokens.expires_hint_at"
+                " ELSE excluded.expires_hint_at END,"
                 " updated_at = excluded.updated_at",
                 (
                     tid,
@@ -726,6 +783,8 @@ class TokenStore:
                     key,
                     STATUS_ACTIVE,
                     now,
+                    hint,
+                    1 if keep_hint else 0,
                 ),
             )
             row = conn.execute(
@@ -759,6 +818,85 @@ class TokenStore:
                     " WHERE principal_key = ?"
                     " AND (last_used_at IS NULL OR last_used_at < ?)",
                     (now, key, now - max(0, min_interval_seconds)),
+                )
+        except (sqlite3.Error, ValueError, OSError):
+            return
+
+    def mark_invalid(
+        self,
+        principal_key: str,
+        object_id: str | None = None,
+        *,
+        reason: str,
+        expected_updated_at: int | None = None,
+    ) -> bool:
+        """Mark an active row invalid; True only if this call changed it.
+
+        An already invalid row is left as it is (the first reason wins). With
+        ``expected_updated_at`` the row is changed only if it still has that
+        ``updated_at``, so a token that Canvas rejected cannot invalidate the
+        replacement the user enrolled in the meantime.
+        """
+        if reason not in INVALID_REASONS:
+            raise ValueError("unknown invalid reason")
+        key = _resolve_principal(principal_key, object_id)
+        sql = (
+            "UPDATE canvas_tokens SET status = ?, invalid_reason = ?, invalid_since = ?"
+            " WHERE principal_key = ? AND status = ?"
+        )
+        args: list[Any] = [STATUS_INVALID, reason, self._now(), key, STATUS_ACTIVE]
+        if expected_updated_at is not None:
+            sql += " AND updated_at = ?"
+            args.append(expected_updated_at)
+        with self._write() as conn:
+            return conn.execute(sql, args).rowcount > 0
+
+    def restore_active(
+        self,
+        principal_key: str,
+        object_id: str | None = None,
+        *,
+        expected_updated_at: int | None = None,
+    ) -> bool:
+        """Mark an invalid row active again after a successful check; True if changed.
+
+        The stored token is untouched. ``expected_updated_at`` works as in
+        :meth:`mark_invalid`.
+        """
+        key = _resolve_principal(principal_key, object_id)
+        now = self._now()
+        sql = (
+            "UPDATE canvas_tokens SET status = ?, invalid_reason = NULL,"
+            " invalid_since = NULL, last_verified_at = ?"
+            " WHERE principal_key = ? AND status = ?"
+        )
+        args: list[Any] = [STATUS_ACTIVE, now, key, STATUS_INVALID]
+        if expected_updated_at is not None:
+            sql += " AND updated_at = ?"
+            args.append(expected_updated_at)
+        with self._write() as conn:
+            return conn.execute(sql, args).rowcount > 0
+
+    def mark_verified(
+        self,
+        principal_key: str,
+        object_id: str | None = None,
+        *,
+        min_interval_seconds: int = 600,
+    ) -> None:
+        """Record a successful Canvas call on an active row, at most once per interval.
+
+        Never raises, and never touches an invalid row.
+        """
+        try:
+            key = _resolve_principal(principal_key, object_id)
+            now = self._now()
+            with self._connection() as conn:
+                conn.execute(
+                    "UPDATE canvas_tokens SET last_verified_at = ?"
+                    " WHERE principal_key = ? AND status = ?"
+                    " AND (last_verified_at IS NULL OR last_verified_at < ?)",
+                    (now, key, STATUS_ACTIVE, now - max(0, min_interval_seconds)),
                 )
         except (sqlite3.Error, ValueError, OSError):
             return
