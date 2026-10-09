@@ -362,7 +362,7 @@ class TestApprovalAndPending:
         service = identity_service(store, policy=APPROVAL)
         out = service.sign_in(claims(OID_A, "Canvas.User"))
         assert isinstance(out, SignIn) and out.pending and out.status.pending
-        assert out.status.admitted_via == "approval"
+        assert out.status.admitted_via == "rules"  # nobody has admitted the person yet
         assert auth_rows(store)[-1][3:5] == ("pending", "pending_approval")
 
     def test_a_pending_account_is_created_by_the_mcp_path_and_refused_there(self, store: TokenStore) -> None:
@@ -410,6 +410,37 @@ class TestApprovalAndPending:
         assert st.session_epoch == epoch + 1 and store.credential_generation(key) == generation + 1
         assert isinstance(service.sign_in(claims(OID_A)), acc.Denied)
         assert store.enable_principal(key, actor=OPERATOR) is True  # and it can be undone
+
+    def test_a_denied_applicant_is_not_admitted_by_being_enabled(self, store: TokenStore) -> None:
+        service = identity_service(store, policy=RULES_THEN_APPROVAL)
+        key = service.sign_in(claims(OID_A)).principal_key  # type: ignore[union-attr]
+        assert store.deny_account(key, actor=OPERATOR) is True
+        assert store.enable_principal(key, actor=OPERATOR) is True
+        assert store.get_principal_status(key).admitted_via == "rules"
+        refused = service.resolve_request(claims(OID_A))
+        assert isinstance(refused, acc.Denied) and refused.code == acc.DENY_ACCESS_DENIED
+        assert isinstance(service.sign_in(claims(OID_A)), acc.Denied)
+
+    def test_a_pending_account_that_is_disabled_and_enabled_is_not_admitted(
+        self, store: TokenStore
+    ) -> None:
+        service = identity_service(store, policy=RULES_THEN_APPROVAL)
+        key = service.sign_in(claims(OID_A)).principal_key  # type: ignore[union-attr]
+        assert store.disable_principal(key, actor=OPERATOR, reason="operator_disabled") is True
+        assert store.enable_principal(key, actor=OPERATOR) is True
+        refused = service.resolve_request(claims(OID_A))
+        assert isinstance(refused, acc.Denied) and refused.code == acc.DENY_ACCESS_DENIED
+
+    def test_an_approved_person_stays_admitted_through_a_disable_and_enable(
+        self, store: TokenStore
+    ) -> None:
+        service = identity_service(store, policy=RULES_THEN_APPROVAL)
+        key = service.sign_in(claims(OID_A)).principal_key  # type: ignore[union-attr]
+        assert store.approve_account(key, actor=OPERATOR) is True
+        assert store.disable_principal(key, actor=OPERATOR, reason="operator_disabled") is True
+        assert store.enable_principal(key, actor=OPERATOR) is True
+        assert store.get_principal_status(key).admitted_via == "approval"
+        assert not isinstance(service.resolve_request(claims(OID_A)), acc.Denied)  # no rule needed
 
     def test_only_an_owner_or_the_operator_may_decide(self, store: TokenStore) -> None:
         from canvas_mcp.core.selfhost.token_store import AccessActionRefused
@@ -529,6 +560,32 @@ class TestIdentityCache:
         assert len(cache) == 0
 
 
+class TestGroupsClaimIsOnlyReadForGroupRules:
+    def test_non_guid_groups_lock_nobody_out_under_the_default_policy(self, store: TokenStore) -> None:
+        service = identity_service(store, policy=RULES)
+        odd = {"groups": ["CONTOSO\\students", "S-1-5-21-1-2-3-4"]}
+        assert not isinstance(service.resolve_request(claims(OID_A, "Canvas.User", **odd)), acc.Denied)
+        out = service.sign_in(claims(OID_B, "Canvas.User", groups="not-a-list"))
+        assert isinstance(out, SignIn) and out.status.active
+
+    def test_with_a_group_rule_a_malformed_claim_only_fails_to_match_the_group(
+        self, store: TokenStore
+    ) -> None:
+        policy = AccessPolicy(
+            mode="rules", rules=(USER, AccessRule("entra", "group", GROUP)), fallback="deny"
+        )
+        service = identity_service(store, policy=policy)
+        # a role holder with on-premises group names is still admitted ...
+        assert not isinstance(
+            service.resolve_request(claims(OID_A, "Canvas.User", groups=["CONTOSO\\students"])),
+            acc.Denied,
+        )
+        # ... and a malformed claim never admits through the group rule.
+        refused = service.resolve_request(claims(OID_B, groups=["CONTOSO\\students"]))
+        assert isinstance(refused, acc.Denied) and refused.code == acc.DENY_ACCESS_DENIED
+        assert not isinstance(service.resolve_request(claims(OID_C, groups=[GROUP])), acc.Denied)
+
+
 class TestOperatorAccounts:
     def test_pre_provisioning_blocks_someone_before_their_first_sign_in(self, store: TokenStore) -> None:
         key = store.create_operator_account(
@@ -536,11 +593,36 @@ class TestOperatorAccounts:
             status="disabled", reason="operator_disabled",
         )
         st = store.get_principal_status(key)
-        assert st.disabled and st.session_epoch == 1 and st.admitted_via == "operator"
+        assert st.disabled and st.session_epoch == 1 and st.admitted_via == "rules"
         service = identity_service(store, policy=RULES)
         denied = service.sign_in(claims(OID_A, "Canvas.User"))
         assert isinstance(denied, acc.Denied) and denied.code == acc.DENY_ACCESS_DISABLED
         assert len(store.list_accounts()) == 1  # no second account for the same identity
+
+    def test_an_account_blocked_in_advance_is_decided_by_the_rules_once_enabled(
+        self, store: TokenStore
+    ) -> None:
+        key = store.create_operator_account(
+            provider_id="entra", issuer=acc.entra_issuer(TENANT), subject=OID_A,
+            status="disabled", reason="operator_disabled",
+        )
+        assert store.enable_principal(key, actor=OPERATOR) is True
+        st = store.get_principal_status(key)
+        assert st.active and st.admitted_via == "rules"
+        service = identity_service(store, policy=RULES)
+        for call in (service.resolve_request, service.sign_in):
+            refused = call(claims(OID_A))  # no role: no rule admits the person
+            assert isinstance(refused, acc.Denied) and refused.code == acc.DENY_ACCESS_DENIED
+        assert not isinstance(service.resolve_request(claims(OID_A, "Canvas.User")), acc.Denied)
+        assert store.get_principal_status(key).admitted_via == "rules"
+
+    def test_an_active_operator_account_is_a_personal_admission(self, store: TokenStore) -> None:
+        key = store.create_operator_account(
+            provider_id="entra", issuer=acc.entra_issuer(TENANT), subject=OID_A, status="active",
+        )
+        assert store.get_principal_status(key).admitted_via == "operator"
+        service = identity_service(store, policy=RULES)
+        assert not isinstance(service.resolve_request(claims(OID_A)), acc.Denied)
 
     def test_creating_it_twice_returns_the_same_account(self, store: TokenStore) -> None:
         kw: dict[str, Any] = {

@@ -191,9 +191,29 @@ class TestRefusals:
         settings.token_db_path.write_bytes(b"this is not a database" * 100)
         with pytest.raises(SelfhostConfigError) as info:
             prepare_selfhost(settings)
-        assert info.value.problems == [
+        (problem,) = info.value.problems
+        assert problem.startswith(
             "the Canvas token database cannot be opened or is not a valid database"
-        ]
+        )
+        assert "(DatabaseError)" in problem  # the driver-free kind helps the operator
+
+    def test_a_failed_upgrade_backup_is_not_reported_as_a_corrupt_database(
+        self, entra_env, monkeypatch
+    ):
+        pytest.importorskip("canvas_mcp.core.selfhost.token_store")
+        from canvas_mcp.core.selfhost.app import prepare_selfhost
+        from canvas_mcp.core.selfhost.settings import SelfhostConfigError
+        from canvas_mcp.core.selfhost.token_store import StoreUnavailable, TokenStore
+
+        def refuse(self, *args, **kwargs):
+            raise StoreUnavailable(kind="BackupFailed")
+
+        monkeypatch.setattr(TokenStore, "initialize", refuse)
+        with pytest.raises(SelfhostConfigError) as info:
+            prepare_selfhost(load_selfhost_settings())
+        (problem,) = info.value.problems
+        assert "schema upgrade did not run and nothing was changed" in problem
+        assert "backup failed" in problem and "not a valid database" not in problem
 
     def test_a_malformed_keyring(self, entra_env):
         pytest.importorskip("canvas_mcp.core.selfhost.token_store")

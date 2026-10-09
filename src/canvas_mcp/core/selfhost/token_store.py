@@ -1921,7 +1921,9 @@ class TokenStore:
 
         The CLI pre-provisions a *disabled* account to block someone before their first
         sign-in; tests and break-glass use create active ones (``admitted_via='operator'``,
-        so a later change of the rules does not undo it). An identity that already has an
+        so a later change of the rules does not undo it). Only an active account is a
+        personal admission: a disabled or pending one is stored as ``rules`` so that
+        enabling it later only lifts the block and the rules keep deciding. An identity that already has an
         account returns that account's key and changes nothing. ``account_id`` (a lower-case
         UUID) chooses the id instead of drawing one; the tests use it to get stable keys.
         """
@@ -1947,7 +1949,9 @@ class TokenStore:
                 status=status,
                 role=role,
                 role_source=acc.ROLE_SOURCE_OPERATOR if role == ROLE_OWNER else None,
-                admitted_via=acc.ADMITTED_OPERATOR,
+                admitted_via=(
+                    acc.ADMITTED_OPERATOR if status == STATUS_ACTIVE else acc.ADMITTED_RULES
+                ),
                 display_name=display_name[:_MAX_DISPLAY_NAME],
                 now=now,
                 approved_by=OPERATOR_ACTOR if status == STATUS_ACTIVE else None,

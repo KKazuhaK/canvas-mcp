@@ -257,11 +257,24 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         store = TokenStore.for_target(settings.database_target, keyring)
         refuse_silent_switch(store.database, settings.token_db_path)
         store.initialize(auto_migrate=settings.auto_migrate)
-    except StoreUnavailable:
+    except StoreUnavailable as exc:
         # A corrupt file, not a database, locked, a failing disk, or an unreachable
         # server. The driver's message is left out: it can quote paths, SQL or the URL.
+        # ``kind`` is only a driver exception class name, safe for the operator's log.
+        if exc.kind == "BackupFailed":
+            # The automatic backup before a schema upgrade failed (disk full, directory
+            # not writable): the upgrade was refused and nothing was changed.
+            raise SelfhostConfigError(
+                [
+                    "the Canvas token database schema upgrade did not run and nothing was "
+                    "changed: the automatic backup failed (check free disk space and that the "
+                    "database directory is writable; token_admin db upgrade --dry-run shows "
+                    "what would run)"
+                ]
+            ) from None
+        detail = f" ({exc.kind})" if exc.kind else ""
         raise SelfhostConfigError(
-            ["the Canvas token database cannot be opened or is not a valid database"]
+            [f"the Canvas token database cannot be opened or is not a valid database{detail}"]
         ) from None
     except (TokenStoreError, KeyringError) as exc:
         raise SelfhostConfigError([str(exc)]) from None

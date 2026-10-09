@@ -522,9 +522,6 @@ _DENIAL_ZH: dict[str, str] = {
     "Your sign-in carries malformed role information. Sign in again.": (
         "你的登录信息中的角色数据格式有误，请重新登录。"
     ),
-    "Your sign-in carries malformed group information. Sign in again.": (
-        "你的登录信息中的组数据格式有误，请重新登录。"
-    ),
     "New sign-ups are paused on this server. Contact the server owner.": (
         "此服务器暂时不接受新的注册，请联系服务器所有者。"
     ),

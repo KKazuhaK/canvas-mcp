@@ -89,10 +89,12 @@ def oracle(claims: dict[str, Any], token_kind: str) -> tuple[str, bool] | str:
 
 
 def new_pipeline(claims: dict[str, Any], token_kind: str) -> tuple[str, bool] | str:
-    ext = entra_external_claims(claims, POLICY, token_kind=token_kind)  # type: ignore[arg-type]
+    policy = default_policy("Canvas.User", "Canvas.Owner")
+    ext = entra_external_claims(
+        claims, POLICY, token_kind=token_kind, parse_groups=policy.has_group_rule()  # type: ignore[arg-type]
+    )
     if isinstance(ext, Denied):
         return ext.code
-    policy = default_policy("Canvas.User", "Canvas.Owner")
     verdict = evaluate_admission(ext, policy)
     decision = decide(None, verdict, policy, DecisionFacts(), "sign_in")
     if decision.outcome == "deny":
@@ -127,6 +129,24 @@ class TestDefaultPolicyEqualsTheFirstRelease:
 
     def test_owner_role_alone_admits(self) -> None:
         assert new_pipeline(claims(roles=["Canvas.Owner"]), "access") == (OID, True)
+
+    @pytest.mark.parametrize("token_kind", ["access", "id"])
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"groups": ["CONTOSO\\students"]},
+            {"groups": "x"},
+            {"groups": [1, None]},
+            {"groups": {"a": 1}},
+            {"groups": [GROUP]},
+            {"hasgroups": True},
+            {"_claim_names": {"groups": "src1"}, "groups": ["S-1-5-21-1"]},
+        ],
+    )
+    def test_group_claims_do_not_change_the_answer(self, token_kind: str, extra: dict[str, Any]) -> None:
+        for roles in (["Canvas.User"], ["Canvas.Owner"], ["Other"], None):
+            sample = claims(roles=roles, **extra)
+            assert new_pipeline(sample, token_kind) == oracle(sample, token_kind), sample
 
 
 class TestIdentityIsTheDirectoryObjectId:
@@ -179,10 +199,25 @@ class TestGroups:
         ext = entra_external_claims(claims(hasgroups=True, groups=[GROUP]), POLICY, token_kind="id")
         assert isinstance(ext, ExternalClaims) and ext.groups_overage and not ext.groups
 
-    @pytest.mark.parametrize("bad", ["x", [1], ["not-a-guid"], {"a": 1}])
-    def test_malformed_groups_are_refused(self, bad: Any) -> None:
-        result = entra_external_claims(claims(groups=bad), POLICY, token_kind="id")
-        assert isinstance(result, Denied) and result.code == acc.DENY_BAD_GROUPS
+    @pytest.mark.parametrize("bad", ["x", [1], ["CORP\\staff"], {"a": 1}])
+    def test_malformed_groups_match_no_group_rule_and_never_refuse_anyone(self, bad: Any) -> None:
+        # Entra can put names or SIDs in the claim; the first release ignored it.
+        policy, _ = settings(ACCESS_RULES=f"entra:group:{GROUP},entra:role:Canvas.User")
+        for parse in (True, False):
+            ext = entra_external_claims(claims(groups=bad), POLICY, token_kind="id", parse_groups=parse)
+            assert isinstance(ext, ExternalClaims) and not ext.groups
+        ext = entra_external_claims(claims(groups=bad), POLICY, token_kind="id")
+        assert isinstance(ext, ExternalClaims)
+        assert not any(acc.rule_matches(r, ext) for r in policy.rules if r.kind == "group")
+        assert evaluate_admission(ext, policy).admitted_by_rule  # the role rule still admits
+
+    def test_valid_guids_are_kept_next_to_malformed_entries(self) -> None:
+        ext = entra_external_claims(claims(groups=[GROUP.upper(), "CORP\\staff", 5]), POLICY, token_kind="id")
+        assert isinstance(ext, ExternalClaims) and ext.groups == frozenset({GROUP})
+
+    def test_groups_are_not_read_without_a_group_rule(self) -> None:
+        ext = entra_external_claims(claims(groups=[GROUP]), POLICY, token_kind="id", parse_groups=False)
+        assert isinstance(ext, ExternalClaims) and not ext.groups
 
     def test_a_group_rule_admits_a_member_and_not_a_stranger(self) -> None:
         policy, _ = settings(ACCESS_RULES=f"entra:group:{GROUP}")
@@ -366,7 +401,7 @@ class TestDecisionTableForNewIdentities:
 
     def test_rules_without_a_match_and_approval_create_a_pending_account(self) -> None:
         d = decide(None, NOBODY, RULES_APPROVAL, DecisionFacts(), "sign_in")
-        assert (d.outcome, d.create_status, d.admitted_via) == ("pending", "pending", "approval")
+        assert (d.outcome, d.create_status, d.admitted_via) == ("pending", "pending", "rules")
 
     def test_approval_creates_pending_accounts_for_everyone(self) -> None:
         d = decide(None, RULE, APPROVAL, DecisionFacts(), "sign_in")

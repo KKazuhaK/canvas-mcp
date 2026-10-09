@@ -205,7 +205,12 @@ class IdentityService:
         rule now admits, goes through the store's single write transaction. A database
         error propagates: the caller must fail closed.
         """
-        ext = acc.entra_external_claims(claims, self.claims_policy, token_kind="access")
+        ext = acc.entra_external_claims(
+            claims,
+            self.claims_policy,
+            token_kind="access",
+            parse_groups=self.access_policy.has_group_rule(),
+        )
         if isinstance(ext, Denied):
             return ext
         verdict = acc.evaluate_admission(ext, self.access_policy)
@@ -273,7 +278,12 @@ class IdentityService:
         decision. A pending account signs in (the page shows that it waits for approval);
         a disabled one, or one the rules do not admit, is refused.
         """
-        ext = acc.entra_external_claims(claims, self.claims_policy, token_kind="id")
+        ext = acc.entra_external_claims(
+            claims,
+            self.claims_policy,
+            token_kind="id",
+            parse_groups=self.access_policy.has_group_rule(),
+        )
         if isinstance(ext, Denied):
             self._store.record_auth_event(
                 account_key=None,
@@ -363,15 +373,15 @@ def evaluate_entra_claims(
     first release did not read, are ignored. Its principal carries the legacy
     ``entra:<tid>:<oid>`` key: the production paths use :class:`IdentityService` instead.
     """
-    trimmed = {
-        k: v for k, v in claims.items() if k not in ("groups", "_claim_names", "hasgroups")
-    }
     ext = acc.entra_external_claims(
-        trimmed, EntraClaimsPolicy(policy.tenant_id, policy.client_id), token_kind=token_kind
+        claims,
+        EntraClaimsPolicy(policy.tenant_id, policy.client_id),
+        token_kind=token_kind,
+        parse_groups=False,
     )
     if isinstance(ext, Denied):
         return _legacy_denied(_LEGACY_CODES.get(ext.code, "bad_roles"))
-    if "roles" not in trimmed:
+    if "roles" not in claims:
         return _legacy_denied("missing_role")
     verdict = acc.evaluate_admission(ext, acc.default_policy(policy.required_role, policy.owner_role))
     if not verdict.admitted_by_rule and not verdict.owner_by_rule:

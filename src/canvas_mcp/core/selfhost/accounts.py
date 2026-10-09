@@ -98,7 +98,6 @@ DENY_WRONG_TENANT = "wrong_tenant"
 DENY_WRONG_CLIENT = "wrong_client"
 DENY_BAD_SUBJECT = "bad_subject"
 DENY_BAD_ROLES = "bad_roles"
-DENY_BAD_GROUPS = "bad_groups"
 DENY_ACCESS_DENIED = "access_denied"
 DENY_ACCESS_DISABLED = "access_disabled"
 DENY_PENDING_APPROVAL = "pending_approval"
@@ -128,7 +127,6 @@ AUTH_REASONS = frozenset(
         DENY_WRONG_CLIENT,
         DENY_BAD_SUBJECT,
         DENY_BAD_ROLES,
-        DENY_BAD_GROUPS,
         DENY_ACCESS_DENIED,
         DENY_ACCESS_DISABLED,
         DENY_PENDING_APPROVAL,
@@ -161,7 +159,6 @@ DENIAL_MESSAGES: dict[str, str] = {
     ),
     DENY_BAD_SUBJECT: "Your sign-in does not carry a valid account identifier.",
     DENY_BAD_ROLES: "Your sign-in carries malformed role information. Sign in again.",
-    DENY_BAD_GROUPS: "Your sign-in carries malformed group information. Sign in again.",
     DENY_ACCESS_DENIED: (
         "Your Microsoft account is not allowed to use this server. "
         "Ask the server owner to add you to the access group."
@@ -251,14 +248,18 @@ def entra_external_claims(
     policy: EntraClaimsPolicy,
     *,
     token_kind: Literal["access", "id"],
+    parse_groups: bool = True,
 ) -> ExternalClaims | Denied:
     """Reduce VERIFIED Entra claims to an external identity, or say why not.
 
     The tenant (and for an access token the issuing client) must be the configured
-    ones, the ``oid`` must be a GUID, ``roles`` (when present) a list of strings and
-    ``groups`` (when present) a list of GUIDs. A groups overage (the token carries a
-    reference instead of the list) yields no groups, so no group rule can match;
-    nothing is ever fetched from Microsoft Graph.
+    ones, the ``oid`` must be a GUID and ``roles`` (when present) a list of strings.
+    ``groups`` is read only when ``parse_groups`` is true (the policy has a group
+    rule): the first release ignored the claim, and a tenant may emit non-GUID values
+    in it (on-premises names or SIDs), which must not lock anyone out. A malformed
+    claim, or one entry that is not a GUID, simply matches no group rule, which keeps
+    group admission closed. A groups overage (the token carries a reference instead of
+    the list) yields no groups; nothing is ever fetched from Microsoft Graph.
     """
     if not _same_guid(claims.get("tid"), policy.tenant_id):
         return denied(DENY_WRONG_TENANT)
@@ -277,13 +278,12 @@ def entra_external_claims(
 
     groups: frozenset[str] = frozenset()
     overage = _has_groups_overage(claims)
-    if not overage and "groups" in claims:
-        raw_groups = claims["groups"]
-        if not isinstance(raw_groups, list) or not all(
-            isinstance(g, str) and _GUID_RE.match(g) for g in raw_groups
-        ):
-            return denied(DENY_BAD_GROUPS)
-        groups = frozenset(g.lower() for g in raw_groups)
+    if parse_groups and not overage:
+        raw_groups = claims.get("groups")
+        if isinstance(raw_groups, list):
+            groups = frozenset(
+                g.lower() for g in raw_groups if isinstance(g, str) and _GUID_RE.match(g)
+            )
 
     tid = policy.tenant_id.lower()
     return ExternalClaims(
@@ -646,7 +646,7 @@ def _pending_or_denied(
             reason=DENY_PENDING_APPROVAL,
             create=True,
             create_status=STATUS_PENDING,
-            admitted_via=ADMITTED_APPROVAL,
+            admitted_via=ADMITTED_RULES,
         )
     return Decision(
         outcome="deny",
@@ -654,7 +654,7 @@ def _pending_or_denied(
         denied=denied(DENY_PENDING_APPROVAL),
         create=True,
         create_status=STATUS_PENDING,
-        admitted_via=ADMITTED_APPROVAL,
+        admitted_via=ADMITTED_RULES,
     )
 
 
