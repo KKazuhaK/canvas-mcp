@@ -75,6 +75,20 @@ documents = [
     "python-docx>=1.2.0,<2",
 ]
 
+# The self-hosted Entra OAuth mode keeps its state in a database through SQLAlchemy
+# Core, with Alembic for the schema. The upstream modes (stdio, X-Canvas-Token,
+# access keys, Easy Auth) never import them, so they stay out of the base install.
+selfhost = [
+    "sqlalchemy>=2.1.3,<2.2",
+    "alembic>=1.19,<2",
+]
+# PostgreSQL for the self-hosted mode (DATABASE_URL=postgresql+psycopg://...).
+# psycopg[binary] ships wheels that bundle libpq, so no system packages are needed.
+postgres = [
+    "canvas-mcp[selfhost]",
+    "psycopg[binary]>=3.3,<4",
+]
+
 [tool.hatch.version]
 path = "src/canvas_mcp/__init__.py"
 
@@ -177,4 +191,9 @@ dev = [
     "pypdf>=6.19.0,<7",
     "python-pptx>=1.0.2,<2",
     "python-docx>=1.2.0,<2",
+    # The self-hosted data layer (SQLAlchemy Core + Alembic) and its PostgreSQL
+    # driver, so the store tests run on both backends.
+    "sqlalchemy>=2.1.3,<2.2",
+    "alembic>=1.19,<2",
+    "psycopg[binary]>=3.3,<4",
 ]
