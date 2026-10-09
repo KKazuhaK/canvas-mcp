@@ -57,7 +57,7 @@ Key points:
 - Who can use it: accounts assigned to the Entra app role `Canvas.User` (or your own `Canvas.Owner`).
 - Each person enrolls their own Canvas token at `/account`. From then on the AI always uses the **caller's own** token; there is no server-level Canvas credential at all.
 - Canvas tokens are stored encrypted in `/data` and the key lives only in `.env`, so leaking a backup of the data volume on its own does not leak the tokens.
-- The audit log is **off by default**: events are written, and the `audit/` directory is created, only if you set `LOG_ACCESS_EVENTS=true` in `.env`. Even when it is on, enrolling, replacing or deleting a Canvas token at `/account` does not write an audit log entry (to find out who enrolled and when, look at the created and updated times in `token_admin list`). What it does write about tokens are health events (`event_type` `canvas_token`): a token marked invalid with its reason, the outcome of a re-check, an administrator marking a token invalid, and a Canvas user change that was detected or confirmed. They carry the principal key and a short code, never a token, a name or an e-mail address.
+- The audit log is **off by default**: events are written, and the `audit/` directory is created, only if you set `LOG_ACCESS_EVENTS=true` in `.env`. Even when it is on, enrolling, replacing or deleting a Canvas token at `/account` does not write an audit log entry (to find out who enrolled and when, look at the created and updated times in `token_admin list`). What it does write about tokens are health events (`event_type` `canvas_token`): a token marked invalid with its reason, the outcome of a re-check, an administrator marking a token invalid, and a Canvas user change that was detected or confirmed. They carry the principal key and a short code, never a token, a name or an e-mail address. A user switching write tools on or off at `/account` writes a `write_tools` event (`changed`, `cleared`, or `refused` when the sign-in was too old), with the principal key and the tool names only.
 
 ## Prerequisites
 
@@ -390,6 +390,26 @@ A Canvas token can be revoked, expire or be regenerated at any time. The server 
 - **Different Canvas user.** If the new token belongs to a different Canvas user at the same school than the one enrolled so far, the page asks for an explicit confirmation before saving, and the change is logged.
 - **For owners.** `/account/admin` lists the status, the reason, when the token became invalid and when it was last verified, can show only the enrollments that need a new token (with a count), and has **Mark as invalid** for an enrollment you want the user to redo (reason `revoked_by_admin`; the user cannot undo this with Check again, only by enrolling a new token).
 
+### Write tools: each user opts in
+
+`ALLOWED_WRITE_TOOLS` (with `STUDENT_WRITE_TOOLS`) is what the **server** offers. It is a ceiling, not a switch that turns the tools on for everyone: **every user starts with all write tools off** and turns on, by name, only the ones they want.
+
+Whether a write tool can act for a user is the intersection of four things:
+
+1. **The server allows it**: the tool is registered and named in `ALLOWED_WRITE_TOOLS`. A tool that is not allowed does not exist, and nothing below can bring it back.
+2. **The user turned it on**: in the **Write tools** section of `/account`. Tools are grouped (planner and calendar, submissions and comments, module completion, inbox), each with a one-line note on what it changes. Tools the server does not offer are shown disabled as "not offered on this server".
+3. **The course allows it**: the syllabus policy (`agent_writes`) is still checked every time a tool is used. It can only narrow what the user turned on.
+4. **The tool's own preview and confirmation step**, exactly as before. The AI app may also ask the user to approve each call.
+
+Details:
+
+- The switches are stored per user in the table `user_tool_prefs` of the same token database (created on first start; the schema version stays 2). Only explicit tool names are stored, there is no "all". Replacing or deleting a Canvas token, or an invalid token, does not change them.
+- A tool the operator adds to `ALLOWED_WRITE_TOOLS` later is **not** switched on for anyone. A tool the operator removes stops working for everyone at once; if a user had it on, their choice is kept and takes effect again if the operator allows the tool again. Code execution can never be switched on by a user (and the server refuses to start with it enabled in this mode).
+- **Only the signed-in browser page can change the switches** (session, CSRF token, `Origin` check). No MCP tool reads or changes them, so a prompt-injected model cannot turn a tool on. **Turning a tool on needs a sign-in from the last 10 minutes** (otherwise the page asks the user to sign in again); turning tools off never does, and **Turn all off** clears everything.
+- On the MCP side, a call to a tool the user has not turned on is refused before the tool runs, with a message that points to `/account`; tools that are off are also left out of the tool list (and out of `search_canvas_tools`). The preferences are read once per request and cached for up to 30 seconds per user, and the cache is dropped as soon as the user saves, so a change normally takes effect on the next request. With several server processes, another process may take up to 30 seconds. If the preferences cannot be read, write tools stay off for that request.
+- AI apps such as claude.ai may remember the tool list. The page tells users to start a new chat or reconnect the connector after a change. The server runs the MCP endpoint stateless, so it has no open session to send a `tools/list_changed` notification to; enforcement does not depend on the app refreshing its list.
+- To remove a user's write access immediately, the user can press **Turn all off**, or the operator can remove the tool from `ALLOWED_WRITE_TOOLS` and restart.
+
 > **React UI (in development).** `/account` is being rewritten as a React single-page app, with the source in `web/` in the repository (see `web/README.md`). `Dockerfile.selfhost` already builds it and puts the output in the image at `/app/web-dist`, but the server does **not** serve those files yet: what you see now is still the server-rendered page described above, and neither the deployment nor the runtime behavior has changed.
 
 ## Multiple schools (optional)
@@ -428,6 +448,7 @@ Mitigations:
 2. When in doubt, do not enable them: the template is read-only by default, so just keep `ALLOWED_WRITE_TOOLS`, `STUDENT_WRITE_TOOLS` and `COURSE_AGENT_POLICY_DEFAULT` commented out. If you do enable them, enable only the few you really need, especially `submit_assignment`, `send_message` and `reply_to_conversation`.
 3. `COURSE_AGENT_POLICY_DEFAULT=allow` lets courses without an instructor policy accept writes as well; the more conservative approach is to keep the default `deny` and open writes only for the courses that truly need them through the instructor policy. A course where the instructor has explicitly set `agent_writes: deny` is always respected.
 4. Make sure every user knows the above, and ask them to follow item 1.
+5. Even with a tool in `ALLOWED_WRITE_TOOLS`, each user has to turn it on for themselves at `/account` (see [Write tools: each user opts in](#write-tools-each-user-opts-in)). Nothing is on for anyone until they do, and a tool you add later starts off for everyone. Tell users to turn on only the few tools they really need.
 
 ## Upgrading
 
@@ -439,6 +460,8 @@ docker compose pull && docker compose up -d
 `docker-compose.yml` sets `pull_policy: always`, so a plain `docker compose up -d` also pulls the chosen tag again. To pin a version, replace `:latest` in `image:` with a specific version (for example `:1.13.0-uci.1`). An upgrade restarts the container; users stay signed in and enrolled (the state is stored in `/data`).
 
 Upgrading to the version with multiple schools migrates the token database (`/data/canvas-mcp/tokens.sqlite3`) to schema version 2 on first start. The migration is automatic and safe to repeat, existing enrollments keep working on the default school and are re-sealed with their school the next time the user saves a token, and key rotation works for both kinds of rows. Back up `/data` first: an older image refuses a version 2 database, so rolling back needs that backup.
+
+The version with per-user write-tool switches adds the `user_tool_prefs` table to the same database on first start (no schema version change, and it is safe to repeat). After the upgrade, **no user has any write tool turned on**, even if you already had `ALLOWED_WRITE_TOOLS` set: each user turns on what they want at `/account`. An older image ignores the table and would offer the full `ALLOWED_WRITE_TOOLS` list to everybody, so roll back only deliberately.
 
 ## Secret rotation
 
@@ -506,6 +529,8 @@ A note on delay: if you do only steps 1 and 2, an access token that has already 
 | **421** | The reverse proxy is not forwarding the `Host` header, or the domain being visited is not the one in `PUBLIC_BASE_URL`. For nginx add `proxy_set_header Host $host;` |
 | A tool returns an "**enroll** ..." message | The user has not enrolled a Canvas token yet (or the enrolled token cannot be decrypted). Have them enroll or re-enroll at `/account` |
 | A tool says **Canvas rejected your stored access token** | The token was revoked, expired or regenerated in Canvas and the server confirmed it. The user creates a new token in Canvas and enrolls it at `/account` (the banner there explains how). If Canvas was only briefly wrong, **Check again** on `/account` restores it |
+| A write tool returns "**is turned off for your account**" | The server allows the tool, but this user has not turned it on. They open `/account`, sign in, tick it under **Write tools** and save (turning on needs a sign-in from the last 10 minutes), then start a new chat or reconnect the connector so the app refreshes its tool list |
+| The user wants a write tool but it is shown as "**not offered on this server**" | It is not in `ALLOWED_WRITE_TOOLS`, or it is not registered (for `STUDENT_WRITE_TOOLS` tools, also check that list and `CANVAS_ROLE`). The operator decides; users cannot turn it on |
 | The container exits right after starting | `docker compose logs` lists all the configuration problems (without secret values). Common causes: a required setting is missing, `CANVAS_API_TOKEN` or `MCP_ACCESS_KEYS` is set, a key in `CANVAS_TOKEN_KEYS` is not 32 bytes, or a row in the volume uses a kid that has been removed |
 | Adding the connector in claude.ai fails, but the browser can open the site | The service has to fetch the client metadata document (CIMD) from claude.ai's egress, and also needs outbound access to claude.ai from the server. Check that the server can reach the internet and that Cloudflare is not blocking `160.79.104.0/21` (see the Cloudflare section) |
 | You see a Cloudflare challenge page, or OAuth / tool calls get 403 / 5xx | Turn off Bot Fight / Super Bot Fight, do not challenge `/mcp`, `/token`, `/register` or `/.well-known/*`, and add the allow rule for `160.79.104.0/21` |
