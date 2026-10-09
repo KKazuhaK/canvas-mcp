@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import os
-import sqlite3
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -21,6 +20,7 @@ from ..config import Config, validate_canvas_url_scheme
 from ..token_health import set_token_health_monitor
 from .edge_guard import SelfhostEdgeGuard
 from .identity import ClaimsPolicy, authorize_id_token_claims
+from .limits import RateLimiters, build_rate_limiters
 from .oauth import cull_expired_oauth_state
 from .principal_access import PrincipalAccessCache
 from .request_context import SelfhostRequestContextMiddleware
@@ -56,6 +56,7 @@ class SelfhostRuntime:
     health: TokenHealth
     tool_prefs: ToolPrefsCache
     access: PrincipalAccessCache
+    limiters: RateLimiters = field(default_factory=lambda: build_rate_limiters("memory"))
 
 
 def _writable_directory_problem(name: str, path: Path) -> str | None:
@@ -198,26 +199,59 @@ def validate_selfhost_startup(config: Config, settings: SelfhostSettings) -> lis
     return problems
 
 
+def _data_layer_problem(settings: SelfhostSettings) -> str | None:
+    """A startup problem if the data layer's optional packages are not installed."""
+    try:
+        import alembic  # noqa: F401
+        import sqlalchemy  # noqa: F401
+    except ImportError:
+        return (
+            "the self-hosted mode needs SQLAlchemy and Alembic: "
+            "pip install 'canvas-mcp[selfhost]' (the container image includes them)"
+        )
+    if settings.database_target.kind == "postgresql":
+        try:
+            import psycopg  # noqa: F401
+        except ImportError:
+            return (
+                "DATABASE_URL names PostgreSQL, which needs the psycopg driver: "
+                "pip install 'canvas-mcp[postgres]' (the container image includes it)"
+            )
+    return None
+
+
 def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
     """Open the encrypted token store and build the claim policy.
 
     Raises :class:`SelfhostConfigError` when the keyring or the store is
-    unusable (a key id missing, a wrong key, an unreadable database).
+    unusable (a key id missing, a wrong key, an unreadable or newer database,
+    an uninitialised PostgreSQL database next to a SQLite file that has data).
     """
-    from .token_store import Keyring, KeyringError, TokenStore, TokenStoreError
+    from .token_store import (
+        Keyring,
+        KeyringError,
+        StoreUnavailable,
+        TokenStore,
+        TokenStoreError,
+    )
+
+    missing = _data_layer_problem(settings)
+    if missing:
+        raise SelfhostConfigError([missing])
 
     try:
         keyring = Keyring.parse(settings.canvas_token_keys_raw)
-        store = TokenStore(settings.token_db_path, keyring)
-        store.initialize()
-    except (TokenStoreError, KeyringError) as exc:
-        raise SelfhostConfigError([str(exc)]) from None
-    except sqlite3.Error:
-        # A corrupt file, not a database, locked, or a failing disk. The driver's
-        # message is left out: it can quote paths.
+        store = TokenStore.for_target(settings.database_target, keyring)
+        _refuse_silent_database_switch(settings, store)
+        store.initialize(auto_migrate=settings.auto_migrate)
+    except StoreUnavailable:
+        # A corrupt file, not a database, locked, a failing disk, or an unreachable
+        # server. The driver's message is left out: it can quote paths, SQL or the URL.
         raise SelfhostConfigError(
             ["the Canvas token database cannot be opened or is not a valid database"]
         ) from None
+    except (TokenStoreError, KeyringError) as exc:
+        raise SelfhostConfigError([str(exc)]) from None
     except OSError:
         raise SelfhostConfigError(["the Canvas token database cannot be opened"]) from None
 
@@ -235,7 +269,31 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         health=health,
         tool_prefs=ToolPrefsCache(store),
         access=PrincipalAccessCache(store),
+        limiters=build_rate_limiters(settings.state_backend),
     )
+
+
+def _refuse_silent_database_switch(settings: SelfhostSettings, store: TokenStore) -> None:
+    """Fail closed when PostgreSQL is empty but the old SQLite file still has data.
+
+    Starting on an empty PostgreSQL database would drop the disablements stored in
+    the SQLite file, and a disabled user could enroll again.
+    """
+    from .db import migrate
+    from .db.transfer import legacy_sqlite_has_rows
+    from .token_store import TokenStoreError
+
+    if settings.database_target.kind != "postgresql":
+        return
+    if migrate.current(store.database).state != migrate.STATE_UNINITIALIZED:
+        return
+    if legacy_sqlite_has_rows(settings.token_db_path):
+        raise TokenStoreError(
+            "DATABASE_URL names an empty PostgreSQL database, but the SQLite token database "
+            "in the data directory still holds data (including access decisions). Import it "
+            "with: python -m canvas_mcp.core.selfhost.token_admin db import-sqlite PATH, or "
+            "move the SQLite file away if it is meant to be abandoned"
+        )
 
 
 def install_selfhost(
@@ -289,7 +347,7 @@ def install_selfhost(
         write_tools=WriteToolCatalog(ceiling=ceiling, list_registered=registered_tool_names),
         tool_prefs=runtime.tool_prefs,
         access=runtime.access,
-        **account_options,
+        **{"rate_limiters": runtime.limiters, **account_options},
     )
 
     @mcp.custom_route(HEALTH_PATH, methods=["GET"])
@@ -339,4 +397,9 @@ def build_selfhost_asgi_app(
     async def cull_oauth_state() -> None:
         await cull_expired_oauth_state(provider)
 
-    return SelfhostEdgeGuard(app, clock=clock or time.monotonic, maintenance=cull_oauth_state)
+    return SelfhostEdgeGuard(
+        app,
+        clock=clock or time.monotonic,
+        maintenance=cull_oauth_state,
+        rate_limiters=runtime.limiters,
+    )

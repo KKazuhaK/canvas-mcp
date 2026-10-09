@@ -60,7 +60,6 @@ import re
 import secrets
 import time
 import urllib.parse
-from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -78,6 +77,11 @@ from starlette.routing import Route
 
 from canvas_mcp.core import audit
 from canvas_mcp.core.dates import output_timezone
+from canvas_mcp.core.selfhost.limits import (
+    InMemorySlidingWindowLimiter,
+    RateLimiters,
+    build_rate_limiters,
+)
 from canvas_mcp.core.selfhost.principal_access import PrincipalAccessCache
 from canvas_mcp.core.selfhost.schools import (
     MAX_QUERY_CHARS,
@@ -324,43 +328,8 @@ class _StoreUnavailable(Exception):
 _UNAVAILABLE = object()
 
 
-class _RateLimiter:
-    """Sliding-window attempt counter in a bounded in-memory table."""
-
-    def __init__(
-        self,
-        limit: int,
-        window: int,
-        max_keys: int,
-        clock: Callable[[], float],
-    ) -> None:
-        self._limit = limit
-        self._window = window
-        self._max_keys = max_keys
-        self._clock = clock
-        self._hits: OrderedDict[tuple[str, str], deque[float]] = OrderedDict()
-
-    def allow(self, key: tuple[str, str]) -> bool:
-        now = self._clock()
-        cutoff = now - self._window
-        hits = self._hits.get(key)
-        if hits is None:
-            if len(self._hits) >= self._max_keys:
-                self._purge(cutoff)
-            while len(self._hits) >= self._max_keys:
-                self._hits.popitem(last=False)
-            hits = deque()
-            self._hits[key] = hits
-        while hits and hits[0] <= cutoff:
-            hits.popleft()
-        if len(hits) >= self._limit:
-            return False
-        hits.append(now)
-        return True
-
-    def _purge(self, cutoff: float) -> None:
-        for key in [k for k, h in self._hits.items() if not h or h[-1] <= cutoff]:
-            del self._hits[key]
+#: The in-process sliding-window limiter (moved to :mod:`.limits`; the name is kept).
+_RateLimiter = InMemorySlidingWindowLimiter
 
 
 # -- language ----------------------------------------------------------------
@@ -682,7 +651,9 @@ class _AccountApp:
         write_tools: WriteToolCatalog | None = None,
         tool_prefs: ToolPrefsCache | None = None,
         access: PrincipalAccessCache | None = None,
+        rate_limiters: RateLimiters | None = None,
     ) -> None:
+        window = (rate_limiters or build_rate_limiters("memory")).sliding_window
         self.cfg = cfg
         self.write_tools = write_tools
         self.tool_prefs = tool_prefs
@@ -694,20 +665,20 @@ class _AccountApp:
         self.authorize_claims = authorize_claims
         self.clock = clock
         self.codec = _CookieCodec(cfg.session_secret)
-        self.limiter = _RateLimiter(
+        self.limiter = window(
             _RATE_LIMIT_ATTEMPTS,
             _RATE_LIMIT_WINDOW_SECONDS,
             _RATE_LIMIT_MAX_KEYS,
             clock,
         )
-        self.recheck_limiter = _RateLimiter(
+        self.recheck_limiter = window(
             _RECHECK_LIMIT_ATTEMPTS,
             _RECHECK_LIMIT_WINDOW_SECONDS,
             _RATE_LIMIT_MAX_KEYS,
             clock,
         )
         self.health = health or TokenHealth(store, account_url=self.base + ACCOUNT_PATH)
-        self.search_limiter = _RateLimiter(
+        self.search_limiter = window(
             _SEARCH_LIMIT_ATTEMPTS,
             _SEARCH_LIMIT_WINDOW_SECONDS,
             _RATE_LIMIT_MAX_KEYS,
@@ -2826,6 +2797,7 @@ def build_account_routes(
     write_tools: WriteToolCatalog | None = None,
     tool_prefs: ToolPrefsCache | None = None,
     access: PrincipalAccessCache | None = None,
+    rate_limiters: RateLimiters | None = None,
 ) -> list[Route]:
     """Build the /account Starlette routes.
 
@@ -2852,6 +2824,7 @@ def build_account_routes(
         write_tools,
         tool_prefs,
         access,
+        rate_limiters,
     )
     return app.routes()
 

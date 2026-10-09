@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import threading
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -30,6 +29,7 @@ from typing import Any
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..logging import log_warning
+from .limits import InMemoryTokenBucket, RateLimiters, build_rate_limiters
 
 REGISTER_PATH = "/register"
 AUTHORIZE_PATH = "/authorize"
@@ -46,38 +46,8 @@ MAINTENANCE_INTERVAL_SECONDS = 3600
 Maintenance = Callable[[], Awaitable[None]]
 
 
-class TokenBucket:
-    """A thread-safe token bucket: ``capacity`` tokens, refilled continuously."""
-
-    def __init__(
-        self, capacity: float, refill_per_second: float, clock: Callable[[], float] = time.monotonic
-    ) -> None:
-        self._capacity = float(capacity)
-        self._rate = float(refill_per_second)
-        self._clock = clock
-        self._tokens = float(capacity)
-        self._updated = clock()
-        self._lock = threading.Lock()
-
-    def _refill(self) -> None:
-        now = self._clock()
-        elapsed = max(0.0, now - self._updated)
-        self._updated = now
-        self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
-
-    def take(self) -> float:
-        """Take one token. Returns 0 when allowed, else seconds until one is free."""
-        with self._lock:
-            self._refill()
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                return 0.0
-            return (1.0 - self._tokens) / self._rate if self._rate > 0 else float("inf")
-
-    def give_back(self) -> None:
-        """Return a token taken for a request that was then refused elsewhere."""
-        with self._lock:
-            self._tokens = min(self._capacity, self._tokens + 1.0)
+#: The in-process token bucket (moved to :mod:`.limits`; the name is kept).
+TokenBucket = InMemoryTokenBucket
 
 
 class SelfhostEdgeGuard:
@@ -90,15 +60,15 @@ class SelfhostEdgeGuard:
         clock: Callable[[], float] = time.monotonic,
         maintenance: Maintenance | None = None,
         maintenance_interval: float = MAINTENANCE_INTERVAL_SECONDS,
+        rate_limiters: RateLimiters | None = None,
     ) -> None:
         self.app = app
         self._clock = clock
+        make = (rate_limiters or build_rate_limiters("memory")).token_bucket
         per_second = PUBLIC_REQUESTS_PER_MINUTE / 60.0
-        self._register = TokenBucket(PUBLIC_REQUESTS_PER_MINUTE, per_second, clock)
-        self._register_daily = TokenBucket(
-            REGISTRATIONS_PER_DAY, REGISTRATIONS_PER_DAY / 86400.0, clock
-        )
-        self._authorize = TokenBucket(PUBLIC_REQUESTS_PER_MINUTE, per_second, clock)
+        self._register = make(PUBLIC_REQUESTS_PER_MINUTE, per_second, clock)
+        self._register_daily = make(REGISTRATIONS_PER_DAY, REGISTRATIONS_PER_DAY / 86400.0, clock)
+        self._authorize = make(PUBLIC_REQUESTS_PER_MINUTE, per_second, clock)
         self._maintenance = maintenance
         self._maintenance_interval = maintenance_interval
         self._last_maintenance: float | None = None

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pathlib
-import sqlite3
 
 import pytest
 
@@ -15,6 +14,7 @@ from canvas_mcp.core.selfhost.token_store import (
     REASON_REVOKED_BY_ADMIN,
     STATUS_ACTIVE,
     STATUS_INVALID,
+    StoreUnavailable,
     TokenStore,
 )
 
@@ -157,10 +157,10 @@ class TestVerifiedAndHint:
     ) -> None:
         store.mark_verified("Not A Lower-Case Key")  # refused key
 
-        def broken() -> None:
-            raise sqlite3.OperationalError("database is locked")
+        def broken(**_: object) -> None:
+            raise StoreUnavailable("the token database is unavailable", "OperationalError")
 
-        monkeypatch.setattr(store, "_connection", broken)
+        monkeypatch.setattr(store._db, "best_effort_write", broken)
         store.mark_verified(PK_A)
 
     def test_the_expiry_hint_is_stored_replaced_cleared_or_kept(self, store: TokenStore) -> None:

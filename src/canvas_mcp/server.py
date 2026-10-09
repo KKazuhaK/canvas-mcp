@@ -594,7 +594,10 @@ def _selfhost_summary(settings: SelfhostSettings) -> list[str]:
         f"  API scope: {settings.api_scope}",
         f"  Roles: user={settings.required_role}, owner={settings.owner_role}",
         f"  Account session lifetime: {settings.account_session_ttl_seconds}s",
-        f"  Token store: {settings.token_db_path}",
+        f"  Token store: {settings.database_target.description}",
+        "  Database migrations: "
+        + ("automatic at start" if settings.auto_migrate else "manual (token_admin db upgrade)"),
+        f"  Rate limits and one-time state: {settings.state_backend} (single instance)",
         f"  FastMCP home: {settings.fastmcp_home}",
         f"  Redirect URIs: {', '.join(settings.allowed_client_redirect_uris)}",
         "  Canvas schools: featured="
@@ -692,7 +695,7 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
         tool_profile=role,
         tool_policy=tool_policy.source,
         removed_tools=len(removed_tools),
-        token_store=str(settings.token_db_path),
+        token_store=settings.database_target.description,
         enrollments=runtime.store.count(),
     )
 

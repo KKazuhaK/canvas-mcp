@@ -10,6 +10,9 @@ Usage::
     python -m canvas_mcp.core.selfhost.token_admin history [TENANT_ID OBJECT_ID]
     python -m canvas_mcp.core.selfhost.token_admin remove TENANT_ID OBJECT_ID
     python -m canvas_mcp.core.selfhost.token_admin rotate
+    python -m canvas_mcp.core.selfhost.token_admin db current
+    python -m canvas_mcp.core.selfhost.token_admin db upgrade [--backup PATH]
+    python -m canvas_mcp.core.selfhost.token_admin db import-sqlite PATH
 
 ``disable`` and ``enable`` are the authorization decision: a disabled user is refused
 at ``/account`` and on every MCP request, cannot enroll, and stays disabled until
@@ -25,11 +28,23 @@ the owners the server has seen.
 name, created, last used and the Canvas host (``-`` for a legacy row, which
 belongs to the default school ``CANVAS_API_URL``).
 
-Reads ``CANVAS_TOKEN_KEYS`` and ``SELFHOST_DATA_DIR`` (default ``/data``) from
-the environment. Never prints a token, a key or any other secret.
+``db current`` prints the backend (without credentials), the Alembic revision, the
+schema version marker and whether the database is current; it needs no keys and
+changes nothing. ``db upgrade`` applies pending schema revisions (use
+``--backup PATH`` to copy a SQLite file first; back up PostgreSQL with ``pg_dump``).
+``db import-sqlite PATH`` copies a SQLite token database into an empty PostgreSQL
+database (``DATABASE_URL``) in one transaction and checks that every token still
+decrypts; the source file is not modified.
 
-Exit codes: 0 ok, 1 not found, 2 configuration or keyring error, 3 refused (for
-example disabling the last active owner).
+Reads ``CANVAS_TOKEN_KEYS``, ``SELFHOST_DATA_DIR`` (default ``/data``) and
+``DATABASE_URL`` (unset: the SQLite file in the data directory) from the
+environment, like the server. Schema changes are applied before a command runs
+unless ``DATABASE_AUTO_MIGRATE=false``. Never prints a token, a key, a database
+password or any other secret.
+
+Exit codes: 0 ok, 1 not found, 2 configuration, keyring or database error, 3
+refused (for example disabling the last active owner), 4 ``db current`` found the
+schema behind this build (run ``db upgrade``).
 """
 
 from __future__ import annotations
@@ -38,10 +53,16 @@ import argparse
 import os
 import pathlib
 import re
-import sqlite3
 import sys
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
+from canvas_mcp.core.selfhost.db.url import (
+    ALLOW_OUTSIDE_ENV,
+    DATABASE_URL_ENV,
+    parse_database_url,
+)
+from canvas_mcp.core.selfhost.settings import AUTO_MIGRATE_ENV, _parse_auto_migrate
 from canvas_mcp.core.selfhost.token_store import (
     DISABLE_REASON_OPERATOR,
     OPERATOR,
@@ -50,13 +71,16 @@ from canvas_mcp.core.selfhost.token_store import (
     TokenDecryptionError,
     TokenStore,
     TokenStoreError,
-    token_db_path,
 )
+
+if TYPE_CHECKING:
+    from canvas_mcp.core.selfhost.db.engine import Database
 
 EXIT_OK = 0
 EXIT_NOT_FOUND = 1
 EXIT_CONFIG = 2
 EXIT_REFUSED = 3
+EXIT_BEHIND = 4
 
 KEYS_ENV = "CANVAS_TOKEN_KEYS"
 DATA_DIR_ENV = "SELFHOST_DATA_DIR"
@@ -114,16 +138,94 @@ def _build_parser() -> argparse.ArgumentParser:
         remove.add_argument("tenant_id")
         remove.add_argument("object_id")
     sub.add_parser("rotate", help="re-encrypt rows under the active key")
+    db = sub.add_parser("db", help="inspect and upgrade the database schema")
+    db_sub = db.add_subparsers(dest="db_command", required=True)
+    db_sub.add_parser("current", help="show the schema state; exit 4 if it is behind")
+    upgrade = db_sub.add_parser("upgrade", help="apply pending schema revisions")
+    upgrade.add_argument(
+        "--backup",
+        metavar="PATH",
+        help="SQLite only: copy the database to this new private file before upgrading",
+    )
+    import_sqlite = db_sub.add_parser(
+        "import-sqlite", help="copy a SQLite token database into an empty PostgreSQL database"
+    )
+    import_sqlite.add_argument("path", help="the SQLite file to import (it is not modified)")
     return parser
 
 
-def _open_store() -> TokenStore:
-    """Open and initialize the store; raises TokenStoreError/OSError/sqlite3.Error."""
-    keyring = Keyring.parse(os.environ.get(KEYS_ENV, ""))
+def _database() -> Database:
+    """The configured database (``DATABASE_URL`` or the SQLite file), not yet opened."""
+    from canvas_mcp.core.selfhost.db.engine import Database
+
     data_dir = pathlib.Path(os.environ.get(DATA_DIR_ENV) or DEFAULT_DATA_DIR)
-    store = TokenStore(token_db_path(data_dir), keyring)
-    store.initialize()
+    problems: list[str] = []
+    allow = (os.environ.get(ALLOW_OUTSIDE_ENV) or "").strip().lower() in ("true", "1", "yes")
+    target = parse_database_url(
+        (os.environ.get(DATABASE_URL_ENV) or "").strip(),
+        data_dir,
+        allow_external_sqlite=allow,
+        problems=problems,
+    )
+    if problems:
+        raise TokenStoreError("; ".join(problems))
+    return Database(target)
+
+
+def _auto_migrate() -> bool:
+    problems: list[str] = []
+    value = _parse_auto_migrate(os.environ.get(AUTO_MIGRATE_ENV) or "", problems)
+    if problems:
+        raise TokenStoreError("; ".join(problems))
+    return value
+
+
+def _open_store() -> TokenStore:
+    """Open and initialize the store; raises TokenStoreError/OSError."""
+    keyring = Keyring.parse(os.environ.get(KEYS_ENV, ""))
+    store = TokenStore(_database(), keyring)
+    store.initialize(auto_migrate=_auto_migrate())
     return store
+
+
+def _run_db(args: argparse.Namespace) -> int:
+    """The ``db`` subcommands. ``current`` and ``upgrade`` need no keys."""
+    from canvas_mcp.core.selfhost.db import migrate
+
+    command: str = args.db_command
+    db = _database()
+    if command == "current":
+        status = migrate.current(db)
+        print(f"backend: {db.description}")
+        print(f"alembic revision: {status.alembic_revision or '(none)'}")
+        print(f"schema version marker: {status.meta_version or '(none)'}")
+        print(f"head revision: {status.head}")
+        print(f"state: {status.state}")
+        if status.state == migrate.STATE_CURRENT:
+            return EXIT_OK
+        if status.state in (migrate.STATE_NEWER, migrate.STATE_UNREADABLE):
+            return EXIT_CONFIG
+        return EXIT_BEHIND
+    if command == "upgrade":
+        backup = pathlib.Path(args.backup) if args.backup else None
+        before, after = migrate.upgrade(db, backup_to=backup)
+        if backup is not None:
+            print(f"backup written to {backup}")
+        if before.state == migrate.STATE_CURRENT:
+            print(f"already current at {after.alembic_revision}")
+        else:
+            print(f"upgraded: {before.alembic_revision or '(none)'} -> {after.alembic_revision}")
+        return EXIT_OK
+    if command == "import-sqlite":
+        from canvas_mcp.core.selfhost.db.transfer import import_sqlite
+
+        keyring = Keyring.parse(os.environ.get(KEYS_ENV, ""))
+        report = import_sqlite(db, pathlib.Path(args.path), keyring)
+        for table, count in report.counts.items():
+            print(f"{table}: {count} row(s)")
+        print("imported; every stored token decrypts with CANVAS_TOKEN_KEYS")
+        return EXIT_OK
+    raise AssertionError(command)  # pragma: no cover - argparse enforces choices
 
 
 def _run(args: argparse.Namespace, store: TokenStore) -> int:
@@ -265,6 +367,8 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
+        if args.command == "db":
+            return _run_db(args)
         store = _open_store()
         return _run(args, store)
     except TokenDecryptionError:
@@ -274,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
         # Messages from the store carry key ids and counts only, never secrets.
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_CONFIG
-    except (OSError, sqlite3.Error) as exc:
+    except OSError as exc:
         print(f"error: cannot open the token store ({type(exc).__name__})", file=sys.stderr)
         return EXIT_CONFIG
 

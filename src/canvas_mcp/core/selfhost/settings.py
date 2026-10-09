@@ -17,6 +17,14 @@ from pathlib import Path, PurePosixPath
 from typing import ClassVar, Literal
 from urllib.parse import urlsplit
 
+from .db.url import (
+    ALLOW_OUTSIDE_ENV,
+    DATABASE_URL_ENV,
+    DatabaseTarget,
+    default_sqlite_path,
+    parse_database_url,
+    sqlite_target,
+)
 from .schools import MAX_FEATURED, FeaturedSchool, parse_hostname
 
 AUTH_MODE_ENV = "MCP_AUTH_MODE"
@@ -40,6 +48,13 @@ DEFAULT_REDIRECT_URIS: tuple[str, ...] = (
 )
 DEFAULT_SESSION_TTL_SECONDS = 900
 DEFAULT_DATA_DIR = "/data"
+
+AUTO_MIGRATE_ENV = "DATABASE_AUTO_MIGRATE"
+STATE_BACKEND_ENV = "SELFHOST_STATE_BACKEND"
+#: Where short-lived state (rate limits, one-time login state) lives. Only the
+#: in-process backend exists; ``redis`` is reserved for a later multi-instance mode.
+STATE_BACKEND_MEMORY = "memory"
+STATE_BACKEND_REDIS = "redis"
 
 _GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -94,8 +109,18 @@ class SelfhostSettings:
     # policies, pseudonyms and hints in process-wide maps shared by all callers)
     # or are cached per principal across requests (explicit opt-in).
     course_state: Literal["request_local", "per_principal"] = "request_local"
+    # Where tokens and access state live: SQLite in the data directory unless
+    # DATABASE_URL names PostgreSQL. ``None`` means the SQLite default.
+    # (DatabaseTarget keeps the URL, which may hold a password, out of its repr.)
+    database: DatabaseTarget | None = None
+    auto_migrate: bool = True
+    state_backend: Literal["memory"] = "memory"
 
     mcp_path: ClassVar[str] = "/mcp"
+
+    def __post_init__(self) -> None:
+        if self.database is None:
+            object.__setattr__(self, "database", sqlite_target(default_sqlite_path(self.data_dir)))
 
     @property
     def mcp_url(self) -> str:
@@ -107,7 +132,13 @@ class SelfhostSettings:
 
     @property
     def token_db_path(self) -> Path:
-        return self.data_dir / "canvas-mcp" / "tokens.sqlite3"
+        """The SQLite file of the default layout (also the pre-PostgreSQL location)."""
+        return default_sqlite_path(self.data_dir)
+
+    @property
+    def database_target(self) -> DatabaseTarget:
+        assert self.database is not None
+        return self.database
 
 
 def auth_mode(env: Mapping[str, str] | None = None) -> Literal["legacy", "entra-oauth"]:
@@ -312,6 +343,29 @@ def _parse_course_state(
         f"or '{COURSE_STATE_PER_PRINCIPAL}'"
     )
     return "request_local"
+def _parse_auto_migrate(raw: str, problems: list[str]) -> bool:
+    """``DATABASE_AUTO_MIGRATE``: true unless explicitly switched off."""
+    word = raw.strip().lower()
+    if word == "" or word in _TRUE_WORDS:
+        return True
+    if word in _FALSE_WORDS:
+        return False
+    problems.append(f"{AUTO_MIGRATE_ENV} must be true or false")
+    return True
+
+
+def _parse_state_backend(raw: str, problems: list[str]) -> Literal["memory"]:
+    word = raw.strip().lower()
+    if word in ("", STATE_BACKEND_MEMORY):
+        return "memory"
+    if word == STATE_BACKEND_REDIS:
+        problems.append(
+            f"{STATE_BACKEND_ENV}=redis is reserved and not implemented yet; leave it unset "
+            "(this server is a single instance)"
+        )
+    else:
+        problems.append(f"{STATE_BACKEND_ENV} must be unset or '{STATE_BACKEND_MEMORY}'")
+    return "memory"
 
 
 def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSettings:
@@ -396,6 +450,16 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
     if not _is_absolute(data_dir_raw):
         problems.append("SELFHOST_DATA_DIR must be an absolute path")
 
+    allow_outside = _parse_bool(ALLOW_OUTSIDE_ENV, get(ALLOW_OUTSIDE_ENV), problems)
+    database = parse_database_url(
+        get(DATABASE_URL_ENV),
+        Path(data_dir_raw),
+        allow_external_sqlite=allow_outside,
+        problems=problems,
+    )
+    auto_migrate = _parse_auto_migrate(get(AUTO_MIGRATE_ENV), problems)
+    state_backend = _parse_state_backend(get(STATE_BACKEND_ENV), problems)
+
     home_raw = get("FASTMCP_HOME")
     if not home_raw:
         problems.append(
@@ -431,4 +495,7 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
         featured_schools=featured,
         school_search=school_search,
         course_state=course_state,
+        database=database,
+        auto_migrate=auto_migrate,
+        state_backend=state_backend,
     )

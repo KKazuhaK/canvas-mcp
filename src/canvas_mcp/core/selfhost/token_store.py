@@ -1,6 +1,7 @@
 """Encrypted per-user Canvas token store for the self-hosted multi-user mode.
 
-One SQLite file holds one row per principal. A principal is named by one opaque,
+One database holds one row per principal (a SQLite file by default, PostgreSQL
+when ``DATABASE_URL`` asks for it; see :mod:`.db`). A principal is named by one opaque,
 lower-case ``principal_key`` string; today that is ``entra:<tenant id>:<object id>``.
 The Canvas personal access token is encrypted with AES-256-GCM; the associated
 data binds each ciphertext to its principal, Canvas host and key id, so a copied
@@ -67,8 +68,17 @@ Keys come from ``CANVAS_TOKEN_KEYS`` (``kid:base64key[,kid:base64key...]``).
 The first entry encrypts new rows; every entry decrypts. Error messages never
 contain key or token material.
 
-All methods are synchronous and thread-safe (one SQLite connection per call).
-Async callers use ``anyio.to_thread.run_sync``.
+All methods are synchronous and thread-safe (one connection per call). Async
+callers use ``anyio.to_thread.run_sync``.
+
+Persistence is behind the repository interfaces of :mod:`.db.ports`
+(SQLAlchemy Core implementations in :mod:`.db.repos`). Each public method is one
+transaction, opened here and nowhere else, so the race-sensitive reasoning stays
+in this file: a write takes the database's writer serialisation first (SQLite:
+``BEGIN IMMEDIATE``; PostgreSQL: a transaction-scoped advisory lock at
+``READ COMMITTED``), then runs the same checks and conditional updates in the
+same order on both backends. SQLAlchemy is imported lazily, when a store is
+built, so the upstream modes never need it.
 """
 
 from __future__ import annotations
@@ -79,19 +89,24 @@ import json
 import os
 import pathlib
 import re
-import sqlite3
-import threading
 import time
-from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from ..credentials import note_credential_generation
+from .db.errors import StoreUnavailable, TokenStoreError  # noqa: F401 - re-exported
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Connection
+
+    from .db.engine import Database
+    from .db.repos import Repositories
+    from .db.url import DatabaseTarget
 
 SCHEMA_VERSION = 4
 
@@ -160,115 +175,6 @@ _MAX_CANVAS_NAME = 200
 _MAX_ENTRA_NAME = 200
 _MAX_UPN = 254
 
-_SCHEMA_META = (
-    "CREATE TABLE IF NOT EXISTS meta ("
-    " key TEXT PRIMARY KEY,"
-    " value TEXT NOT NULL"
-    ") WITHOUT ROWID"
-)
-_SCHEMA_TOKENS = (
-    "CREATE TABLE IF NOT EXISTS canvas_tokens ("
-    " tenant_id TEXT NOT NULL,"
-    " object_id TEXT NOT NULL,"
-    " key_id TEXT NOT NULL,"
-    " nonce BLOB NOT NULL,"
-    " ciphertext BLOB NOT NULL,"
-    " canvas_user_id TEXT NOT NULL,"
-    " canvas_user_name TEXT NOT NULL,"
-    " entra_display_name TEXT NOT NULL DEFAULT '',"
-    " entra_upn TEXT NOT NULL DEFAULT '',"
-    " created_at INTEGER NOT NULL,"
-    " updated_at INTEGER NOT NULL,"
-    " last_used_at INTEGER,"
-    " canvas_host TEXT,"
-    " principal_key TEXT,"
-    " status TEXT NOT NULL DEFAULT 'active',"
-    " invalid_reason TEXT,"
-    " invalid_since INTEGER,"
-    " last_verified_at INTEGER,"
-    " expires_hint_at INTEGER,"
-    " PRIMARY KEY (tenant_id, object_id)"
-    ") WITHOUT ROWID"
-)
-_SCHEMA_TOOL_PREFS = (
-    "CREATE TABLE IF NOT EXISTS user_tool_prefs ("
-    " principal_key TEXT PRIMARY KEY,"
-    " enabled_write_tools TEXT NOT NULL DEFAULT '[]',"
-    " enabled_at TEXT NOT NULL DEFAULT '{}',"
-    " updated_at INTEGER NOT NULL,"
-    " updated_via TEXT NOT NULL DEFAULT 'account_web'"
-    ") WITHOUT ROWID"
-)
-_SCHEMA_PRINCIPAL_STATUS = (
-    "CREATE TABLE IF NOT EXISTS principal_status ("
-    " principal_key TEXT PRIMARY KEY,"
-    " status TEXT NOT NULL DEFAULT 'active',"
-    " disabled_reason TEXT,"
-    " disabled_at INTEGER,"
-    " disabled_by TEXT,"
-    " display_name TEXT NOT NULL DEFAULT '',"
-    " upn TEXT NOT NULL DEFAULT '',"
-    " session_epoch INTEGER NOT NULL DEFAULT 0,"
-    " is_owner INTEGER NOT NULL DEFAULT 0,"
-    " owner_seen_at INTEGER,"
-    " updated_at INTEGER NOT NULL"
-    ") WITHOUT ROWID"
-)
-_SCHEMA_STATUS_EVENTS = (
-    "CREATE TABLE IF NOT EXISTS principal_status_events ("
-    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-    " principal_key TEXT NOT NULL,"
-    " action TEXT NOT NULL,"
-    " actor TEXT,"
-    " reason TEXT,"
-    " session_epoch INTEGER NOT NULL,"
-    " at INTEGER NOT NULL"
-    ")"
-)
-_SCHEMA_STATUS_EVENTS_INDEX = (
-    "CREATE INDEX IF NOT EXISTS principal_status_events_principal"
-    " ON principal_status_events (principal_key, id)"
-)
-_SCHEMA_CREDENTIAL_GENERATIONS = (
-    "CREATE TABLE IF NOT EXISTS credential_generations ("
-    " principal_key TEXT PRIMARY KEY,"
-    " generation INTEGER NOT NULL,"
-    " reason TEXT NOT NULL DEFAULT '',"
-    " updated_at INTEGER NOT NULL"
-    ") WITHOUT ROWID"
-)
-# The generation of the credential that belongs to ``canvas_tokens.principal_key``,
-# read in the same statement as the row so a token and its generation always match.
-_GENERATION_OF_TOKEN_ROW = (
-    "COALESCE((SELECT g.generation FROM credential_generations g"
-    " WHERE g.principal_key = canvas_tokens.principal_key), 0)"
-)
-_PRINCIPAL_STATUS_COLUMNS = (
-    "principal_key, status, disabled_reason, disabled_at, disabled_by,"
-    " display_name, upn, session_epoch, is_owner, owner_seen_at, updated_at"
-)
-_SCHEMA_PRINCIPAL_INDEX = (
-    "CREATE UNIQUE INDEX IF NOT EXISTS canvas_tokens_principal_key"
-    " ON canvas_tokens (principal_key)"
-)
-# Columns added after version 1, as (name, definition). A database that lacks one
-# gets it with ALTER TABLE; a freshly created table already has them all.
-_ADDED_COLUMNS = (
-    ("canvas_host", "TEXT"),
-    ("principal_key", "TEXT"),
-    ("status", "TEXT NOT NULL DEFAULT 'active'"),
-    ("invalid_reason", "TEXT"),
-    ("invalid_since", "INTEGER"),
-    ("last_verified_at", "INTEGER"),
-    ("expires_hint_at", "INTEGER"),
-)
-
-_INFO_COLUMNS = (
-    "tenant_id, object_id, canvas_user_id, canvas_user_name, entra_display_name,"
-    " entra_upn, key_id, created_at, updated_at, last_used_at, canvas_host,"
-    " principal_key, status, invalid_reason, invalid_since, last_verified_at,"
-    " expires_hint_at, " + _GENERATION_OF_TOKEN_ROW
-)
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _MAX_PREF_TOOLS = 256
 _MAX_PREF_VIA = 32
@@ -281,10 +187,6 @@ class _Unset(Enum):
 
 #: Pass as ``expires_hint_at`` to keep the stored hint when a row is saved again.
 KEEP_EXPIRY_HINT: Literal[_Unset.UNSET] = _Unset.UNSET
-
-
-class TokenStoreError(Exception):
-    """Base class for token store failures. Messages carry no secrets."""
 
 
 class KeyringError(TokenStoreError):
@@ -436,7 +338,7 @@ class StatusEvent:
     at: int
 
 
-def _status_from_row(row: tuple[Any, ...]) -> PrincipalStatus:
+def _status_from_row(row: Sequence[Any]) -> PrincipalStatus:
     return PrincipalStatus(
         principal_key=row[0],
         status=STATUS_DISABLED if row[1] == STATUS_DISABLED else STATUS_ACTIVE,
@@ -724,7 +626,7 @@ def _row_aad(
     return _aad_v2(principal_key or "", canvas_host, key_id)
 
 
-def _info_from_row(row: tuple[Any, ...]) -> EnrollmentInfo:
+def _info_from_row(row: Sequence[Any]) -> EnrollmentInfo:
     return EnrollmentInfo(
         tenant_id=row[0],
         object_id=row[1],
@@ -748,152 +650,112 @@ def _info_from_row(row: tuple[Any, ...]) -> EnrollmentInfo:
 
 
 class TokenStore:
-    """SQLite-backed store of AES-GCM encrypted Canvas tokens."""
+    """Store of AES-GCM encrypted Canvas tokens and the access state around them.
+
+    ``db`` is a :class:`~.db.engine.Database`, or a file path, which means a
+    SQLite file (what every test and the operator CLI have always passed).
+    """
 
     def __init__(
         self,
-        db_path: pathlib.Path,
+        db: pathlib.Path | Database,
         keyring: Keyring,
         *,
         clock: Callable[[], float] = time.time,
     ) -> None:
-        self._path = pathlib.Path(db_path)
+        # Imported here, not at module level: SQLAlchemy is an optional extra that
+        # the upstream modes never load (this module is imported in every mode).
+        try:
+            from .db.engine import Database as _Database
+            from .db.repos import Repositories
+        except ImportError:  # pragma: no cover - exercised by the isolation tests
+            raise TokenStoreError(
+                "the self-hosted mode needs SQLAlchemy and Alembic: "
+                "pip install 'canvas-mcp[selfhost]'"
+            ) from None
+
+        self._db: Database = db if isinstance(db, _Database) else _Database.sqlite(pathlib.Path(db))
+        #: The SQLite file, or None on PostgreSQL.
+        self._path: pathlib.Path | None = self._db.sqlite_path
+        self._repos: Repositories = Repositories(self._db.kind)
         self._keyring = keyring
         self._clock = clock
-        # Serialises writers inside this process; SQLite's own lock (BEGIN
-        # IMMEDIATE plus busy_timeout) covers other processes such as the CLI.
-        self._write_lock = threading.Lock()
+        # Test seam for deterministic race tests: called with a name at fixed points
+        # inside a transaction. None in production.
+        self._pause_hook: Callable[[str], None] | None = None
+
+    @classmethod
+    def for_target(
+        cls,
+        target: DatabaseTarget,
+        keyring: Keyring,
+        *,
+        clock: Callable[[], float] = time.time,
+    ) -> TokenStore:
+        """A store for a validated ``DATABASE_URL`` target (SQLite or PostgreSQL)."""
+        from .db.engine import Database as _Database
+
+        return cls(_Database(target), keyring, clock=clock)
 
     # -- plumbing ----------------------------------------------------------
 
     def _now(self) -> int:
         return int(self._clock())
 
-    @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(str(self._path), timeout=5.0, isolation_level=None)
-        try:
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=FULL")
-            yield conn
-        finally:
-            conn.close()
+    def _pause(self, name: str) -> None:
+        if self._pause_hook is not None:
+            self._pause_hook(name)
 
-    @contextmanager
-    def _write(self) -> Iterator[sqlite3.Connection]:
-        with self._write_lock, self._connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                yield conn
-            except BaseException:
-                conn.execute("ROLLBACK")
-                raise
-            conn.execute("COMMIT")
+    @property
+    def database(self) -> Database:
+        return self._db
+
+    @property
+    def description(self) -> str:
+        """The backend, without credentials (``postgresql+psycopg://host:port/db`` or a path)."""
+        return self._db.description
+
+    def close(self) -> None:
+        """Release the connection pool (a no-op for SQLite, which opens one per call)."""
+        self._db.dispose()
 
     # -- lifecycle ---------------------------------------------------------
 
-    def initialize(self) -> None:
-        """Create or open the database and prove the keyring matches its data."""
-        parent = self._path.parent
-        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if os.name == "posix":
-            os.chmod(parent, 0o700)
-            # Create the file private from the start instead of chmod-after.
-            os.close(os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600))
+    def initialize(self, *, auto_migrate: bool = True) -> None:
+        """Create or open the database and prove the keyring matches its data.
 
-        with self._write_lock, self._connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                conn.execute(_SCHEMA_META)
-                row = conn.execute(
-                    "SELECT value FROM meta WHERE key = 'schema_version'"
-                ).fetchone()
-                if row is None:
-                    conn.execute(_SCHEMA_TOKENS)
-                    self._migrate_columns(conn)
-                    self._create_side_tables(conn)
-                    conn.execute(
-                        "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
-                        (str(SCHEMA_VERSION),),
-                    )
-                else:
-                    try:
-                        version = int(row[0])
-                    except ValueError:
-                        raise TokenStoreError(
-                            "token database has an unreadable schema version"
-                        ) from None
-                    if version > SCHEMA_VERSION:
-                        raise TokenStoreError(
-                            f"token database schema version {version} is newer "
-                            f"than this server supports ({SCHEMA_VERSION})"
-                        )
-                    conn.execute(_SCHEMA_TOKENS)
-                    self._migrate_columns(conn)
-                    self._create_side_tables(conn)
-                    if version < SCHEMA_VERSION:
-                        conn.execute(
-                            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
-                            (str(SCHEMA_VERSION),),
-                        )
-            except BaseException:
-                conn.execute("ROLLBACK")
-                raise
-            conn.execute("COMMIT")
+        Applies pending schema revisions when ``auto_migrate`` is true; otherwise
+        refuses a database that is not current (run ``token_admin db upgrade``).
+        Refuses, changing nothing, a database written by a newer server.
+        """
+        from .db import migrate
 
-        if os.name == "posix":
+        if self._path is not None:
+            parent = self._path.parent
+            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if os.name == "posix":
+                os.chmod(parent, 0o700)
+                # Create the file private from the start instead of chmod-after.
+                os.close(os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600))
+
+        migrate.ensure_ready(self._db, auto=auto_migrate)
+
+        if self._path is not None and os.name == "posix":
             os.chmod(self._path, 0o600)
 
         self._verify_keyring()
 
-    @staticmethod
-    def _create_side_tables(conn: sqlite3.Connection) -> None:
-        """The tables keyed by principal: tool switches, access status and its history."""
-        conn.execute(_SCHEMA_TOOL_PREFS)
-        conn.execute(_SCHEMA_PRINCIPAL_STATUS)
-        conn.execute(_SCHEMA_STATUS_EVENTS)
-        conn.execute(_SCHEMA_STATUS_EVENTS_INDEX)
-        conn.execute(_SCHEMA_CREDENTIAL_GENERATIONS)
-
-    @staticmethod
-    def _migrate_columns(conn: sqlite3.Connection) -> None:
-        """Bring an older table up to date; a current one is left unchanged.
-
-        Adds each missing column, gives every row without a principal key the key
-        ``entra:<tenant>:<object>`` (both ids are stored lower-case) and makes the
-        key unique. Safe to run again at any point.
-        """
-        columns = {r[1] for r in conn.execute("PRAGMA table_info(canvas_tokens)")}
-        for name, definition in _ADDED_COLUMNS:
-            if name not in columns:
-                conn.execute(f"ALTER TABLE canvas_tokens ADD COLUMN {name} {definition}")
-        conn.execute(
-            "UPDATE canvas_tokens"
-            " SET principal_key = 'entra:' || tenant_id || ':' || object_id"
-            " WHERE principal_key IS NULL"
-        )
-        conn.execute(_SCHEMA_PRINCIPAL_INDEX)
-
     def _verify_keyring(self) -> None:
-        with self._connection() as conn:
-            used = [
-                r[0]
-                for r in conn.execute(
-                    "SELECT DISTINCT key_id FROM canvas_tokens ORDER BY key_id"
-                )
-            ]
+        tokens = self._repos.tokens
+        with self._db.read() as conn:
+            used = tokens.key_ids_in_use(conn)
             missing = [kid for kid in used if kid not in self._keyring.key_ids]
             if missing:
                 raise KeyringError(
                     "CANVAS_TOKEN_KEYS is missing key id(s): " + ", ".join(missing)
                 )
             for kid in used:
-                probe = conn.execute(
-                    "SELECT tenant_id, object_id, nonce, ciphertext, canvas_host,"
-                    " principal_key FROM canvas_tokens WHERE key_id = ? LIMIT 1",
-                    (kid,),
-                ).fetchone()
+                probe = tokens.probe_row(conn, kid)
                 if probe is None:
                     continue
                 try:
@@ -917,16 +779,8 @@ class TokenStore:
         means the Entra principal. Raises TokenDecryptionError.
         """
         key = _resolve_principal(principal_key, object_id)
-        with self._connection() as conn:
-            row = conn.execute(
-                "SELECT key_id, nonce, ciphertext, canvas_user_id,"
-                " canvas_user_name, entra_display_name, entra_upn,"
-                " created_at, updated_at, last_used_at, canvas_host,"
-                " tenant_id, object_id, status, invalid_reason, invalid_since,"
-                " last_verified_at, expires_hint_at, " + _GENERATION_OF_TOKEN_ROW +
-                " FROM canvas_tokens WHERE principal_key = ?",
-                (key,),
-            ).fetchone()
+        with self._db.read() as conn:
+            row = self._repos.tokens.row_for_get(conn, key)
         if row is None:
             return None
         # The AAD is built from the key the caller asked for, not from anything
@@ -970,25 +824,18 @@ class TokenStore:
 
     def info(self, principal_key: str, object_id: str | None = None) -> EnrollmentInfo | None:
         key = _resolve_principal(principal_key, object_id)
-        with self._connection() as conn:
-            row = conn.execute(
-                f"SELECT {_INFO_COLUMNS} FROM canvas_tokens WHERE principal_key = ?",
-                (key,),
-            ).fetchone()
+        with self._db.read() as conn:
+            row = self._repos.tokens.info(conn, key)
         return None if row is None else _info_from_row(row)
 
     def list_enrollments(self) -> list[EnrollmentInfo]:
-        with self._connection() as conn:
-            rows = conn.execute(
-                f"SELECT {_INFO_COLUMNS} FROM canvas_tokens"
-                " ORDER BY created_at, tenant_id, object_id"
-            ).fetchall()
+        with self._db.read() as conn:
+            rows = self._repos.tokens.list_all(conn)
         return [_info_from_row(r) for r in rows]
 
     def count(self) -> int:
-        with self._connection() as conn:
-            row = conn.execute("SELECT COUNT(*) FROM canvas_tokens").fetchone()
-        return int(row[0])
+        with self._db.read() as conn:
+            return self._repos.tokens.count(conn)
 
     # -- writes ------------------------------------------------------------
 
@@ -1048,64 +895,39 @@ class TokenStore:
             _aad_for_principal(key, host, self._keyring.active_key_id),
         )
         now = self._now()
-        with self._write() as conn:
+        repos = self._repos
+        with self._db.write() as conn:
             # Checked in the same transaction as the write, so an enrollment that
             # races an administrator's disable either lands first (and the principal
             # is disabled right after) or is refused; it can never be saved for a
             # principal that is already disabled.
-            gate = conn.execute(
-                "SELECT status FROM principal_status WHERE principal_key = ?", (key,)
-            ).fetchone()
-            if gate is not None and gate[0] == STATUS_DISABLED:
+            gate = repos.status.gate_status(conn, key)
+            self._pause("after_gate_read")
+            if gate == STATUS_DISABLED:
                 raise PrincipalDisabledError("this principal is disabled")
-            conn.execute(
-                "INSERT INTO canvas_tokens (tenant_id, object_id, key_id, nonce,"
-                " ciphertext, canvas_user_id, canvas_user_name,"
-                " entra_display_name, entra_upn, created_at, updated_at,"
-                " last_used_at, canvas_host, principal_key, status,"
-                " last_verified_at, expires_hint_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)"
-                " ON CONFLICT (principal_key) DO UPDATE SET"
-                " key_id = excluded.key_id, nonce = excluded.nonce,"
-                " ciphertext = excluded.ciphertext,"
-                " canvas_user_id = excluded.canvas_user_id,"
-                " canvas_user_name = excluded.canvas_user_name,"
-                " entra_display_name = excluded.entra_display_name,"
-                " entra_upn = excluded.entra_upn,"
-                " canvas_host = excluded.canvas_host,"
-                " status = excluded.status,"
-                " invalid_reason = NULL, invalid_since = NULL,"
-                " last_verified_at = excluded.last_verified_at,"
-                " expires_hint_at = CASE WHEN ? THEN canvas_tokens.expires_hint_at"
-                " ELSE excluded.expires_hint_at END,"
-                " updated_at = excluded.updated_at",
-                (
-                    tid,
-                    oid,
-                    kid,
-                    nonce,
-                    ciphertext,
-                    str(canvas_user_id),
-                    str(canvas_user_name)[:_MAX_CANVAS_NAME],
-                    str(entra_display_name)[:_MAX_ENTRA_NAME],
-                    str(entra_upn)[:_MAX_UPN],
-                    now,
-                    now,
-                    host,
-                    key,
-                    STATUS_ACTIVE,
-                    now,
-                    hint,
-                    1 if keep_hint else 0,
-                ),
+            repos.tokens.upsert(
+                conn,
+                tenant_id=tid,
+                object_id=oid,
+                key_id=kid,
+                nonce=nonce,
+                ciphertext=ciphertext,
+                canvas_user_id=str(canvas_user_id),
+                canvas_user_name=str(canvas_user_name)[:_MAX_CANVAS_NAME],
+                entra_display_name=str(entra_display_name)[:_MAX_ENTRA_NAME],
+                entra_upn=str(entra_upn)[:_MAX_UPN],
+                canvas_host=host,
+                principal_key=key,
+                status=STATUS_ACTIVE,
+                now=now,
+                expires_hint_at=hint,
+                keep_expiry_hint=keep_hint,
             )
             # Saving a token is always a new credential lifecycle, even for the
             # same token text: state learned under the old one is not reused.
-            generation = self._bump_generation(conn, key, GENERATION_ENROLLED, now)
-            row = conn.execute(
-                f"SELECT {_INFO_COLUMNS} FROM canvas_tokens WHERE principal_key = ?",
-                (key,),
-            ).fetchone()
+            generation = repos.generations.bump(conn, key, GENERATION_ENROLLED, now)
+            row = repos.tokens.info(conn, key)
+        assert row is not None
         self._publish_generation(key, generation)
         return _info_from_row(row)
 
@@ -1120,15 +942,14 @@ class TokenStore:
         """
         key = _resolve_principal(principal_key, object_id)
         generation: int | None = None
-        with self._write() as conn:
-            cur = conn.execute(
-                "DELETE FROM canvas_tokens WHERE principal_key = ?", (key,)
-            )
-            removed = cur.rowcount > 0
+        with self._db.write() as conn:
+            removed = self._repos.tokens.delete(conn, key)
             if removed:
                 # The generation outlives the row: a token enrolled afterwards
                 # is a later one, never a reuse of the deleted one's number.
-                generation = self._bump_generation(conn, key, GENERATION_REMOVED, self._now())
+                generation = self._repos.generations.bump(
+                    conn, key, GENERATION_REMOVED, self._now()
+                )
         if generation is not None:
             self._publish_generation(key, generation)
         return removed
@@ -1144,14 +965,11 @@ class TokenStore:
         try:
             key = _resolve_principal(principal_key, object_id)
             now = self._now()
-            with self._connection() as conn:
-                conn.execute(
-                    "UPDATE canvas_tokens SET last_used_at = ?"
-                    " WHERE principal_key = ?"
-                    " AND (last_used_at IS NULL OR last_used_at < ?)",
-                    (now, key, now - max(0, min_interval_seconds)),
-                )
-        except (sqlite3.Error, ValueError, OSError):
+            # No writer lock on PostgreSQL: the update only sets a timestamp, and
+            # nothing else depends on it.
+            with self._db.best_effort_write(lock=False) as conn:
+                self._repos.tokens.touch(conn, key, now, now - max(0, min_interval_seconds))
+        except (TokenStoreError, ValueError, OSError):
             return
 
     def mark_invalid(
@@ -1175,23 +993,20 @@ class TokenStore:
         if reason not in INVALID_REASONS:
             raise ValueError("unknown invalid reason")
         key = _resolve_principal(principal_key, object_id)
-        sql = (
-            "UPDATE canvas_tokens SET status = ?, invalid_reason = ?, invalid_since = ?"
-            " WHERE principal_key = ? AND status = ?"
-        )
         now = self._now()
-        args: list[Any] = [STATUS_INVALID, reason, now, key, STATUS_ACTIVE]
-        if expected_updated_at is not None:
-            sql += " AND updated_at = ?"
-            args.append(expected_updated_at)
-        if expected_generation is not None:
-            sql += " AND " + _GENERATION_OF_TOKEN_ROW + " = ?"
-            args.append(expected_generation)
         generation: int | None = None
-        with self._write() as conn:
-            changed = conn.execute(sql, args).rowcount > 0
+        with self._db.write() as conn:
+            changed = self._repos.tokens.mark_invalid(
+                conn,
+                key,
+                reason=reason,
+                now=now,
+                expected_updated_at=expected_updated_at,
+                expected_generation=expected_generation,
+            )
+            self._pause("after_conditional_update")
             if changed:
-                generation = self._bump_generation(conn, key, GENERATION_INVALIDATED, now)
+                generation = self._repos.generations.bump(conn, key, GENERATION_INVALIDATED, now)
         if generation is not None:
             self._publish_generation(key, generation)
         return changed
@@ -1211,23 +1026,18 @@ class TokenStore:
         """
         key = _resolve_principal(principal_key, object_id)
         now = self._now()
-        sql = (
-            "UPDATE canvas_tokens SET status = ?, invalid_reason = NULL,"
-            " invalid_since = NULL, last_verified_at = ?"
-            " WHERE principal_key = ? AND status = ?"
-        )
-        args: list[Any] = [STATUS_ACTIVE, now, key, STATUS_INVALID]
-        if expected_updated_at is not None:
-            sql += " AND updated_at = ?"
-            args.append(expected_updated_at)
-        if expected_generation is not None:
-            sql += " AND " + _GENERATION_OF_TOKEN_ROW + " = ?"
-            args.append(expected_generation)
         generation: int | None = None
-        with self._write() as conn:
-            changed = conn.execute(sql, args).rowcount > 0
+        with self._db.write() as conn:
+            changed = self._repos.tokens.restore_active(
+                conn,
+                key,
+                now=now,
+                expected_updated_at=expected_updated_at,
+                expected_generation=expected_generation,
+            )
+            self._pause("after_conditional_update")
             if changed:
-                generation = self._bump_generation(conn, key, GENERATION_RESTORED, now)
+                generation = self._repos.generations.bump(conn, key, GENERATION_RESTORED, now)
         if generation is not None:
             self._publish_generation(key, generation)
         return changed
@@ -1250,39 +1060,20 @@ class TokenStore:
         try:
             key = _resolve_principal(principal_key, object_id)
             now = self._now()
-            sql = (
-                "UPDATE canvas_tokens SET last_verified_at = ?"
-                " WHERE principal_key = ? AND status = ?"
-                " AND (last_verified_at IS NULL OR last_verified_at < ?)"
-            )
-            args: list[Any] = [now, key, STATUS_ACTIVE, now - max(0, min_interval_seconds)]
-            if expected_generation is not None:
-                sql += " AND " + _GENERATION_OF_TOKEN_ROW + " = ?"
-                args.append(expected_generation)
-            with self._connection() as conn:
-                conn.execute(sql, args)
-        except (sqlite3.Error, ValueError, OSError):
+            # Takes the PostgreSQL writer lock: the generation comparison must see
+            # every enrollment that committed before it.
+            with self._db.best_effort_write(lock=True) as conn:
+                self._repos.tokens.mark_verified(
+                    conn,
+                    key,
+                    now=now,
+                    older_than=now - max(0, min_interval_seconds),
+                    expected_generation=expected_generation,
+                )
+        except (TokenStoreError, ValueError, OSError):
             return
 
     # -- credential generation --------------------------------------------------
-
-    @staticmethod
-    def _bump_generation(conn: sqlite3.Connection, key: str, reason: str, now: int) -> int:
-        """Raise a principal's credential generation inside the caller's transaction."""
-        conn.execute(
-            "INSERT INTO credential_generations (principal_key, generation, reason, updated_at)"
-            " VALUES (?, 1, ?, ?)"
-            " ON CONFLICT (principal_key) DO UPDATE SET"
-            " generation = credential_generations.generation + 1,"
-            " reason = excluded.reason, updated_at = excluded.updated_at",
-            (key, reason, now),
-        )
-        return int(
-            conn.execute(
-                "SELECT generation FROM credential_generations WHERE principal_key = ?",
-                (key,),
-            ).fetchone()[0]
-        )
 
     @staticmethod
     def _publish_generation(key: str, generation: int) -> None:
@@ -1295,26 +1086,20 @@ class TokenStore:
     def credential_generation(self, principal_key: str, object_id: str | None = None) -> int:
         """The current credential generation of a principal (0 if it never changed)."""
         key = _resolve_principal(principal_key, object_id)
-        with self._connection() as conn:
-            row = conn.execute(
-                "SELECT generation FROM credential_generations WHERE principal_key = ?",
-                (key,),
-            ).fetchone()
-        return 0 if row is None else int(row[0])
+        with self._db.read() as conn:
+            return self._repos.generations.get(conn, key)
 
     # -- access status: the authorization decision ------------------------------
 
-    @staticmethod
-    def _fetch_status(conn: sqlite3.Connection, key: str) -> PrincipalStatus | None:
-        row = conn.execute(
-            f"SELECT {_PRINCIPAL_STATUS_COLUMNS} FROM principal_status WHERE principal_key = ?",
-            (key,),
-        ).fetchone()
+    def _fetch_status(
+        self, conn: Connection, key: str, *, for_update: bool = False
+    ) -> PrincipalStatus | None:
+        row = self._repos.status.get(conn, key, for_update=for_update)
         return None if row is None else _status_from_row(row)
 
-    @staticmethod
     def _record_event(
-        conn: sqlite3.Connection,
+        self,
+        conn: Connection,
         key: str,
         action: str,
         actor: str | None,
@@ -1322,12 +1107,7 @@ class TokenStore:
         epoch: int,
         now: int,
     ) -> None:
-        conn.execute(
-            "INSERT INTO principal_status_events"
-            " (principal_key, action, actor, reason, session_epoch, at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (key, action, actor, reason, epoch, now),
-        )
+        self._repos.events.append(conn, key, action, actor, reason, epoch, now)
 
     @staticmethod
     def _actor_name(actor: Actor) -> str:
@@ -1336,7 +1116,7 @@ class TokenStore:
             return OPERATOR_ACTOR
         return _validate_principal_key(actor)
 
-    def _require_owner_actor(self, conn: sqlite3.Connection, actor: Actor) -> None:
+    def _require_owner_actor(self, conn: Connection, actor: Actor) -> None:
         """Re-evaluate, inside the transaction, that the actor is an active owner now.
 
         The operator at the host needs no identity. Anyone else must have a stored
@@ -1346,7 +1126,7 @@ class TokenStore:
         """
         if isinstance(actor, _Operator):
             return
-        current = self._fetch_status(conn, _validate_principal_key(actor))
+        current = self._fetch_status(conn, _validate_principal_key(actor), for_update=True)
         if current is None or current.disabled or not current.is_owner:
             raise AccessActionRefused(AccessActionRefused.NOT_OWNER)
 
@@ -1355,40 +1135,24 @@ class TokenStore:
     ) -> PrincipalStatus:
         """The access status of a principal; active at epoch 0 when nothing is stored.
 
-        Carries the credential generation, read in the same snapshot as the status.
+        Carries the credential generation, read in the same statement as the status.
         """
         key = _resolve_principal(principal_key, object_id)
-        with self._connection() as conn:
-            conn.execute("BEGIN")
-            try:
-                found = self._fetch_status(conn, key)
-                gen_row = conn.execute(
-                    "SELECT generation FROM credential_generations WHERE principal_key = ?",
-                    (key,),
-                ).fetchone()
-            finally:
-                conn.execute("COMMIT")
-        generation = 0 if gen_row is None else int(gen_row[0])
-        if found is None:
+        with self._db.read() as conn:
+            row, generation = self._repos.status.get_with_generation(conn, key)
+        if row is None:
             return PrincipalStatus(key, credential_generation=generation)
-        return replace(found, credential_generation=generation)
+        return replace(_status_from_row(row), credential_generation=generation)
 
     def list_principal_statuses(self) -> list[PrincipalStatus]:
         """Every stored status row (disabled principals and known owners)."""
-        with self._connection() as conn:
-            rows = conn.execute(
-                f"SELECT {_PRINCIPAL_STATUS_COLUMNS} FROM principal_status"
-                " ORDER BY principal_key"
-            ).fetchall()
+        with self._db.read() as conn:
+            rows = self._repos.status.list_all(conn)
         return [_status_from_row(r) for r in rows]
 
     def count_active_owners(self) -> int:
-        with self._connection() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM principal_status WHERE is_owner = 1 AND status = ?",
-                (STATUS_ACTIVE,),
-            ).fetchone()
-        return int(row[0])
+        with self._db.read() as conn:
+            return self._repos.status.count_active_owners(conn)
 
     def record_sign_in(
         self, principal_key: str, object_id: str | None = None, *, is_owner: bool
@@ -1402,23 +1166,16 @@ class TokenStore:
         """
         key = _resolve_principal(principal_key, object_id)
         now = self._now()
-        with self._write() as conn:
-            row = self._fetch_status(conn, key)
+        status = self._repos.status
+        with self._db.write() as conn:
+            row = self._fetch_status(conn, key, for_update=True)
             if row is None:
                 if not is_owner:
                     return PrincipalStatus(key)
-                conn.execute(
-                    "INSERT INTO principal_status (principal_key, is_owner, owner_seen_at,"
-                    " updated_at) VALUES (?, 1, ?, ?)",
-                    (key, now, now),
-                )
+                status.insert_owner_seen(conn, key, now)
                 self._record_event(conn, key, EVENT_OWNER_GAINED, None, "sign_in", 0, now)
             else:
-                conn.execute(
-                    "UPDATE principal_status SET is_owner = ?, owner_seen_at = ?,"
-                    " updated_at = ? WHERE principal_key = ?",
-                    (1 if is_owner else 0, now, now, key),
-                )
+                status.set_owner_flag(conn, key, is_owner, now)
                 if row.is_owner != is_owner:
                     self._record_event(
                         conn,
@@ -1448,17 +1205,13 @@ class TokenStore:
         """
         key = _resolve_principal(principal_key, object_id)
         now = self._now()
-        with self._write() as conn:
-            row = self._fetch_status(conn, key)
+        with self._db.write() as conn:
+            row = self._fetch_status(conn, key, for_update=True)
             if row is None or not row.is_owner:
                 return False
             if evidence_issued_at <= (row.owner_seen_at or 0):
                 return False
-            conn.execute(
-                "UPDATE principal_status SET is_owner = 0, updated_at = ?"
-                " WHERE principal_key = ?",
-                (now, key),
-            )
+            self._repos.status.demote(conn, key, now)
             self._record_event(
                 conn, key, EVENT_OWNER_LOST, None, "access_token_roles", row.session_epoch, now
             )
@@ -1492,48 +1245,32 @@ class TokenStore:
             raise ValueError("unknown disable reason")
         by = self._actor_name(actor)
         now = self._now()
-        with self._write() as conn:
+        repos = self._repos
+        with self._db.write() as conn:
             self._require_owner_actor(conn, actor)
             if not isinstance(actor, _Operator) and by == key:
                 raise AccessActionRefused(AccessActionRefused.SELF)
-            row = self._fetch_status(conn, key)
+            row = self._fetch_status(conn, key, for_update=True)
             if row is not None and row.disabled:
                 return False
             if row is not None and row.is_owner and not allow_last_owner:
-                others = conn.execute(
-                    "SELECT COUNT(*) FROM principal_status"
-                    " WHERE is_owner = 1 AND status = ? AND principal_key != ?",
-                    (STATUS_ACTIVE, key),
-                ).fetchone()[0]
+                others = repos.status.count_active_owners(conn, exclude=key)
+                self._pause("after_owner_count")
                 if others == 0:
                     raise AccessActionRefused(AccessActionRefused.LAST_OWNER)
-            names = conn.execute(
-                "SELECT entra_display_name, entra_upn FROM canvas_tokens"
-                " WHERE principal_key = ?",
-                (key,),
-            ).fetchone()
-            display_name, upn = (names[0], names[1]) if names is not None else ("", "")
-            conn.execute(
-                "INSERT INTO principal_status (principal_key, status, disabled_reason,"
-                " disabled_at, disabled_by, display_name, upn, session_epoch, is_owner,"
-                " owner_seen_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, NULL, ?)"
-                " ON CONFLICT (principal_key) DO UPDATE SET"
-                " status = excluded.status, disabled_reason = excluded.disabled_reason,"
-                " disabled_at = excluded.disabled_at, disabled_by = excluded.disabled_by,"
-                " display_name = excluded.display_name, upn = excluded.upn,"
-                " session_epoch = principal_status.session_epoch + 1,"
-                " updated_at = excluded.updated_at",
-                (key, STATUS_DISABLED, reason, now, by, display_name, upn, now),
-            )
-            epoch = int(
-                conn.execute(
-                    "SELECT session_epoch FROM principal_status WHERE principal_key = ?",
-                    (key,),
-                ).fetchone()[0]
+            names = repos.tokens.names(conn, key)
+            display_name, upn = names if names is not None else ("", "")
+            epoch = repos.status.upsert_disabled(
+                conn,
+                key,
+                reason=reason,
+                by=by,
+                display_name=display_name,
+                upn=upn,
+                now=now,
             )
             self._record_event(conn, key, EVENT_DISABLED, by, reason, epoch, now)
-            generation = self._bump_generation(conn, key, GENERATION_DISABLED, now)
+            generation = repos.generations.bump(conn, key, GENERATION_DISABLED, now)
         self._publish_generation(key, generation)
         return True
 
@@ -1550,20 +1287,14 @@ class TokenStore:
         key = _resolve_principal(principal_key, object_id)
         by = self._actor_name(actor)
         now = self._now()
-        with self._write() as conn:
+        with self._db.write() as conn:
             self._require_owner_actor(conn, actor)
-            row = self._fetch_status(conn, key)
+            row = self._fetch_status(conn, key, for_update=True)
             if row is None or not row.disabled:
                 return False
-            conn.execute(
-                "UPDATE principal_status SET status = ?, disabled_reason = NULL,"
-                " disabled_at = NULL, disabled_by = NULL, display_name = '', upn = '',"
-                " session_epoch = session_epoch + 1, updated_at = ?"
-                " WHERE principal_key = ?",
-                (STATUS_ACTIVE, now, key),
-            )
+            self._repos.status.enable(conn, key, now)
             self._record_event(conn, key, EVENT_ENABLED, by, None, row.session_epoch + 1, now)
-            generation = self._bump_generation(conn, key, GENERATION_ENABLED, now)
+            generation = self._repos.generations.bump(conn, key, GENERATION_ENABLED, now)
         self._publish_generation(key, generation)
         return True
 
@@ -1575,31 +1306,18 @@ class TokenStore:
         limit: int = 50,
     ) -> list[StatusEvent]:
         """The newest status transitions first, for one principal or for all."""
-        sql = (
-            "SELECT id, principal_key, action, actor, reason, session_epoch, at"
-            " FROM principal_status_events"
-        )
-        args: list[Any] = []
-        if principal_key is not None:
-            sql += " WHERE principal_key = ?"
-            args.append(_resolve_principal(principal_key, object_id))
-        sql += " ORDER BY id DESC LIMIT ?"
-        args.append(max(1, min(int(limit), 1000)))
-        with self._connection() as conn:
-            rows = conn.execute(sql, args).fetchall()
-        return [StatusEvent(*r) for r in rows]
+        key = None if principal_key is None else _resolve_principal(principal_key, object_id)
+        with self._db.read() as conn:
+            rows = self._repos.events.list_events(conn, key, max(1, min(int(limit), 1000)))
+        return [StatusEvent(*tuple(r)) for r in rows]
 
     # -- per-user write-tool preferences -------------------------------------
 
     def get_tool_prefs(self, principal_key: str) -> ToolPrefs | None:
         """The stored write-tool preferences of a principal, or None if never saved."""
         key = _validate_principal_key(principal_key)
-        with self._connection() as conn:
-            row = conn.execute(
-                "SELECT enabled_write_tools, enabled_at, updated_at, updated_via"
-                " FROM user_tool_prefs WHERE principal_key = ?",
-                (key,),
-            ).fetchone()
+        with self._db.read() as conn:
+            row = self._repos.prefs.get(conn, key)
         if row is None:
             return None
         return _decode_tool_prefs(key, row[0], row[1], row[2], row[3])
@@ -1622,34 +1340,21 @@ class TokenStore:
         if not isinstance(via, str) or not 1 <= len(via) <= _MAX_PREF_VIA or not via.isascii():
             raise ValueError("via must be a short ASCII label")
         now = self._now()
-        with self._write() as conn:
-            row = conn.execute(
-                "SELECT enabled_write_tools, enabled_at, updated_at, updated_via"
-                " FROM user_tool_prefs WHERE principal_key = ?",
-                (key,),
-            ).fetchone()
+        with self._db.write() as conn:
+            row = self._repos.prefs.get(conn, key)
             previous = (
                 _decode_tool_prefs(key, row[0], row[1], row[2], row[3]).enabled_at
                 if row is not None
                 else {}
             )
             stamps = {name: previous.get(name, now) for name in names}
-            conn.execute(
-                "INSERT INTO user_tool_prefs"
-                " (principal_key, enabled_write_tools, enabled_at, updated_at, updated_via)"
-                " VALUES (?, ?, ?, ?, ?)"
-                " ON CONFLICT (principal_key) DO UPDATE SET"
-                " enabled_write_tools = excluded.enabled_write_tools,"
-                " enabled_at = excluded.enabled_at,"
-                " updated_at = excluded.updated_at,"
-                " updated_via = excluded.updated_via",
-                (
-                    key,
-                    json.dumps(sorted(names)),
-                    json.dumps(stamps, sort_keys=True),
-                    now,
-                    via,
-                ),
+            self._repos.prefs.upsert(
+                conn,
+                key,
+                names_json=json.dumps(sorted(names)),
+                stamps_json=json.dumps(stamps, sort_keys=True),
+                now=now,
+                via=via,
             )
         return ToolPrefs(key, names, stamps, now, via)
 
@@ -1657,13 +1362,8 @@ class TokenStore:
         """Re-encrypt every row not under the active key; returns rows changed."""
         active = self._keyring.active_key_id
         changed = 0
-        with self._write() as conn:
-            rows = conn.execute(
-                "SELECT tenant_id, object_id, key_id, nonce, ciphertext,"
-                " canvas_host, principal_key"
-                " FROM canvas_tokens WHERE key_id != ?",
-                (active,),
-            ).fetchall()
+        with self._db.write() as conn:
+            rows = self._repos.tokens.rows_not_under_key(conn, active)
             for tid, oid, kid, nonce, ciphertext, host, pkey in rows:
                 # Each row keeps its own principal and host, so its AAD layout
                 # (v1 or v2) is preserved.
@@ -1673,10 +1373,13 @@ class TokenStore:
                 new_kid, new_nonce, new_ct = self._keyring.encrypt(
                     plaintext, _row_aad(tid, oid, host, pkey, active)
                 )
-                conn.execute(
-                    "UPDATE canvas_tokens SET key_id = ?, nonce = ?,"
-                    " ciphertext = ? WHERE tenant_id = ? AND object_id = ?",
-                    (new_kid, new_nonce, new_ct, tid, oid),
+                self._repos.tokens.reseal(
+                    conn,
+                    tenant_id=tid,
+                    object_id=oid,
+                    key_id=new_kid,
+                    nonce=new_nonce,
+                    ciphertext=new_ct,
                 )
                 changed += 1
         return changed
