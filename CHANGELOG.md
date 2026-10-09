@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **React account UI scaffold (`web/`, not served yet).** A Vite + React + TypeScript app for
+  `/account`: sign-in, Canvas token enroll/replace/delete, write tools, linked sign-in methods,
+  connected apps, recent sign-ins, MCP consent and owner admin pages, in English (default) and
+  Chinese, with a dev-only mock API. Cookie-only auth, CSRF header on every mutation, no inline
+  script and no remote assets (works under `script-src 'self'`). `Dockerfile.selfhost` builds it
+  into `/app/web-dist` and CI has a `web` job; the server still renders the legacy pages.
 - **Self-hosted multi-user mode (`MCP_AUTH_MODE=entra-oauth`).** An explicit opt-in
   mode where claude.ai, Claude Desktop and Claude Code connect through OAuth against
   your own Microsoft Entra tenant (FastMCP `AzureProvider`) and each person enrolls

@@ -373,6 +373,8 @@ claude mcp add --transport http canvas https://canvas.mcp.kazuhahub.com/mcp
 
 Owner 登录后会多一个 `/account/admin` 链接：列出所有人的登记情况（不含 token），并可撤销某人的登记。
 
+> **React 版界面（开发中）。** `/account` 正在改写成 React 单页应用，源码在仓库的 `web/`（说明见 `web/README.md`）。`Dockerfile.selfhost` 已经会构建它，并把产物放进镜像的 `/app/web-dist`，但服务器**还没有**提供这些文件：你现在看到的仍是上面描述的服务端渲染页面，部署方式和运行行为都没有变化。
+
 ## 写入工具的提示词注入风险
 
 写入类工具（提交作业、发消息、日历和计划事项写入等）由运维者通过 `ALLOWED_WRITE_TOOLS`、`STUDENT_WRITE_TOOLS` 开启，**模板里默认不开**。开启后 AI 就有能力代表你在 Canvas 里做这些事。
