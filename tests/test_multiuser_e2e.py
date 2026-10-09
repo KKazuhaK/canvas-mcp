@@ -742,6 +742,59 @@ class TestMcpAsTwoUsers:
         assert enrolled.browser.enroll(USER_A).status_code == 303
         assert call_tool(enrolled.client, bearer_a, "list_courses")["isError"] is False
 
+    def test_the_replay_with_the_sessions_own_csrf_value_is_refused_because_the_user_is_disabled(
+        self, enrolled
+    ):
+        """The reported replay again, carrying the stale session's real CSRF value.
+
+        The replay in the test above posts ``csrf=x``, which leaves a doubt: refused
+        because A is disabled, or only because the CSRF value is wrong? Here the value
+        is the one the session's own page rendered, and the very same request is first
+        shown to be accepted while A is in good standing.
+        """
+        user_a_key = f"entra:{TENANT}:{USER_A.oid}"
+        browser, client, store = enrolled.browser, enrolled.client, enrolled.runtime.store
+        assert browser.account_sign_in(USER_A).status_code == 303
+        a_session = client.cookies.get("__Host-cmcp_session")
+        assert a_session
+        a_csrf = browser.csrf()  # read from the page A's session rendered
+        replay_fields = {"csrf": a_csrf, "canvas_token": USER_A.canvas_token}
+
+        # While A is in good standing this exact request is processed: Canvas is asked
+        # about the token.
+        accepted = client.post("/account/token", data=replay_fields, headers=ORIGIN, follow_redirects=False)
+        assert accepted.status_code == 303 and accepted.headers["location"] == "/account"
+        assert enrolled.canvas.calls_with("/api/v1/users/self") == [USER_A.canvas_token]
+
+        # The owner disables A and removes the stored token.
+        assert browser.account_sign_in(OWNER).status_code == 303
+        csrf = browser.csrf("/account/admin")
+        disable = client.post("/account/admin/disable", data={
+            "csrf": csrf, "principal_key": user_a_key,
+        }, headers=ORIGIN, follow_redirects=False)
+        assert disable.status_code == 303
+        remove = client.post("/account/admin/remove", data={
+            "csrf": csrf, "tenant_id": TENANT, "object_id": USER_A.oid,
+        }, headers=ORIGIN, follow_redirects=False)
+        assert remove.status_code == 303
+        assert store.info(user_a_key) is None
+        assert store.get_principal_status(user_a_key).disabled
+        enrolled.canvas.seen.clear()
+
+        # The replay: A's own session cookie, A's own real CSRF value, the same body.
+        browser.fresh_session()
+        client.cookies.set("__Host-cmcp_session", a_session, domain="canvas.example.test", path="/")
+        assert "Sign in with Microsoft" in client.get("/account").text
+        replay = client.post("/account/token", data=replay_fields, headers=ORIGIN, follow_redirects=False)
+        # A CSRF or Origin failure would be a 403 page. This is the redirect a request
+        # without a valid session gets, and the session is dead.
+        assert replay.status_code == 303 and replay.headers["location"] == "/account"
+        assert store.info(user_a_key) is None  # the row did not come back
+        assert enrolled.canvas.seen == []  # Canvas was never asked about the replayed token
+        # The only way back in says why.
+        refused_sign_in = browser.account_sign_in(USER_A)
+        assert refused_sign_in.status_code == 403 and "disabled by an administrator" in refused_sign_in.text
+
     def test_a_user_deleting_their_own_token_may_enroll_again(self, enrolled):
         user_a_key = f"entra:{TENANT}:{USER_A.oid}"
         assert enrolled.browser.account_sign_in(USER_A).status_code == 303

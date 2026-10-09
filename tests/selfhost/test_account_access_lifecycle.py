@@ -8,6 +8,7 @@ and from the browser session, and every path below checks it again.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import pathlib
 import re
@@ -24,6 +25,7 @@ from canvas_mcp.core.selfhost.token_store import (
     OPERATOR,
     AccessActionRefused,
     PrincipalDisabledError,
+    PrincipalStatus,
 )
 
 from .test_account_web import (
@@ -111,6 +113,28 @@ def disable_user(h: Harness, target: str = USER) -> Any:
     return post_form(h, DISABLE, {"csrf": csrf_of(h), "principal_key": target})
 
 
+def sealed_session(value: str) -> dict[str, Any]:
+    """What the server sealed into a /account cookie: its csrf value and session epoch."""
+    payload = account_web._CookieCodec(SESSION_SECRET).unseal(SESSION_COOKIE, value)
+    assert payload is not None
+    return payload
+
+
+def real_csrf_of_session(h: Harness, value: str) -> str:
+    """The CSRF value of a session, read from the page it renders and checked against the cookie."""
+    use_cookie(h, value)
+    shown = csrf_of(h)
+    assert sealed_session(value)["csrf"] == shown
+    return shown
+
+
+def owner_removes_the_token(h: Harness) -> None:
+    assert post_form(
+        h, REMOVE, {"csrf": csrf_of(h), "tenant_id": TID, "object_id": OID}
+    ).status_code == 303
+    assert h.store.info(USER) is None
+
+
 class TestTheReportedSequence:
     def test_a_stale_session_cannot_restore_a_disabled_users_enrollment(self, h: Harness) -> None:
         jar = two_owners_and_a_user(h)
@@ -178,6 +202,108 @@ class TestTheReportedSequence:
             response = post_form(h, path, {"csrf": "x"})
             assert response.status_code == 303 and response.headers["location"] == ACCOUNT_PATH
         assert h.store.info(USER) is not None  # the delete route did nothing
+
+
+class TestTheReportedSequenceWithTheRealCsrf:
+    """The same replay, carrying the stale session's own CSRF value.
+
+    The tests above post ``csrf=whatever``, which leaves a doubt: is the replay refused
+    because the principal is disabled, or only because the CSRF value is wrong? Here the
+    value is the real one, read from the page the session rendered while it was still
+    valid, and the very same request is first shown to be accepted while the user is in
+    good standing. Only the administrator's decision differs between the two requests.
+    """
+
+    @pytest.mark.parametrize(
+        "enabled_again", [False, True], ids=["disabled", "disabled_then_enabled"]
+    )
+    def test_the_replay_is_refused_because_the_session_epoch_moved_on(
+        self, h: Harness, enabled_again: bool
+    ) -> None:
+        jar = two_owners_and_a_user(h)
+        csrf = real_csrf_of_session(h, jar["user"])
+        epoch = sealed_session(jar["user"])["ep"]
+        replay_fields = {"csrf": csrf, "canvas_token": CANVAS_TOKEN}
+
+        # While the user is in good standing this exact request is processed: it reaches
+        # the Canvas check and saves the token.
+        accepted = post_form(h, "/account/token", replay_fields)
+        assert accepted.status_code == 303 and accepted.headers["location"] == ACCOUNT_PATH
+        assert h.whoami_calls == [CANVAS_TOKEN, CANVAS_TOKEN]
+        assert h.store.info(USER) is not None
+
+        # The owner disables the user and removes the stored token (and, in one case,
+        # lifts the disable again, which still moves the epoch on).
+        use_cookie(h, jar["owner"])
+        assert disable_user(h).status_code == 303
+        owner_removes_the_token(h)
+        if enabled_again:
+            enable = post_form(h, ENABLE, {"csrf": csrf_of(h), "principal_key": USER})
+            assert enable.status_code == 303
+        standing = h.store.get_principal_status(USER)
+        assert standing.disabled == (not enabled_again)
+        assert standing.session_epoch != epoch
+
+        # The replay: same cookie, same real CSRF value, same body.
+        use_cookie(h, jar["user"])
+        replay = post_form(h, "/account/token", replay_fields)
+        # A CSRF or Origin failure would be a 403 page. This is the redirect a request
+        # without a valid session gets, and the session is dead.
+        assert replay.status_code == 303 and replay.headers["location"] == ACCOUNT_PATH
+        assert signed_out(h)
+        assert h.store.info(USER) is None  # the row did not come back
+        assert h.whoami_calls == [CANVAS_TOKEN, CANVAS_TOKEN]  # refused before Canvas was asked
+
+    def test_the_store_refuses_the_write_even_if_the_session_check_were_to_pass(
+        self, h: Harness, events: list[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Defence in depth: the disable decision is also enforced inside the write.
+
+        The administrator disables the user between the session check and the write.
+        The session check is made to read the standing from just before that (active,
+        at the cookie's own epoch); the real write transaction then meets the real,
+        disabled row. The CSRF value is the real one, so nothing else can refuse it.
+        """
+        jar = two_owners_and_a_user(h)
+        csrf = real_csrf_of_session(h, jar["user"])
+        use_cookie(h, jar["owner"])
+        assert disable_user(h).status_code == 303
+        owner_removes_the_token(h)
+        before_disable = PrincipalStatus(USER, session_epoch=sealed_session(jar["user"])["ep"])
+        monkeypatch.setattr(h.store, "get_principal_status", lambda *_a, **_kw: before_disable)
+
+        use_cookie(h, jar["user"])
+        assert not signed_out(h)  # the session check passes now: only the write can refuse
+        events.clear()
+        response = post_form(h, "/account/token", {"csrf": csrf, "canvas_token": CANVAS_TOKEN})
+        assert response.status_code == 403
+        assert "disabled by an administrator" in response.text
+        assert "Security check failed" not in response.text
+        assert h.store.info(USER) is None  # the row did not come back
+        assert [e["action"] for e in principal_events(events)] == ["enroll_refused"]
+
+    def test_a_disabled_user_is_refused_even_when_the_epoch_matches(
+        self, h: Harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The disabled flag is checked on its own, not only through the epoch it moves."""
+        jar = two_owners_and_a_user(h)
+        csrf = real_csrf_of_session(h, jar["user"])
+        use_cookie(h, jar["owner"])
+        assert disable_user(h).status_code == 303
+        disabled_at_the_cookies_epoch = dataclasses.replace(
+            h.store.get_principal_status(USER),
+            session_epoch=sealed_session(jar["user"])["ep"],
+        )
+        assert disabled_at_the_cookies_epoch.disabled
+        monkeypatch.setattr(
+            h.store, "get_principal_status", lambda *_a, **_kw: disabled_at_the_cookies_epoch
+        )
+
+        use_cookie(h, jar["user"])
+        assert signed_out(h)
+        replay = post_form(h, "/account/token", {"csrf": csrf, "canvas_token": CANVAS_TOKEN})
+        assert replay.status_code == 303 and replay.headers["location"] == ACCOUNT_PATH
+        assert h.whoami_calls == [CANVAS_TOKEN]  # refused before Canvas was asked again
 
 
 class TestSelfDisconnectIsNotRevocation:
