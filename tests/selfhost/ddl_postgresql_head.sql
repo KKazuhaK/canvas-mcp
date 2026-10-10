@@ -193,4 +193,117 @@ UPDATE meta SET value = '5' WHERE key = 'schema_version';
 
 UPDATE canvas_mcp_alembic_version SET version_num='0002_accounts' WHERE canvas_mcp_alembic_version.version_num = '0001_baseline_v4';
 
+-- Running upgrade 0002_accounts -> 0003_oauth_authz
+
+CREATE TABLE oauth_clients (
+    id TEXT COLLATE "C" NOT NULL,
+    info_json TEXT NOT NULL,
+    client_name TEXT DEFAULT '' NOT NULL,
+    created_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    PRIMARY KEY (id)
+);
+
+CREATE INDEX oauth_clients_expires ON oauth_clients (expires_at);
+
+CREATE TABLE cimd_clients (
+    url TEXT COLLATE "C" NOT NULL,
+    doc_json TEXT NOT NULL,
+    fetched_at BIGINT NOT NULL,
+    fresh_until BIGINT NOT NULL,
+    last_error_at BIGINT,
+    last_error TEXT,
+    PRIMARY KEY (url),
+    CONSTRAINT cimd_clients_fresh_check CHECK (fresh_until >= fetched_at)
+);
+
+CREATE INDEX cimd_clients_fetched ON cimd_clients (fetched_at);
+
+CREATE TABLE oauth_grants (
+    id TEXT COLLATE "C" NOT NULL,
+    account_id TEXT COLLATE "C" NOT NULL,
+    client_id TEXT COLLATE "C" NOT NULL,
+    client_kind TEXT NOT NULL,
+    client_name TEXT DEFAULT '' NOT NULL,
+    client_host TEXT,
+    redirect_host TEXT DEFAULT '' NOT NULL,
+    scopes TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    last_used_at BIGINT,
+    upstream_auth_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    revoked_at BIGINT,
+    revoked_reason TEXT,
+    revoked_by TEXT COLLATE "C",
+    PRIMARY KEY (id),
+    CONSTRAINT oauth_grants_kind_check CHECK (client_kind IN ('dcr', 'cimd')),
+    CONSTRAINT oauth_grants_reason_check CHECK (revoked_reason IS NULL OR revoked_reason IN ('user_revoked', 'owner_revoked', 'operator_revoked', 'client_revoked', 'refresh_reuse', 'code_replay', 'account_disabled', 'admission_lost', 'reauth_required'))
+);
+
+CREATE INDEX oauth_grants_account ON oauth_grants (account_id, revoked_at);
+
+CREATE INDEX oauth_grants_client ON oauth_grants (client_id);
+
+CREATE INDEX oauth_grants_expires ON oauth_grants (expires_at);
+
+CREATE TABLE oauth_codes (
+    code_hash TEXT COLLATE "C" NOT NULL,
+    client_id TEXT COLLATE "C" NOT NULL,
+    account_id TEXT COLLATE "C" NOT NULL,
+    redirect_uri TEXT NOT NULL,
+    redirect_uri_explicit BIGINT NOT NULL,
+    code_challenge TEXT NOT NULL,
+    scopes TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    client_kind TEXT NOT NULL,
+    client_name TEXT DEFAULT '' NOT NULL,
+    client_host TEXT,
+    redirect_host TEXT DEFAULT '' NOT NULL,
+    upstream_auth_at BIGINT NOT NULL,
+    created_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    consumed_at BIGINT,
+    grant_id TEXT COLLATE "C",
+    grace_replays BIGINT DEFAULT 0 NOT NULL,
+    PRIMARY KEY (code_hash),
+    CONSTRAINT oauth_codes_explicit_check CHECK (redirect_uri_explicit IN (0, 1)),
+    CONSTRAINT oauth_codes_kind_check CHECK (client_kind IN ('dcr', 'cimd'))
+);
+
+CREATE INDEX oauth_codes_expires ON oauth_codes (expires_at);
+
+CREATE TABLE oauth_refresh_tokens (
+    token_hash TEXT COLLATE "C" NOT NULL,
+    grant_id TEXT COLLATE "C" NOT NULL,
+    parent_hash TEXT COLLATE "C",
+    created_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    used_at BIGINT,
+    replaced_by TEXT COLLATE "C",
+    grace_replays BIGINT DEFAULT 0 NOT NULL,
+    PRIMARY KEY (token_hash),
+    CONSTRAINT oauth_refresh_grace_check CHECK (grace_replays >= 0)
+);
+
+CREATE INDEX oauth_refresh_grant ON oauth_refresh_tokens (grant_id);
+
+CREATE INDEX oauth_refresh_parent ON oauth_refresh_tokens (parent_hash);
+
+CREATE INDEX oauth_refresh_expires ON oauth_refresh_tokens (expires_at);
+
+CREATE TABLE login_states (
+    kind TEXT COLLATE "C" NOT NULL,
+    id_hash TEXT COLLATE "C" NOT NULL,
+    binding_hash TEXT COLLATE "C",
+    payload TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    PRIMARY KEY (kind, id_hash)
+);
+
+CREATE INDEX login_states_expires ON login_states (expires_at);
+
+UPDATE canvas_mcp_alembic_version SET version_num='0003_oauth_authz' WHERE canvas_mcp_alembic_version.version_num = '0002_accounts';
+
 COMMIT;

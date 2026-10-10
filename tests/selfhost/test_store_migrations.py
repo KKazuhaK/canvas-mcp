@@ -483,7 +483,9 @@ class TestRevisionPolicy:
         assert versions[-1] == SCHEMA_VERSION
         assert migrate.head_compat_version() == SCHEMA_VERSION
 
-    @pytest.mark.parametrize("revision", [migrate.BASELINE_REVISION, "0002_accounts"])
+    @pytest.mark.parametrize(
+        "revision", [migrate.BASELINE_REVISION, "0002_accounts", "0003_oauth_authz"]
+    )
     def test_no_revision_has_a_downgrade(self, revision: str) -> None:
         from alembic.script import ScriptDirectory
 
@@ -494,10 +496,20 @@ class TestRevisionPolicy:
             module.downgrade()
         assert isinstance(migrate._script(), ScriptDirectory)
 
-    def test_there_is_one_linear_history_ending_at_the_account_model(self) -> None:
-        assert migrate.head_revision() == "0002_accounts"
-        assert migrate.known_revisions() == {migrate.BASELINE_REVISION, "0002_accounts"}
-        assert migrate.revision_compat_versions() == {migrate.BASELINE_REVISION: 4, "0002_accounts": 5}
+    def test_there_is_one_linear_history_ending_at_the_authorization_server_tables(self) -> None:
+        assert migrate.head_revision() == "0003_oauth_authz"
+        assert migrate.known_revisions() == {
+            migrate.BASELINE_REVISION,
+            "0002_accounts",
+            "0003_oauth_authz",
+        }
+        # 0003 only adds tables: an older server refuses the database through the
+        # unknown revision, so the marker does not move.
+        assert migrate.revision_compat_versions() == {
+            migrate.BASELINE_REVISION: 4,
+            "0002_accounts": 5,
+            "0003_oauth_authz": 5,
+        }
 
     def test_the_revision_that_re_encrypts_asks_for_a_backup(self) -> None:
         rev = migrate._script().get_revision("0002_accounts")

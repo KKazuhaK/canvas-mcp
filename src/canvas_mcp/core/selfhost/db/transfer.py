@@ -54,7 +54,18 @@ COPIED_TABLES = (
     "credential_generations",
     "auth_events",
     "audit_log",
+    # The authorization server's long-lived state: registered clients, the client
+    # metadata documents, the connections (grants) and their refresh tokens. Moving a
+    # server to PostgreSQL must not sign every connected app out.
+    "oauth_clients",
+    "cimd_clients",
+    "oauth_grants",
+    "oauth_refresh_tokens",
 )
+#: Tables that are not copied: minutes-long state (authorization codes and the login
+#: states of requests waiting for a sign-in). An import loses at most a connection
+#: that was being approved at that moment; the app simply starts it again.
+EPHEMERAL_TABLES = ("oauth_codes", "login_states")
 #: The tables whose rows make a database "hold data" for the silent-switch guard.
 #: (The sign-in history and the audit log only exist next to accounts.)
 _DATA_TABLES = (

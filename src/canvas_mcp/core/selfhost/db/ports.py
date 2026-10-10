@@ -331,3 +331,170 @@ class MetaRepo(Protocol):
     def schema_version(self, conn: Connection) -> str | None: ...
 
     def set_schema_version(self, conn: Connection, value: str) -> None: ...
+
+
+# -- the self-hosted authorization server (revision 0003) ---------------------------------
+#
+# Statements that consume something (a login state, a code, a refresh token, a
+# revocation) are one conditional UPDATE/DELETE each and return whether this call did it;
+# the callers act on that, never on a prior read.
+
+
+class OAuthClientRepo(Protocol):
+    """``oauth_clients``: dynamically registered (public) clients."""
+
+    def insert(
+        self,
+        conn: Connection,
+        *,
+        client_id: str,
+        info_json: str,
+        client_name: str,
+        now: int,
+        expires_at: int,
+    ) -> None: ...
+
+    def get(self, conn: Connection, client_id: str) -> Row | None:
+        """``(id, info_json, client_name, created_at, expires_at)``."""
+
+    def extend(self, conn: Connection, client_id: str, expires_at: int) -> bool:
+        """Raise the expiry (never lowers it)."""
+
+    def delete_expired(self, conn: Connection, now: int) -> int: ...
+
+
+class CimdRepo(Protocol):
+    """``cimd_clients``: the last known good client metadata documents."""
+
+    def get(self, conn: Connection, url: str) -> Row | None:
+        """``(url, doc_json, fetched_at, fresh_until, last_error_at, last_error)``."""
+
+    def upsert(
+        self, conn: Connection, *, url: str, doc_json: str, fetched_at: int, fresh_until: int
+    ) -> bool:
+        """Store unless a newer document is stored (monotonic); True if this call wrote."""
+
+    def record_error(self, conn: Connection, url: str, *, now: int, code: str) -> bool: ...
+
+    def delete_fetched_before(self, conn: Connection, cutoff: int) -> int: ...
+
+
+class GrantRepo(Protocol):
+    """``oauth_grants``: one row per connection of an app to an account."""
+
+    def insert(self, conn: Connection, **fields: Any) -> None: ...
+
+    def get(self, conn: Connection, grant_id: str) -> Row | None:
+        """Columns in the order of ``authz_repos.GRANT_COLUMNS``."""
+
+    def status_row(self, conn: Connection, grant_id: str) -> Row | None:
+        """``(account_id, client_id, revoked_at, expires_at, last_used_at, account_status)``."""
+
+    def lock_live(self, conn: Connection, grant_id: str, now: int) -> bool:
+        """Take the row lock if the grant is live (and note the use); True if live."""
+
+    def revoke(self, conn: Connection, grant_id: str, *, reason: str, by: str, now: int) -> bool: ...
+
+    def revoke_own(
+        self, conn: Connection, grant_id: str, account_id: str, *, reason: str, by: str, now: int
+    ) -> bool: ...
+
+    def revoke_for_account(
+        self, conn: Connection, account_id: str, *, reason: str, by: str, now: int
+    ) -> int: ...
+
+    def touch_used(self, conn: Connection, grant_id: str, *, now: int, older_than: int) -> bool: ...
+
+    def list_for_account(self, conn: Connection, account_id: str, now: int) -> list[Row]: ...
+
+    def list_all(
+        self, conn: Connection, *, include_inactive: bool, now: int, limit: int
+    ) -> list[Row]: ...
+
+    def delete_inactive_before(self, conn: Connection, cutoff: int) -> int: ...
+
+
+class AuthCodeRepo(Protocol):
+    """``oauth_codes``: authorization codes, kept as tombstones after use."""
+
+    def insert(self, conn: Connection, **fields: Any) -> None: ...
+
+    def get(self, conn: Connection, code_hash: str) -> Row | None:
+        """Columns in the order of ``authz_repos.CODE_COLUMNS``."""
+
+    def consume(
+        self, conn: Connection, code_hash: str, client_id: str, *, grant_id: str, now: int
+    ) -> bool: ...
+
+    def bump_grace(self, conn: Connection, code_hash: str, cap: int) -> bool: ...
+
+    def delete_expired_before(self, conn: Connection, cutoff: int) -> int: ...
+
+
+class RefreshRepo(Protocol):
+    """``oauth_refresh_tokens``: hashes of refresh tokens and their rotation chain."""
+
+    def insert(
+        self,
+        conn: Connection,
+        *,
+        token_hash: str,
+        grant_id: str,
+        parent_hash: str | None,
+        now: int,
+        expires_at: int,
+    ) -> None: ...
+
+    def get(self, conn: Connection, token_hash: str) -> Row | None:
+        """Columns in the order of ``authz_repos.REFRESH_COLUMNS``."""
+
+    def get_with_grant(self, conn: Connection, token_hash: str) -> Row | None:
+        """The token row, then ``(client_id, scopes, resource, account_id, revoked_at)``."""
+
+    def mark_used(self, conn: Connection, token_hash: str, *, replaced_by: str, now: int) -> bool: ...
+
+    def retire_siblings(
+        self, conn: Connection, *, grant_id: str, parent_hash: str | None, keep: str, now: int
+    ) -> int: ...
+
+    def has_rotated_child(self, conn: Connection, token_hash: str) -> bool: ...
+
+    def any_used(self, conn: Connection, grant_id: str) -> bool: ...
+
+    def bump_grace(self, conn: Connection, token_hash: str, cap: int) -> bool: ...
+
+    def delete_dead(self, conn: Connection, *, now: int, revoked_before: int) -> int: ...
+
+
+class LoginStateRepo(Protocol):
+    """``login_states``: one-time state that must survive between requests."""
+
+    def insert(
+        self,
+        conn: Connection,
+        *,
+        kind: str,
+        id_hash: str,
+        binding_hash: str | None,
+        payload: str,
+        now: int,
+        expires_at: int,
+    ) -> None: ...
+
+    def peek(
+        self, conn: Connection, *, kind: str, id_hash: str, binding_hash: str | None, now: int
+    ) -> str | None: ...
+
+    def delete_matching(
+        self, conn: Connection, *, kind: str, id_hash: str, binding_hash: str | None, now: int
+    ) -> bool: ...
+
+    def delete_expired(self, conn: Connection, now: int) -> int: ...
+
+
+class JwtEpochRepo(Protocol):
+    """``meta['mcp_jwt_epoch']``: raised to invalidate every access token at once."""
+
+    def get(self, conn: Connection) -> int: ...
+
+    def bump(self, conn: Connection) -> int: ...

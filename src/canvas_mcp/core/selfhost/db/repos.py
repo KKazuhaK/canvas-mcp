@@ -16,20 +16,41 @@ from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import Connection
 
 from . import schema as t
+from .authz_repos import (
+    SqlAuthCodeRepo,
+    SqlCimdRepo,
+    SqlGrantRepo,
+    SqlJwtEpochRepo,
+    SqlLoginStateRepo,
+    SqlOAuthClientRepo,
+    SqlRefreshRepo,
+)
 from .ports import (
     AccountRepo,
     AuditRepo,
+    AuthCodeRepo,
     AuthEventRepo,
     CanvasTokenRepo,
+    CimdRepo,
     CredentialGenerationRepo,
+    GrantRepo,
     IdentityRepo,
+    JwtEpochRepo,
+    LoginStateRepo,
     MetaRepo,
+    OAuthClientRepo,
     PrefsRepo,
     PrincipalEventRepo,
+    RefreshRepo,
     Row,
 )
 
 Dialect = Literal["sqlite", "postgresql"]
+
+#: The surfaces of the sign-in history a user sees (the ``oauth`` surface is not part of
+#: it). Kept equal to ``accounts.SIGN_IN_SURFACES`` by a test; this module stays free of
+#: imports from the pure admission module.
+SIGN_IN_SURFACES = ("account", "mcp")
 
 STATUS_ACTIVE = "active"
 STATUS_INVALID = "invalid"
@@ -689,7 +710,7 @@ class SqlAuthEventRepo:
                 _ae.c.ip,
                 _ae.c.ua_hash,
             )
-            .where(_ae.c.account_id == account_id)
+            .where(_ae.c.account_id == account_id, _ae.c.surface.in_(SIGN_IN_SURFACES))
             .order_by(_ae.c.id.desc())
             .limit(limit)
         )
@@ -802,6 +823,14 @@ class Repositories:
         self.audit: AuditRepo = SqlAuditRepo()
         self.prefs: PrefsRepo = SqlPrefsRepo(dialect)
         self.meta: MetaRepo = SqlMetaRepo()
+        # The authorization server's tables (empty and unused in entra_proxy mode).
+        self.clients: OAuthClientRepo = SqlOAuthClientRepo()
+        self.cimd: CimdRepo = SqlCimdRepo(dialect)
+        self.grants: GrantRepo = SqlGrantRepo()
+        self.codes: AuthCodeRepo = SqlAuthCodeRepo()
+        self.refresh: RefreshRepo = SqlRefreshRepo()
+        self.login_states: LoginStateRepo = SqlLoginStateRepo()
+        self.jwt_epoch: JwtEpochRepo = SqlJwtEpochRepo()
 
 
 __all__ = [

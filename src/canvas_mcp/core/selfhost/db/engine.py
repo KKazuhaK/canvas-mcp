@@ -208,6 +208,42 @@ class Database:
                 yield from self._pg_tx(lock=True, lock_timeout=None)
 
     @contextmanager
+    def row_write(self) -> Iterator[Connection]:
+        """A write transaction for single-row conditional updates: no global writer lock.
+
+        This is for the hot paths of the authorization server (consuming a one-time
+        login state, an authorization code or a refresh token, rotating a refresh
+        family, revoking one grant), whose correctness rests on statements of the form
+        ``UPDATE ... WHERE <row is still unused> `` followed by a check of ``rowcount``.
+
+        * SQLite: identical to :meth:`write` (the process lock, then ``BEGIN IMMEDIATE``,
+          which already serialises every writer of the file).
+        * PostgreSQL: a ``READ COMMITTED`` transaction **without** the advisory lock of
+          :meth:`write`. A second transaction that updates the same row blocks on the
+          row lock until the first one ends and then *re-evaluates the WHERE clause
+          against the committed row* (that is what ``READ COMMITTED`` does for
+          ``UPDATE`` and ``DELETE``), so it matches nothing if the first one consumed
+          the row. Unrelated rows do not wait for each other, so a slow client cannot
+          stall every other token exchange behind one global lock. The statement and
+          lock timeouts of the connection still apply.
+
+        What this is **not** safe for: a transaction that decides from a predicate over
+        *many* rows or over a row it does not write (the last-owner guard, the status
+        gate of an enrollment). Those keep using :meth:`write`. A transaction here must
+        take the one row lock that decides its outcome first (a grant rotation updates
+        the grant row before anything else), and a change that adds a multi-row
+        predicate to such a transaction reintroduces write skew; the PostgreSQL lock
+        inspection test in ``tests/selfhost/authz`` guards that this method really does
+        not take the advisory lock.
+        """
+        if self.kind == "sqlite":
+            with self.guard(), self._write_lock:
+                yield from self._sqlite_tx("IMMEDIATE")
+        else:
+            with self.guard():
+                yield from self._pg_tx(lock=False, lock_timeout=None)
+
+    @contextmanager
     def read(self) -> Iterator[Connection]:
         """A connection for reads. Each statement sees a committed state."""
         with self.guard():

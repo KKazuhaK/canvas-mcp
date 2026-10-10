@@ -113,8 +113,23 @@ REASON_STATE_INVALID = "state_invalid"
 REASON_TOKEN_INVALID = "token_invalid"
 REASON_PROVIDER_ERROR = "provider_error"
 REASON_STORE_UNAVAILABLE = "store_unavailable"
+# Reasons of the ``oauth`` surface (the local authorization server).
+REASON_CONSENT_GRANTED = "consent_granted"
+REASON_CONSENT_DENIED = "consent_denied"
+REASON_GRANT_CREATED = "grant_created"
+REASON_CODE_REPLAY = "code_replay"
+REASON_REFRESH_REUSE = "refresh_reuse"
+REASON_REAUTH_REQUIRED = "reauth_required"
+REASON_CLIENT_REVOKED = "client_revoked"
 AUTH_REASONS = frozenset(
     {
+        REASON_CONSENT_GRANTED,
+        REASON_CONSENT_DENIED,
+        REASON_GRANT_CREATED,
+        REASON_CODE_REPLAY,
+        REASON_REFRESH_REUSE,
+        REASON_REAUTH_REQUIRED,
+        REASON_CLIENT_REVOKED,
         REASON_OK,
         REASON_ACCOUNT_CREATED,
         REASON_ACTIVATED,
@@ -142,6 +157,11 @@ AUTH_OUTCOMES = (OUTCOME_SUCCESS, OUTCOME_PENDING, OUTCOME_DENIED, OUTCOME_ERROR
 
 SURFACE_ACCOUNT = "account"
 SURFACE_MCP = "mcp"
+#: The server's own authorization server (SELFHOST_AUTH_MODE=local): consent, grants,
+#: replayed codes and refresh tokens. Kept out of the sign-in history a user sees.
+SURFACE_OAUTH = "oauth"
+#: The surfaces the sign-in history shows.
+SIGN_IN_SURFACES = (SURFACE_ACCOUNT, SURFACE_MCP)
 
 # History entries written by a decision (``principal_status_events.action``).
 EVENT_ACCOUNT_CREATED = "account_created"

@@ -85,7 +85,9 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from ..credentials import note_credential_generation
 from . import accounts as acc
@@ -188,8 +190,15 @@ AUDIT_TOKEN_MARKED_INVALID = "token_marked_invalid"
 AUDIT_WRITE_TOOLS_CHANGED = "write_tools_changed"
 AUDIT_SCHEMA_MIGRATED = "schema_migrated"
 AUDIT_PENDING_PURGED = "pending_purged"
+# The local authorization server (SELFHOST_AUTH_MODE=local).
+AUDIT_GRANT_REVOKED = "grant_revoked"
+AUDIT_GRANTS_REVOKED_FOR_ACCOUNT = "grants_revoked_for_account"
+AUDIT_JWT_KEY_ROTATED = "jwt_key_rotated"
 AUDIT_ACTIONS = frozenset(
     {
+        AUDIT_GRANT_REVOKED,
+        AUDIT_GRANTS_REVOKED_FOR_ACCOUNT,
+        AUDIT_JWT_KEY_ROTATED,
         AUDIT_ACCOUNT_CREATED,
         AUDIT_ACCOUNT_CREATED_BY_OPERATOR,
         AUDIT_ACCOUNT_ACTIVATED,
@@ -215,6 +224,7 @@ _GUID_RE = re.compile(
 _AAD_PREFIX_V2 = b"canvas-mcp/canvas-token/v2\x1f"
 _AAD_PREFIX_V3 = b"canvas-mcp/canvas-token/v3\x1f"
 _AAD_SEP = b"\x1f"
+_DERIVE_SALT = b"canvas-mcp/keyring-derive/v1"
 _ENTRA_PREFIX = "entra:"
 _MAX_HOST = 253
 _MAX_PRINCIPAL_KEY = 256
@@ -602,6 +612,8 @@ class Keyring:
             raise KeyringError("CANVAS_TOKEN_KEYS is empty")
         self._ids: tuple[str, ...] = tuple(kid for kid, _ in keys)
         self._aead = {kid: AESGCM(key) for kid, key in keys}
+        # The raw keys stay private to this object: only encrypt, decrypt and derive use them.
+        self._raw = dict(keys)
 
     def __repr__(self) -> str:
         return f"Keyring(active={self._ids[0]!r}, ids={self._ids!r})"
@@ -655,6 +667,24 @@ class Keyring:
         kid = self._ids[0]
         nonce = os.urandom(_NONCE_BYTES)
         return kid, nonce, self._aead[kid].encrypt(nonce, plaintext, aad)
+
+    def derive(self, key_id: str, info: str, length: int = 32) -> bytes:
+        """A key for another purpose, derived from one of the keys (HKDF-SHA256).
+
+        ``info`` names the purpose (and should include the key id), so two purposes
+        never share a key and none of them is the encryption key. The result is
+        deterministic: every process with the same ``CANVAS_TOKEN_KEYS`` derives the same
+        bytes. Raises :class:`KeyringError` for an unknown key id.
+        """
+        raw = self._raw.get(key_id)
+        if raw is None:
+            raise KeyringError("unknown key id")
+        return HKDF(
+            algorithm=hashes.SHA256(),
+            length=length,
+            salt=_DERIVE_SALT,
+            info=info.encode("utf-8"),
+        ).derive(raw)
 
     def decrypt(
         self, key_id: str, nonce: bytes, ciphertext: bytes, aad: bytes
@@ -1802,7 +1832,20 @@ class TokenStore:
             epoch = repos.accounts.disable(conn, account_id, reason=reason, by=by, now=now)
             self._record_event(conn, key, EVENT_DISABLED, by, reason, epoch, now)
             generation = repos.generations.bump(conn, key, GENERATION_DISABLED, now)
-            self._audit(conn, by, AUDIT_ACCOUNT_DISABLED, target=key, reason=reason, now=now)
+            # The apps this person connected stop working with the account (the table is
+            # empty unless SELFHOST_AUTH_MODE=local has ever issued a grant).
+            revoked = repos.grants.revoke_for_account(
+                conn, account_id, reason="account_disabled", by=by, now=now
+            )
+            self._audit(
+                conn,
+                by,
+                AUDIT_ACCOUNT_DISABLED,
+                target=key,
+                reason=reason,
+                detail={"grants_revoked": revoked} if revoked else None,
+                now=now,
+            )
         self._publish_generation(key, generation)
         return True
 
