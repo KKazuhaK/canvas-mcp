@@ -7,7 +7,10 @@ Both entrances use :class:`IdentityService`:
   ``azp``;
 * the ``/account`` sign-in hands it the claims of the verified *id* token
   (:meth:`IdentityService.sign_in`), whose client is its ``aud``, checked where the
-  token is verified.
+  token is verified. A provider other than Entra (Google, GitHub, a generic OpenID Connect
+  provider; ``SELFHOST_AUTH_MODE=local`` only) hands it neutral claims that its own
+  ceremony already verified (:meth:`IdentityService.sign_in_external`), and an explicit
+  link from ``/account`` goes through :meth:`IdentityService.link`.
 
 Each reduces the claims to an external identity ``(provider, issuer, subject)`` (for
 Entra: the tenant's issuer URL and the ``oid``), matches it against the configured
@@ -39,13 +42,21 @@ from .accounts import (
     ExternalClaims,
     Verdict,
 )
-from .token_store import PrincipalStatus, Resolution
+from .token_store import (
+    LINK_OK,
+    Actor,
+    LinkResult,
+    PrincipalStatus,
+    Resolution,
+    UnlinkResult,
+)
 
 DenyReason = Literal["wrong_tenant", "wrong_client", "bad_subject", "missing_role", "bad_roles"]
 
-#: How long a known identity -> account mapping is reused. A mapping never changes
-#: (identities are not unlinked or moved in this release) and the account's own status
-#: is read separately, so a stale entry cannot widen access.
+#: How long a known identity -> account mapping is reused. The cache is read only by the
+#: ``entra_proxy`` MCP path, where linking cannot exist (Entra is the only provider), so a
+#: mapping never changes there; the account's own status is read separately, so a stale
+#: entry cannot widen access. An unlink in this process discards the entry at once.
 IDENTITY_CACHE_SECONDS = 300.0
 _MAX_CACHED_IDENTITIES = 4096
 
@@ -79,6 +90,26 @@ class IdentityStore(Protocol):
         ip: str = "unknown",
         ua_hash: str | None = None,
     ) -> None: ...
+
+    def link_identity(
+        self,
+        principal_key: str,
+        ext: ExternalClaims,
+        verdict: Verdict,
+        policy: AccessPolicy,
+        *,
+        expected_epoch: int,
+        ua_hash: str | None = None,
+    ) -> LinkResult: ...
+
+    def unlink_identity(
+        self,
+        principal_key: str,
+        identity_id: int,
+        *,
+        actor: Actor,
+        expected_epoch: int | None = None,
+    ) -> UnlinkResult: ...
 
 
 class StatusSource(Protocol):
@@ -124,6 +155,11 @@ class IdentityCache:
             self._entries.move_to_end(identity)
             while len(self._entries) > self._max:
                 self._entries.popitem(last=False)
+
+    def discard(self, identity: tuple[str, str, str]) -> None:
+        """Forget one mapping (an identity that was unlinked)."""
+        with self._lock:
+            self._entries.pop(identity, None)
 
     def clear(self) -> None:
         with self._lock:
@@ -295,6 +331,24 @@ class IdentityService:
                 ua_hash=ua_hash,
             )
             return ext
+        return self.sign_in_external(ext, ip=ip, ua_hash=ua_hash)
+
+    def sign_in_external(
+        self,
+        ext: ExternalClaims,
+        *,
+        ip: str = "unknown",
+        ua_hash: str | None = None,
+    ) -> SignIn | Denied:
+        """Decide a ``/account`` sign-in from claims a provider ceremony already verified.
+
+        Entra's id token goes through :meth:`sign_in`, which reduces it first; every other
+        provider reduces its own tokens in its ceremony and calls this directly. The
+        admission rules are evaluated for the identity used, the store decides and applies
+        the result, and the outcome is written to the sign-in history in the same
+        transaction. A refusal for a provider other than Entra carries a message that does
+        not name Microsoft.
+        """
         verdict = acc.evaluate_admission(ext, self.access_policy)
         resolution = self._store.resolve_identity(
             ext, verdict, self.access_policy, purpose="sign_in", ip=ip, ua_hash=ua_hash
@@ -304,15 +358,56 @@ class IdentityService:
             self.cache.put(ext.identity, key)
         if resolution.outcome == "deny" or resolution.status is None:
             assert resolution.denied is not None
-            return SignInDenied(
-                resolution.denied.code, resolution.denied.message, account_key=key
-            )
+            message = resolution.denied.message
+            if ext.provider_id != acc.PROVIDER_ENTRA and resolution.denied.code == acc.DENY_ACCESS_DENIED:
+                message = acc.NEUTRAL_ACCESS_DENIED
+            return SignInDenied(resolution.denied.code, message, account_key=key)
         return SignIn(
             status=resolution.status,
             ext=ext,
             owner=resolution.session_owner,
             pending=resolution.outcome == "pending",
         )
+
+    # -- linking (from /account, by a signed-in person) ------------------------------------------
+
+    def link(
+        self,
+        account_key: str,
+        ext: ExternalClaims,
+        *,
+        expected_epoch: int,
+        ua_hash: str | None = None,
+    ) -> LinkResult:
+        """Attach the verified identity ``ext`` to ``account_key`` (see ``TokenStore.link_identity``)."""
+        verdict = acc.evaluate_admission(ext, self.access_policy)
+        result = self._store.link_identity(
+            account_key,
+            ext,
+            verdict,
+            self.access_policy,
+            expected_epoch=expected_epoch,
+            ua_hash=ua_hash,
+        )
+        if result.code == LINK_OK:
+            self.cache.put(ext.identity, account_key)
+        return result
+
+    def unlink(
+        self,
+        account_key: str,
+        identity_id: int,
+        *,
+        actor: Actor,
+        expected_epoch: int | None = None,
+    ) -> UnlinkResult:
+        """Remove an identity from an account and forget its cached mapping."""
+        result = self._store.unlink_identity(
+            account_key, identity_id, actor=actor, expected_epoch=expected_epoch
+        )
+        if result.ok:
+            self.cache.discard((result.provider_id, result.issuer, result.subject))
+        return result
 
 
 # -- the first release's rule, kept as the oracle -------------------------------------
