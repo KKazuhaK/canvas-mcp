@@ -2054,14 +2054,21 @@ class TokenStore:
 
     # -- accounts: administrative changes ------------------------------------------
 
-    def demote_owner(self, principal_key: str, *, evidence_issued_at: int) -> bool:
+    def demote_owner(
+        self,
+        principal_key: str,
+        *,
+        evidence_issued_at: int,
+        listed_providers: Collection[str] | None = None,
+    ) -> bool:
         """Lower the stored owner role on evidence from a request token; True if lowered.
 
         The evidence is the issue time of a verified access token that carries no
         owner role. It counts only if it is newer than the last sign-in that showed the
         role, so a token issued before a promotion cannot undo it. Only a role that
         rules granted is touched (a bootstrap or operator owner is not), the last
-        active owner is never demoted, and this path can only ever lower the role:
+        *usable* owner is never demoted (an owner no sign-in under ``listed_providers`` can show,
+        see :func:`accounts.owner_is_usable`, is no replacement), and this path can only ever lower the role:
         raising it needs a fresh sign-in.
         """
         key = _require_account_key(principal_key)
@@ -2078,9 +2085,11 @@ class TokenStore:
                 return False
             if evidence_issued_at <= (row[4] or 0):
                 return False
-            others = self._repos.accounts.count_active_owners(conn, exclude=account_id)
+            others = self._repos.accounts.usable_owner_ids(
+                conn, _listed(listed_providers), exclude=account_id, for_update=True
+            )
             self._pause("after_owner_count")
-            if others == 0:
+            if not others:
                 self._record_event(
                     conn, key, EVENT_OWNER_LOSS_REFUSED, None, "access_token_roles", int(row[16]), now
                 )
@@ -2104,6 +2113,7 @@ class TokenStore:
         actor: Actor,
         reason: str,
         allow_last_owner: bool = False,
+        listed_providers: Collection[str] | None = None,
     ) -> bool:
         """Administratively disable an account; True if this call changed it.
 
@@ -2116,9 +2126,12 @@ class TokenStore:
 
         ``actor`` is the acting owner's account key or :data:`OPERATOR`. An owner
         actor is re-checked inside the transaction (still active and an owner) and
-        cannot disable themselves. Disabling the last active owner is refused unless
-        ``allow_last_owner``; the check and the write are one transaction, so two
-        owners cannot disable each other concurrently. Already disabled, or no such
+        cannot disable themselves. Disabling the last *usable* owner (an active owner that can
+        still get an owner session under ``listed_providers``, the providers of
+        ``SELFHOST_LOGIN_PROVIDERS``; None: all; see :func:`accounts.owner_is_usable`) is refused
+        unless ``allow_last_owner``, and so is disabling the last active owner of any kind; the
+        check and the write are one transaction (the other owners' rows are read ``FOR UPDATE``),
+        so two owners cannot disable each other concurrently. Already disabled, or no such
         account: returns False and changes nothing.
         """
         key = _require_account_key(principal_key)
@@ -2136,10 +2149,21 @@ class TokenStore:
             if row is None or row[1] == STATUS_DISABLED:
                 return False
             if row[1] == STATUS_ACTIVE and row[2] == ROLE_OWNER and not allow_last_owner:
-                others = repos.accounts.count_active_owners(conn, exclude=account_id)
+                listed = _listed(listed_providers)
+                usable_others = repos.accounts.usable_owner_ids(
+                    conn, listed, exclude=account_id, for_update=True
+                )
                 self._pause("after_owner_count")
-                if others == 0:
-                    raise AccessActionRefused(AccessActionRefused.LAST_OWNER)
+                if not usable_others:
+                    # The target matters to the server when it is usable itself, or when it is
+                    # the only active owner at all (the guard before usable owners existed).
+                    identities = repos.identities.list_with_ids(conn, account_id)
+                    target_usable = acc.owner_is_usable(
+                        role=row[2], status=row[1], role_source=row[3],
+                        identity_providers=[r[1] for r in identities], listed=listed,
+                    )
+                    if target_usable or repos.accounts.count_active_owners(conn, exclude=account_id) == 0:
+                        raise AccessActionRefused(AccessActionRefused.LAST_OWNER)
             epoch = repos.accounts.disable(conn, account_id, reason=reason, by=by, now=now)
             self._record_event(conn, key, EVENT_DISABLED, by, reason, epoch, now)
             generation = repos.generations.bump(conn, key, GENERATION_DISABLED, now)

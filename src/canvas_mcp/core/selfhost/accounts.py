@@ -1209,7 +1209,10 @@ def _recompute_role(
         return None, None, None
     # An owner. Only a role that rules granted is taken back by rules.
     if existing.role_source == ROLE_SOURCE_RULES and not owner_match and owner_evidence:
-        others = facts.active_owner_count - (1 if existing.is_active_owner else 0)
+        # Stranded owners (no sign-in can show their role) do not count as a replacement: the
+        # account being decided signs in with owner evidence, so it is itself usable.
+        owners = facts.active_owner_count if facts.usable_owner_count is None else facts.usable_owner_count
+        others = owners - (1 if existing.is_active_owner else 0)
         if others <= 0:
             return None, None, EVENT_OWNER_LOSS_REFUSED
         return ROLE_USER, None, EVENT_OWNER_LOST

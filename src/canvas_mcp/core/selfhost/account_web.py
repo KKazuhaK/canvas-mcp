@@ -4558,6 +4558,7 @@ class _AccountApp:
                         target,
                         actor=actor,
                         reason=DISABLE_REASON_ADMIN,
+                        listed_providers=self.identity.login_providers,
                     )
                 )
             else:

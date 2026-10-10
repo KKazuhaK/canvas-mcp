@@ -772,6 +772,7 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
                 actor=OPERATOR,
                 reason=DISABLE_REASON_OPERATOR,
                 allow_last_owner=args.allow_last_owner,
+                listed_providers=_listed_providers(),
             )
         except AccessActionRefused as exc:
             if exc.code == AccessActionRefused.LAST_OWNER:
@@ -928,9 +929,12 @@ def _endpoint_hosts(meta: Any) -> str:
 def _listed_providers() -> frozenset[str] | None:
     """The providers of ``SELFHOST_LOGIN_PROVIDERS`` in this environment (None: unreadable).
 
-    They decide which owners are usable. An environment that does not load as the server's
-    configuration cannot say, so every provider counts as listed.
+    They decide which owners are usable. When the full settings do not load (the operator shell
+    often lacks the server's other variables), only ``SELFHOST_LOGIN_PROVIDERS`` is parsed, so an
+    explicit list still holds. Only a list that cannot be read at all leaves every provider
+    counted as listed, and then a note says so.
     """
+    from canvas_mcp.core.selfhost.login.config import parse_login_providers
     from canvas_mcp.core.selfhost.settings import (
         SelfhostConfigError,
         load_selfhost_settings,
@@ -939,7 +943,22 @@ def _listed_providers() -> frozenset[str] | None:
     try:
         return load_selfhost_settings().login_providers.ids
     except SelfhostConfigError:
-        return None
+        pass
+    ignored: list[str] = []
+    try:
+        # authz_mode "local": the mode of the other settings is not known here, and this reads
+        # the list alone.
+        ids = parse_login_providers(os.environ, ignored, authz_mode="local").ids
+    except Exception:  # noqa: BLE001 - an unreadable list falls back to "all listed"
+        ids = frozenset()
+    if ids and not any(p.startswith("SELFHOST_LOGIN_PROVIDERS") for p in ignored):
+        return ids
+    print(
+        "note: SELFHOST_LOGIN_PROVIDERS is not readable in this environment; every provider is "
+        "assumed to be listed, so the usable-owner check is more permissive than the server's",
+        file=sys.stderr,
+    )
+    return None
 
 
 def _run_login_providers(args: argparse.Namespace) -> int:

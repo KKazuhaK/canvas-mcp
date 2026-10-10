@@ -20,7 +20,7 @@ from starlette.types import ASGIApp
 from ..config import Config, validate_canvas_url_scheme
 from ..logging import log_info, log_warning
 from ..token_health import set_token_health_monitor
-from .accounts import EntraClaimsPolicy
+from .accounts import STATUS_DISABLED, EntraClaimsPolicy
 from .edge_guard import SelfhostEdgeGuard
 from .identity import IdentityService
 from .limits import RateLimiters, build_rate_limiters
@@ -248,9 +248,23 @@ def _owner_path_problem(settings: SelfhostSettings, store: TokenStore) -> str | 
     if settings.entra_enabled:
         return None
     policy = settings.access_policy
-    if policy.bootstrap_via_token_admin or policy.bootstrap_owner is not None:
+    if policy.bootstrap_via_token_admin:
         return None
     if store.count_usable_owners(settings.login_providers.ids) > 0:
+        return None
+    boot = policy.bootstrap_owner
+    if boot is not None:
+        # The bootstrap identity makes an owner at its next sign-in, unless its account exists
+        # and is disabled: a disabled account is refused before any role is applied.
+        key = store.lookup_identity(boot.provider_id, boot.issuer, boot.subject)
+        if key is not None and store.get_principal_status(key).status == STATUS_DISABLED:
+            return (
+                "no owner can sign in: the account of SELFHOST_BOOTSTRAP_OWNER is disabled and "
+                "no other usable owner exists; enable it with: "
+                "python -m canvas_mcp.core.selfhost.token_admin enable ACCOUNT, or make another "
+                "account an owner with: python -m canvas_mcp.core.selfhost.token_admin "
+                "promote-owner ACCOUNT"
+            )
         return None
     stranded = store.count_active_owners()
     if stranded > 0:
@@ -528,6 +542,7 @@ def build_selfhost_asgi_app(
                 tool_prefs=runtime.tool_prefs,
                 access=runtime.access,
                 owners=None if local else runtime.store,
+                login_providers=settings.login_providers.ids,
                 course_state=settings.course_state,
                 identity_mode="local" if local else "entra",
             )

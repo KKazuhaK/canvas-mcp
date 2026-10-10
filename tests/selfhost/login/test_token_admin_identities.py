@@ -221,6 +221,31 @@ class TestUnlinkIdentity:
         assert [i.provider_id for i in store.list_identities(KEY_B)] == ["entra", "github"]
 
 
+    def test_an_explicit_provider_list_holds_when_the_other_settings_do_not_load(
+        self, store, monkeypatch, capsys
+    ) -> None:
+        # SELFHOST_LOGIN_PROVIDERS=github without GITHUB_CLIENT_ID: the full settings fail, the list does not.
+        for name in ("GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("SELFHOST_LOGIN_PROVIDERS", "github")
+        assert token_admin._listed_providers() == frozenset({"github"})
+        make_account(store, OID_A)
+        assert store.promote_owner(KEY_A)
+        link(store, KEY_A, github())
+        github_id = next(i.id for i in store.list_identities(KEY_A) if i.provider_id == "github")
+        # Entra is not listed: removing the GitHub identity would leave the one owner without a way in.
+        assert token_admin.main(["unlink-identity", KEY_A, str(github_id)]) == 3
+        assert "without a usable owner" in capsys.readouterr().err
+        assert [i.provider_id for i in store.list_identities(KEY_A)] == ["entra", "github"]
+
+    def test_an_unreadable_provider_list_assumes_every_provider_and_says_so(
+        self, store, monkeypatch, capsys
+    ) -> None:
+        monkeypatch.setenv("SELFHOST_LOGIN_PROVIDERS", "not-a-provider")
+        assert token_admin._listed_providers() is None
+        assert "assumed to be listed" in capsys.readouterr().err
+
+
 class TestLoginProviders:
     def settings_env(self, monkeypatch: pytest.MonkeyPatch, **extra: str) -> None:
         options = {

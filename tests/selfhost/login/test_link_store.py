@@ -25,7 +25,7 @@ from canvas_mcp.core.selfhost.token_store import (
     TokenStore,
 )
 
-from ..conftest import OID_A, OID_B, TENANT, acct_key, make_account, sign_in
+from ..conftest import OID_A, OID_B, TENANT, acct_key, external, make_account, sign_in
 
 WAIT = 20
 KEY_A = acct_key(OID_A)
@@ -720,6 +720,105 @@ class TestBootstrapOwnerWithUnusableOwners:
         resolution = self.sign(store, google("boot-1"), self.GOOGLE_ONLY)
         assert resolution.session_owner and resolution.principal_key is not None
         assert actions(store, "role_changed") == []
+
+
+class TestUsableOwnerGuards:
+    """UO-1: disabling and demoting count usable owners, so a stranded owner is no replacement."""
+
+    def stranded_pair(self, store: TokenStore) -> None:
+        """A and B are rules owners; A unlinked Entra, so A is a stranded owner and B the only usable one."""
+        entra_a = rules_owner(store, OID_A, KEY_A, "1001")
+        rules_owner(store, OID_B, KEY_B, "1002")
+        assert store.unlink_identity(KEY_A, entra_a, actor=KEY_A, listed_providers=LISTED).ok
+        assert store.count_usable_owners(LISTED) == 1
+        assert store.get_principal_status(KEY_A).role == "owner"
+
+    def test_the_operator_cannot_disable_the_last_usable_owner_beside_a_stranded_one(
+        self, store: TokenStore
+    ) -> None:
+        self.stranded_pair(store)
+        with pytest.raises(AccessActionRefused) as excinfo:
+            store.disable_principal(KEY_B, actor=OPERATOR, reason="operator_disabled", listed_providers=LISTED)
+        assert excinfo.value.code == AccessActionRefused.LAST_OWNER
+        assert store.get_principal_status(KEY_B).status == "active"
+        assert store.count_usable_owners(LISTED) == 1
+        # The operator's explicit override still works.
+        assert store.disable_principal(
+            KEY_B, actor=OPERATOR, reason="operator_disabled", allow_last_owner=True, listed_providers=LISTED
+        )
+
+    def test_disabling_a_stranded_owner_or_a_usable_owner_beside_another_usable_one_is_fine(
+        self, store: TokenStore
+    ) -> None:
+        self.stranded_pair(store)
+        assert store.disable_principal(KEY_A, actor=OPERATOR, reason="operator_disabled", listed_providers=LISTED)
+        assert store.count_usable_owners(LISTED) == 1
+        assert store.enable_principal(KEY_A, actor=OPERATOR)
+        third = make_account(store, OID_C, role="owner")
+        assert link(store, third, gh("1003"), policy=OPEN).ok
+        assert store.disable_principal(KEY_B, actor=OPERATOR, reason="operator_disabled", listed_providers=LISTED)
+
+    def test_the_last_active_owner_of_any_kind_is_still_protected(self, store: TokenStore) -> None:
+        entra_a = rules_owner(store, OID_A, KEY_A, "1001")
+        assert store.unlink_identity(KEY_A, entra_a, actor=KEY_A, listed_providers=LISTED).code == "last_owner"
+        only_github = frozenset({"github"})  # Entra delisted: A is the one active owner and is unusable
+        assert store.count_usable_owners(only_github) == 0
+        with pytest.raises(AccessActionRefused):
+            store.disable_principal(KEY_A, actor=OPERATOR, reason="operator_disabled", listed_providers=only_github)
+
+    def test_a_disable_and_an_unlink_racing_for_the_last_usable_owner_serialise(
+        self, pair: tuple[TokenStore, TokenStore]
+    ) -> None:
+        first, second = pair
+        entra_a = rules_owner(first, OID_A, KEY_A, "1001")
+        rules_owner(first, OID_B, KEY_B, "1002")
+        gate = Gate("after_owner_count")
+        first._pause_hook = gate
+        disabling = Runner(
+            lambda: first.disable_principal(KEY_B, actor=OPERATOR, reason="operator_disabled", listed_providers=LISTED)
+        )
+        assert gate.reached.wait(WAIT)
+        unlinking = Runner(lambda: second.unlink_identity(KEY_A, entra_a, actor=KEY_A, listed_providers=LISTED))
+        assert unlinking.blocked()
+        gate.release.set()
+        assert disabling.join() is True  # B was disabled while A was still usable
+        assert unlinking.join().code == "last_owner"  # and then A is the last usable owner
+        assert first.count_usable_owners(LISTED) == 1
+
+    def test_a_token_demotion_never_removes_the_last_usable_owner(self, store: TokenStore) -> None:
+        self.stranded_pair(store)
+        refused = store.demote_owner(KEY_B, evidence_issued_at=1_900_000_000, listed_providers=LISTED)
+        assert refused is False
+        assert store.get_principal_status(KEY_B).role == "owner"
+        assert store.list_status_events(KEY_B)[0].action == acc.EVENT_OWNER_LOSS_REFUSED
+
+    def test_a_token_demotion_beside_a_usable_owner_still_works(self, store: TokenStore) -> None:
+        rules_owner(store, OID_A, KEY_A, "1001")
+        rules_owner(store, OID_B, KEY_B, "1002")
+        assert store.demote_owner(KEY_B, evidence_issued_at=1_900_000_000, listed_providers=LISTED) is True
+        assert store.get_principal_status(KEY_B).role == "user"
+
+    def test_a_sign_in_without_the_owner_role_does_not_demote_the_last_usable_owner(
+        self, store: TokenStore
+    ) -> None:
+        self.stranded_pair(store)
+        ext = external(OID_B)
+        resolution = store.resolve_identity(
+            ext, Verdict(admitted_by_rule=True, owner_by_rule=False), TestUnlink.RULES_OWNER,
+            purpose="sign_in", listed_providers=LISTED,
+        )
+        assert resolution.allowed and not resolution.session_owner
+        assert store.get_principal_status(KEY_B).role == "owner"
+        assert store.count_usable_owners(LISTED) == 1
+
+    def test_a_sign_in_without_the_owner_role_demotes_beside_a_usable_owner(self, store: TokenStore) -> None:
+        rules_owner(store, OID_A, KEY_A, "1001")
+        rules_owner(store, OID_B, KEY_B, "1002")
+        store.resolve_identity(
+            external(OID_B), Verdict(admitted_by_rule=True, owner_by_rule=False), TestUnlink.RULES_OWNER,
+            purpose="sign_in", listed_providers=LISTED,
+        )
+        assert store.get_principal_status(KEY_B).role == "user"
 
 
 class TestUsableOwnerRaces:

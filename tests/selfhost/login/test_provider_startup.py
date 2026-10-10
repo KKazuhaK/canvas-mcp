@@ -184,3 +184,27 @@ def test_a_named_bootstrap_owner_is_an_owner_path_beside_owners_nobody_can_use(t
         assert runtime.store.get_principal_status(stranded).is_owner
     finally:
         runtime.store.close()
+
+
+def test_a_disabled_bootstrap_account_beside_unusable_owners_is_not_an_owner_path(tmp_path: pathlib.Path) -> None:
+    # The bootstrap owner would make an owner at its next sign-in, but a disabled account is refused first.
+    env = env_for(tmp_path, SELFHOST_BOOTSTRAP_OWNER="token_admin")
+    first = prepare_selfhost(load_selfhost_settings(env))
+    make_account(first.store, OID_A, role="owner")  # stranded: an Entra identity only
+    boot = first.store.create_operator_account(
+        provider_id="google", issuer=acc.GOOGLE_ISSUER, subject="1234567890",
+        status="disabled", reason="operator_disabled",
+    )
+    first.store.close()
+    named = {**env, "SELFHOST_BOOTSTRAP_OWNER": "google:1234567890"}
+    with pytest.raises(SelfhostConfigError) as info:
+        prepare_selfhost(load_selfhost_settings(named))
+    (message,) = info.value.problems
+    assert "no owner can sign in" in message and "SELFHOST_BOOTSTRAP_OWNER is disabled" in message
+    assert "1234567890" not in message
+    # Enabling the account restores the path.
+    again = prepare_selfhost(load_selfhost_settings(env))
+    assert again.store.enable_principal(boot, actor=OPERATOR)
+    again.store.close()
+    ok = prepare_selfhost(load_selfhost_settings(named))
+    ok.store.close()
