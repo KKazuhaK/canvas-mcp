@@ -22,11 +22,13 @@ FAILCLOSED="canvas-mcp-smoke-fc-${SUFFIX}"
 GENERATED="canvas-mcp-smoke-gen-${SUFFIX}"
 REACT="canvas-mcp-smoke-react-${SUFFIX}"
 REACT_BAD="canvas-mcp-smoke-reactbad-${SUFFIX}"
+LOCAL="canvas-mcp-smoke-local-${SUFFIX}"
+LOCAL_REACT="canvas-mcp-smoke-localreact-${SUFFIX}"
 VOLUMES=()
 WORKDIR="$(mktemp -d)"
 
 cleanup() {
-  docker rm -f "$MAIN" "$LEGACY" "$FAILCLOSED" "$GENERATED" "$REACT" "$REACT_BAD" >/dev/null 2>&1 || true
+  docker rm -f "$MAIN" "$LEGACY" "$FAILCLOSED" "$GENERATED" "$REACT" "$REACT_BAD" "$LOCAL" "$LOCAL_REACT" >/dev/null 2>&1 || true
   local v
   for v in "${VOLUMES[@]:-}"; do
     [ -n "$v" ] && docker volume rm -f "$v" >/dev/null 2>&1 || true
@@ -37,7 +39,7 @@ trap cleanup EXIT
 
 dump_logs() {
   local c
-  for c in "$MAIN" "$LEGACY" "$FAILCLOSED" "$GENERATED" "$REACT" "$REACT_BAD"; do
+  for c in "$MAIN" "$LEGACY" "$FAILCLOSED" "$GENERATED" "$REACT" "$REACT_BAD" "$LOCAL" "$LOCAL_REACT"; do
     if docker inspect "$c" >/dev/null 2>&1; then
       echo "----- docker logs ${c} -----" >&2
       docker logs "$c" 2>&1 | tail -n 80 >&2 || true
@@ -355,5 +357,204 @@ docker logs "$REACT_BAD" 2>&1 | grep -q 'serving the legacy /account pages' \
   || fail "the fallback was not logged"
 docker rm -f "$REACT_BAD" >/dev/null
 ok "ACCOUNT_UI=react with a missing build serves the legacy pages and logs it"
+
+# ----------- (m) SELFHOST_AUTH_MODE=local: the server is its own authorization server
+# The default stays entra_proxy (sections b to l). Here the same image, with the same dummy
+# values plus SELFHOST_AUTH_MODE=local, must publish its own metadata, refuse what it should
+# without any sign-in, and not serve the proxy's routes.
+new_volume local
+LOCAL_VOL="$NEW_VOLUME"
+docker run -d --name "$LOCAL" \
+  --read-only --tmpfs /tmp \
+  -v "${LOCAL_VOL}:/data" \
+  "${ENTRA_ENV[@]}" \
+  -e CANVAS_TOKEN_KEYS="$TOKEN_KEYS" \
+  -e SELFHOST_AUTH_MODE=local \
+  -p "127.0.0.1:${PORT}:8819" \
+  "$IMAGE" >/dev/null
+wait_for "$LOCAL" 60 "${BASE}/healthz"
+ok "local mode boots (healthz)"
+
+curl -fsS "${BASE}/.well-known/oauth-authorization-server" -o "$WORKDIR/local-as.json" \
+  || fail "local mode: authorization server metadata not served"
+python3 - "$WORKDIR/local-as.json" "$PUBLIC" <<'PY' || fail "local mode: authorization server metadata has the wrong content"
+import json
+import sys
+
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+public = sys.argv[2]
+assert doc["issuer"] == public + "/", doc.get("issuer")
+assert doc["token_endpoint_auth_methods_supported"] == ["none"], doc.get("token_endpoint_auth_methods_supported")
+assert doc["revocation_endpoint_auth_methods_supported"] == ["none"], doc.get("revocation_endpoint_auth_methods_supported")
+assert doc["revocation_endpoint"] == public + "/revoke", doc.get("revocation_endpoint")
+assert doc["code_challenge_methods_supported"] == ["S256"], doc.get("code_challenge_methods_supported")
+assert doc["authorization_response_iss_parameter_supported"] is True
+assert doc["client_id_metadata_document_supported"] is True
+assert "offline_access" not in doc.get("scopes_supported", [])
+PY
+curl -fsS "${BASE}/.well-known/oauth-protected-resource/mcp" -o "$WORKDIR/local-prm.json" \
+  || fail "local mode: protected resource metadata not served"
+python3 - "$WORKDIR/local-prm.json" "$PUBLIC" <<'PY' || fail "local mode: protected resource metadata has the wrong content"
+import json
+import sys
+
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+public = sys.argv[2]
+assert doc["resource"] == public + "/mcp", doc.get("resource")
+assert doc["authorization_servers"] == [public + "/"], doc.get("authorization_servers")
+PY
+ok "local mode: authorization server and protected resource metadata"
+
+code="$(curl -s -o /dev/null -D "$WORKDIR/local-mcp.headers" -w '%{http_code}' -X POST \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  --data "$INIT_BODY" "${BASE}/mcp")"
+[ "$code" = "401" ] || fail "local mode: POST /mcp without a bearer returned ${code}, expected 401"
+grep -i '^www-authenticate:' "$WORKDIR/local-mcp.headers" \
+  | grep -q "resource_metadata=\"${PUBLIC}/.well-known/oauth-protected-resource/mcp\"" \
+  || fail "local mode: WWW-Authenticate lacks the expected resource_metadata"
+ok "local mode: POST /mcp is 401 with resource_metadata"
+
+UNKNOWN_CLIENT="00000000-0000-4000-8000-000000000000"
+# A registration whose redirect is not on the allow-list is refused; a good one is a public client.
+code="$(curl -s -o "$WORKDIR/local-reg-evil.json" -w '%{http_code}' -X POST \
+  -H 'Content-Type: application/json' \
+  --data '{"client_name":"smoke","redirect_uris":["https://evil.example/cb"],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none"}' \
+  "${BASE}/register")"
+[ "$code" = "400" ] || fail "local mode: /register with an evil redirect returned ${code}, expected 400"
+grep -q 'invalid_redirect_uri' "$WORKDIR/local-reg-evil.json" || fail "local mode: /register did not say invalid_redirect_uri"
+code="$(curl -s -o "$WORKDIR/local-reg.json" -w '%{http_code}' -X POST \
+  -H 'Content-Type: application/json' \
+  --data '{"client_name":"smoke","redirect_uris":["https://claude.ai/api/mcp/auth_callback"],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none"}' \
+  "${BASE}/register")"
+[ "$code" = "201" ] || fail "local mode: /register with an allowed redirect returned ${code}, expected 201"
+KNOWN_CLIENT="$(python3 - "$WORKDIR/local-reg.json" <<'PY' || true
+import json
+import sys
+
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+assert doc.get("client_secret") in (None, ""), "a public client must not get a secret"
+assert doc["token_endpoint_auth_method"] == "none", doc.get("token_endpoint_auth_method")
+print(doc["client_id"])
+PY
+)"
+[ -n "$KNOWN_CLIENT" ] || fail "local mode: /register did not return a public client"
+ok "local mode: /register refuses an evil redirect and registers a public client"
+
+# /revoke: an unknown client is invalid_client (401), a known one needs a token (400), and
+# garbage is answered 200 whatever it is (nothing is revealed).
+code="$(curl -s -o "$WORKDIR/local-revoke1.json" -w '%{http_code}' -X POST \
+  --data-urlencode "token=garbage" "${BASE}/revoke")"
+[ "$code" = "401" ] || fail "local mode: /revoke without a client returned ${code}, expected 401"
+code="$(curl -s -o "$WORKDIR/local-revoke2.json" -w '%{http_code}' -X POST \
+  --data-urlencode "client_id=${UNKNOWN_CLIENT}" --data-urlencode "token=garbage" "${BASE}/revoke")"
+[ "$code" = "401" ] || fail "local mode: /revoke for an unknown client returned ${code}, expected 401"
+grep -q 'invalid_client' "$WORKDIR/local-revoke2.json" || fail "local mode: /revoke did not say invalid_client"
+code="$(curl -s -o "$WORKDIR/local-revoke3.json" -w '%{http_code}' -X POST \
+  --data-urlencode "client_id=${KNOWN_CLIENT}" "${BASE}/revoke")"
+[ "$code" = "400" ] || fail "local mode: /revoke without a token returned ${code}, expected 400"
+code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  --data-urlencode "client_id=${KNOWN_CLIENT}" --data-urlencode "token=garbage" "${BASE}/revoke")"
+[ "$code" = "200" ] || fail "local mode: /revoke of garbage returned ${code}, expected 200"
+ok "local mode: /revoke (invalid_client, 400 without a token, 200 for garbage)"
+
+code="$(curl -s -o "$WORKDIR/local-token.json" -w '%{http_code}' -X POST \
+  --data-urlencode "grant_type=authorization_code" --data-urlencode "code=cmcp_ac_nope" \
+  --data-urlencode "client_id=${UNKNOWN_CLIENT}" \
+  --data-urlencode "redirect_uri=https://claude.ai/api/mcp/auth_callback" \
+  --data-urlencode "code_verifier=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "${BASE}/token")"
+[ "$code" = "401" ] || fail "local mode: /token for an unknown client returned ${code}, expected 401"
+grep -q 'invalid_client' "$WORKDIR/local-token.json" || fail "local mode: /token did not say invalid_client"
+ok "local mode: /token for an unknown client is invalid_client (401)"
+
+# An unknown client is shown an error, never redirected anywhere.
+code="$(curl -s -o /dev/null -D "$WORKDIR/local-authorize.headers" -w '%{http_code}' -G \
+  --data-urlencode "response_type=code" --data-urlencode "client_id=${UNKNOWN_CLIENT}" \
+  --data-urlencode "redirect_uri=https://claude.ai/api/mcp/auth_callback" \
+  --data-urlencode "code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM" \
+  --data-urlencode "code_challenge_method=S256" --data-urlencode "state=smoke" \
+  "${BASE}/authorize")"
+[ "$code" = "400" ] || fail "local mode: /authorize for an unknown client returned ${code}, expected 400"
+if grep -qi '^location:' "$WORKDIR/local-authorize.headers"; then
+  fail "local mode: /authorize for an unknown client redirected"
+fi
+ok "local mode: /authorize for an unknown client is a 400 without a redirect"
+
+# A sign-in request that does not exist (or is not this browser's) is refused before Microsoft.
+code="$(curl -s -o "$WORKDIR/local-login.html" -D "$WORKDIR/local-login.headers" -w '%{http_code}' "${BASE}/account/login?txn=bogus")"
+[ "$code" = "400" ] || fail "local mode: /account/login?txn=bogus returned ${code}, expected 400"
+if grep -qi '^location:' "$WORKDIR/local-login.headers"; then
+  fail "local mode: /account/login?txn=bogus redirected"
+fi
+grep -q 'opened in another browser' "$WORKDIR/local-login.html" \
+  || fail "local mode: /account/login?txn=bogus did not explain itself"
+ok "local mode: /account/login?txn=bogus is a 400 and never reaches Microsoft"
+
+# The proxy's own routes are not served.
+for path in /consent /auth/callback /.well-known/openid-configuration; do
+  code="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}${path}")"
+  [ "$code" = "404" ] || fail "local mode: GET ${path} returned ${code}, expected 404"
+done
+ok "local mode: /consent, /auth/callback and the OpenID metadata are not served"
+docker rm -f "$LOCAL" >/dev/null
+
+# ---- (m2) local mode with the React UI and CIMD off: the API, the consent route, the metadata
+new_volume localreact
+LOCAL_REACT_VOL="$NEW_VOLUME"
+docker run -d --name "$LOCAL_REACT" \
+  --read-only --tmpfs /tmp \
+  -v "${LOCAL_REACT_VOL}:/data" \
+  "${ENTRA_ENV[@]}" \
+  -e CANVAS_TOKEN_KEYS="$TOKEN_KEYS" \
+  -e SELFHOST_AUTH_MODE=local \
+  -e ACCOUNT_UI=react \
+  -e CIMD_ENABLED=false \
+  -p "127.0.0.1:${PORT}:8819" \
+  "$IMAGE" >/dev/null
+wait_for "$LOCAL_REACT" 60 "${BASE}/healthz"
+curl -fsS "${BASE}/.well-known/oauth-authorization-server" -o "$WORKDIR/local-as-nocimd.json" \
+  || fail "local mode (CIMD off): authorization server metadata not served"
+python3 - "$WORKDIR/local-as-nocimd.json" <<'PY' || fail "local mode (CIMD off): metadata still advertises client metadata documents"
+import json
+import sys
+
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+assert "client_id_metadata_document_supported" not in doc, doc
+assert doc["token_endpoint_auth_methods_supported"] == ["none"]
+PY
+ok "local mode (CIMD off): the metadata does not advertise client metadata documents"
+
+code="$(curl -s -o /dev/null -D "$WORKDIR/local-react-login.headers" -w '%{http_code}' "${BASE}/account/login?txn=bogus")"
+[ "$code" = "303" ] || fail "local mode (react): /account/login?txn=bogus returned ${code}, expected 303"
+tr -d '\r' <"$WORKDIR/local-react-login.headers" | grep -i '^location:' | grep -q '/account/sign-in?error=authorization_invalid' \
+  || fail "local mode (react): a request that is not this browser's did not end on the sign-in page with authorization_invalid"
+ok "local mode (react): a bad sign-in request ends on /account/sign-in?error=authorization_invalid"
+
+TXN="$(printf 'A%.0s' $(seq 1 43))"
+code="$(curl -s -o "$WORKDIR/local-consent.html" -w '%{http_code}' "${BASE}/account/consent?txn=${TXN}")"
+[ "$code" = "200" ] || fail "local mode (react): /account/consent returned ${code}, expected 200 (the app)"
+grep -q 'id="root"' "$WORKDIR/local-consent.html" || fail "local mode (react): /account/consent is not the single-page app"
+if grep -q 'name="decision"' "$WORKDIR/local-consent.html"; then
+  fail "local mode (react): /account/consent is a server-rendered form"
+fi
+for path in "/account/api/consent/${TXN}" /account/api/me/grants; do
+  code="$(curl -s -o "$WORKDIR/local-api.json" -w '%{http_code}' "${BASE}${path}")"
+  [ "$code" = "401" ] || fail "local mode (react): GET ${path} without a session returned ${code}, expected 401"
+  grep -q 'not_authenticated' "$WORKDIR/local-api.json" || fail "local mode (react): ${path} did not answer not_authenticated"
+done
+ok "local mode (react): the consent screen is the app, and its API wants a session"
+docker rm -f "$LOCAL_REACT" >/dev/null
+
+# ------------------------------------------ (n) an unknown SELFHOST_AUTH_MODE fails closed
+new_volume fc3
+FC_VOL3="$NEW_VOLUME"
+expect_refusal "SELFHOST_AUTH_MODE=bogus" \
+  docker run --name "$FAILCLOSED" --read-only --tmpfs /tmp -v "${FC_VOL3}:/data" \
+  "${ENTRA_ENV[@]}" -e CANVAS_TOKEN_KEYS="$TOKEN_KEYS" -e SELFHOST_AUTH_MODE=bogus "$IMAGE"
+new_volume fc4
+FC_VOL4="$NEW_VOLUME"
+expect_refusal "SELFHOST_AUTH_MODE=local with ACCESS_TOKEN_TTL=1" \
+  docker run --name "$FAILCLOSED" --read-only --tmpfs /tmp -v "${FC_VOL4}:/data" \
+  "${ENTRA_ENV[@]}" -e CANVAS_TOKEN_KEYS="$TOKEN_KEYS" -e SELFHOST_AUTH_MODE=local -e ACCESS_TOKEN_TTL=1 "$IMAGE"
 
 echo "SMOKE TEST PASSED"

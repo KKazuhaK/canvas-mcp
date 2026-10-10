@@ -237,8 +237,24 @@ def test_smoke_test_script_is_wired_for_the_documented_contract():
         # ...and the fallback to the legacy pages when the build is not usable.
         "ACCOUNT_WEB_DIST=/nonexistent",
         "serving the legacy /account pages",
+        # SELFHOST_AUTH_MODE=local: the server's own authorization server.
+        "SELFHOST_AUTH_MODE=local",
+        "token_endpoint_auth_methods_supported",
+        "authorization_response_iss_parameter_supported",
+        "revocation_endpoint",
+        "/revoke",
+        "invalid_client",
+        "invalid_redirect_uri",
+        "/account/login?txn=bogus",
+        "authorization_invalid",
+        "SELFHOST_AUTH_MODE=bogus",
+        "CIMD_ENABLED=false",
     ):
         assert needle in script, f"smoke-test.sh is missing {needle!r}"
+    # the new containers are cleaned up and their logs dumped on failure
+    for name in ("LOCAL", "LOCAL_REACT"):
+        assert f'"${name}"' in script.split("dump_logs()", 1)[1].split("fail()", 1)[0]
+        assert f'"${name}"' in script.split("cleanup()", 1)[1].split("trap cleanup", 1)[0]
 
 
 def test_smoke_test_frees_the_published_port_between_sections():
@@ -264,7 +280,7 @@ def test_smoke_test_frees_the_published_port_between_sections():
         )
         running = run.group(1)
         started += 1
-    assert started >= 5
+    assert started >= 7
 
 
 
