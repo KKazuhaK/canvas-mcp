@@ -33,6 +33,7 @@ def test_local_entra_only_summary_is_the_same_apart_from_the_authz_line() -> Non
     local = _selfhost_summary(load_selfhost_settings(env()))
     assert not any("Sign-in providers" in line for line in local)
     assert any(line.startswith("  Entra tenant: ") for line in local)
+    assert any(line.startswith("  Roles: user=") for line in local)
 
 
 def test_multi_provider_summary_names_providers_and_no_secret() -> None:
@@ -56,4 +57,5 @@ def test_without_entra_the_tenant_and_client_lines_are_omitted() -> None:
     )
     text = "\n".join(_selfhost_summary(settings))
     assert "Entra tenant" not in text and "Entra client" not in text
+    assert "Roles:" not in text  # the Entra app roles mean nothing without Entra
     assert "Sign-in providers: google" in text

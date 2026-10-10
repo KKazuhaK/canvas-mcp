@@ -635,6 +635,12 @@ def _selfhost_summary(settings: SelfhostSettings) -> list[str]:
         if settings.entra_enabled
         else []
     )
+    # The Entra app roles mean something only while Entra signs people in.
+    role_lines = (
+        [f"  Roles: user={settings.required_role}, owner={settings.owner_role}"]
+        if settings.entra_enabled
+        else []
+    )
     return [
         f"  Auth mode: {AUTH_MODE_ENTRA}",
         f"  Public URL: {settings.public_base_url}",
@@ -645,7 +651,7 @@ def _selfhost_summary(settings: SelfhostSettings) -> list[str]:
         *_providers_summary(settings),
         *entra_lines,
         f"  API scope: {settings.api_scope}",
-        f"  Roles: user={settings.required_role}, owner={settings.owner_role}",
+        *role_lines,
         f"  Account session lifetime: {settings.account_session_ttl_seconds}s",
         f"  Token store: {settings.database_target.description}",
         "  Database migrations: "
