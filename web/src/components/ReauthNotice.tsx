@@ -4,6 +4,7 @@ import Button from '@mui/material/Button'
 import { useTranslation } from 'react-i18next'
 import { useLocation } from 'react-router'
 import { LOGIN_PATH, signInUrl } from '@/api/endpoints'
+import { useProviders } from '@/query/hooks'
 import { hardNavigate } from '@/utils/navigate'
 import { SITE_BASE, sanitizeReturnTo } from '@/utils/returnTo'
 
@@ -13,18 +14,23 @@ import { SITE_BASE, sanitizeReturnTo } from '@/utils/returnTo'
  * back to this page. It is a button, not an automatic redirect: a redirect would
  * throw away what the person was in the middle of, and a session that never counts
  * as fresh could loop.
+ *
+ * With several sign-in providers the trip asks for `reauth`, so the server's chooser stays
+ * open for a person who is already signed in (Entra alone goes straight to the provider).
  */
 export default function ReauthNotice() {
   const { t } = useTranslation()
   const location = useLocation()
   const here = `${SITE_BASE}${location.pathname === '/' ? '' : location.pathname}${location.search}`
   const returnTo = sanitizeReturnTo(here)
+  const providers = useProviders().data?.providers
+  const reauth = (providers?.length ?? 0) > 1
   return (
     <Alert
       severity="warning"
       role="alert"
       action={
-        <Button color="inherit" size="small" onClick={() => hardNavigate(signInUrl(LOGIN_PATH, returnTo))}>
+        <Button color="inherit" size="small" onClick={() => hardNavigate(signInUrl(LOGIN_PATH, { returnTo, reauth }))}>
           {t('common:actions.signInAgain')}
         </Button>
       }

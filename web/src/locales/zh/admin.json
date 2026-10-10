@@ -75,7 +75,18 @@
     "noUsername": "无用户名",
     "neverLoggedIn": "从未",
     "disabledSince": "停用于",
-    "empty": "没有符合条件的账户。"
+    "empty": "没有符合条件的账户。",
+    "identities": {
+      "title": "登录方式",
+      "unlink": "移除",
+      "unlinkLabel": "从 {{name}} 移除 {{provider}}",
+      "confirmTitle": "从 {{name}} 移除 {{provider}}？",
+      "confirmBody": "对方保留其他登录方式，但其所有浏览器会话都会结束。已连接的应用不会断开；如果账号可能已泄露，请另外结束它们。",
+      "done": "已移除登录方式。",
+      "issuer": "签发方",
+      "linked": "关联时间",
+      "lastSignIn": "最近登录"
+    }
   },
   "enrollments": {
     "title": "Canvas 令牌绑定",

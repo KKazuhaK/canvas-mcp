@@ -78,6 +78,18 @@ export const deleteWriteTools = () => call('DELETE /me/write-tools')
 
 export const getLoginHistory = () => call('GET /me/login-history')
 
+// ---- sign-in methods (two or more providers) ------------------------------------------
+
+export const getIdentities = () => call('GET /me/identities')
+
+/** Starts a link: the answer is the provider's page (https), to be navigated to as it is. */
+export const startLink = (provider: string) =>
+  call('POST /me/identities/link', { body: { provider } })
+
+export const unlinkIdentity = (id: string) => call('DELETE /me/identities/{id}', { id })
+
+export const adminUnlinkIdentity = (id: string) => call('DELETE /admin/identities/{id}', { id })
+
 export async function putUiLocale(locale: UiLocale): Promise<void> {
   await call('PUT /me/ui-locale', { body: { locale } })
 }
@@ -143,13 +155,31 @@ export const adminRevokeGrant = (id: string) => call('DELETE /admin/grants/{id}'
 /** The server-side OIDC start (a full-page navigation, never an XHR). */
 export const LOGIN_PATH = '/account/login'
 
+export interface SignInUrlOptions {
+  /** A validated same-site return address (utils/returnTo). */
+  returnTo?: string | null
+  /** A waiting app's request id (utils/appRedirect TXN_PATTERN); the server checks it again. */
+  txn?: string | null
+  /** "Use a different account": force the provider to ask again. */
+  reauth?: boolean
+}
+
 /**
- * Where the SPA sends a person to sign in: the server-side OIDC redirect
- * (`start_url` from GET /providers, /account/login). It is a full-page
- * navigation, never an XHR. `returnTo` must already be validated (utils/returnTo);
- * the server validates it again.
+ * Where the SPA sends a person to sign in: the server-side redirect (`start_url` from
+ * GET /providers). It is a full-page navigation, never an XHR. A bare string is a
+ * `returnTo`, which must already be validated (utils/returnTo); the server validates it
+ * again, and a request id only counts for a request started in this browser.
  */
-export function signInUrl(startUrl: string, returnTo?: string | null): string {
-  if (!returnTo) return startUrl
-  return `${startUrl}?${new URLSearchParams({ return_to: returnTo }).toString()}`
+export function signInUrl(
+  startUrl: string,
+  options?: SignInUrlOptions | string | null,
+): string {
+  const opts: SignInUrlOptions =
+    typeof options === 'string' ? { returnTo: options } : (options ?? {})
+  const query = new URLSearchParams()
+  if (opts.txn) query.set('txn', opts.txn)
+  if (opts.reauth) query.set('reauth', '1')
+  if (opts.returnTo) query.set('return_to', opts.returnTo)
+  const text = query.toString()
+  return text ? `${startUrl}?${text}` : startUrl
 }

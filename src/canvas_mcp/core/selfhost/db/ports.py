@@ -245,7 +245,7 @@ class IdentityRepo(Protocol):
 
     def for_account(self, conn: Connection, account_id: str) -> list[Row]:
         """``(provider_id, issuer, subject, username, email, email_verified, linked_at,
-        last_login_at)``, oldest first."""
+        last_login_at, id)``, oldest first."""
 
     def list_with_ids(self, conn: Connection, account_id: str) -> list[Row]:
         """``(id, provider_id, issuer, subject, username, email, email_verified, linked_at,
@@ -256,6 +256,9 @@ class IdentityRepo(Protocol):
     ) -> Row | None:
         """The same columns as :meth:`list_with_ids` if the identity belongs to the account."""
 
+    def account_of(self, conn: Connection, identity_id: int) -> str | None:
+        """The account id an identity row belongs to, or None."""
+
     def count_for_account(self, conn: Connection, account_id: str) -> int: ...
 
     def count_for_provider(self, conn: Connection, account_id: str, provider_id: str) -> int: ...
@@ -264,7 +267,8 @@ class IdentityRepo(Protocol):
         """Delete an identity of the account; True if a row was removed."""
 
     def all(self, conn: Connection) -> list[Row]:
-        """``(account_id, provider_id, issuer, subject, username)`` of every identity."""
+        """``(account_id, provider_id, issuer, subject, username, linked_at, last_login_at, id)``
+        of every identity."""
 
     def delete_for_accounts(self, conn: Connection, account_ids: Sequence[str]) -> None: ...
 

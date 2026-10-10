@@ -636,6 +636,7 @@ class SqlIdentityRepo:
                 _ei.c.email_verified,
                 _ei.c.linked_at,
                 _ei.c.last_login_at,
+                _ei.c.id,
             )
             .where(_ei.c.account_id == account_id)
             .order_by(_ei.c.id)
@@ -672,6 +673,11 @@ class SqlIdentityRepo:
         )
         return conn.execute(_for_update(stmt, for_update)).one_or_none()
 
+    def account_of(self, conn: Connection, identity_id: int) -> str | None:
+        stmt = select(_ei.c.account_id).where(_ei.c.id == identity_id)
+        value = conn.execute(stmt).scalar_one_or_none()
+        return None if value is None else str(value)
+
     def count_for_account(self, conn: Connection, account_id: str) -> int:
         stmt = select(func.count()).select_from(_ei).where(_ei.c.account_id == account_id)
         return int(conn.execute(stmt).scalar_one())
@@ -692,7 +698,14 @@ class SqlIdentityRepo:
 
     def all(self, conn: Connection) -> list[Row]:
         stmt = select(
-            _ei.c.account_id, _ei.c.provider_id, _ei.c.issuer, _ei.c.subject, _ei.c.username
+            _ei.c.account_id,
+            _ei.c.provider_id,
+            _ei.c.issuer,
+            _ei.c.subject,
+            _ei.c.username,
+            _ei.c.linked_at,
+            _ei.c.last_login_at,
+            _ei.c.id,
         ).order_by(_ei.c.id)
         return list(conn.execute(stmt).all())
 

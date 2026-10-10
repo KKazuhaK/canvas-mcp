@@ -445,6 +445,8 @@ class IdentityInfo:
     email_verified: bool
     linked_at: int
     last_login_at: int | None
+    #: The row id an unlink names (0 when the reader did not select it).
+    id: int = 0
 
     @property
     def legacy_key(self) -> str | None:
@@ -1476,8 +1478,9 @@ class TokenStore:
                     username=i[4] or "",
                     email=None,
                     email_verified=False,
-                    linked_at=0,
-                    last_login_at=None,
+                    linked_at=int(i[5]),
+                    last_login_at=i[6],
+                    id=int(i[7]),
                 )
                 for i in by_account.get(row[0], [])
             )
@@ -1491,7 +1494,7 @@ class TokenStore:
         with self._db.read() as conn:
             rows = self._repos.identities.for_account(conn, account_id)
         return [
-            IdentityInfo(r[0], r[1], r[2], r[3] or "", r[4], bool(r[5]), int(r[6]), r[7])
+            IdentityInfo(r[0], r[1], r[2], r[3] or "", r[4], bool(r[5]), int(r[6]), r[7], int(r[8]))
             for r in rows
         ]
 
@@ -1503,6 +1506,12 @@ class TokenStore:
         with self._db.read() as conn:
             rows = self._repos.identities.list_with_ids(conn, account_id)
         return [_linked_from_row(r) for r in rows]
+
+    def identity_account(self, identity_id: int) -> str | None:
+        """The account key an identity row belongs to (None for an unknown id)."""
+        with self._db.read() as conn:
+            account_id = self._repos.identities.account_of(conn, identity_id)
+        return None if account_id is None else acc.account_key_of(account_id)
 
     def count_active_owners(self) -> int:
         with self._db.read() as conn:

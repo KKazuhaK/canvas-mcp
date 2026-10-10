@@ -7,6 +7,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { AdminAccount, AdminStatusFilter } from '@/api/types'
 import AccountApps from '@/components/admin/AccountApps'
+import AccountIdentities from '@/components/admin/AccountIdentities'
 import AdminActions from '@/components/admin/AdminActions'
 import ErrorNotice from '@/components/ErrorNotice'
 import ResponsiveTable, { type Column } from '@/components/ResponsiveTable'
@@ -54,6 +55,7 @@ function Details({ account }: { account: AdminAccount }) {
           <TimeText iso={account.approved_at} />
         </Typography>
       </Box>
+      <AccountIdentities account={account} />
     </Box>
   )
 }

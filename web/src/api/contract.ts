@@ -12,6 +12,8 @@ import type {
   ConsentResponse,
   GrantRevokeResponse,
   GrantsResponse,
+  IdentitiesResponse,
+  LinkStartResponse,
   LoginHistoryResponse,
   MeResponse,
   ProvidersResponse,
@@ -19,6 +21,7 @@ import type {
   SchoolSearchResponse,
   SchoolsResponse,
   UiLocale,
+  UnlinkResponse,
   WriteToolsResponse,
   WriteToolsSavedResponse,
 } from './types'
@@ -60,6 +63,12 @@ export interface Contract {
   'POST /admin/enrollments/{id}/mark-invalid': { response: AdminActionResponse }
   'DELETE /admin/enrollments/{id}': { response: AdminActionResponse }
   'GET /admin/audit': { query: { before?: string }; response: AdminAuditResponse }
+  // Only with two or more sign-in providers: the server answers not_found for these
+  // otherwise, and GET /me `features.identities` says so. `{id}` is an identity's decimal id.
+  'GET /me/identities': { response: IdentitiesResponse }
+  'POST /me/identities/link': { body: { provider: string }; response: LinkStartResponse }
+  'DELETE /me/identities/{id}': { response: UnlinkResponse }
+  'DELETE /admin/identities/{id}': { response: AdminActionResponse }
   // Only with the server's own authorization server (SELFHOST_AUTH_MODE=local): the
   // server answers not_found for these otherwise, and GET /me `features` says so.
   // `{id}` is a connection's id or an account id. The consent request id travels in the query

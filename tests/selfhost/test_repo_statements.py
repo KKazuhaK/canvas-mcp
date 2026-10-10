@@ -124,6 +124,7 @@ def _run_everything(dialect: Any, name: str) -> list[tuple[str, dict[str, Any]]]
     )
     repos.identities.list_with_ids(conn, ACCOUNT_ID)
     repos.identities.get_for_account(conn, 7, ACCOUNT_ID, for_update=True)
+    repos.identities.account_of(conn, 7)
     repos.identities.count_for_account(conn, ACCOUNT_ID)
     repos.identities.count_for_provider(conn, ACCOUNT_ID, "github")
     repos.identities.delete_one(conn, 7, ACCOUNT_ID)

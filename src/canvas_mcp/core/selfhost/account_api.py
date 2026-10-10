@@ -22,9 +22,11 @@ It serves the single-page UI with the data and the actions the server-rendered
   {"code": ..., "params": {...}}}``). No body ever holds Entra text, Canvas text, a
   token or an exception message.
 
-Only the features that exist are served. Linked identities are not (yet) served by this API,
-although the server-rendered pages manage them when several sign-in providers are configured
-(:mod:`.login.linking`); ``GET /me`` says so in ``features``. The consent screen and the connected apps (``/consent``,
+Only the features that exist are served. Linked sign-in methods (``/me/identities``,
+``/admin/identities``) belong to a server with two or more sign-in providers
+(:mod:`.login.linking`; local authorization mode only): the routes are always in the table, but
+every one answers ``not_found`` before any other check otherwise, and ``GET /me`` says so in
+``features``. The consent screen and the connected apps (``/consent``,
 ``/me/grants``, ``/admin/accounts/{id}/grants``, ``/admin/grants/{id}``) belong to the
 server's own authorization server (``SELFHOST_AUTH_MODE=local``): the routes are always in
 the route table (the web app and the server must list the same ones), but every one of them
@@ -53,7 +55,7 @@ from starlette.responses import Response
 from starlette.routing import Route
 
 from canvas_mcp.core.selfhost import account_web as web
-from canvas_mcp.core.selfhost.account_ops import Refusal, WriteToolsSnapshot
+from canvas_mcp.core.selfhost.account_ops import Refusal, Unlinked, WriteToolsSnapshot
 from canvas_mcp.core.selfhost.accounts import PROVIDER_ENTRA, valid_account_key
 from canvas_mcp.core.selfhost.schools import (
     MAX_QUERY_CHARS,
@@ -169,8 +171,17 @@ _FIELD_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _AUDIT_ACTION_RE = re.compile(r"^[a-z_]{1,64}$")
 _LOCALES = ("en", "zh")
 _HISTORY_REASONS = frozenset(
-    {"account_created", "activated", "access_disabled", "signups_paused", "pending_approval"}
+    {
+        "account_created",
+        "activated",
+        "access_disabled",
+        "signups_paused",
+        "pending_approval",
+        "identity_linked",
+    }
 )
+_IDENTITY_ID_RE = re.compile(r"^[1-9][0-9]{0,17}$")
+_PROVIDER_FIELD_RE = re.compile(r"^[a-z][a-z0-9:-]{0,63}$")
 _DISABLED_REASONS = frozenset({DISABLE_REASON_ADMIN, DISABLE_REASON_OPERATOR, DISABLE_REASON_DENIED})
 _ADMIN_STATUSES = ("active", "pending", "disabled")
 _TXN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
@@ -320,6 +331,8 @@ class _Endpoint:
     body: BodyKind = "none"
     #: Served only with the local authorization server; ``not_found`` otherwise, before any other check.
     local_authz: bool = False
+    #: Served only with two or more sign-in providers; ``not_found`` otherwise, before any other check.
+    linking: bool = False
 
 
 class ApiApp:
@@ -392,6 +405,32 @@ class ApiApp:
                 {"DELETE": e(self.admin_remove_enrollment, access="owner", mutating=True, body="empty")},
             ),
             (f"{API_PREFIX}/admin/audit", {"GET": e(self.admin_audit, access="owner")}),
+            # Two or more sign-in providers only (not_found otherwise).
+            (f"{API_PREFIX}/me/identities", {"GET": e(self.my_identities, linking=True)}),
+            (
+                f"{API_PREFIX}/me/identities/link",
+                {"POST": e(self.link_identity, mutating=True, body="json", linking=True)},
+            ),
+            (
+                f"{API_PREFIX}/me/identities/{{id}}",
+                {
+                    "DELETE": e(
+                        self.unlink_my_identity, mutating=True, body="empty", linking=True
+                    )
+                },
+            ),
+            (
+                f"{API_PREFIX}/admin/identities/{{id}}",
+                {
+                    "DELETE": e(
+                        self.admin_unlink_identity,
+                        access="owner",
+                        mutating=True,
+                        body="empty",
+                        linking=True,
+                    )
+                },
+            ),
             # SELFHOST_AUTH_MODE=local only (not_found otherwise).
             (
                 f"{API_PREFIX}/consent",
@@ -477,6 +516,8 @@ class ApiApp:
         if self.app.authz is None and any(e.local_authz for e in endpoints.values()):
             # Not served in this mode: as if the path did not exist, for any method.
             raise _Fail("not_found")
+        if self._linking_off() and any(e.linking for e in endpoints.values()):
+            raise _Fail("not_found")
         endpoint = endpoints.get(request.method)
         if endpoint is None:
             raise _Fail("method_not_allowed", headers={"Allow": ", ".join(sorted(endpoints))})
@@ -500,6 +541,10 @@ class ApiApp:
                 raise _Fail("malformed_request")
         ctx = _Ctx(request, session, body, request.path_params)
         return await endpoint.handler(ctx)
+
+    def _linking_off(self) -> bool:
+        logins = self.app.logins
+        return logins is None or not logins.linking_enabled
 
     async def _session(self, request: Request) -> web._Session:
         try:
@@ -758,9 +803,8 @@ class ApiApp:
                     "school_search": (not pending) and app.schools.search_enabled,
                     "write_tools": (not pending) and app.write_tools is not None,
                     "admin": session.owner,
-                    # The identities routes arrive with the single-page UI's Sign-in methods
-                    # screen; until then the flag stays false (the server-rendered pages do it).
-                    "identities": False,
+                    # Two or more sign-in providers: the Sign-in methods screen.
+                    "identities": (not pending) and not self._linking_off(),
                     # Local authorization server only (see the module docstring). A waiting
                     # account is still told so; its own screens and the API refuse it.
                     "connected_apps": app.authz is not None,
@@ -1078,6 +1122,28 @@ class ApiApp:
             else None,
             "enrollment": self._enrollment_view(row) if row is not None else None,
             "actions": self._actions(key, session.acct, row, status),
+            **self._identities_view(identities),
+        }
+
+    def _identities_view(self, identities: Sequence[Any]) -> dict[str, Any]:
+        """Every sign-in method of an account (only when providers beyond Entra are configured)."""
+        if self.app.logins is None:
+            return {}
+        many = len(identities) > 1 and not self._linking_off()
+        return {
+            "identities": [
+                {
+                    "id": str(i.id),
+                    "provider_id": i.provider_id,
+                    "username": _clean(i.username, 254),
+                    "subject": _clean(i.subject, 255),
+                    "issuer": _clean(i.issuer, 255),
+                    "linked_at": _ts(i.linked_at),
+                    "last_login_at": _ts(i.last_login_at),
+                    "can_unlink": many and i.id > 0,
+                }
+                for i in identities
+            ]
         }
 
     async def admin_accounts(self, ctx: _Ctx) -> Response:
@@ -1410,6 +1476,105 @@ class ApiApp:
         if isinstance(outcome, Refusal):
             raise _refusal_to_fail(outcome)
         return self._ok({"changed": outcome})
+
+    # -- sign-in methods (two or more providers) ---------------------------------------------------
+
+    @staticmethod
+    def _identity_id(ctx: _Ctx) -> int:
+        raw = ctx.params.get("id", "")
+        if not _IDENTITY_ID_RE.fullmatch(raw):
+            raise _invalid("id")
+        return int(raw)
+
+    def _apply_unlink_cookie(
+        self, response: Response, session: web._Session, outcome: Unlinked
+    ) -> None:
+        """Clear the caller's session cookie, or re-issue it under the new session epoch."""
+        if outcome.signed_out:
+            self.app.clear_cookie(response, web.SESSION_COOKIE)
+        elif outcome.session_cookie is not None:
+            response.set_cookie(
+                web.SESSION_COOKIE,
+                outcome.session_cookie,
+                max_age=max(1, int(session.exp - self.app.clock())),
+                **self.app._cookie_kwargs(),
+            )
+
+    async def my_identities(self, ctx: _Ctx) -> Response:
+        session = ctx.session
+        assert session is not None
+        views = await self.app.list_own_identities(session)
+        if isinstance(views, Refusal):
+            raise _refusal_to_fail(views)
+        logins = self.app.logins
+        assert logins is not None
+        linked = {v.provider_id for v in views}
+        return self._ok(
+            {
+                "identities": [
+                    {
+                        "id": str(v.id),
+                        "provider_id": v.provider_id,
+                        "username": _clean(v.username, 254),
+                        "email": _clean(v.email, 254) if v.email else None,
+                        "email_verified": bool(v.email and v.email_verified),
+                        "linked_at": _ts(v.linked_at),
+                        "last_login_at": _ts(v.last_login_at),
+                        "current": v.current,
+                        "can_unlink": v.can_unlink,
+                    }
+                    for v in views
+                ],
+                "linkable": [e.id for e in logins.entries() if e.id not in linked],
+                "fresh": self.app._signed_in_recently(session),
+                "fresh_window_s": FRESH_WINDOW_SECONDS,
+            }
+        )
+
+    async def link_identity(self, ctx: _Ctx) -> Response:
+        session = ctx.session
+        body = ctx.body
+        assert session is not None and body is not None
+        _closed(body, required=("provider",))
+        provider = body["provider"]
+        if not isinstance(provider, str) or not _PROVIDER_FIELD_RE.fullmatch(provider):
+            raise _invalid("provider")
+        outcome = await self.app.start_link(session, provider)
+        if isinstance(outcome, Refusal):
+            raise _refusal_to_fail(outcome)
+        response = self._ok({"redirect_to": outcome.url})
+        response.set_cookie(
+            outcome.cookie_name,
+            outcome.cookie_value,
+            max_age=outcome.max_age,
+            **self.app._cookie_kwargs(),
+        )
+        return response
+
+    async def unlink_my_identity(self, ctx: _Ctx) -> Response:
+        session = ctx.session
+        assert session is not None
+        outcome = await self.app.unlink_own_identity(session, self._identity_id(ctx))
+        if isinstance(outcome, Refusal):
+            raise _refusal_to_fail(outcome)
+        response = self._ok({"signed_out": outcome.signed_out})
+        self._apply_unlink_cookie(response, session, outcome)
+        return response
+
+    async def admin_unlink_identity(self, ctx: _Ctx) -> Response:
+        session = ctx.session
+        assert session is not None
+        identity_id = self._identity_id(ctx)
+        target = await anyio.to_thread.run_sync(self.app.store.identity_account, identity_id)
+        if target is None:
+            raise _Fail("not_found")
+        outcome = await self.app.owner_unlink_identity(session, target, identity_id)
+        if isinstance(outcome, Refusal):
+            raise _refusal_to_fail(outcome)
+        response = await self._admin_result(ctx, target, True)
+        if target == session.acct:
+            self._apply_unlink_cookie(response, session, outcome)
+        return response
 
 
 def build_api_routes(app: web._AccountApp) -> list[Route]:

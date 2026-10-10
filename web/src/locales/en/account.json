@@ -206,7 +206,8 @@
       "activated": "Account approved",
       "access_disabled": "Access turned off",
       "signups_paused": "Sign-ups paused",
-      "pending_approval": "Waiting for approval"
+      "pending_approval": "Waiting for approval",
+      "identity_linked": "Sign-in method added"
     },
     "empty": "No sign-ins recorded yet.",
     "sessionsTitle": "Session",
@@ -253,5 +254,32 @@
     "pendingBody": "Your account is waiting for the server owner to approve it, so you cannot connect apps yet. You can cancel this request.",
     "errorTitle": "This request cannot be used",
     "decisionFailed": "Your answer could not be sent to the app. Nothing was granted."
+  },
+  "methods": {
+    "title": "Sign-in methods",
+    "intro": "The accounts you can use to sign in to this Canvas account. A method is only added when you prove you control it; accounts are never merged by e-mail address.",
+    "columns": {
+      "provider": "Provider",
+      "account": "Account",
+      "linked": "Linked",
+      "lastSignIn": "Last sign-in",
+      "actions": "Actions"
+    },
+    "current": "This sign-in",
+    "verified": "verified e-mail",
+    "never": "Never",
+    "unlink": "Unlink",
+    "unlinkLabel": "Unlink: {{name}}",
+    "unlinkTitle": "Unlink {{name}}?",
+    "unlinkBody": "This sign-in method stops working for your account and every browser session of your account ends, so other devices have to sign in again. Connected apps stay connected; end them under Connected apps if you need to.",
+    "unlinkCurrent": "You are using this method right now, so you will be signed out.",
+    "unlinked": "Sign-in method removed.",
+    "link": "Link {{name}}",
+    "addTitle": "Add a sign-in method",
+    "addBody": "You are taken to the provider to confirm it is you, then come back here. An account that already belongs to another user of this server cannot be added.",
+    "linkedDone": "Sign-in method added.",
+    "linkFailed": "The sign-in method was not added",
+    "lastOne": "An account must keep at least one sign-in method.",
+    "effects": "Removing a sign-in method ends all of your browser sessions. Connected apps stay connected; end them under Connected apps."
   }
 }
