@@ -1,11 +1,20 @@
-"""The FastMCP OAuth provider that signs MCP clients in through Entra ID."""
+"""The authorization server behind the MCP endpoint.
+
+Two modes (``SELFHOST_AUTH_MODE``):
+
+* ``entra_proxy`` (the default): FastMCP's OAuth proxy signs MCP clients in through
+  Entra ID (:func:`build_entra_auth_provider`, unchanged).
+* ``local``: this server is its own authorization server
+  (:class:`~canvas_mcp.core.selfhost.authz.server.LocalAuthorizationServer`); the sign-in
+  is the ``/account`` Entra sign-in and nothing here touches ``FASTMCP_HOME``.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import weakref
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cryptography.fernet import Fernet
 from fastmcp.server.auth.jwt_issuer import derive_jwt_key
@@ -20,6 +29,11 @@ from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 from key_value.aio.wrappers.ttl_clamp import TTLClampWrapper
 
 from .settings import SelfhostSettings
+
+if TYPE_CHECKING:
+    from fastmcp.server.auth import AuthProvider
+
+    from .app import SelfhostRuntime
 
 # How long a dynamically registered client (POST /register) is remembered.
 # FastMCP stores these records with no lifetime at all, and anyone on the
@@ -119,6 +133,21 @@ def build_entra_auth_provider(settings: SelfhostSettings) -> AzureProvider:
     )
     _STORES[provider] = storage
     return provider
+
+
+def build_auth_provider(settings: SelfhostSettings, runtime: SelfhostRuntime) -> AuthProvider:
+    """The provider for the configured mode.
+
+    ``entra_proxy`` builds the FastMCP proxy exactly as before. ``local`` builds our own
+    authorization server over the runtime's database; no ``AzureProvider`` and no
+    ``OAuthStorage`` exist in that mode, and the local modules are imported only here.
+    """
+    if settings.authz_mode == "local":
+        from .authz.server import LocalAuthorizationServer
+
+        assert runtime.authz is not None, "local mode needs the authorization runtime"
+        return LocalAuthorizationServer(settings, runtime.authz)
+    return build_entra_auth_provider(settings)
 
 
 def oauth_storage_of(provider: Any) -> OAuthStorage | None:

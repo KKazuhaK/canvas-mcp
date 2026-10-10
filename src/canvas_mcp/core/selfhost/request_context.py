@@ -51,7 +51,6 @@ from collections.abc import Mapping
 from typing import Any, Protocol
 
 import anyio.to_thread
-from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .. import audit
@@ -73,7 +72,17 @@ from ..credentials import (
     set_request_tool_prefs,
 )
 from ..logging import log_error, log_warning
-from .accounts import Denied
+from .accounts import (
+    DENY_ACCESS_DENIED,
+    DENY_ACCESS_DISABLED,
+    DENY_BAD_SUBJECT,
+    DENY_PENDING_APPROVAL,
+    Denied,
+    account_id_of,
+    denied,
+    valid_account_key,
+)
+from .authz.fastmcp_compat import AuthenticatedUser
 from .principal_access import access_unavailable_message
 from .schools import SchoolPolicy
 from .settings import COURSE_STATE_PER_PRINCIPAL, COURSE_STATE_REQUEST_LOCAL
@@ -96,6 +105,53 @@ class RequestIdentity(Protocol):
     """The slice of the identity service the middleware uses (synchronous)."""
 
     def resolve_request(self, claims: Mapping[str, Any]) -> RequestPrincipal | Denied: ...
+
+
+class LocalClaimsResolver:
+    """Turns the claims of an access token this server issued into the account behind it.
+
+    Used when ``SELFHOST_AUTH_MODE=local``. The JWT was verified (signature, issuer,
+    audience, expiry) and its grant checked before it got here; this adds the account:
+    the subject must be a well-formed ``acct:<uuid>`` that is the ``acct`` claim, and the
+    account must be active **now** (read through the access cache, so a disabling
+    reaches every request within its TTL whatever token the client holds). A database
+    error propagates and the caller answers 503.
+    """
+
+    def __init__(self, access: AccessChecker, issuer: str) -> None:
+        self._access = access
+        self._issuer = issuer
+
+    def resolve_request(self, claims: Mapping[str, Any]) -> RequestPrincipal | Denied:
+        acct = claims.get("acct")
+        if (
+            claims.get("token_use") != "access"
+            or claims.get("iss") != self._issuer
+            or claims.get("sub") != acct
+            or not isinstance(acct, str)
+            or not valid_account_key(acct)
+        ):
+            return denied(DENY_BAD_SUBJECT)
+        status = self._access.status(acct)
+        if status.disabled:
+            return denied(DENY_ACCESS_DISABLED)
+        if status.pending:
+            return denied(DENY_PENDING_APPROVAL)
+        if not status.active:
+            return denied(DENY_ACCESS_DENIED)
+        return RequestPrincipal(
+            key=acct,
+            tenant_id="",
+            object_id="",
+            display_name=status.display_name,
+            upn="",
+            roles=frozenset(),
+            is_owner=status.is_owner,
+            provider_id="local",
+            issuer=self._issuer,
+            subject=acct,
+            account_id=account_id_of(acct),
+        )
 
 
 class StoredTokenLike(Protocol):
@@ -229,8 +285,12 @@ class SelfhostRequestContextMiddleware:
         access: AccessChecker | None = None,
         owners: OwnerLedger | None = None,
         course_state: str = COURSE_STATE_REQUEST_LOCAL,
+        identity_mode: str = "entra",
     ) -> None:
         self.app = app
+        # What identifies the caller in the log when a request is refused: the Entra
+        # object id (``entra``) or the account key of our own token (``local``).
+        self.local_identity = identity_mode == "local"
         # Anything but the explicit opt-in keeps the course state request-local.
         self.request_local_state = course_state != COURSE_STATE_PER_PRINCIPAL
         self.mcp_path = mcp_path
@@ -276,6 +336,16 @@ class SelfhostRequestContextMiddleware:
                 await _send_json(send, 503, access_unavailable_message())
                 return
             if isinstance(resolved, Denied):
+                if self.local_identity:
+                    acct = claims.get("acct")
+                    # Only a well-formed account key is ever logged.
+                    log_warning(
+                        "MCP request denied",
+                        reason=resolved.code,
+                        account=acct if isinstance(acct, str) and valid_account_key(acct) else None,
+                    )
+                    await _send_json(send, 403, resolved.message)
+                    return
                 oid = claims.get("oid")
                 log_warning(
                     "MCP request denied",

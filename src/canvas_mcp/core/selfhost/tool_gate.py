@@ -110,6 +110,31 @@ async def _check_access(access: AccessChecker | None, error_type: type[Exception
         raise error_type(_CREDENTIAL_CHANGED)
 
 
+def _check_local_identity(error_type: type[Exception]) -> None:
+    """Like :func:`_check_identity`, for a token issued by this server (``SELFHOST_AUTH_MODE=local``).
+
+    The verified token and the request context must agree on the account, the issuer and
+    the kind of token, and the principal must be one the local resolver made.
+    """
+    principal = get_request_principal()
+    if principal is None:
+        raise error_type(_NOT_SIGNED_IN)
+    token = get_access_token()
+    claims: Any = getattr(token, "claims", None)
+    get = claims.get if hasattr(claims, "get") else (lambda _name: None)
+    acct = get("acct")
+    if (
+        not isinstance(acct, str)
+        or acct != principal.key
+        or principal.provider_id != "local"
+        or not principal.issuer
+        or get("iss") != principal.issuer
+        or get("token_use") != "access"
+    ):
+        log_error("identity mismatch between access token and request context")
+        raise error_type(_IDENTITY_MISMATCH)
+
+
 def _check_identity(error_type: type[Exception]) -> None:
     """Raise ``error_type`` unless the verified token and the request context agree."""
     principal = get_request_principal()
@@ -160,12 +185,21 @@ class SelfhostCredentialGate(Middleware):
         account_url: str | None = None,
         write_ceiling: Collection[str] | None = None,
         access: AccessChecker | None = None,
+        identity_mode: str = "entra",
     ) -> None:
         self._access = access
+        self._local_identity = identity_mode == "local"
         self._account_url = account_url
         self._ceiling: frozenset[str] | None = (
             None if write_ceiling is None else frozenset(write_ceiling)
         )
+
+    def _verify_identity(self, error_type: type[Exception]) -> None:
+        """The identity check of this server's mode (resolved when called)."""
+        if self._local_identity:
+            _check_local_identity(error_type)
+        else:
+            _check_identity(error_type)
 
     @staticmethod
     def _enabled_write_tools() -> frozenset[str]:
@@ -189,7 +223,7 @@ class SelfhostCredentialGate(Middleware):
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        _check_identity(ToolError)
+        self._verify_identity(ToolError)
         await _check_access(self._access, ToolError)
         _check_credentials(ToolError)
         _check_generation_in_process(ToolError)
@@ -215,7 +249,7 @@ class SelfhostCredentialGate(Middleware):
         context: MiddlewareContext[mt.ReadResourceRequestParams],
         call_next: CallNext[mt.ReadResourceRequestParams, ResourceResult],
     ) -> ResourceResult:
-        _check_identity(ResourceError)
+        self._verify_identity(ResourceError)
         await _check_access(self._access, ResourceError)
         _check_credentials(ResourceError)
         _check_generation_in_process(ResourceError)

@@ -637,7 +637,7 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
         prepare_selfhost,
         validate_selfhost_startup,
     )
-    from .core.selfhost.oauth import build_entra_auth_provider
+    from .core.selfhost.oauth import build_auth_provider
 
     admin_hint = "use python -m canvas_mcp.core.selfhost.token_admin instead"
     if args.transport != "streamable-http":
@@ -689,7 +689,7 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
 
     init_audit_logging()
 
-    mcp = create_server(auth=build_entra_auth_provider(settings))
+    mcp = create_server(auth=build_auth_provider(settings, runtime))
     scrub_third_party_logs()
     role = args.role or config.canvas_role
     if role not in ("student", "educator", "all"):
@@ -719,6 +719,7 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
         removed_tools=len(removed_tools),
         disabled_tools=len(disabled_tools),
         account_ui=account_ui,
+        authz_mode=settings.authz_mode,
         token_store=settings.database_target.description,
         enrollments=runtime.store.count(),
     )

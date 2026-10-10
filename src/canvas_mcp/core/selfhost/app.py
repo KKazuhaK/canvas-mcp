@@ -26,7 +26,11 @@ from .identity import IdentityService
 from .limits import RateLimiters, build_rate_limiters
 from .oauth import cull_expired_oauth_state
 from .principal_access import PrincipalAccessCache
-from .request_context import SelfhostRequestContextMiddleware
+from .request_context import (
+    LocalClaimsResolver,
+    RequestIdentity,
+    SelfhostRequestContextMiddleware,
+)
 from .schools import SchoolPolicy, is_blocked_hostname
 from .settings import SelfhostConfigError, SelfhostSettings
 from .token_health import TokenHealth
@@ -35,6 +39,7 @@ from .tool_prefs import ToolPrefsCache, WriteToolCatalog
 
 if TYPE_CHECKING:
     from ..tool_policy import ToolPolicy
+    from .authz.runtime import AuthzRuntime
     from .token_store import TokenStore
 
 HEALTH_PATH = "/healthz"
@@ -64,6 +69,8 @@ class SelfhostRuntime:
     tool_prefs: ToolPrefsCache
     access: PrincipalAccessCache
     limiters: RateLimiters = field(default_factory=lambda: build_rate_limiters("memory"))
+    #: The server's own authorization server (``SELFHOST_AUTH_MODE=local``); None in the default mode.
+    authz: AuthzRuntime | None = None
 
 
 def _writable_directory_problem(name: str, path: Path) -> str | None:
@@ -289,6 +296,12 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         access=access,
     )
     health = TokenHealth(store, account_url=settings.account_url)
+    authz: AuthzRuntime | None = None
+    if settings.authz_mode == "local":
+        # Imported here: the default mode never loads the authorization server.
+        from .authz.runtime import build_authz_runtime
+
+        authz = build_authz_runtime(settings, store, keyring, access)
     return SelfhostRuntime(
         settings=settings,
         store=store,
@@ -297,6 +310,7 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         tool_prefs=ToolPrefsCache(store),
         access=access,
         limiters=build_rate_limiters(settings.state_backend),
+        authz=authz,
     )
 
 
@@ -371,6 +385,7 @@ def install_selfhost(
             account_url=settings.account_url,
             write_ceiling=ceiling,
             access=runtime.access,
+            identity_mode="local" if settings.authz_mode == "local" else "entra",
         )
     )
     # The Canvas client confirms a suspected dead token through this service.
@@ -397,6 +412,7 @@ def install_selfhost(
             "rate_limiters": runtime.limiters,
             "ui": settings.account_ui,
             "spa": spa,
+            "authz": runtime.authz,
             **account_options,
         },
     )
@@ -431,21 +447,31 @@ def build_selfhost_asgi_app(
     the unauthenticated OAuth endpoints and cleans expired OAuth records.
     """
     settings = runtime.settings
+    local = settings.authz_mode == "local"
+    identity: RequestIdentity
+    if local:
+        # The token is ours: its subject is the account. Roles are not in it, so the
+        # owner role changes only at an /account sign-in (never by a request token).
+        assert runtime.authz is not None
+        identity = LocalClaimsResolver(runtime.access, runtime.authz.issuer)
+    else:
+        identity = runtime.identity
     app = mcp.http_app(
         stateless_http=True,
         middleware=[
             Middleware(
                 SelfhostRequestContextMiddleware,
                 mcp_path=settings.mcp_path,
-                identity=runtime.identity,
+                identity=identity,
                 store=runtime.store,
                 schools=selfhost_school_policy(settings, config),
                 account_url=settings.account_url,
                 health=runtime.health,
                 tool_prefs=runtime.tool_prefs,
                 access=runtime.access,
-                owners=runtime.store,
+                owners=None if local else runtime.store,
                 course_state=settings.course_state,
+                identity_mode="local" if local else "entra",
             )
         ],
         host_origin_protection=True,
@@ -472,13 +498,24 @@ def build_selfhost_asgi_app(
         except Exception:  # noqa: BLE001 - housekeeping must never affect a request
             log_warning("cleanup of old sign-in records failed")
 
+    async def cull_authz() -> None:
+        """Delete expired codes, login states, grants and registrations (worker thread, best effort)."""
+        if runtime.authz is None:
+            return
+        try:
+            await anyio.to_thread.run_sync(runtime.authz.store.cull)
+        except Exception:  # noqa: BLE001 - housekeeping must never affect a request
+            log_warning("cleanup of expired authorization state failed")
+
     async def maintenance() -> None:
         await cull_expired_oauth_state(provider)
         await prune_store()
+        await cull_authz()
 
     return SelfhostEdgeGuard(
         app,
         clock=clock or time.monotonic,
         maintenance=maintenance,
         rate_limiters=runtime.limiters,
+        authz_local=local,
     )

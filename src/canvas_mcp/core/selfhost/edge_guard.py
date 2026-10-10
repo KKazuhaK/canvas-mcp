@@ -16,6 +16,11 @@ sign-in:
   budget for registrations, and a size cap on the registration body.
 * **Cleanup.** At most once per interval, after such a request, expired OAuth
   records are deleted from disk (the file store never does it on its own).
+
+With ``authz_local`` (``SELFHOST_AUTH_MODE=local``) two more endpoints reach the
+database without a sign-in and get a bucket as well: ``POST /token`` and
+``POST /revoke``; and their bodies, like ``POST /authorize``, are capped at 16 KiB. Without
+it nothing about these paths changes.
 """
 
 from __future__ import annotations
@@ -33,6 +38,8 @@ from .limits import InMemoryTokenBucket, RateLimiters, build_rate_limiters
 
 REGISTER_PATH = "/register"
 AUTHORIZE_PATH = "/authorize"
+TOKEN_PATH = "/token"
+REVOKE_PATH = "/revoke"
 
 # Per-minute allowance for each of the two public endpoints (also the burst).
 PUBLIC_REQUESTS_PER_MINUTE = 30
@@ -41,6 +48,13 @@ PUBLIC_REQUESTS_PER_MINUTE = 30
 REGISTRATIONS_PER_DAY = 300
 # Dynamic client registration documents are tiny; anything bigger is abuse.
 MAX_REGISTER_BODY_BYTES = 16 * 1024
+# Local authorization server only: the token endpoint reads the database (and may fetch a
+# client metadata document), so it gets a larger allowance than the other two, and the
+# revocation endpoint the same as /authorize. Per minute, process-wide (also the burst).
+TOKEN_REQUESTS_PER_MINUTE = 120
+REVOKE_REQUESTS_PER_MINUTE = 30
+# The form bodies of /token, /revoke and POST /authorize are a few hundred bytes.
+MAX_OAUTH_FORM_BYTES = 16 * 1024
 MAINTENANCE_INTERVAL_SECONDS = 3600
 
 Maintenance = Callable[[], Awaitable[None]]
@@ -61,14 +75,28 @@ class SelfhostEdgeGuard:
         maintenance: Maintenance | None = None,
         maintenance_interval: float = MAINTENANCE_INTERVAL_SECONDS,
         rate_limiters: RateLimiters | None = None,
+        authz_local: bool = False,
     ) -> None:
         self.app = app
+        self._authz_local = authz_local
         self._clock = clock
         make = (rate_limiters or build_rate_limiters("memory")).token_bucket
         per_second = PUBLIC_REQUESTS_PER_MINUTE / 60.0
         self._register = make(PUBLIC_REQUESTS_PER_MINUTE, per_second, clock)
         self._register_daily = make(REGISTRATIONS_PER_DAY, REGISTRATIONS_PER_DAY / 86400.0, clock)
         self._authorize = make(PUBLIC_REQUESTS_PER_MINUTE, per_second, clock)
+        # Only the local authorization server has these two endpoints (nothing else is built
+        # in the default mode, so its behaviour is exactly what it always was).
+        self._token = (
+            make(TOKEN_REQUESTS_PER_MINUTE, TOKEN_REQUESTS_PER_MINUTE / 60.0, clock)
+            if authz_local
+            else None
+        )
+        self._revoke = (
+            make(REVOKE_REQUESTS_PER_MINUTE, REVOKE_REQUESTS_PER_MINUTE / 60.0, clock)
+            if authz_local
+            else None
+        )
         self._maintenance = maintenance
         self._maintenance_interval = maintenance_interval
         self._last_maintenance: float | None = None
@@ -96,7 +124,34 @@ class SelfhostEdgeGuard:
                     await _too_many_requests(send, retry)
                     return
                 self._schedule_maintenance()
+                if self._authz_local and method == "POST":
+                    await self._capped_oauth_form(scope, receive, send)
+                    return
+            elif (
+                self._token is not None
+                and self._revoke is not None
+                and method == "POST"
+                and path in (TOKEN_PATH, REVOKE_PATH)
+            ):
+                bucket = self._token if path == TOKEN_PATH else self._revoke
+                retry = bucket.take()
+                if retry > 0:
+                    await _too_many_requests(send, retry)
+                    return
+                self._schedule_maintenance()
+                await self._capped_oauth_form(scope, receive, send)
+                return
         await self.app(scope, receive, send)
+
+    async def _capped_oauth_form(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Pass the request on with its (small) form body read and replayed, or refuse it with 413."""
+        body = await _read_capped_body(scope, receive, MAX_OAUTH_FORM_BYTES)
+        if body is None:
+            await _respond(
+                send, 413, {"error": "invalid_request", "error_description": "request is too large"}
+            )
+            return
+        await self.app(scope, _replaying(body, receive), send)
 
     async def _guarded_register(self, scope: Scope, receive: Receive, send: Send) -> None:
         retry = self._register.take()
@@ -114,17 +169,7 @@ class SelfhostEdgeGuard:
                                        "error_description": "registration request is too large"})
             return
         self._schedule_maintenance()
-
-        replayed = False
-
-        async def replay() -> Message:
-            nonlocal replayed
-            if not replayed:
-                replayed = True
-                return {"type": "http.request", "body": body, "more_body": False}
-            return await receive()
-
-        await self.app(scope, replay, send)
+        await self.app(scope, _replaying(body, receive), send)
 
     def _schedule_maintenance(self) -> None:
         if self._maintenance is None:
@@ -144,6 +189,20 @@ class SelfhostEdgeGuard:
         except Exception:
             # The exception text can carry file paths; the reason is enough.
             log_warning("cleanup of expired OAuth records failed")
+
+
+def _replaying(body: bytes, receive: Receive) -> Receive:
+    """A receive callable that hands ``body`` to the app once, then whatever ``receive`` gives."""
+    replayed = False
+
+    async def replay() -> Message:
+        nonlocal replayed
+        if not replayed:
+            replayed = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return await receive()
+
+    return replay
 
 
 async def _read_capped_body(scope: Scope, receive: Receive, limit: int) -> bytes | None:
