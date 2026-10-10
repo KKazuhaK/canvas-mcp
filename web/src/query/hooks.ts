@@ -8,12 +8,17 @@ import {
 import {
   adminAccessAction,
   adminAudit,
+  adminGrants,
   adminListAccounts,
   adminListEnrollments,
   adminMarkInvalid,
   adminRemoveEnrollment,
+  adminRevokeGrant,
+  decideConsent,
   deleteCanvasToken,
   deleteWriteTools,
+  getConsent,
+  getGrants,
   getLoginHistory,
   getMe,
   getProviders,
@@ -22,10 +27,16 @@ import {
   logout,
   putWriteTools,
   recheckCanvasToken,
+  revokeGrant,
   type AdminAccessAction,
 } from '@/api/endpoints'
 import { clearCsrfToken } from '@/api/client'
-import type { AdminEnrollmentFilter, AdminStatusFilter, WriteToolsResponse } from '@/api/types'
+import type {
+  AdminEnrollmentFilter,
+  AdminStatusFilter,
+  ConsentDecision,
+  WriteToolsResponse,
+} from '@/api/types'
 import { hardNavigate } from '@/utils/navigate'
 import { keys } from './keys'
 
@@ -180,5 +191,60 @@ export function useAdminAudit() {
     queryFn: ({ pageParam }) => adminAudit(pageParam),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.next_cursor,
+  })
+}
+
+// ---- apps: consent and connected apps (the server's own authorization server) ------------
+
+/**
+ * What an app asks for. The request id is a one-time secret of this browser, so it is read
+ * from the URL by the screen and handed in, never stored in a query key. The answer does not
+ * change while the person looks at it, and a failure is final (an expired or used request does
+ * not come back), so there is no refetching or retrying.
+ */
+export function useConsent(txn: string, enabled: boolean) {
+  return useQuery({
+    queryKey: keys.consent,
+    queryFn: () => getConsent(txn),
+    enabled,
+    retry: false,
+    staleTime: Infinity,
+    gcTime: 0,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  })
+}
+
+/** The one answer to a request; the response says where the browser goes next. */
+export function useDecideConsent(txn: string) {
+  return useMutation({ mutationFn: (decision: ConsentDecision) => decideConsent(txn, decision) })
+}
+
+export function useGrants(enabled = true) {
+  return useQuery({ queryKey: keys.grants, queryFn: getGrants, enabled })
+}
+
+export function useRevokeGrant() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => revokeGrant(id),
+    // Also after a failure: the list may already have changed (another tab, an owner).
+    onSettled: () => client.invalidateQueries({ queryKey: keys.grants }),
+  })
+}
+
+export function useAdminGrants(accountId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: keys.adminGrants(accountId),
+    queryFn: () => adminGrants(accountId),
+    enabled,
+  })
+}
+
+export function useAdminRevokeGrant(accountId: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => adminRevokeGrant(id),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.adminGrants(accountId) }),
   })
 }

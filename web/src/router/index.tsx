@@ -2,6 +2,8 @@ import { createBrowserRouter, createMemoryRouter, type RouteObject } from 'react
 import AdminLayout from '@/layouts/AdminLayout'
 import PublicLayout from '@/layouts/PublicLayout'
 import ActivityView from '@/views/ActivityView'
+import ConnectedAppsView from '@/views/ConnectedAppsView'
+import ConsentView from '@/views/ConsentView'
 import HomeView from '@/views/HomeView'
 import SignInView from '@/views/SignInView'
 import { NotFoundView, RouteError } from '@/views/StateViews'
@@ -33,6 +35,9 @@ export const routes: RouteObject[] = [
       },
       // `/` chooses its own frame: signed-out landing or the account page.
       { index: true, element: <HomeView /> },
+      // An app asks to be connected (the server's own authorization server). Outside RequireAuth on
+      // purpose: a signed-out visitor is sent to the sign-in of this very request, not to /sign-in.
+      { path: 'consent', element: <ConsentView />, handle: { titleKey: 'account:consent.title' } },
       {
         element: <RequireAuth />,
         children: [
@@ -41,6 +46,16 @@ export const routes: RouteObject[] = [
             element: <RequireFeature feature="write_tools" />,
             children: [
               { path: 'write-tools', element: <WriteToolsView />, handle: { titleKey: 'common:nav.writeTools' } },
+            ],
+          },
+          {
+            element: <RequireFeature feature="connected_apps" />,
+            children: [
+              {
+                path: 'connected-apps',
+                element: <ConnectedAppsView />,
+                handle: { titleKey: 'common:nav.connectedApps' },
+              },
             ],
           },
           { path: 'activity', element: <ActivityView />, handle: { titleKey: 'common:nav.activity' } },

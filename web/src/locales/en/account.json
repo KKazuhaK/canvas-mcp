@@ -211,5 +211,47 @@
     "empty": "No sign-ins recorded yet.",
     "sessionsTitle": "Session",
     "sessionsBody": "Signing out ends this session on this device."
+  },
+  "apps": {
+    "title": "Connected apps",
+    "intro": "These apps can use the Canvas tools as you through MCP. Revoking one cuts it off right away (within about 30 seconds at most); it has to ask for your approval again.",
+    "empty": "No apps are connected.",
+    "columns": {
+      "app": "App",
+      "returnsTo": "Returns to",
+      "connected": "Connected",
+      "lastUsed": "Last used",
+      "actions": "Actions"
+    },
+    "verified": "Verified domain",
+    "unverified": "Unverified: a self-registered app. Anyone can pick any name.",
+    "unnamed": "Unnamed app",
+    "selfName": "The app calls itself: {{name}}",
+    "never": "Never",
+    "revoke": "Revoke",
+    "revokeLabel": "Revoke: {{name}}",
+    "revokeTitle": "Disconnect {{name}}?",
+    "revokeBody": "The app loses access right away (within about 30 seconds at most) and has to ask for your approval again.",
+    "revoked": "App disconnected."
+  },
+  "consent": {
+    "title": "Connect this app to your account?",
+    "signingIn": "Taking you to sign in…",
+    "redirecting": "Returning to the app…",
+    "returnsTo": "After you decide, you are sent back to:",
+    "loopbackWarning": "The approval is delivered to an app on this computer. Continue only if you just started this connection here, for example from Claude Code.",
+    "can": "It will be able to:",
+    "canBody": "Use this server's Canvas tools as you, with the Canvas token you saved here. Write tools you have not switched on stay off, and the token itself is never handed to the app.",
+    "signedInAs": "Signed in as",
+    "useDifferent": "Use a different account",
+    "phishing": "Continue only if you just started connecting this app. If someone sent you a link to this page, choose Deny.",
+    "validUntil": "This request is valid until:",
+    "allow": "Allow",
+    "deny": "Deny",
+    "cancel": "Cancel",
+    "pendingTitle": "Waiting for approval",
+    "pendingBody": "Your account is waiting for the server owner to approve it, so you cannot connect apps yet. You can cancel this request.",
+    "errorTitle": "This request cannot be used",
+    "decisionFailed": "Your answer could not be sent to the app. Nothing was granted."
   }
 }

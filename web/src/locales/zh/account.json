@@ -211,5 +211,47 @@
     "empty": "还没有登录记录。",
     "sessionsTitle": "会话",
     "sessionsBody": "退出登录会结束这台设备上的会话。"
+  },
+  "apps": {
+    "title": "已连接的应用",
+    "intro": "这些应用可以通过 MCP 以你的身份使用 Canvas 工具。断开后它会立刻（最多约 30 秒内）失去访问权限，之后需要重新征得你的同意。",
+    "empty": "还没有连接任何应用。",
+    "columns": {
+      "app": "应用",
+      "returnsTo": "回到",
+      "connected": "连接于",
+      "lastUsed": "最近使用",
+      "actions": "操作"
+    },
+    "verified": "已验证的域名",
+    "unverified": "未经验证：应用自己注册的名称，任何人都可以起这个名字。",
+    "unnamed": "未命名的应用",
+    "selfName": "应用自称：{{name}}",
+    "never": "从未",
+    "revoke": "断开",
+    "revokeLabel": "断开：{{name}}",
+    "revokeTitle": "断开 {{name}}？",
+    "revokeBody": "该应用会立刻（最多约 30 秒内）失去访问权限，之后需要重新征得你的同意。",
+    "revoked": "已断开该应用。"
+  },
+  "consent": {
+    "title": "要把这个应用连接到你的账户吗？",
+    "signingIn": "正在带你去登录…",
+    "redirecting": "正在回到应用…",
+    "returnsTo": "决定之后，你会回到：",
+    "loopbackWarning": "批准会交给这台电脑上的一个应用。只有你刚刚在本机（例如 Claude Code）启动了连接，才继续。",
+    "can": "它会得到：",
+    "canBody": "以你的身份使用本服务器的 Canvas 工具，用的是你自己绑定的 Canvas 令牌；你没有开启的写入工具它仍然用不了。Canvas 令牌本身不会交给它。",
+    "signedInAs": "登录账号",
+    "useDifferent": "使用其他账号",
+    "phishing": "只有你刚刚才开始连接这个应用时才继续。如果是别人发给你的链接，请选择“拒绝”。",
+    "validUntil": "此请求在这个时间前有效：",
+    "allow": "允许",
+    "deny": "拒绝",
+    "cancel": "取消",
+    "pendingTitle": "正在等待批准",
+    "pendingBody": "你的账户正在等待服务器所有者批准，现在还不能连接应用。你可以取消这次请求。",
+    "errorTitle": "这个请求无法使用",
+    "decisionFailed": "无法把你的答复发给应用，没有授予任何权限。"
   }
 }

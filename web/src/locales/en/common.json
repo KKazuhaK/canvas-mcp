@@ -27,7 +27,8 @@
     "admin": "Admin",
     "adminAccounts": "Accounts",
     "adminEnrollments": "Enrollments",
-    "adminAudit": "Audit log"
+    "adminAudit": "Audit log",
+    "connectedApps": "Connected apps"
   },
   "language": {
     "names": {

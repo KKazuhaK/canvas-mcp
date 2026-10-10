@@ -141,7 +141,10 @@
       "write_tools_changed": "更改写入工具",
       "schema_migrated": "数据库已升级",
       "pending_purged": "清理待审批账户",
-      "other": "其他"
+      "other": "其他",
+      "grant_revoked": "断开了一个已连接的应用",
+      "grants_revoked_for_account": "断开了账户的全部已连接应用",
+      "jwt_key_rotated": "作废了应用访问令牌"
     },
     "operator": "服务器运维",
     "system": "系统",
@@ -162,8 +165,23 @@
         "enabled": "已开启",
         "disabled": "已关闭",
         "school": "学校",
-        "version": "版本"
+        "version": "版本",
+        "client_kind": "应用类型",
+        "epoch": "代次"
       }
     }
+  },
+  "apps": {
+    "button": "已连接的应用",
+    "buttonLabel": "已连接的应用：{{name}}",
+    "title": "{{name}} 已连接的应用",
+    "empty": "还没有连接任何应用。",
+    "revoke": "断开",
+    "revokeLabel": "断开：{{app}}",
+    "revoked": "已断开该应用。",
+    "unchanged": "没有变化。",
+    "returnsTo": "回到",
+    "connected": "连接于",
+    "lastUsed": "最近使用"
   }
 }

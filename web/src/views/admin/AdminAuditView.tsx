@@ -29,6 +29,9 @@ const KNOWN_ACTIONS = [
   'write_tools_changed',
   'schema_migrated',
   'pending_purged',
+  'grant_revoked',
+  'grants_revoked_for_account',
+  'jwt_key_rotated',
 ] as const
 
 function isKnown(action: string): boolean {
@@ -50,6 +53,8 @@ const KNOWN_DETAIL_KEYS = [
   'disabled',
   'school',
   'version',
+  'client_kind',
+  'epoch',
 ] as const
 
 function isKnownDetailKey(key: string): boolean {

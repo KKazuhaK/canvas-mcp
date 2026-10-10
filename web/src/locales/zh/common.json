@@ -27,7 +27,8 @@
     "admin": "管理",
     "adminAccounts": "账户",
     "adminEnrollments": "令牌绑定",
-    "adminAudit": "审计日志"
+    "adminAudit": "审计日志",
+    "connectedApps": "已连接的应用"
   },
   "language": {
     "names": {

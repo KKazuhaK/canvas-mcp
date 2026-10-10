@@ -141,7 +141,10 @@
       "write_tools_changed": "Changed write tools",
       "schema_migrated": "Database upgraded",
       "pending_purged": "Cleared pending accounts",
-      "other": "Other"
+      "other": "Other",
+      "grant_revoked": "Ended a connected app",
+      "grants_revoked_for_account": "Ended all connected apps of an account",
+      "jwt_key_rotated": "Invalidated app access tokens"
     },
     "operator": "Server operator",
     "system": "System",
@@ -162,8 +165,23 @@
         "enabled": "Turned on",
         "disabled": "Turned off",
         "school": "School",
-        "version": "Version"
+        "version": "Version",
+        "client_kind": "App kind",
+        "epoch": "Epoch"
       }
     }
+  },
+  "apps": {
+    "button": "Connected apps",
+    "buttonLabel": "Connected apps: {{name}}",
+    "title": "Connected apps of {{name}}",
+    "empty": "No apps are connected.",
+    "revoke": "Revoke",
+    "revokeLabel": "Revoke: {{app}}",
+    "revoked": "App disconnected.",
+    "unchanged": "Nothing changed.",
+    "returnsTo": "Returns to",
+    "connected": "Connected",
+    "lastUsed": "Last used"
   }
 }

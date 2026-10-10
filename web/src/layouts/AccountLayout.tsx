@@ -1,4 +1,5 @@
 import AdminPanelSettingsIcon from '@mui/icons-material/AdminPanelSettings'
+import AppsIcon from '@mui/icons-material/Apps'
 import HistoryIcon from '@mui/icons-material/History'
 import HomeIcon from '@mui/icons-material/Home'
 import KeyIcon from '@mui/icons-material/Key'
@@ -45,6 +46,9 @@ function navFor(features: Features): NavItem[] {
     { to: '/token', labelKey: 'common:nav.token', Icon: KeyIcon },
     ...(features.write_tools
       ? [{ to: '/write-tools', labelKey: 'common:nav.writeTools', Icon: TuneIcon }]
+      : []),
+    ...(features.connected_apps
+      ? [{ to: '/connected-apps', labelKey: 'common:nav.connectedApps', Icon: AppsIcon }]
       : []),
     { to: '/activity', labelKey: 'common:nav.activity', Icon: HistoryIcon },
     ...(features.admin
