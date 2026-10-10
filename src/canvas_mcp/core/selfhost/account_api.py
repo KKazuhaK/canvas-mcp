@@ -22,8 +22,9 @@ It serves the single-page UI with the data and the actions the server-rendered
   {"code": ..., "params": {...}}}``). No body ever holds Entra text, Canvas text, a
   token or an exception message.
 
-Only the features that exist are served. Linked identities are not; ``GET /me`` says so in
-``features``. The consent screen and the connected apps (``/consent``,
+Only the features that exist are served. Linked identities are not (yet) served by this API,
+although the server-rendered pages manage them when several sign-in providers are configured
+(:mod:`.login.linking`); ``GET /me`` says so in ``features``. The consent screen and the connected apps (``/consent``,
 ``/me/grants``, ``/admin/accounts/{id}/grants``, ``/admin/grants/{id}``) belong to the
 server's own authorization server (``SELFHOST_AUTH_MODE=local``): the routes are always in
 the route table (the web app and the server must list the same ones), but every one of them
@@ -757,9 +758,9 @@ class ApiApp:
                     "school_search": (not pending) and app.schools.search_enabled,
                     "write_tools": (not pending) and app.write_tools is not None,
                     "admin": session.owner,
-                    "identities": (not pending)
-                    and app.logins is not None
-                    and app.logins.linking_enabled,
+                    # The identities routes arrive with the single-page UI's Sign-in methods
+                    # screen; until then the flag stays false (the server-rendered pages do it).
+                    "identities": False,
                     # Local authorization server only (see the module docstring). A waiting
                     # account is still told so; its own screens and the API refuse it.
                     "connected_apps": app.authz is not None,

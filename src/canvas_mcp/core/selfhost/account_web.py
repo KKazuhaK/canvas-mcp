@@ -56,6 +56,15 @@ Security notes:
   client address is ``unknown`` (no proxy is trusted) and the user agent is only a
   keyed hash. Owners can read the audit log at ``/account/admin/audit``.
 
+More sign-in providers (``SELFHOST_LOGIN_PROVIDERS``, ``SELFHOST_AUTH_MODE=local`` only). Entra keeps its
+sign-in exactly as described above, and a deployment with Entra alone behaves as it always did: no
+extra route, page or style. With others, ``/account/login`` chooses (or goes straight to the only
+provider), each of Google, GitHub and the generic OpenID Connect providers has a start and a
+callback of its own (:mod:`.login.flows`; the ceremony state is stored server side and the
+browser holds only a sealed ``__Host-cmcp_flow`` cookie), and a signed-in person can link and
+unlink sign-in methods (:mod:`.login.linking`; a link needs a sign-in from the last ten minutes
+and is bound to the session that started it). The session cookie names the provider that issued it.
+
 Two UIs, one set of rules. With ``ACCOUNT_UI=react`` the built single-page app is served
 instead of the pages above and talks to the JSON API in :mod:`.account_api`; that API is
 built on the *same* application object, so it shares the session, the CSRF token, the

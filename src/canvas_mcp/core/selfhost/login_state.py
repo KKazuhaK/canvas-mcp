@@ -1,11 +1,14 @@
 """One-time login state behind an interface.
 
-The OIDC ``state``, ``nonce`` and PKCE verifier of the ``/account`` sign-in travel in an
+The OIDC ``state``, ``nonce`` and PKCE verifier of the Entra ``/account`` sign-in travel in an
 AES-GCM sealed ``__Host-`` cookie (see ``account_web``) and need no server-side state.
 The server's own authorization server (``SELFHOST_AUTH_MODE=local``) does: an
 ``/authorize`` request has to survive the redirects through the sign-in and the consent
 page, so it is stored here (``authz.transactions.SqlLoginStateStore`` is the database
-implementation; the in-process one below serves tests and one-process uses).
+implementation; the in-process one below serves tests and one-process uses). The same store
+holds the ceremonies of the other sign-in providers (Google, GitHub, generic OpenID Connect:
+kind ``login_flow``, popped exactly once at the callback) and the server-side record of an
+Entra link (kind ``account_link``); see ``login.ceremony``.
 
 Contract of :class:`LoginStateStore`:
 

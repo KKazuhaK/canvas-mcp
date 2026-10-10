@@ -53,12 +53,12 @@ def test_the_providers_endpoint_lists_every_provider_with_a_built_in_icon(ps: Pr
     ]
 
 
-def test_features_say_whether_identities_can_be_managed(ps: ProviderStack) -> None:
+def test_me_names_the_provider_of_the_session(ps: ProviderStack) -> None:
     person = ps.person()
     person.sign_in("google")
     me = Browser(ps.stack, client=person.client, react=True).api("GET", "/me").json()
-    assert me["features"]["identities"] is True
     assert me["account"]["provider_id"] == "google"
+    assert me["account"]["username"] == "ada@example.edu"
 
 
 @pytest.mark.parametrize("provider", ["google", "github", "school"])
