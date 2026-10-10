@@ -589,14 +589,28 @@ class AuthzStore:
             return changed
 
     def revoke_all_for_account(self, account_key: str, *, reason: str) -> int:
-        """End every live connection of an account (``admission_lost``); returns how many."""
+        """End every live connection of an account (``admission_lost``); returns how many.
+
+        For ``admission_lost`` the account itself stays active, so this also ends its
+        ``/account`` sessions (``session_epoch``) and deletes the codes it approved but
+        nobody has redeemed: otherwise a browser that is still signed in could approve the
+        app again without a round trip to the identity provider, or an approved code could
+        still be exchanged for a new connection. (Disabling an account does both on its own.)
+        """
         assert reason in (REVOKE_ADMISSION_LOST, REVOKE_ACCOUNT_DISABLED), reason
         account_id = acc.account_id_of(account_key)
         now = self._now()
         with self._db.row_write() as conn:
+            lost = reason == REVOKE_ADMISSION_LOST
+            # Codes first, then the account lock: an exchange takes its code row, then the
+            # account row, and no transaction takes them in the other order.
+            if lost:
+                self._repos.codes.delete_unconsumed_for_account(conn, account_id)
             # Serialise with a first code exchange of the account (which reads the row FOR
             # UPDATE) so that a grant created concurrently is seen by the revocation below.
             self._repos.accounts.get(conn, account_id, for_update=True)
+            if lost:
+                self._repos.accounts.end_sessions(conn, account_id, now)
             count = self._repos.grants.revoke_for_account(
                 conn, account_id, reason=reason, by=BY_SYSTEM, now=now
             )

@@ -184,6 +184,9 @@ class AccountRepo(Protocol):
     def enable(self, conn: Connection, account_id: str, now: int) -> int:
         """Lift a disablement, raise ``session_epoch`` by one in place and return it."""
 
+    def end_sessions(self, conn: Connection, account_id: str, now: int) -> int:
+        """Raise ``session_epoch`` by one in place (every ``/account`` session ends); return it."""
+
     def set_role(
         self,
         conn: Connection,
@@ -427,6 +430,9 @@ class AuthCodeRepo(Protocol):
     ) -> bool: ...
 
     def bump_grace(self, conn: Connection, code_hash: str, cap: int) -> bool: ...
+
+    def delete_unconsumed_for_account(self, conn: Connection, account_id: str) -> int:
+        """Delete the codes of an account that nobody has redeemed yet; returns how many."""
 
     def delete_expired_before(self, conn: Connection, cutoff: int) -> int: ...
 

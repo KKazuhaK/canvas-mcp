@@ -357,6 +357,10 @@ class SqlAuthCodeRepo:
         )
         return conn.execute(stmt).rowcount == 1
 
+    def delete_unconsumed_for_account(self, conn: Connection, account_id: str) -> int:
+        stmt = delete(_c).where(_c.c.account_id == account_id, _c.c.consumed_at.is_(None))
+        return int(conn.execute(stmt).rowcount or 0)
+
     def delete_expired_before(self, conn: Connection, cutoff: int) -> int:
         return int(conn.execute(delete(_c).where(_c.c.expires_at < cutoff)).rowcount or 0)
 

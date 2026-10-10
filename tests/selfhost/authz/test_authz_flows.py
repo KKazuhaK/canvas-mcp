@@ -297,6 +297,34 @@ class TestAdmissionLost:
             e.action == "grants_revoked_for_account" and e.target == alice for e in stack.store.list_audit()
         )
 
+    def test_a_session_that_was_still_open_cannot_connect_again_without_the_identity_provider(
+        self, stack: Stack
+    ) -> None:
+        stack.enroll(ALICE)
+        browser_a = Browser(stack)
+        browser_a.sign_in(ALICE)  # an /account session that is still valid
+        elsewhere = Browser(stack)
+        refused = elsewhere.entra_login(replace(ALICE, roles=()), elsewhere.get("/account/login"))
+        assert refused.status_code == 403
+        _, _, url = start_request(stack, browser_a)
+        response = browser_a.get(url)
+        # not "straight to consent": the session ended, so it is the Entra round trip again
+        assert response.status_code == 302 and "login.microsoftonline.com" in response.headers["location"]
+
+    def test_a_code_approved_before_the_refusal_cannot_be_redeemed_afterwards(self, stack: Stack) -> None:
+        stack.enroll(ALICE)
+        client_id, verifier, code, _ = stack.code_for(ALICE)
+        elsewhere = Browser(stack)
+        refused = elsewhere.entra_login(replace(ALICE, roles=()), elsewhere.get("/account/login"))
+        assert refused.status_code == 403
+        response = stack.token(
+            grant_type="authorization_code", code=code, client_id=client_id, redirect_uri=CLAUDE_REDIRECT,
+            code_verifier=verifier, resource=AUDIENCE,
+        )
+        assert response.status_code in (400, 401), response.text
+        assert response.json()["error"] == "invalid_grant", response.text
+        assert raw_sql(stack.store, "SELECT COUNT(*) FROM oauth_grants")[0][0] == 0
+
     def test_a_refused_sign_in_of_a_stranger_revokes_nothing(self, stack: Stack) -> None:
         stack.enroll(ALICE)
         stack.tokens_for(ALICE)

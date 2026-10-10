@@ -328,6 +328,19 @@ class TestRevocation:
         assert env.authz.list_grants(env.account_key) == []
         assert g1.id != g2.id
 
+    def test_admission_lost_also_ends_the_sessions_and_the_unredeemed_codes(self, env: Env) -> None:
+        env.grant_with_token()
+        redeemed = env.new_code()
+        env.exchange(redeemed)
+        pending = env.new_code()
+        epoch = rows(env, "SELECT session_epoch FROM accounts WHERE id = :a", a=env.account_id)[0][0]
+        env.authz.revoke_all_for_account(env.account_key, reason="admission_lost")
+        assert rows(env, "SELECT session_epoch FROM accounts WHERE id = :a", a=env.account_id)[0][0] == epoch + 1
+        assert env.authz.load_code(tk.hash_secret(pending)) is None
+        assert env.authz.load_code(tk.hash_secret(redeemed)) is not None  # kept: replay detection
+        assert rows(env, "SELECT status FROM accounts WHERE id = :a", a=env.account_id)[0][0] == "active"
+        assert env.exchange(pending)[0].outcome is X.DEAD
+
     def test_status_and_listing(self, env: Env, clock) -> None:
         grant, _ = env.grant_with_token()
         status = env.authz.grant_status(grant.id)

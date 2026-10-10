@@ -506,6 +506,14 @@ class SqlAccountRepo:
         )
         return self._epoch(conn, account_id)
 
+    def end_sessions(self, conn: Connection, account_id: str, now: int) -> int:
+        conn.execute(
+            update(_a)
+            .where(_a.c.id == account_id)
+            .values(session_epoch=_a.c.session_epoch + 1, updated_at=now)
+        )
+        return self._epoch(conn, account_id)
+
     @staticmethod
     def _epoch(conn: Connection, account_id: str) -> int:
         return int(conn.execute(select(_a.c.session_epoch).where(_a.c.id == account_id)).scalar_one())
