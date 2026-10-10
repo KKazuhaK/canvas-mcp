@@ -28,8 +28,13 @@ NO_ENTRA = {
 }
 
 
+def env_for(tmp_path: pathlib.Path, **env: str) -> dict[str, str]:
+    """One environment for one database (on PostgreSQL, building it resets the shared schema)."""
+    return default_env(tmp_path, **{**NO_ENTRA, **env})
+
+
 def settings_for(tmp_path: pathlib.Path, **env: str):  # type: ignore[no-untyped-def]
-    return load_selfhost_settings(default_env(tmp_path, **{**NO_ENTRA, **env}))
+    return load_selfhost_settings(env_for(tmp_path, **env))
 
 
 def test_without_entra_and_without_an_owner_path_the_server_refuses_to_start(tmp_path: pathlib.Path) -> None:
@@ -58,25 +63,25 @@ def test_a_named_bootstrap_owner_or_token_admin_is_an_owner_path(tmp_path: pathl
 
 
 def test_an_owner_already_in_the_database_is_an_owner_path(tmp_path: pathlib.Path) -> None:
-    settings = settings_for(tmp_path, SELFHOST_BOOTSTRAP_OWNER="token_admin")
-    first = prepare_selfhost(settings)
+    env = env_for(tmp_path, SELFHOST_BOOTSTRAP_OWNER="token_admin")
+    first = prepare_selfhost(load_selfhost_settings(env))
     key = make_account(first.store, OID_A)
     assert first.store.promote_owner(key, actor=OPERATOR)
     first.store.close()
     # Same database, no bootstrap setting any more: the existing owner is the path.
-    again = prepare_selfhost(settings_for(tmp_path))
+    again = prepare_selfhost(load_selfhost_settings({**env, "SELFHOST_BOOTSTRAP_OWNER": ""}))
     assert again.store.count_active_owners() == 1
     again.store.close()
 
 
 def test_an_owner_that_was_disabled_is_not_an_owner_path(tmp_path: pathlib.Path) -> None:
-    settings = settings_for(tmp_path, SELFHOST_BOOTSTRAP_OWNER="token_admin")
-    first = prepare_selfhost(settings)
+    env = env_for(tmp_path, SELFHOST_BOOTSTRAP_OWNER="token_admin")
+    first = prepare_selfhost(load_selfhost_settings(env))
     key = make_account(first.store, OID_A, role="owner")
     assert first.store.disable_principal(key, actor=OPERATOR, reason="operator_disabled", allow_last_owner=True)
     first.store.close()
     with pytest.raises(SelfhostConfigError):
-        prepare_selfhost(settings_for(tmp_path))
+        prepare_selfhost(load_selfhost_settings({**env, "SELFHOST_BOOTSTRAP_OWNER": ""}))
 
 
 def test_an_entra_deployment_needs_no_owner_path(tmp_path: pathlib.Path) -> None:
