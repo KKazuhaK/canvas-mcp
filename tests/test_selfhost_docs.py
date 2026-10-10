@@ -1246,3 +1246,32 @@ def test_the_changelog_announces_the_extra_sign_in_providers():
         "No schema change",
     ):
         assert needle in added, f"the changelog entry is missing {needle!r}"
+
+
+def test_local_mode_text_does_not_say_the_sign_in_is_always_microsoft(readme):
+    env_text = (SELFHOST / "env.example").read_text(encoding="utf-8")
+    for stale in (
+        "last Microsoft sign-in is older",
+        "You are sent to the Microsoft sign-in",
+        "The sign-in is the `/account` Microsoft sign-in",
+        "a fresh Microsoft sign-in otherwise",
+    ):
+        assert stale not in readme, stale
+    for stale in ("the sign-in is the /account Microsoft sign-in", "their last Microsoft sign-in"):
+        assert stale not in env_text, stale
+
+
+def test_the_google_notes_match_what_the_server_asks_for(readme):
+    # Google exempts an app that asks only for basic identity scopes from the Testing limits.
+    assert "publish it (**In production**)" not in readme
+    assert "https://support.google.com/cloud/answer/15549945" in readme
+    assert "scopes the server asks for are only `openid`, `email` and `profile`" in readme
+
+
+def test_the_proxy_example_keeps_the_per_ip_rate_below_the_service_backstop():
+    from canvas_mcp.core.selfhost.login.registry import START_BURST, START_REFILL_PER_SECOND
+
+    nginx = (SELFHOST / "nginx.conf.example").read_text(encoding="utf-8")
+    per_ip = int(re.search(r"zone=canvas_signin:\w+ rate=(\d+)r/m", nginx).group(1))
+    assert START_BURST >= 10 * per_ip and START_REFILL_PER_SECOND * 60 >= 10 * per_ip
+    assert f"a burst of {START_BURST}" in nginx
