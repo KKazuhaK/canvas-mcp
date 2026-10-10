@@ -46,8 +46,9 @@ from .repos import Repositories
 
 #: Tables copied, in order. ``meta`` is not copied as a table: the target is created by
 #: Alembic. The one value in it that matters, the access-token epoch (``rotate-jwt-key``),
-#: is carried over on its own (``_carry_jwt_epoch``): the grants are copied as live, so an
-#: import must not bring back tokens that a rotation had invalidated.
+#: is carried over on its own (read in ``_private_migrated_copy``, written by
+#: ``import_sqlite``'s ``populate`` via ``jwt_epoch.set``): the grants are copied as live, so
+#: an import must not bring back tokens that a rotation had invalidated.
 COPIED_TABLES = (
     "canvas_tokens",
     "user_tool_prefs",
