@@ -917,9 +917,12 @@ def test_the_authorization_settings_are_documented_with_the_defaults_the_code_ha
 
 def test_the_authorization_setting_ranges_in_the_docs_are_the_ones_the_code_enforces(readme):
     # Each documented range is exercised at and just outside its edges.
-    from canvas_mcp.core.selfhost.settings import SelfhostConfigError, load_selfhost_settings
-
     import base64
+
+    from canvas_mcp.core.selfhost.settings import (
+        SelfhostConfigError,
+        load_selfhost_settings,
+    )
 
     def good_env() -> dict[str, str]:
         return {
@@ -974,7 +977,11 @@ def test_the_replay_rules_of_the_local_server_are_documented(readme):
         "REFRESH_REUSE_GRACE_S=0",
     ):
         assert needle in section, f"the replay notes no longer mention {needle!r}"
-    from canvas_mcp.core.selfhost.authz.models import REVOKE_CODE_REPLAY, REVOKE_REAUTH_REQUIRED, REVOKE_REFRESH_REUSE
+    from canvas_mcp.core.selfhost.authz.models import (
+        REVOKE_CODE_REPLAY,
+        REVOKE_REAUTH_REQUIRED,
+        REVOKE_REFRESH_REUSE,
+    )
 
     for reason in (REVOKE_CODE_REPLAY, REVOKE_REFRESH_REUSE, REVOKE_REAUTH_REQUIRED):
         assert reason in section
