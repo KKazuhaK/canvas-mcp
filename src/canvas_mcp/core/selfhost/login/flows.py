@@ -180,7 +180,15 @@ class ExternalSignIn:
             if provider.response_issuer is not None and issuer != provider.response_issuer:
                 logger.warning("provider sign-in refused provider=%s reason=iss_mismatch", provider.id)
                 return self._failure(record, "state_invalid", 400, provider)
-        elif provider.requires_iss():
+        else:
+            # Whether the provider promises an ``iss`` is known from its metadata, which a restart
+            # between the start and the callback leaves unloaded: load it first, and fail closed.
+            try:
+                await provider.prepare()
+            except ProviderUnavailable:
+                logger.warning("provider sign-in unavailable provider=%s step=callback", provider.id)
+                return self._failure(record, "provider_error", 502, provider)
+        if issuer is None and provider.requires_iss():
             logger.warning("provider sign-in refused provider=%s reason=iss_missing", provider.id)
             return self._failure(record, "state_invalid", 400, provider)
 

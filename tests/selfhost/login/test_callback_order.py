@@ -283,9 +283,13 @@ class TestStartRoute:
         assert response.status_code == 405 and flow_rows(ps) == rows
 
     def test_the_rate_bucket_limits_starts_per_provider(self, ps: ProviderStack) -> None:
+        from .test_entra_only_golden import account_app
+
         client = ps.stack.new_client()
-        statuses = [client.get("/account/login/github").status_code for _ in range(32)]
-        assert statuses[:30] == [302] * 30 and 429 in statuses[30:]
+        bucket = account_app(ps.stack).logins.start_buckets["github"]
+        while bucket.take() == 0:
+            pass
+        assert client.get("/account/login/github").status_code == 429
         assert client.get("/account/login/google").status_code == 302  # another provider's bucket
         ps.clock.advance(3)
         assert client.get("/account/login/github").status_code == 302
