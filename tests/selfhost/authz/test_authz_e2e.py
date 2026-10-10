@@ -274,7 +274,7 @@ class TestReactConsent:
         started = browser.start(stack.authorize_params(CLAUDE_AI_URL, challenge, redirect_uri=CLAUDE_REDIRECT))
         txn = started.headers["location"].split("txn=")[1]
         browser.entra_login(ALICE, browser.get(started.headers["location"]))
-        response = browser.api("GET", f"/consent/{txn}")
+        response = browser.api("GET", f"/consent?txn={txn}")
         shown = response.json()
         assert "client" in shown, (response.status_code, shown)
         assert shown["client"]["verified"] is True and shown["client"]["host"] == "claude.ai"

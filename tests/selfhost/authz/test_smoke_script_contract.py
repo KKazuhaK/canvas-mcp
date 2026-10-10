@@ -138,7 +138,7 @@ class TestSectionM2:
         txn = "A" * 43
         page = stack.client.get(f"{BASE}/account/consent?txn={txn}")
         assert page.status_code == 200 and 'id="root"' in page.text and 'name="decision"' not in page.text
-        for path in (f"/account/api/consent/{txn}", "/account/api/me/grants"):
+        for path in (f"/account/api/consent?txn={txn}", "/account/api/me/grants"):
             response = stack.client.get(f"{BASE}{path}")
             assert response.status_code == 401 and "not_authenticated" in response.text
 

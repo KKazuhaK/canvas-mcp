@@ -412,6 +412,26 @@ class TestConsentPage:
             assert "waiting for the server owner to approve" in page.text
             assert 'value="approve"' not in page.text and 'value="deny"' in page.text and "Cancel" in page.text
 
+    def test_a_waiting_account_can_switch_to_another_account(self, tmp_path, monkeypatch) -> None:
+        with local_stack(tmp_path, monkeypatch, env={"ACCESS_POLICY": "approval"}) as stack:
+            other = Browser(stack)
+            other.sign_in(BOB)  # waiting, until the operator approves
+            bob_key = stack.account_of(BOB)
+            assert stack.store.approve_account(bob_key, actor=OPERATOR)
+            browser = Browser(stack)
+            _, txn, url = start_request(stack, browser)
+            browser.entra_login(ALICE, browser.get(url))  # Alice is waiting for approval
+            assert browser.get(url).status_code == 303  # the link without reauth stays on consent
+            page = browser.get(f"/account/consent?txn={txn}")
+            assert f"txn={txn}&amp;reauth=1" in page.text or f"txn={txn}&reauth=1" in page.text
+            switch = browser.get(url + "&reauth=1")
+            assert switch.status_code == 302 and "login.microsoftonline.com" in switch.headers["location"]
+            callback = browser.entra_login(BOB, switch)
+            assert callback.headers["location"] == f"/account/consent?txn={txn}"
+            landed = browser.decide(browser.get(callback.headers["location"]), "approve")
+            record = stack.authz.store.load_code(tk.hash_secret(query(landed)["code"][0]))
+            assert record is not None and f"acct:{record.account_id}" == bob_key
+
     def test_a_language_switch_keeps_the_transaction(self, stack: Stack) -> None:
         browser = Browser(stack)
         browser.sign_in(ALICE)
@@ -489,6 +509,20 @@ class TestConsentDecision:
             response = browser.client.post("/account/consent", data=data, headers={"Origin": BASE})
             assert response.status_code == 403
         assert browser.decide(page, "approve").status_code == 303
+
+    def test_a_session_that_ended_before_the_button_resumes_the_sign_in_of_this_request(
+        self, stack: Stack
+    ) -> None:
+        browser, page, txn = consent_page(stack)
+        csrf, _ = browser.consent_form(page)
+        browser.client.cookies.delete("__Host-cmcp_session")
+        response = browser.client.post(
+            "/account/consent", data={"csrf": csrf, "txn": txn, "decision": "approve"}, headers={"Origin": BASE}
+        )
+        assert response.status_code == 303 and response.headers["location"] == f"/account/login?txn={txn}"
+        # a malformed id is not echoed anywhere: plain /account
+        other = browser.client.post("/account/consent", data={"txn": "../x"}, headers={"Origin": BASE})
+        assert other.status_code == 303 and other.headers["location"] == "/account"
 
     def test_a_foreign_or_missing_origin_is_refused(self, stack: Stack) -> None:
         browser, page, _ = consent_page(stack)

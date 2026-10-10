@@ -68,12 +68,13 @@ def open_request(stack: Stack, browser: Browser | None = None, user: Any = ALICE
 
 
 def get_consent(browser: Browser, txn: str, **headers: str) -> Any:
-    return browser.api("GET", f"/consent/{txn}", **headers)
+    return browser.api("GET", f"/consent?txn={txn}", **headers)
 
 
 def decide(browser: Browser, txn: str, decision: Any = "approve", **kw: Any) -> Any:
     return browser.api(
-        "POST", f"/consent/{txn}", body={"decision": decision}, csrf=kw.pop("csrf", None) or browser.csrf_token(), **kw
+        "POST", "/consent", body={"txn": txn, "decision": decision},
+        csrf=kw.pop("csrf", None) or browser.csrf_token(), **kw
     )
 
 
@@ -143,8 +144,8 @@ class TestFeaturesAndThePrefix:
             txn = "A" * 43
             gid = "00000000-0000-4000-8000-000000000001"
             calls = [
-                ("GET", f"/consent/{txn}", None), ("POST", f"/consent/{txn}", {"decision": "deny"}),
-                ("PUT", f"/consent/{txn}", None), ("GET", "/me/grants", None),
+                ("GET", f"/consent?txn={txn}", None), ("POST", "/consent", {"txn": txn, "decision": "deny"}),
+                ("PUT", "/consent", None), ("GET", "/me/grants", None),
                 ("DELETE", f"/me/grants/{gid}", None), ("GET", f"/admin/accounts/{gid}/grants", None),
                 ("DELETE", f"/admin/grants/{gid}", None), ("OPTIONS", "/me/grants", None),
             ]
@@ -156,7 +157,7 @@ class TestFeaturesAndThePrefix:
             assert features["consent"] is False and features["connected_apps"] is False
 
 
-# ------------------------------------------------------------------------- GET /consent/{id}
+# ------------------------------------------------------------------------- GET /consent?txn=
 
 
 class TestGetConsent:
@@ -264,7 +265,7 @@ class TestGetConsent:
         assert "secret" not in response.text
 
 
-# ------------------------------------------------------------------------- POST /consent/{id}
+# ------------------------------------------------------------------------- POST /consent
 
 
 class TestDecide:
@@ -318,9 +319,9 @@ class TestDecide:
 
     def test_the_pipeline_of_every_mutation_applies(self, react: Stack) -> None:
         browser, txn = open_request(react)
-        path = f"/consent/{txn}"
+        path = "/consent"
         csrf = browser.csrf_token()
-        body = {"decision": "approve"}
+        body = {"txn": txn, "decision": "approve"}
         error_of(browser.api("POST", path, body=body), 403, "csrf_invalid")
         error_of(browser.api("POST", path, body=body, csrf="wrong"), 403, "csrf_invalid")
         foreign = browser.api("POST", path, body=body, csrf=csrf, Origin="https://evil.example")
@@ -371,7 +372,7 @@ class TestDecide:
 
         browser, txn = open_request(react)
         react.store.disable_principal(react.account_of(ALICE), actor=OPERATOR, reason="operator_disabled")
-        response = browser.api("POST", f"/consent/{txn}", body={"decision": "approve"}, csrf="x")
+        response = browser.api("POST", "/consent", body={"txn": txn, "decision": "approve"}, csrf="x")
         assert response.status_code in (401, 403)
         assert raw_sql(react.store, "SELECT COUNT(*) FROM oauth_codes")[0][0] == 0
 

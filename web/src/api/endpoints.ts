@@ -121,11 +121,11 @@ export const adminAudit = (before?: string | null) =>
 // ---- apps (the server's own authorization server) --------------------------------
 
 /** What an app asks for, to show before the person decides. `txn` is the request id from the URL. */
-export const getConsent = (txn: string) => call('GET /consent/{id}', { id: txn })
+export const getConsent = (txn: string) => call('GET /consent', { query: { txn } })
 
 /** The one decision on a request; the answer says where to send the browser next. */
 export const decideConsent = (txn: string, decision: ConsentDecision) =>
-  call('POST /consent/{id}', { id: txn, body: { decision } })
+  call('POST /consent', { body: { txn, decision } })
 
 export const getGrants = () => call('GET /me/grants')
 

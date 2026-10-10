@@ -385,9 +385,9 @@ class Browser:
         """What the consent screen does: read the request, decide, return where the browser goes."""
         txn = query_of(location)["txn"]
         csrf = self.csrf_token()
-        shown = self.api("GET", f"/consent/{txn}")
+        shown = self.api("GET", f"/consent?txn={txn}")
         assert shown.status_code == 200, shown.text
-        done = self.api("POST", f"/consent/{txn}", body={"decision": decision}, csrf=csrf)
+        done = self.api("POST", "/consent", body={"txn": txn, "decision": decision}, csrf=csrf)
         assert done.status_code == 200, done.text
         target = str(done.json()["redirect_to"])
         return Landed(target, query_of(target))

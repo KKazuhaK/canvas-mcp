@@ -26,9 +26,9 @@ describe('api/contract.ts', () => {
       'DELETE /admin/grants/{id}',
       'DELETE /me/grants/{id}',
       'GET /admin/accounts/{id}/grants',
-      'GET /consent/{id}',
+      'GET /consent',
       'GET /me/grants',
-      'POST /consent/{id}',
+      'POST /consent',
     ])
   })
 

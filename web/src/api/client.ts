@@ -73,7 +73,7 @@ http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
  * itself (a plain navigation that keeps the request id) instead of the generic sign-in page.
  */
 function isMeProbe(url: string | undefined): boolean {
-  return url === '/me' || url === '/providers' || (url?.startsWith('/consent/') ?? false)
+  return url === '/me' || url === '/providers' || url === '/consent'
 }
 
 http.interceptors.response.use(

@@ -537,7 +537,7 @@ grep -q 'id="root"' "$WORKDIR/local-consent.html" || fail "local mode (react): /
 if grep -q 'name="decision"' "$WORKDIR/local-consent.html"; then
   fail "local mode (react): /account/consent is a server-rendered form"
 fi
-for path in "/account/api/consent/${TXN}" /account/api/me/grants; do
+for path in "/account/api/consent?txn=${TXN}" /account/api/me/grants; do
   code="$(curl -s -o "$WORKDIR/local-api.json" -w '%{http_code}' "${BASE}${path}")"
   [ "$code" = "401" ] || fail "local mode (react): GET ${path} without a session returned ${code}, expected 401"
   grep -q 'not_authenticated' "$WORKDIR/local-api.json" || fail "local mode (react): ${path} did not answer not_authenticated"

@@ -62,9 +62,13 @@ export interface Contract {
   'GET /admin/audit': { query: { before?: string }; response: AdminAuditResponse }
   // Only with the server's own authorization server (SELFHOST_AUTH_MODE=local): the
   // server answers not_found for these otherwise, and GET /me `features` says so.
-  // `{id}` is the request id (consent), a connection's id, or an account id.
-  'GET /consent/{id}': { response: ConsentResponse }
-  'POST /consent/{id}': { body: { decision: ConsentDecision }; response: ConsentDecisionResponse }
+  // `{id}` is a connection's id or an account id. The consent request id travels in the query
+  // (read) and the body (decision), never in the path: proxies log paths, and blank queries.
+  'GET /consent': { query: { txn: string }; response: ConsentResponse }
+  'POST /consent': {
+    body: { txn: string; decision: ConsentDecision }
+    response: ConsentDecisionResponse
+  }
   'GET /me/grants': { response: GrantsResponse }
   'DELETE /me/grants/{id}': { response: void }
   'GET /admin/accounts/{id}/grants': { response: GrantsResponse }

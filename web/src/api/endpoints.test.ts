@@ -55,7 +55,7 @@ describe('the wire shape of every endpoint', () => {
     ['revokeGrant', () => revokeGrant(ID), 'DELETE', `/me/grants/${ID}`],
     ['adminGrants', () => adminGrants(ID), 'GET', `/admin/accounts/${ID}/grants`],
     ['adminRevokeGrant', () => adminRevokeGrant(ID), 'DELETE', `/admin/grants/${ID}`],
-    ['getConsent', () => getConsent(TXN), 'GET', `/consent/${TXN}`],
+    ['getConsent', () => getConsent(TXN), 'GET', '/consent'],
     ['adminMarkInvalid', () => adminMarkInvalid(ID), 'POST', `/admin/enrollments/${ID}/mark-invalid`],
     ['adminRemoveEnrollment', () => adminRemoveEnrollment(ID), 'DELETE', `/admin/enrollments/${ID}`],
     ['approve', () => adminAccessAction(ID, 'approve'), 'POST', `/admin/accounts/${ID}/approve`],
@@ -111,13 +111,15 @@ describe('the wire shape of every endpoint', () => {
     expect(seen[0].headers['x-csrf-token']).toBe('c')
   })
 
-  it('POST /consent/{id} sends exactly {decision} with the CSRF header', async () => {
+  it('the consent request id travels in the query and the body, never in the path', async () => {
     const seen = scriptAdapter(() => ({ status: 200, data: { redirect_to: 'https://app.test/cb' } }))
     setCsrfToken('c')
+    await getConsent(TXN)
+    expect(seen[0]).toMatchObject({ method: 'GET', url: '/consent', params: { txn: TXN } })
     await decideConsent(TXN, 'approve')
-    expect(seen[0]).toMatchObject({ method: 'POST', url: `/consent/${TXN}` })
-    expect(JSON.parse(seen[0].data as string)).toEqual({ decision: 'approve' })
-    expect(seen[0].headers['x-csrf-token']).toBe('c')
+    expect(seen[1]).toMatchObject({ method: 'POST', url: '/consent' })
+    expect(JSON.parse(seen[1].data as string)).toEqual({ txn: TXN, decision: 'approve' })
+    expect(seen[1].headers['x-csrf-token']).toBe('c')
   })
 
   it('the revoke calls carry the CSRF header and no body', async () => {

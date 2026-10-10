@@ -91,9 +91,9 @@ describe('the consent screen', () => {
       await user.click(screen.getByRole('button', { name: 'Allow' }))
       await waitFor(() => expect(hardNavigate).toHaveBeenCalledTimes(1))
       const post = seen.find((request) => request.method === 'POST')
-      expect(post?.url).toBe(`/consent/${MOCK_TXN.verified}`)
+      expect(post?.url).toBe('/consent')
       expect(post?.headers['x-csrf-token']).toBe(CSRF)
-      expect(JSON.parse(post?.data as string)).toEqual({ decision: 'approve' })
+      expect(JSON.parse(post?.data as string)).toEqual({ txn: MOCK_TXN.verified, decision: 'approve' })
       const target = new URL(vi.mocked(hardNavigate).mock.calls[0][0])
       expect(target.origin + target.pathname).toBe('https://claude.ai/api/mcp/auth_callback')
       expect(target.searchParams.get('code')).toBe('mock-code')
@@ -203,7 +203,7 @@ describe('the consent screen', () => {
       await renderApp(consentPath(MOCK_TXN.verified), 'signed-out')
       const seen = recordRequests()
       await waitFor(() => expect(hardNavigate).toHaveBeenCalledWith(`/account/login?txn=${MOCK_TXN.verified}`))
-      expect(seen.find((request) => request.url.startsWith('/consent/'))).toBeUndefined()
+      expect(seen.find((request) => request.url === '/consent')).toBeUndefined()
       expect(screen.getByText('Taking you to sign in…')).toBeInTheDocument()
     })
 
@@ -217,6 +217,33 @@ describe('the consent screen', () => {
       })
       await waitFor(() => expect(hardNavigate).toHaveBeenCalledWith(`/account/login?txn=${MOCK_TXN.verified}`))
       expect(router.state.location.pathname).toBe('/consent')
+    })
+  })
+
+  describe('a session that ends between the screen and the button', () => {
+    it('sends the person to the sign-in of this very request instead of showing an error', async () => {
+      const user = userEvent.setup()
+      await renderApp(consentPath(MOCK_TXN.verified), 'local', () => {
+        scriptAdapter((request) => {
+          if (request.url === '/me') {
+            return { status: 200, data: meFixture({}, { features: { ...meFixture().features, consent: true } }) }
+          }
+          if (request.method === 'POST') return { status: 401, data: errorBody('not_authenticated') }
+          return {
+            status: 200,
+            data: {
+              client: { kind: 'dcr', label: 'App', name: 'App', host: null, verified: false },
+              redirect: { host: 'app.test', loopback: false },
+              scopes: [{ name: 'Canvas.Access' }],
+              account: { display_name: 'Ada Example', username: 'ada@example.edu' },
+              can_approve: true,
+              expires_at: '2030-01-01T00:00:00Z',
+            },
+          }
+        })
+      })
+      await user.click(await screen.findByRole('button', { name: 'Allow' }))
+      await waitFor(() => expect(hardNavigate).toHaveBeenCalledWith(`/account/login?txn=${MOCK_TXN.verified}`))
     })
   })
 
@@ -235,7 +262,7 @@ describe('the consent screen', () => {
         await renderApp(txn === '' ? '/consent' : `/consent?txn=${encodeURIComponent(txn)}`, 'local')
         const seen = recordRequests()
         expect(await screen.findByRole('alert')).toHaveTextContent('expired, was started in a different browser')
-        expect(seen.find((request) => request.url.startsWith('/consent/'))).toBeUndefined()
+        expect(seen.find((request) => request.url === '/consent')).toBeUndefined()
         expect(hardNavigate).not.toHaveBeenCalled()
       },
     )

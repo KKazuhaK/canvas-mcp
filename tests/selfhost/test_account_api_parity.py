@@ -99,8 +99,8 @@ LEGACY_TO_API: dict[tuple[str, str], list[tuple[str, str]] | None] = {
 #: pages register them only then, and the API answers ``not_found`` for them otherwise.
 #: ``tests/selfhost/authz/test_account_api_authz.py`` checks this table against a local-mode app.
 LOCAL_LEGACY_TO_API: dict[tuple[str, str], list[tuple[str, str]]] = {
-    ("GET", "/account/consent"): [("GET", f"{P}/consent/{{id}}")],
-    ("POST", "/account/consent"): [("POST", f"{P}/consent/{{id}}")],
+    ("GET", "/account/consent"): [("GET", f"{P}/consent")],
+    ("POST", "/account/consent"): [("POST", f"{P}/consent")],
     ("POST", "/account/grants/revoke"): [("DELETE", f"{P}/me/grants/{{id}}")],
     ("POST", "/account/admin/grants/revoke"): [
         ("DELETE", f"{P}/admin/grants/{{id}}"),

@@ -23,7 +23,7 @@ It serves the single-page UI with the data and the actions the server-rendered
   token or an exception message.
 
 Only the features that exist are served. Linked identities are not; ``GET /me`` says so in
-``features``. The consent screen and the connected apps (``/consent/{txn}``,
+``features``. The consent screen and the connected apps (``/consent``,
 ``/me/grants``, ``/admin/accounts/{id}/grants``, ``/admin/grants/{id}``) belong to the
 server's own authorization server (``SELFHOST_AUTH_MODE=local``): the routes are always in
 the route table (the web app and the server must list the same ones), but every one of them
@@ -387,7 +387,7 @@ class ApiApp:
             (f"{API_PREFIX}/admin/audit", {"GET": e(self.admin_audit, access="owner")}),
             # SELFHOST_AUTH_MODE=local only (not_found otherwise).
             (
-                f"{API_PREFIX}/consent/{{id}}",
+                f"{API_PREFIX}/consent",
                 {
                     "GET": e(self.get_consent, access="session", local_authz=True),
                     "POST": e(
@@ -1270,10 +1270,13 @@ class ApiApp:
         }
 
     @staticmethod
-    def _txn(ctx: _Ctx) -> str:
-        """The request id in the path; a malformed one is as good as an unknown one."""
-        raw = ctx.params.get("id", "")
-        if not _TXN_ID_RE.fullmatch(raw):
+    def _txn(raw: object) -> str:
+        """The request id; a malformed one is as good as an unknown one.
+
+        It travels in the query of the read and in the body of the decision, never in the
+        path: proxies log paths (nginx ``$uri``), and the query is what their filters blank.
+        """
+        if not isinstance(raw, str) or not _TXN_ID_RE.fullmatch(raw):
             raise _Fail("authorization_invalid")
         return raw
 
@@ -1286,7 +1289,9 @@ class ApiApp:
 
         session = ctx.session
         assert session is not None and self.app.authz is not None
-        txn = self._txn(ctx)
+        if set(ctx.request.query_params.keys()) - {"txn"}:
+            raise _invalid("query")
+        txn = self._txn(ctx.request.query_params.get("txn"))
         try:
             shown = await self.app.authz.consent.describe(
                 txn, self._binding(ctx), account_pending=session.pending
@@ -1325,8 +1330,10 @@ class ApiApp:
 
         session, body = ctx.session, ctx.body
         assert session is not None and body is not None and self.app.authz is not None
-        txn = self._txn(ctx)
-        _closed(body, required=("decision",))
+        if ctx.request.url.query:
+            raise _invalid("query")
+        _closed(body, required=("txn", "decision"))
+        txn = self._txn(body["txn"])
         decision = body["decision"]
         if decision not in _DECISIONS:
             raise _invalid("decision")

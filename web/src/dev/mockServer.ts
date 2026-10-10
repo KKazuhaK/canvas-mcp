@@ -925,21 +925,21 @@ function consentView(txn: string, state: MockState): ConsentResponse {
   }
 }
 
-route('GET /consent/{id}', 'session', (c, s) => {
+route('GET /consent', 'session', (c, s) => {
   if (!s.me.features.consent) return fail('not_found')
-  const txn = decodeURIComponent(c.match[1])
+  const txn = c.query.get('txn') ?? ''
   if (!TXN_SHAPE.test(txn) || !s.txns.has(txn)) return fail('authorization_invalid')
   if (txn === MOCK_TXN.unavailable) return fail('client_unavailable')
   return ok(consentView(txn, s))
 })
 
-route('POST /consent/{id}', 'session', (c, s) => {
+route('POST /consent', 'session', (c, s) => {
   if (!s.me.features.consent) return fail('not_found')
-  const bad = onlyFields(c.body, ['decision'])
+  const bad = onlyFields(c.body, ['txn', 'decision'])
   if (bad) return bad
   const decision = c.body.decision
   if (decision !== 'approve' && decision !== 'deny') return fail('validation_failed', { field: 'decision' })
-  const txn = decodeURIComponent(c.match[1])
+  const txn = typeof c.body.txn === 'string' ? c.body.txn : ''
   if (!TXN_SHAPE.test(txn) || !s.txns.has(txn)) return fail('authorization_invalid')
   if (decision === 'approve' && s.me.account.status === 'pending') return fail('pending_approval')
   s.txns.delete(txn)
