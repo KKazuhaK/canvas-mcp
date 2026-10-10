@@ -5,6 +5,9 @@ Usage::
     python -m canvas_mcp.core.selfhost.token_admin check
     python -m canvas_mcp.core.selfhost.token_admin list
     python -m canvas_mcp.core.selfhost.token_admin accounts
+    python -m canvas_mcp.core.selfhost.token_admin identities [PRINCIPAL]
+    python -m canvas_mcp.core.selfhost.token_admin unlink-identity PRINCIPAL IDENTITY_ID
+    python -m canvas_mcp.core.selfhost.token_admin login-providers [--check]
     python -m canvas_mcp.core.selfhost.token_admin approve PRINCIPAL
     python -m canvas_mcp.core.selfhost.token_admin promote-owner PRINCIPAL
     python -m canvas_mcp.core.selfhost.token_admin disable PRINCIPAL [--allow-last-owner]
@@ -48,6 +51,16 @@ for a row that belongs to the default school ``CANVAS_API_URL``) and, last, the 
 key. ``accounts`` prints one line per account: key, status, role, how it was admitted,
 display name, sign-in name, provider, created, last sign-in and the legacy
 ``entra:<tid>:<oid>`` key (``-`` if none).
+
+``identities`` prints one tab-separated line per linked sign-in method (every account, or
+one): account key, identity id, provider, issuer, subject, sign-in name, e-mail, ``verified``
+or ``unverified``, linked, last sign-in. ``unlink-identity`` removes one by the id that line
+shows: an account always keeps at least one (exit 3), every browser session of the account
+ends, connected apps stay, and the audit log records it. ``login-providers`` prints the
+configured sign-in providers with the redirect URI to register at each; ``--check`` also asks
+every OpenID Connect provider for its discovery document and key set (the only command that
+makes network calls) and exits 1 if one of them is unusable. It reads the server's environment,
+so it needs the same variables as the server.
 
 ``list-grants`` (``SELFHOST_AUTH_MODE=local``) prints one tab-separated line per connected
 app: grant id, account key, client kind (``dcr`` or ``cimd``, which answers how a client
@@ -107,7 +120,7 @@ import re
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from canvas_mcp.core.selfhost import accounts as acc
 from canvas_mcp.core.selfhost.db.url import (
@@ -178,6 +191,24 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("object_id", nargs="?", help="the object id when PRINCIPAL is a tenant id")
 
     sub.add_parser("check", help="open the store, print the row counts and key ids")
+    identities = sub.add_parser(
+        "identities", help="list linked sign-in methods (tab-separated, no secrets)"
+    )
+    principal(identities, optional=True)
+    unlink = sub.add_parser(
+        "unlink-identity", help="remove one sign-in method from an account (it keeps at least one)"
+    )
+    unlink.add_argument("principal", help="acct:<uuid>, a bare uuid or entra:<tenant id>:<object id>")
+    unlink.add_argument("identity_id", type=int, help="the identity id printed by 'identities'")
+    unlink.set_defaults(object_id=None)
+    providers = sub.add_parser(
+        "login-providers", help="show the configured sign-in providers and the redirect URIs to register"
+    )
+    providers.add_argument(
+        "--check",
+        action="store_true",
+        help="also fetch each OpenID Connect provider's discovery document and keys (network)",
+    )
     sub.add_parser("list", help="list enrollments with their Canvas host (tab-separated, no tokens)")
     sub.add_parser("accounts", help="list every account (tab-separated)")
     approve = sub.add_parser("approve", help="approve an account that waits for approval")
@@ -606,6 +637,8 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
                 )
             )
         return EXIT_OK
+    if command == "identities":
+        return _identities(args, store)
     if command == "rotate":
         rotated = store.rotate()
         print(f"re-encrypted {rotated} row(s)")
@@ -691,6 +724,26 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
             return EXIT_NOT_FOUND
         print("approved 1 account")
         return EXIT_OK
+    if command == "unlink-identity":
+        if key is None:
+            print("not found: no such account", file=sys.stderr)
+            return EXIT_NOT_FOUND
+        result = store.unlink_identity(key, args.identity_id, actor=OPERATOR)
+        if result.ok:
+            print(
+                f"unlinked 1 sign-in method ({result.provider_id}); every browser session of the "
+                "account ended, connected apps are unchanged"
+            )
+            return EXIT_OK
+        if result.code == "last_identity":
+            print(
+                "refused: an account keeps at least one sign-in method (use 'disable' to cut "
+                "someone off)",
+                file=sys.stderr,
+            )
+            return EXIT_REFUSED
+        print("not found: that account has no sign-in method with that id", file=sys.stderr)
+        return EXIT_NOT_FOUND
     if command == "promote-owner":
         changed = key is not None and store.promote_owner(key, actor=OPERATOR)
         if not changed:
@@ -727,6 +780,108 @@ def _history(args: argparse.Namespace, store: TokenStore, target: _Target | None
     return EXIT_OK
 
 
+def _identities(args: argparse.Namespace, store: TokenStore) -> int:
+    keys: list[str]
+    if args.principal is None and args.object_id is None:
+        keys = [st.principal_key for st in store.list_principal_statuses()]
+    else:
+        try:
+            target = _parse_target(args.principal, args.object_id)
+        except (ValueError, _BadPrincipal):
+            print(_BAD_PRINCIPAL, file=sys.stderr)
+            return EXIT_CONFIG
+        found = _lookup(store, target)
+        if found is None:
+            print("not found: no such account", file=sys.stderr)
+            return EXIT_NOT_FOUND
+        keys = [found]
+    for key in keys:
+        for identity in store.list_identities(key):
+            print(
+                "\t".join(
+                    [
+                        key,
+                        str(identity.id),
+                        _cell(identity.provider_id),
+                        _cell(identity.issuer),
+                        _cell(identity.subject),
+                        _cell(identity.username) or "-",
+                        _cell(identity.email or "") or "-",
+                        "verified" if identity.email_verified else "unverified",
+                        _iso(identity.linked_at),
+                        _iso(identity.last_login_at),
+                    ]
+                )
+            )
+    return EXIT_OK
+
+
+def _redirect_uri(base: str, provider_id: str) -> str:
+    if provider_id == acc.PROVIDER_ENTRA:
+        return f"{base}/account/callback"
+    if provider_id in (acc.PROVIDER_GOOGLE, acc.PROVIDER_GITHUB):
+        return f"{base}/account/callback/{provider_id}"
+    return f"{base}/account/callback/oidc/{provider_id.removeprefix('oidc:')}"
+
+
+def _run_login_providers(args: argparse.Namespace) -> int:
+    """``login-providers``: what is configured, and with ``--check`` whether the providers answer."""
+    from canvas_mcp.core.selfhost.settings import (
+        SelfhostConfigError,
+        load_selfhost_settings,
+    )
+
+    try:
+        settings = load_selfhost_settings()
+    except SelfhostConfigError as exc:
+        for problem in exc.problems:
+            print(f"error: {problem}", file=sys.stderr)
+        return EXIT_CONFIG
+    login = settings.login_providers
+    base = settings.public_base_url
+    if not (args.check and login.public):
+        for provider_id in login.order:
+            print(f"{provider_id}	redirect_uri={_redirect_uri(base, provider_id)}")
+        return EXIT_OK
+
+    import asyncio
+
+    from canvas_mcp.core.selfhost.login.registry import build_login_runtime
+    from canvas_mcp.core.selfhost.login_state import InMemoryLoginStateStore
+
+    runtime = build_login_runtime(settings, flow_store=InMemoryLoginStateStore())
+    assert runtime is not None
+
+    async def check() -> int:
+        failed = 0
+        for provider_id in login.order:
+            line = f"{provider_id}	redirect_uri={_redirect_uri(base, provider_id)}"
+            provider: Any = runtime.providers.get(provider_id)
+            discovery = getattr(provider, "discovery", None)
+            if provider is None or discovery is None:
+                print(line + "	OK	(nothing to discover)")
+                continue
+            try:
+                await provider.prepare()
+                meta = discovery.current()
+                assert meta is not None
+                await provider.jwks.ensure(meta.jwks_uri, None)
+                print(
+                    line
+                    + f"	OK	issuer={meta.issuer}	algs={','.join(meta.algs)}"
+                    + f"	pkce={'listed' if meta.pkce_s256 else 'not listed'}"
+                    + f"	iss_param={'yes' if meta.iss_param_supported else 'no'}"
+                    + f"	token_auth={','.join(meta.token_auth_methods) or 'not listed'}"
+                    + f"	jwks_keys={provider.jwks.key_count()}"
+                )
+            except Exception as exc:  # noqa: BLE001 - report the class only, never the response
+                failed += 1
+                print(line + f"	FAILED	{type(exc).__name__}")
+        return failed
+
+    return EXIT_NOT_FOUND if asyncio.run(check()) else EXIT_OK
+
+
 def _access(store: TokenStore) -> int:
     by_key = {a.principal_key: a for a in store.list_accounts()}
     for st in store.list_principal_statuses():
@@ -756,6 +911,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "db":
             return _run_db(args)
+        if args.command == "login-providers":
+            return _run_login_providers(args)
         store = _open_store()
         if args.command == "access":
             return _access(store)

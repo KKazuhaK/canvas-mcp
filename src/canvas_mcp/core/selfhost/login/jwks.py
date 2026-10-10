@@ -166,6 +166,10 @@ class JwksCache:
         self._keys, self._anonymous = by_kid, anonymous
         self._loaded_at = self._clock()
 
+    def key_count(self) -> int:
+        """How many verification keys are loaded."""
+        return len(self._keys) + len(self._anonymous)
+
     def lookup(self, kid: str | None, alg: str) -> Key | None:
         """The key to verify a token with this ``kid`` and ``alg`` against, from what is loaded."""
         if kid is not None:
