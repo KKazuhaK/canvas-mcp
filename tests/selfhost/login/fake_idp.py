@@ -405,6 +405,7 @@ class FakeGitHub:
 
     def __init__(self, net: FakeNetwork, *, client_id: str = "Iv1.0123456789abcdef",
                  client_secret: str = "github-secret-value-0123456789abcdef") -> None:
+        self.net = net
         self.client_id = client_id
         self.client_secret = client_secret
         self.user = GitHubUser()
