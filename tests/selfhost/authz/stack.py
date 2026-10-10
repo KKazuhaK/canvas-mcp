@@ -18,8 +18,10 @@ import hashlib
 import json
 import re
 import secrets
+import socket
+import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,7 +31,9 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 import fastmcp
 import httpx
+import httpx2
 import pytest
+import uvicorn
 from dbbackend import stack_env
 from fastmcp import FastMCP
 from starlette.testclient import TestClient
@@ -174,7 +178,7 @@ def pkce() -> tuple[str, str]:
 
 @dataclass
 class Stack:
-    client: TestClient
+    client: Any  # a TestClient (in process) or an httpx2.Client (served by uvicorn)
     runtime: SelfhostRuntime
     settings: SelfhostSettings
     mcp: FastMCP
@@ -183,6 +187,8 @@ class Stack:
     clock: Clock
     tmp_path: Path
     enrolled: dict[str, str] = field(default_factory=dict)
+    #: Builds another client with its own cookie jar (another browser) for the same app.
+    new_client: Callable[[], Any] = field(default=lambda: None)
 
     # -- accounts -------------------------------------------------------------------------
 
@@ -303,11 +309,9 @@ class Landed:
 class Browser:
     """A scripted user agent (own cookie jar) that follows /authorize through sign-in and consent."""
 
-    def __init__(self, stack: Stack, *, client: TestClient | None = None) -> None:
+    def __init__(self, stack: Stack, *, client: Any = None) -> None:
         self.stack = stack
-        self.client = client or TestClient(
-            stack.client.app, base_url=BASE, follow_redirects=False
-        )
+        self.client = client or stack.new_client()
         self.trail: list[str] = []
 
     def get(self, url: str, **kw: Any) -> httpx.Response:
@@ -391,16 +395,14 @@ def default_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
     return env
 
 
-@contextmanager
-def local_stack(
+def _build(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    env: Mapping[str, str] | None = None,
-    clock: Clock | None = None,
-    tools: bool = True,
-) -> Iterator[Stack]:
-    """Start the app in local mode and yield the stack (a context manager: it stops the app)."""
+    env: Mapping[str, str] | None,
+    clock: Clock | None,
+    tools: bool,
+) -> tuple[Any, Stack]:
+    """The app and a Stack around it (without a client yet)."""
     monkeypatch.setattr(fastmcp.settings, "test_mode", True)
     monkeypatch.setattr(fastmcp.settings, "home", tmp_path / "fastmcp")
     monkeypatch.setenv("CANVAS_API_URL", f"https://{CANVAS_HOST}")
@@ -438,8 +440,126 @@ def local_stack(
         id_token_verifier=idp.verify, http_client_factory=idp.factory, clock=clock,
     )
     app = build_selfhost_asgi_app(mcp, runtime, config)
+    return app, Stack(None, runtime, settings, mcp, idp, cimd, clock, tmp_path)
+
+
+@contextmanager
+def local_stack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    env: Mapping[str, str] | None = None,
+    clock: Clock | None = None,
+    tools: bool = True,
+) -> Iterator[Stack]:
+    """Start the app in local mode and yield the stack (a context manager: it stops the app)."""
+    app, stack = _build(tmp_path, monkeypatch, env, clock, tools)
     with TestClient(app, base_url=BASE, follow_redirects=False) as client:
-        yield Stack(client, runtime, settings, mcp, idp, cimd, clock, tmp_path)
+        stack.client = client
+        stack.new_client = lambda: TestClient(app, base_url=BASE, follow_redirects=False)
+        yield stack
+
+
+# -- served over real HTTP -----------------------------------------------------------------------
+
+
+def _free_socket() -> socket.socket:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    return sock
+
+
+class Runner:
+    """uvicorn in a thread, on a socket we own, with the lifespan on."""
+
+    def __init__(self, app: Any, sock: socket.socket) -> None:
+        self.server = uvicorn.Server(uvicorn.Config(app, log_level="warning", lifespan="on"))
+        self.sock = sock
+        self.thread = threading.Thread(target=lambda: self.server.run(sockets=[sock]), daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+        for _ in range(200):
+            if self.server.started:
+                return
+            time.sleep(0.05)
+        raise RuntimeError("uvicorn did not start")
+
+    def stop(self) -> None:
+        self.server.should_exit = True
+        self.thread.join(timeout=10)
+
+
+def _rewrite(url: httpx2.URL, port: int) -> httpx2.URL:
+    if url.host == "canvas.example.test":
+        return url.copy_with(scheme="http", host="127.0.0.1", port=port)
+    return url
+
+
+class RewriteTransport(httpx2.HTTPTransport):
+    """Sends https://canvas.example.test to the local server, keeping the Host header (and the cookie jar's view)."""
+
+    def __init__(self, port: int) -> None:
+        super().__init__()
+        self.port = port
+
+    def handle_request(self, request: httpx2.Request) -> httpx2.Response:
+        forwarded = httpx2.Request(
+            request.method, _rewrite(request.url, self.port), headers=request.headers,
+            stream=request.stream, extensions=request.extensions,
+        )
+        return super().handle_request(forwarded)
+
+
+class AsyncRewriteTransport(httpx2.AsyncHTTPTransport):
+    def __init__(self, port: int) -> None:
+        super().__init__()
+        self.port = port
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        forwarded = httpx2.Request(
+            request.method, _rewrite(request.url, self.port), headers=request.headers,
+            stream=request.stream, extensions=request.extensions,
+        )
+        return await super().handle_async_request(forwarded)
+
+
+@dataclass
+class Served:
+    stack: Stack
+    port: int
+
+    def async_transport(self) -> AsyncRewriteTransport:
+        return AsyncRewriteTransport(self.port)
+
+
+@contextmanager
+def served_stack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    env: Mapping[str, str] | None = None,
+    clock: Clock | None = None,
+) -> Iterator[Served]:
+    """The same app served by uvicorn; clients reach it as https://canvas.example.test."""
+    app, stack = _build(tmp_path, monkeypatch, env, clock, True)
+    sock = _free_socket()
+    port = sock.getsockname()[1]
+    runner = Runner(app, sock)
+    runner.start()
+
+    def new_client() -> httpx2.Client:
+        return httpx2.Client(
+            transport=RewriteTransport(port), base_url=BASE, follow_redirects=False, timeout=20
+        )
+
+    stack.new_client = new_client
+    stack.client = new_client()
+    try:
+        yield Served(stack, port)
+    finally:
+        stack.client.close()
+        runner.stop()
 
 
 def query_of(url: str) -> dict[str, str]:
