@@ -183,3 +183,27 @@ class TestRedirectAllowlist:
             "http://localhost/callback",
             "http://127.0.0.1/callback",
         )
+
+
+class TestSummary:
+    def test_the_default_mode_says_the_local_settings_are_ignored(self) -> None:
+        from canvas_mcp.server import _selfhost_summary
+
+        lines = _selfhost_summary(_load())
+        (line,) = [entry for entry in lines if "MCP authorization" in entry]
+        assert "entra_proxy" in line and "ignored" in line
+
+    def test_the_local_mode_shows_the_tunables(self) -> None:
+        from canvas_mcp.server import _selfhost_summary
+
+        settings = _load(SELFHOST_AUTH_MODE="local", ACCESS_TOKEN_TTL="30m", CIMD_ENABLED="false", REFRESH_REUSE_GRACE_S="0")
+        (line,) = [entry for entry in _selfhost_summary(settings) if "MCP authorization" in entry]
+        assert line.startswith("  MCP authorization: local (own authorization server;")
+        assert "CIMD off" in line and "access 30m" in line and "refresh cap 30d" in line
+        assert "grace 0s" in line and "upstream age 14d" in line
+
+    def test_no_secret_is_in_the_summary(self) -> None:
+        from canvas_mcp.server import _selfhost_summary
+
+        text = "\n".join(_selfhost_summary(_load(SELFHOST_AUTH_MODE="local")))
+        assert "entra-client-secret" not in text and "jwt-signing" not in text

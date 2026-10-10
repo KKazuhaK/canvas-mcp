@@ -37,7 +37,7 @@ from .models import (
     GrantStatus,
     RotateOutcome,
 )
-from .store import AuthzStore
+from .store import LAST_USED_GRANULARITY_SECONDS, AuthzStore
 from .tokens import AccessTokenCodec, hash_secret, new_refresh_token
 
 _MAX_CACHED_GRANTS = 8192
@@ -223,7 +223,12 @@ class GrantService:
             epoch = self.cache.epoch
             status = await anyio.to_thread.run_sync(self.store.grant_status, grant_id)
             self.cache.put(grant_id, status, epoch)
-            if status.found and not status.revoked:
+            now = int(self._clock())
+            if (
+                status.found
+                and not status.revoked
+                and (status.last_used_at is None or now - status.last_used_at >= LAST_USED_GRANULARITY_SECONDS)
+            ):
                 await anyio.to_thread.run_sync(self.store.touch_grant, grant_id)
         return (
             status.usable(int(self._clock()))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -271,6 +272,31 @@ class TestLoginContinuation:
         assert record2 is not None and f"acct:{record2.account_id}" == bob_key
 
 
+class TestAdmissionLost:
+    def test_a_sign_in_that_is_no_longer_admitted_ends_the_apps_that_account_had_connected(self, stack: Stack) -> None:
+        alice = stack.enroll(ALICE)
+        _, tokens = stack.tokens_for(ALICE)
+        assert stack.mcp_status(tokens["access_token"]) == 200
+        browser = Browser(stack)
+        # Alice signs in again, but Entra no longer shows the role that admitted her
+        response = browser.entra_login(replace(ALICE, roles=()), browser.get("/account/login"))
+        assert response.status_code == 403
+        rows = raw_sql(stack.store, "SELECT revoked_reason, revoked_by FROM oauth_grants")
+        assert rows == [("admission_lost", "system")]
+        assert stack.mcp_status(tokens["access_token"]) == 401  # in this process: at once
+        assert any(
+            e.action == "grants_revoked_for_account" and e.target == alice for e in stack.store.list_audit()
+        )
+
+    def test_a_refused_sign_in_of_a_stranger_revokes_nothing(self, stack: Stack) -> None:
+        stack.enroll(ALICE)
+        stack.tokens_for(ALICE)
+        browser = Browser(stack)
+        response = browser.entra_login(replace(BOB, roles=()), browser.get("/account/login"))
+        assert response.status_code == 403
+        assert raw_sql(stack.store, "SELECT revoked_reason FROM oauth_grants") == [(None,)]
+
+
 # ------------------------------------------------------------------------------- consent: GET
 
 
@@ -354,7 +380,8 @@ class TestConsentPage:
         browser.sign_in(ALICE)
         _, txn, _ = start_request(stack, browser)
         page = browser.get(f"/account/consent?txn={txn}&lang=zh")
-        assert page.status_code == 200 and "连接" in page.text
+        # the Chinese page (written as escapes: this file stays English-only)
+        assert page.status_code == 200 and 'lang="zh-CN"' in page.text and "\u8fde\u63a5" in page.text
         assert f"/account/consent?txn={txn}&amp;lang=en" in page.text
 
     def test_a_malformed_transaction_id_is_refused(self, stack: Stack) -> None:

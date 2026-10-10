@@ -51,6 +51,11 @@ class AuthzRuntime:
 
     # -- what /account uses -------------------------------------------------------------------
 
+    @property
+    def account_hooks(self) -> AuthzRuntime:
+        """What ``/account`` receives: the consent service, the grant operations and the cache hooks."""
+        return self
+
     def account_changed(self, account_key: str) -> None:
         """An owner disabled, enabled, approved or denied an account: forget cached grant status."""
         self.cache.invalidate_account(account_key.removeprefix("acct:"))
