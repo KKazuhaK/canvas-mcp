@@ -111,7 +111,7 @@ describe('the consent screen', () => {
       const seen = recordRequests()
       await user.click(screen.getByRole('button', { name: 'Deny' }))
       await waitFor(() => expect(hardNavigate).toHaveBeenCalledTimes(1))
-      expect(JSON.parse(seen.find((r) => r.method === 'POST')?.data as string)).toEqual({ decision: 'deny' })
+      expect(JSON.parse(seen.find((r) => r.method === 'POST')?.data as string)).toEqual({ txn: MOCK_TXN.verified, decision: 'deny' })
       const target = new URL(vi.mocked(hardNavigate).mock.calls[0][0])
       expect(target.searchParams.get('error')).toBe('access_denied')
       expect(target.searchParams.has('code')).toBe(false)
