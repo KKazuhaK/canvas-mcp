@@ -11,7 +11,7 @@ import base64
 import binascii
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import ClassVar, Literal
@@ -60,6 +60,21 @@ STATE_BACKEND_ENV = "SELFHOST_STATE_BACKEND"
 STATE_BACKEND_MEMORY = "memory"
 STATE_BACKEND_REDIS = "redis"
 
+#: Which authorization server signs MCP clients in: the FastMCP OAuth proxy in front of
+#: Entra (the default, proven with claude.ai), or this server's own (``local``).
+AUTHZ_MODE_ENV = "SELFHOST_AUTH_MODE"
+AUTHZ_MODE_ENTRA_PROXY = "entra_proxy"
+AUTHZ_MODE_LOCAL = "local"
+AUTHZ_MODES = (AUTHZ_MODE_ENTRA_PROXY, AUTHZ_MODE_LOCAL)
+
+DEFAULT_ACCESS_TOKEN_TTL = 3600
+DEFAULT_REFRESH_ABSOLUTE_TTL = 30 * 86400
+DEFAULT_REFRESH_REUSE_GRACE_S = 30
+DEFAULT_GRANT_STATUS_CACHE_S = 30
+DEFAULT_CIMD_FETCH_TIMEOUT_S = 3
+DEFAULT_CIMD_STALE_MAX = 7 * 86400
+DEFAULT_MAX_UPSTREAM_AUTH_AGE = 14 * 86400
+
 ACCOUNT_UI_ENV = "ACCOUNT_UI"
 ACCOUNT_UI_LEGACY = "legacy"
 ACCOUNT_UI_REACT = "react"
@@ -76,7 +91,7 @@ _ROLE_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/_-]+={0,2}$")
 _RESERVED_TENANTS = frozenset({"common", "organizations", "consumers"})
 _OIDC_SCOPES = frozenset({"openid", "profile", "email", "offline_access"})
-_LOOPBACK_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1"})
+_LOOPBACK_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 MIN_CLIENT_SECRET_CHARS = 16
@@ -93,6 +108,33 @@ class SelfhostConfigError(Exception):
     def __init__(self, problems: list[str]) -> None:
         self.problems = list(problems)
         super().__init__("; ".join(self.problems))
+
+
+@dataclass(frozen=True)
+class AuthzSettings:
+    """Tunables of the server's own authorization server (``SELFHOST_AUTH_MODE=local``).
+
+    All durations are seconds. The values are parsed and validated in both modes (a typo
+    fails closed) and used only in ``local`` mode. The defaults are what the design
+    recommends; a settings object built by hand gets them.
+    """
+
+    #: Lifetime of an access token (a JWT), 5 minutes to 24 hours.
+    access_token_ttl: int = DEFAULT_ACCESS_TOKEN_TTL
+    #: Absolute lifetime of a grant (a refresh family): rotation never extends it.
+    refresh_absolute_ttl: int = DEFAULT_REFRESH_ABSOLUTE_TTL
+    #: A replay of a just-used code or refresh token inside this window is a benign
+    #: duplicate, not theft; 0 means strict.
+    refresh_reuse_grace_s: int = DEFAULT_REFRESH_REUSE_GRACE_S
+    #: How long a grant's status (live, account active) is reused in this process.
+    grant_status_cache_s: int = DEFAULT_GRANT_STATUS_CACHE_S
+    #: Resolve client ids that are URLs (Client ID Metadata Documents).
+    cimd_enabled: bool = True
+    cimd_fetch_timeout_s: int = DEFAULT_CIMD_FETCH_TIMEOUT_S
+    #: How old a stored client metadata document may be and still serve /token.
+    cimd_stale_max: int = DEFAULT_CIMD_STALE_MAX
+    #: How long ago the user must have signed in at /account for a grant to continue.
+    max_upstream_auth_age: int = DEFAULT_MAX_UPSTREAM_AUTH_AGE
 
 
 @dataclass(frozen=True)
@@ -140,6 +182,10 @@ class SelfhostSettings:
     # build is missing or unusable).
     account_ui: Literal["legacy", "react"] = "legacy"
     account_web_dist: Path = Path(DEFAULT_ACCOUNT_WEB_DIST)
+    # Who signs MCP clients in: the FastMCP OAuth proxy (default) or this server's own
+    # authorization server. ``authz`` only matters in ``local`` mode.
+    authz_mode: Literal["entra_proxy", "local"] = "entra_proxy"
+    authz: AuthzSettings = field(default_factory=AuthzSettings)
 
     mcp_path: ClassVar[str] = "/mcp"
 
@@ -253,7 +299,7 @@ def _parse_redirect_uris(raw: str, problems: list[str]) -> tuple[str, ...]:
     if bad:
         problems.append(
             f"{name} entries must be https on a non-loopback host, or http on "
-            "localhost or 127.0.0.1 without a port; no wildcards, user "
+            "localhost, 127.0.0.1 or [::1] without a port; no wildcards, user "
             "information, query or fragment"
         )
     elif not entries:
@@ -302,6 +348,109 @@ def _parse_int(name: str, raw: str, default: int, low: int, high: int, problems:
         problems.append(f"{name} must be an integer from {low} to {high}")
         return default
     return value
+
+
+_DURATION_RE = re.compile(r"^([0-9]{1,9})([smhd]?)$")
+_DURATION_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def format_duration(seconds: int) -> str:
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size and seconds % size == 0:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
+def _parse_duration(
+    name: str, raw: str, default: int, low: int, high: int, problems: list[str]
+) -> int | None:
+    """A duration such as ``3600``, ``30m``, ``12h`` or ``30d``, in seconds.
+
+    Returns ``None`` (after recording a problem) for anything malformed or out of
+    range; the value is never echoed. An unset variable gives ``default``.
+    """
+    if not raw:
+        return default
+    match = _DURATION_RE.fullmatch(raw)
+    seconds = int(match.group(1)) * _DURATION_UNITS[match.group(2)] if match else -1
+    if not low <= seconds <= high:
+        problems.append(
+            f"{name} must be a duration such as 3600, 30m, 12h or 30d, from "
+            f"{format_duration(low)} to {format_duration(high)}"
+        )
+        return None
+    return seconds
+
+
+def _parse_bool_default(name: str, raw: str, default: bool, problems: list[str]) -> bool:
+    """A true/false switch whose unset value is ``default`` (``_parse_bool`` is False when unset)."""
+    word = raw.strip().lower()
+    if not word:
+        return default
+    if word in _TRUE_WORDS:
+        return True
+    if word in _FALSE_WORDS:
+        return False
+    problems.append(f"{name} must be true or false")
+    return default
+
+
+def _parse_authz_mode(raw: str, problems: list[str]) -> Literal["entra_proxy", "local"]:
+    """``SELFHOST_AUTH_MODE``: unset or ``entra_proxy`` (the default) or ``local``."""
+    word = raw.strip().lower()
+    if word in ("", AUTHZ_MODE_ENTRA_PROXY):
+        return "entra_proxy"
+    if word == AUTHZ_MODE_LOCAL:
+        return "local"
+    problems.append(
+        f"{AUTHZ_MODE_ENV} must be unset, '{AUTHZ_MODE_ENTRA_PROXY}' or '{AUTHZ_MODE_LOCAL}'"
+    )
+    return "entra_proxy"
+
+
+def _parse_authz_settings(get: Callable[[str], str], problems: list[str]) -> AuthzSettings:
+    """The tunables of the local authorization server (checked in both modes)."""
+    defaults = AuthzSettings()
+    access_ttl = _parse_duration(
+        "ACCESS_TOKEN_TTL", get("ACCESS_TOKEN_TTL"),
+        defaults.access_token_ttl, 300, 24 * 3600, problems,
+    )
+    refresh_ttl = _parse_duration(
+        "REFRESH_ABSOLUTE_TTL", get("REFRESH_ABSOLUTE_TTL"),
+        defaults.refresh_absolute_ttl, 3600, 90 * 86400, problems,
+    )
+    if access_ttl is not None and refresh_ttl is not None and refresh_ttl <= access_ttl:
+        problems.append("REFRESH_ABSOLUTE_TTL must be longer than ACCESS_TOKEN_TTL")
+    stale_max = _parse_duration(
+        "CIMD_STALE_MAX", get("CIMD_STALE_MAX"), defaults.cimd_stale_max, 0, 30 * 86400, problems
+    )
+    upstream_age = _parse_duration(
+        "MAX_UPSTREAM_AUTH_AGE", get("MAX_UPSTREAM_AUTH_AGE"),
+        defaults.max_upstream_auth_age, 3600, 90 * 86400, problems,
+    )
+    return AuthzSettings(
+        access_token_ttl=access_ttl if access_ttl is not None else defaults.access_token_ttl,
+        refresh_absolute_ttl=(
+            refresh_ttl if refresh_ttl is not None else defaults.refresh_absolute_ttl
+        ),
+        refresh_reuse_grace_s=_parse_int(
+            "REFRESH_REUSE_GRACE_S", get("REFRESH_REUSE_GRACE_S"),
+            defaults.refresh_reuse_grace_s, 0, 120, problems,
+        ),
+        grant_status_cache_s=_parse_int(
+            "GRANT_STATUS_CACHE_S", get("GRANT_STATUS_CACHE_S"),
+            defaults.grant_status_cache_s, 0, 60, problems,
+        ),
+        cimd_enabled=_parse_bool_default("CIMD_ENABLED", get("CIMD_ENABLED"), True, problems),
+        cimd_fetch_timeout_s=_parse_int(
+            "CIMD_FETCH_TIMEOUT_S", get("CIMD_FETCH_TIMEOUT_S"),
+            defaults.cimd_fetch_timeout_s, 1, 5, problems,
+        ),
+        cimd_stale_max=stale_max if stale_max is not None else defaults.cimd_stale_max,
+        max_upstream_auth_age=(
+            upstream_age if upstream_age is not None else defaults.max_upstream_auth_age
+        ),
+    )
 
 
 def _parse_featured_schools(raw: str, problems: list[str]) -> tuple[FeaturedSchool, ...]:
@@ -446,6 +595,14 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
     problems: list[str] = []
 
     base = _parse_public_base_url(get("PUBLIC_BASE_URL"), problems)
+    authz_mode = _parse_authz_mode(get(AUTHZ_MODE_ENV), problems)
+    authz = _parse_authz_settings(get, problems)
+    if authz_mode == "local" and base is not None and base[0].endswith(":443"):
+        # The issuer and the token audience are compared as exact strings, so the one
+        # spelling of this origin has to be the one every client derives from the URL.
+        problems.append(
+            "PUBLIC_BASE_URL must not include the default port when SELFHOST_AUTH_MODE=local"
+        )
 
     tenant_raw = get("ENTRA_TENANT_ID")
     if tenant_raw.lower() in _RESERVED_TENANTS:
@@ -582,4 +739,6 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
         access_policy=access_policy,
         account_ui=account_ui,
         account_web_dist=Path(web_dist_raw),
+        authz_mode=authz_mode,
+        authz=authz,
     )

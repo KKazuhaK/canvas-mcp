@@ -279,7 +279,7 @@ def test_every_variable_the_selfhost_settings_read_is_documented(env_text):
     read = set(re.findall(r'get\("([A-Z][A-Z0-9_]+)"\)', source))
     read |= {
         "ACCOUNT_SESSION_TTL_SECONDS", "OAUTH_ALLOWED_REDIRECT_URIS", "MCP_AUTH_MODE", "SELFHOST_COURSE_STATE",
-        "SELFHOST_DISABLED_TOOLS", "ACCOUNT_UI", "ACCOUNT_WEB_DIST",
+        "SELFHOST_DISABLED_TOOLS", "ACCOUNT_UI", "ACCOUNT_WEB_DIST", "SELFHOST_AUTH_MODE",
     }
     # The admission settings are read by the pure module (settings.py hands it the environment).
     accounts_source = (SRC / "core" / "selfhost" / "accounts.py").read_text(encoding="utf-8")

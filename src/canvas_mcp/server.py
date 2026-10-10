@@ -39,6 +39,7 @@ from .core.selfhost.settings import (
     SelfhostConfigError,
     SelfhostSettings,
     auth_mode,
+    format_duration,
     load_selfhost_settings,
 )
 from .core.tool_policy import ToolPolicyError, apply_tool_policy, resolve_tool_policy
@@ -582,6 +583,21 @@ def _cmd_revoke(args: argparse.Namespace) -> int:
     return 1
 
 
+def _authz_summary(settings: SelfhostSettings) -> str:
+    """The MCP authorization line of --config (the tunables are shown only when they apply)."""
+    if settings.authz_mode != "local":
+        return "  MCP authorization: entra_proxy (FastMCP OAuth proxy); local-mode settings ignored"
+    authz = settings.authz
+    return (
+        "  MCP authorization: local (own authorization server; "
+        f"CIMD {'on' if authz.cimd_enabled else 'off'}; "
+        f"access {format_duration(authz.access_token_ttl)}; "
+        f"refresh cap {format_duration(authz.refresh_absolute_ttl)}; "
+        f"grace {authz.refresh_reuse_grace_s}s; "
+        f"upstream age {format_duration(authz.max_upstream_auth_age)})"
+    )
+
+
 def _selfhost_summary(settings: SelfhostSettings) -> list[str]:
     """Configuration lines for --config. Never includes a secret."""
     return [
@@ -601,6 +617,7 @@ def _selfhost_summary(settings: SelfhostSettings) -> list[str]:
         + ("automatic at start" if settings.auto_migrate else "manual (token_admin db upgrade)"),
         f"  Rate limits and one-time state: {settings.state_backend} (single instance)",
         f"  FastMCP home: {settings.fastmcp_home}",
+        _authz_summary(settings),
         f"  Redirect URIs: {', '.join(settings.allowed_client_redirect_uris)}",
         "  Canvas schools: featured="
         + (", ".join(school.host for school in settings.featured_schools) or "none")
