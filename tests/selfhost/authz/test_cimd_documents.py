@@ -82,9 +82,8 @@ class TestTheRecordedDocuments:
         assert client.display_name == "claude.ai"  # the verified host, not the self-asserted name
 
     async def test_claude_ai_may_only_use_its_callback(self, env: Env) -> None:
-        from pydantic import AnyUrl
-
         from mcp.shared.auth import InvalidRedirectUriError
+        from pydantic import AnyUrl
 
         cimd = FakeCimd()
         cimd.serve(CLAUDE_AI_URL, fixture("claude-ai.json"))
@@ -132,9 +131,8 @@ class TestTheRecordedDocuments:
         ],
     )
     async def test_claude_code_matches_nothing_else(self, env: Env, uri: str) -> None:
-        from pydantic import AnyUrl
-
         from mcp.shared.auth import InvalidRedirectUriError
+        from pydantic import AnyUrl
 
         cimd = FakeCimd()
         cimd.serve(CLAUDE_CODE_URL, fixture("claude-code.json"))

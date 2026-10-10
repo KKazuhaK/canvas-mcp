@@ -80,7 +80,10 @@ class User:
 
 ALICE = User("Alice", "aaaaaaaa-0000-4000-8000-00000000000a", canvas_token="canvas-pat-alice-0123456789abcdef")
 BOB = User("Bob", "bbbbbbbb-0000-4000-8000-00000000000b", canvas_token="canvas-pat-bob-0123456789abcdefgh")
-OWNER = User("Olive", "eeeeeeee-0000-4000-8000-00000000000e", roles=("Canvas.Owner",))
+OWNER = User(
+    "Olive", "eeeeeeee-0000-4000-8000-00000000000e", roles=("Canvas.Owner",),
+    canvas_token="canvas-pat-olive-0123456789abcdefg",
+)
 
 
 class Clock:

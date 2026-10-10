@@ -67,6 +67,8 @@ def test_the_server_and_every_non_database_module_import_without_the_extras() ->
         import canvas_mcp.core.selfhost.db
         import canvas_mcp.core.selfhost.db.url
         import canvas_mcp.core.selfhost.token_admin
+        import canvas_mcp.core.selfhost.authz
+        import canvas_mcp.core.selfhost.authz.urls
         assert not any(m.split(".")[0] in ("sqlalchemy", "alembic", "psycopg") for m in sys.modules)
         print("ok")
         """

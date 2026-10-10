@@ -10,8 +10,8 @@ import pytest
 from canvas_mcp.core.selfhost.authz import fastmcp_compat as compat
 from canvas_mcp.core.selfhost.authz.clients import (
     CIMD_BUDGET,
-    ClientDirectory,
     CimdResolver,
+    ClientDirectory,
     cimd_url_ok,
 )
 from canvas_mcp.core.selfhost.settings import AuthzSettings

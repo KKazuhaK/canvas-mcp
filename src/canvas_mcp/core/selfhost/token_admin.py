@@ -13,6 +13,9 @@ Usage::
     python -m canvas_mcp.core.selfhost.token_admin history [PRINCIPAL] [--limit N]
     python -m canvas_mcp.core.selfhost.token_admin remove PRINCIPAL
     python -m canvas_mcp.core.selfhost.token_admin rotate
+    python -m canvas_mcp.core.selfhost.token_admin list-grants [--all]
+    python -m canvas_mcp.core.selfhost.token_admin revoke-grant GRANT_ID
+    python -m canvas_mcp.core.selfhost.token_admin rotate-jwt-key
     python -m canvas_mcp.core.selfhost.token_admin db current
     python -m canvas_mcp.core.selfhost.token_admin db upgrade [--backup PATH] [--dry-run]
                                                               [--mark-undecryptable-invalid]
@@ -44,6 +47,16 @@ for a row that belongs to the default school ``CANVAS_API_URL``) and, last, the 
 key. ``accounts`` prints one line per account: key, status, role, how it was admitted,
 display name, sign-in name, provider, created, last sign-in and the legacy
 ``entra:<tid>:<oid>`` key (``-`` if none).
+
+``list-grants`` (``SELFHOST_AUTH_MODE=local``) prints one tab-separated line per connected
+app: grant id, account key, client kind (``dcr`` or ``cimd``, which answers how a client
+identifies itself), client id (the metadata URL for CIMD), the app's name for itself, the
+return host, created, last used, expires, and the state (``active``, ``expired`` or
+``revoked:<reason>``); ``--all`` includes the ended ones. ``revoke-grant`` ends one
+connection (exit 1 if there is none to end); the running server notices within
+``GRANT_STATUS_CACHE_S``. ``rotate-jwt-key`` invalidates every access token (apps simply
+refresh; connections are untouched; running servers notice within 30 seconds). To rotate
+the signing key itself, put a new key first in ``CANVAS_TOKEN_KEYS``.
 
 ``db current`` prints the backend (without credentials), the Alembic revision, the
 schema version marker and whether the database is current; it needs no keys and
@@ -190,6 +203,13 @@ def _build_parser() -> argparse.ArgumentParser:
     ):
         principal(remove)
     sub.add_parser("rotate", help="re-encrypt rows under the active key")
+    list_grants = sub.add_parser(
+        "list-grants", help="list connected apps (SELFHOST_AUTH_MODE=local; tab-separated, no secrets)"
+    )
+    list_grants.add_argument("--all", action="store_true", help="include ended and expired connections")
+    revoke_grant = sub.add_parser("revoke-grant", help="end one connected app's connection")
+    revoke_grant.add_argument("grant_id", help="the grant id printed by list-grants")
+    sub.add_parser("rotate-jwt-key", help="invalidate every access token (apps refresh; grants stay)")
     db = sub.add_parser("db", help="inspect and upgrade the database schema")
     db_sub = db.add_subparsers(dest="db_command", required=True)
     db_sub.add_parser("current", help="show the schema state; exit 4 if it is behind")
@@ -410,6 +430,56 @@ def _identity_columns(account: AccountInfo | None) -> tuple[str, str]:
     return parts if parts is not None else ("-", "-")
 
 
+_GRANT_ID_RE = _UUID_RE
+
+
+def _grant_state(grant: object, now: int) -> str:
+    revoked_at = getattr(grant, "revoked_at", None)
+    if revoked_at is not None:
+        return f"revoked:{getattr(grant, 'revoked_reason', None) or '-'}"
+    return "expired" if getattr(grant, "expires_at", 0) <= now else "active"
+
+
+def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
+    """The commands of the local authorization server (``list-grants`` and friends)."""
+    import time
+
+    from canvas_mcp.core.selfhost.authz.store import AuthzStore
+
+    authz = AuthzStore(store.database)
+    command: str = args.command
+    if command == "list-grants":
+        now = int(time.time())
+        for grant in authz.list_all_grants(include_inactive=args.all):
+            print(
+                "	".join(
+                    [
+                        grant.id,
+                        grant.account_key,
+                        grant.client_kind,
+                        _cell(grant.client_id),
+                        _cell(grant.client_name) or "-",
+                        _cell(grant.redirect_host) or "-",
+                        _iso(grant.created_at),
+                        _iso(grant.last_used_at),
+                        _iso(grant.expires_at),
+                        _grant_state(grant, now),
+                    ]
+                )
+            )
+        return EXIT_OK
+    if command == "revoke-grant":
+        grant_id = str(args.grant_id).strip().lower()
+        if not _GRANT_ID_RE.match(grant_id) or not authz.operator_revoke_grant(grant_id):
+            print("not found: no live connection with that id")
+            return EXIT_NOT_FOUND
+        print("revoked 1 connection")
+        return EXIT_OK
+    epoch = authz.bump_jwt_epoch()
+    print(f"access tokens invalidated (epoch {epoch}); running servers notice within 30 seconds")
+    return EXIT_OK
+
+
 def _run(args: argparse.Namespace, store: TokenStore) -> int:
     command: str = args.command
     if command == "check":
@@ -480,6 +550,8 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
         rotated = store.rotate()
         print(f"re-encrypted {rotated} row(s)")
         return EXIT_OK
+    if command in ("list-grants", "revoke-grant", "rotate-jwt-key"):
+        return _run_grants(args, store)
 
     # The remaining commands name an account.
     try:

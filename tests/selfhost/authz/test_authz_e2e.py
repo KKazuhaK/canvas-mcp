@@ -36,10 +36,8 @@ from canvas_mcp.core.selfhost.authz import tokens as tk
 from .stack import (
     ALICE,
     AUDIENCE,
-    BASE,
     CLAUDE_REDIRECT,
     ISSUER,
-    LOOPBACK_REDIRECT,
     SCOPE,
     Browser,
     Served,
