@@ -285,10 +285,10 @@ describe('the consent screen', () => {
     const user = userEvent.setup()
     await renderApp(consentPath(MOCK_TXN.verified), 'local')
     await screen.findByRole('heading', { name: 'Connect this app to your account?' })
-    await user.click(screen.getByRole('button', { name: 'Switch language to 中文' }))
+    await user.click(screen.getByRole('button', { name: 'Switch language to \u4e2d\u6587' }))
     // "Connect this app to your account?" in Chinese
-    expect(await screen.findByRole('heading', { name: /^要把这个应用连接到你的账户吗/ })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: '使用其他账号' })).toHaveAttribute(
+    expect(await screen.findByRole('heading', { name: /^\u8981\u628a\u8fd9\u4e2a\u5e94\u7528\u8fde\u63a5\u5230\u4f60\u7684\u8d26\u6237\u5417/ })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '\u4f7f\u7528\u5176\u4ed6\u8d26\u53f7' })).toHaveAttribute(
       'href',
       `/account/login?txn=${MOCK_TXN.verified}&reauth=1`,
     )

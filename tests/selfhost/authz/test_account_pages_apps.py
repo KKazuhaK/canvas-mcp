@@ -69,7 +69,7 @@ class TestAccountPage:
     def test_the_card_is_in_chinese_after_the_toggle(self, stack: Stack, alice_browser: Browser) -> None:
         stack.tokens_for(ALICE)
         text = alice_browser.get("/account?lang=zh").text
-        assert "已连接的应用" in text  # the heading
+        assert "\u5df2\u8fde\u63a5\u7684\u5e94\u7528" in text  # the heading
         assert "Connected apps" not in text and "Revoke" not in text
 
     def test_a_waiting_account_has_no_card(self, tmp_path, monkeypatch) -> None:
