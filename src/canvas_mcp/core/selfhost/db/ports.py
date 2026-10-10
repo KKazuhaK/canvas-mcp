@@ -147,7 +147,17 @@ class AccountRepo(Protocol):
 
     def count_active_owners(self, conn: Connection, *, exclude: str | None = None) -> int: ...
 
-    def count_owners_reaching(self, conn: Connection, provider_ids: Sequence[str]) -> int: ...
+    def usable_owner_ids(
+        self,
+        conn: Connection,
+        provider_ids: Sequence[str] | None,
+        *,
+        exclude: str | None = None,
+        for_update: bool = False,
+    ) -> list[str]:
+        """Active owners that can still get an owner session (see ``accounts.owner_is_usable``)."""
+
+    def count_usable_owners(self, conn: Connection, provider_ids: Sequence[str] | None) -> int: ...
 
     def count_pending(self, conn: Connection) -> int: ...
 

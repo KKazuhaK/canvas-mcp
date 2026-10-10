@@ -11,7 +11,18 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Literal
 
-from sqlalchemy import Select, delete, func, insert, literal, or_, select, update
+from sqlalchemy import (
+    Select,
+    and_,
+    delete,
+    false,
+    func,
+    insert,
+    literal,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import Connection
 
@@ -59,6 +70,7 @@ STATUS_PENDING = "pending"
 ROLE_OWNER = "owner"
 ROLE_USER = "user"
 ROLE_SOURCE_RULES = "rules"
+PROVIDER_ENTRA = "entra"
 REASON_DECRYPT_FAILED = "decrypt_failed"
 
 _ct = t.canvas_tokens
@@ -414,24 +426,52 @@ class SqlAccountRepo:
             stmt = stmt.where(_a.c.id != exclude)
         return int(conn.execute(stmt).scalar_one())
 
-    def count_owners_reaching(self, conn: Connection, provider_ids: Sequence[str]) -> int:
-        """Active owners a sign-in without Entra can still make an owner session for.
+    def usable_owner_ids(
+        self,
+        conn: Connection,
+        provider_ids: Sequence[str] | None,
+        *,
+        exclude: str | None = None,
+        for_update: bool = False,
+    ) -> list[str]:
+        """The ids of the usable owners: active owners that can still get an owner session.
 
-        A role granted by the rules needs the evidence of an Entra sign-in; any other owner needs
-        only one identity at one of ``provider_ids``.
+        ``provider_ids`` are the listed sign-in providers (None: every provider counts as
+        listed). An owner whose role the Entra owner rules granted (``role_source`` ``rules``)
+        needs an Entra sign-in to show owner evidence, so it counts only while Entra is listed
+        and it holds an Entra identity; any other owner needs one identity at a listed provider.
+        This is :func:`accounts.owner_is_usable` as a statement; a test keeps the two equal.
+        ``for_update`` locks the rows (PostgreSQL), ``exclude`` leaves one account out.
         """
-        reachable = (
-            select(_ei.c.account_id)
-            .where(_ei.c.account_id == _a.c.id, _ei.c.provider_id.in_(list(provider_ids)))
-            .exists()
-        )
-        stmt = select(func.count()).select_from(_a).where(
+
+        def holds(*conditions: Any) -> Any:
+            return (
+                select(_ei.c.account_id)
+                .where(_ei.c.account_id == _a.c.id, *conditions)
+                .exists()
+            )
+
+        listed = None if provider_ids is None else list(provider_ids)
+        if listed is None:
+            any_listed = holds()
+            entra = holds(_ei.c.provider_id == PROVIDER_ENTRA)
+        else:
+            any_listed = holds(_ei.c.provider_id.in_(listed))
+            entra = holds(_ei.c.provider_id == PROVIDER_ENTRA) if PROVIDER_ENTRA in listed else false()
+        stmt = select(_a.c.id).where(
             _a.c.role == ROLE_OWNER,
             _a.c.status == STATUS_ACTIVE,
-            or_(_a.c.role_source.is_(None), _a.c.role_source != ROLE_SOURCE_RULES),
-            reachable,
+            or_(
+                and_(_a.c.role_source == ROLE_SOURCE_RULES, entra),
+                and_(or_(_a.c.role_source.is_(None), _a.c.role_source != ROLE_SOURCE_RULES), any_listed),
+            ),
         )
-        return int(conn.execute(stmt).scalar_one())
+        if exclude is not None:
+            stmt = stmt.where(_a.c.id != exclude)
+        return [str(r[0]) for r in conn.execute(_for_update(stmt.order_by(_a.c.id), for_update)).all()]
+
+    def count_usable_owners(self, conn: Connection, provider_ids: Sequence[str] | None) -> int:
+        return len(self.usable_owner_ids(conn, provider_ids))
 
     def count_pending(self, conn: Connection) -> int:
         stmt = select(func.count()).select_from(_a).where(_a.c.status == STATUS_PENDING)

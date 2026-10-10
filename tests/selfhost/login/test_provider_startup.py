@@ -92,11 +92,11 @@ def test_owners_who_can_no_longer_sign_in_are_not_an_owner_path(tmp_path: pathli
     key = make_account(first.store, OID_A, role="owner")
     assert first.store.count_active_owners() == 1
     first.store.close()
-    for bootstrap in ("", "google:1234567890"):  # a bootstrap owner cannot fire beside an owner
-        with pytest.raises(SelfhostConfigError) as info:
-            prepare_selfhost(load_selfhost_settings({**env, "SELFHOST_BOOTSTRAP_OWNER": bootstrap}))
-        (message,) = info.value.problems
-        assert "no owner can sign in" in message and "promote-owner" in message
+    with pytest.raises(SelfhostConfigError) as info:
+        prepare_selfhost(load_selfhost_settings({**env, "SELFHOST_BOOTSTRAP_OWNER": ""}))
+    (message,) = info.value.problems
+    assert "no owner can sign in" in message and "promote-owner" in message
+    assert "SELFHOST_BOOTSTRAP_OWNER" in message  # it names the other way out
     # The operator command is the way out, and token_admin as the bootstrap setting keeps the start.
     again = prepare_selfhost(load_selfhost_settings(env))
     google_owner(again, "99")
@@ -127,7 +127,7 @@ def test_a_rules_owner_with_a_google_identity_is_not_an_owner_path(tmp_path: pat
         key, ext, acc.evaluate_admission(ext, policy), policy,
         expected_epoch=first.store.get_principal_status(key).session_epoch,
     ).ok
-    assert first.store.count_owners_reaching({"google"}) == 0
+    assert first.store.count_usable_owners({"google"}) == 0
     first.store.close()
     with pytest.raises(SelfhostConfigError) as info:
         prepare_selfhost(load_selfhost_settings({**env, "SELFHOST_BOOTSTRAP_OWNER": ""}))
@@ -158,3 +158,29 @@ def test_other_providers_are_refused_under_entra_proxy(tmp_path: pathlib.Path) -
             )
         )
     assert any("need SELFHOST_AUTH_MODE=local" in p for p in info.value.problems)
+
+
+def test_a_named_bootstrap_owner_is_an_owner_path_beside_owners_nobody_can_use(tmp_path: pathlib.Path) -> None:
+    # The bootstrap owner applies while there is no *usable* owner, so the start is allowed and
+    # the first sign-in of that identity makes an owner (audited with the number it overrides).
+    env = env_for(tmp_path, SELFHOST_BOOTSTRAP_OWNER="token_admin")
+    first = prepare_selfhost(load_selfhost_settings(env))
+    stranded = make_account(first.store, OID_A, role="owner")
+    first.store.close()
+    runtime = prepare_selfhost(
+        load_selfhost_settings({**env, "SELFHOST_BOOTSTRAP_OWNER": "google:1234567890"})
+    )
+    try:
+        assert runtime.store.count_active_owners() == 1
+        assert runtime.store.count_usable_owners(runtime.settings.login_providers.ids) == 0
+        ext = ExternalClaims(
+            provider_id="google", issuer=acc.GOOGLE_ISSUER, subject="1234567890",
+            email="b@example.edu", email_verified=True, hd="example.edu",
+        )
+        signed = runtime.identity.sign_in_external(ext)
+        assert not isinstance(signed, acc.Denied) and signed.owner
+        assert runtime.store.count_active_owners() == 2
+        assert runtime.store.count_usable_owners(runtime.settings.login_providers.ids) == 1
+        assert runtime.store.get_principal_status(stranded).is_owner
+    finally:
+        runtime.store.close()

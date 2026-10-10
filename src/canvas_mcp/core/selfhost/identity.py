@@ -29,7 +29,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -77,6 +77,7 @@ class IdentityStore(Protocol):
         purpose: acc.Purpose,
         ip: str = "unknown",
         ua_hash: str | None = None,
+        listed_providers: Collection[str] | None = None,
     ) -> Resolution: ...
 
     def record_auth_event(
@@ -109,6 +110,7 @@ class IdentityStore(Protocol):
         *,
         actor: Actor,
         expected_epoch: int | None = None,
+        listed_providers: Collection[str] | None = None,
     ) -> UnlinkResult: ...
 
 
@@ -226,7 +228,13 @@ class IdentityService:
         *,
         access: StatusSource | None = None,
         cache: IdentityCache | None = None,
+        login_providers: Collection[str] | None = None,
     ) -> None:
+        # The providers of SELFHOST_LOGIN_PROVIDERS decide which owners are usable (None: every
+        # provider is listed, which is only right for tests and the Entra-only default).
+        self.login_providers: frozenset[str] | None = (
+            None if login_providers is None else frozenset(login_providers)
+        )
         self._store = store
         self.claims_policy = claims_policy
         self.access_policy = access_policy
@@ -291,7 +299,7 @@ class IdentityService:
         self, ext: ExternalClaims, verdict: Verdict, *, purpose: acc.Purpose
     ) -> RequestPrincipal | Denied:
         resolution = self._store.resolve_identity(
-            ext, verdict, self.access_policy, purpose=purpose
+            ext, verdict, self.access_policy, purpose=purpose, listed_providers=self.login_providers
         )
         key = resolution.principal_key
         if key is not None:
@@ -353,7 +361,8 @@ class IdentityService:
         """
         verdict = acc.evaluate_admission(ext, self.access_policy)
         resolution = self._store.resolve_identity(
-            ext, verdict, self.access_policy, purpose="sign_in", ip=ip, ua_hash=ua_hash
+            ext, verdict, self.access_policy, purpose="sign_in", ip=ip, ua_hash=ua_hash,
+            listed_providers=self.login_providers,
         )
         key = resolution.principal_key
         if key is not None:
@@ -407,7 +416,8 @@ class IdentityService:
     ) -> UnlinkResult:
         """Remove an identity from an account and forget its cached mapping."""
         result = self._store.unlink_identity(
-            account_key, identity_id, actor=actor, expected_epoch=expected_epoch
+            account_key, identity_id, actor=actor, expected_epoch=expected_epoch,
+            listed_providers=self.login_providers,
         )
         if result.ok:
             self.cache.discard((result.provider_id, result.issuer, result.subject))

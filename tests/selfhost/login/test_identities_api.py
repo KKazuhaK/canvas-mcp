@@ -24,6 +24,7 @@ from ..test_account_api_parity import (
     READ_MODELS,
 )
 from ..test_account_spa import make_dist
+from .fake_idp import IdpUser
 from .stack_providers import ProviderStack, provider_stack, query_of
 from .test_entra_only_golden import account_app
 
@@ -557,6 +558,27 @@ class TestAdmin:
         response = admin.send("DELETE", f"/admin/identities/{mine['entra']}")
         assert response.status_code == 200
         assert code_of(admin.get("/me"), 401) == "not_authenticated"
+
+    def test_two_rules_owners_cannot_both_drop_their_entra_identity(self, ps: ProviderStack) -> None:
+        # Both owner roles come from the Entra owner rule: once one of them has no Entra identity
+        # left, the other is the only owner that can still get an owner session.
+        first = owner(ps)
+        first.complete(first.link("oidc:school"), "oidc:school")
+        second_person = ps.person()
+        otto = User("Otto", "dddddddd-0000-4000-8000-00000000000d", roles=("Canvas.Owner",))
+        assert second_person.sign_in_entra(otto).status_code == 303
+        second = Spa(ps, second_person)
+        ps.school.user = IdpUser(sub="user-2", email="otto@example.edu", name="Otto", preferred_username="otto")
+        second.complete(second.link("oidc:school"), "oidc:school")
+        mine = {i["provider_id"]: i["id"] for i in first.identities()["identities"]}
+        theirs = {i["provider_id"]: i["id"] for i in second.identities()["identities"]}
+        assert ps.store.count_usable_owners(ps.stack.settings.login_providers.ids) == 2
+        assert first.send("DELETE", f"/admin/identities/{mine['entra']}").status_code == 200
+        refused = second.send("DELETE", f"/admin/identities/{theirs['entra']}")
+        assert code_of(refused, 409) == "last_owner"
+        assert second.get("/me").status_code == 200
+        assert [i["provider_id"] for i in second.identities()["identities"]] == ["entra", "oidc:school"]
+        assert ps.store.count_usable_owners(ps.stack.settings.login_providers.ids) == 1
 
     def test_the_view_needs_no_new_state_for_a_pending_row(self, ps: ProviderStack) -> None:
         # Bob signs in and is admitted by the open policy; the owner sees his single method.

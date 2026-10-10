@@ -805,7 +805,9 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
         if key is None:
             print("not found: no such account", file=sys.stderr)
             return EXIT_NOT_FOUND
-        result = store.unlink_identity(key, args.identity_id, actor=OPERATOR)
+        result = store.unlink_identity(
+            key, args.identity_id, actor=OPERATOR, listed_providers=_listed_providers()
+        )
         if result.ok:
             print(
                 f"unlinked 1 sign-in method ({result.provider_id}); every browser session of the "
@@ -821,8 +823,9 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
             return EXIT_REFUSED
         if result.code == "last_owner":
             print(
-                "refused: this is the only owner and its owner role comes from the Entra owner rule, "
-                "which only the Microsoft sign-in carries; promote another owner first",
+                "refused: that would leave the server without a usable owner (an owner whose role "
+                "comes from the Entra owner rule needs an Entra identity, any other owner an "
+                "identity at a listed provider); promote or link another owner first",
                 file=sys.stderr,
             )
             return EXIT_REFUSED
@@ -920,6 +923,23 @@ def _endpoint_hosts(meta: Any) -> str:
         if host and host not in hosts:
             hosts.append(host)
     return ",".join(hosts)
+
+
+def _listed_providers() -> frozenset[str] | None:
+    """The providers of ``SELFHOST_LOGIN_PROVIDERS`` in this environment (None: unreadable).
+
+    They decide which owners are usable. An environment that does not load as the server's
+    configuration cannot say, so every provider counts as listed.
+    """
+    from canvas_mcp.core.selfhost.settings import (
+        SelfhostConfigError,
+        load_selfhost_settings,
+    )
+
+    try:
+        return load_selfhost_settings().login_providers.ids
+    except SelfhostConfigError:
+        return None
 
 
 def _run_login_providers(args: argparse.Namespace) -> int:

@@ -79,7 +79,7 @@ import pathlib
 import re
 import time
 import uuid
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
@@ -260,6 +260,11 @@ _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _MAX_PREF_TOOLS = 256
 _MAX_PREF_VIA = 32
 _MAX_EXPIRES_HINT = 4_102_444_800  # 2100-01-01 UTC: a sanity bound, not a policy
+
+
+def _listed(provider_ids: Iterable[str] | None) -> list[str] | None:
+    """The listed provider ids as a sorted list (None stays None: every provider is listed)."""
+    return None if provider_ids is None else sorted(set(provider_ids))
 
 
 class _Unset(Enum):
@@ -1518,14 +1523,16 @@ class TokenStore:
         with self._db.read() as conn:
             return self._repos.accounts.count_active_owners(conn)
 
-    def count_owners_reaching(self, provider_ids: Iterable[str]) -> int:
-        """Active owners that can still get an owner session when only ``provider_ids`` sign in.
+    def count_usable_owners(self, provider_ids: Iterable[str] | None) -> int:
+        """Active owners that can still get an owner session under the listed providers.
 
-        An owner whose role comes from the rules needs an Entra sign-in, so it counts only
-        through the other kinds of owner; every owner needs one identity at a listed provider.
+        ``provider_ids`` are the providers of ``SELFHOST_LOGIN_PROVIDERS`` (None: all of them).
+        An owner whose role the Entra owner rules granted counts only while Entra is listed and it
+        holds an Entra identity; every other owner needs one identity at a listed provider (see
+        :func:`accounts.owner_is_usable`).
         """
         with self._db.read() as conn:
-            return self._repos.accounts.count_owners_reaching(conn, sorted(provider_ids))
+            return self._repos.accounts.count_usable_owners(conn, _listed(provider_ids))
 
     def lookup_identity(self, provider_id: str, issuer: str, subject: str) -> str | None:
         """The account key of an external identity, or None if it is not known."""
@@ -1551,6 +1558,7 @@ class TokenStore:
         purpose: acc.Purpose,
         ip: str = "unknown",
         ua_hash: str | None = None,
+        listed_providers: Collection[str] | None = None,
     ) -> Resolution:
         """Decide and apply, in one transaction, what an external identity may do.
 
@@ -1561,7 +1569,10 @@ class TokenStore:
         The history, the audit entry and the sign-in event are written in the same
         transaction. ``purpose='sign_in'`` is the ``/account`` login (roles are
         recomputed, an event is always recorded); ``'request'`` is the MCP path (an
-        existing account is not written, a role is never raised).
+        existing account is not written, a role is never raised). ``listed_providers`` (the
+        providers of ``SELFHOST_LOGIN_PROVIDERS``; None: all) decides which owners are usable:
+        the bootstrap identity becomes an owner while there is no usable owner, and the number
+        of owners it overrides is audited.
         """
         now = self._now()
         repos = self._repos
@@ -1570,8 +1581,11 @@ class TokenStore:
             account_id = repos.identities.lookup(conn, *ext.identity)
             row = repos.accounts.get(conn, account_id, for_update=True) if account_id else None
             existing = None if row is None else _status_from_row(row).facts
+            active_owners = repos.accounts.count_active_owners(conn)
+            usable_owners = repos.accounts.count_usable_owners(conn, _listed(listed_providers))
             facts = DecisionFacts(
-                active_owner_count=repos.accounts.count_active_owners(conn),
+                active_owner_count=active_owners,
+                usable_owner_count=usable_owners,
                 pending_count=repos.accounts.count_pending(conn),
                 is_bootstrap_identity=acc.is_bootstrap_identity(ext, policy),
             )
@@ -1579,10 +1593,17 @@ class TokenStore:
             self._pause("after_decision")
             created = activated = False
             owner_change: str | None = None
+            unusable_owners = (
+                active_owners - usable_owners
+                if decision.role == ROLE_OWNER and decision.role_source == acc.ROLE_SOURCE_BOOTSTRAP
+                else 0
+            )
             if decision.create:
                 account_id = self._new_account_id(ext)
                 self._create_account(conn, account_id, ext, decision, now)
                 created = True
+                if unusable_owners > 0:
+                    self._audit_bootstrap_override(conn, account_id, unusable_owners, now)
             elif row is not None and account_id is not None:
                 if decision.activate:
                     repos.accounts.activate(
@@ -1603,7 +1624,8 @@ class TokenStore:
                     )
                     activated = True
                 owner_change = self._apply_role(
-                    conn, account_id, row, decision, purpose, verdict, now
+                    conn, account_id, row, decision, purpose, verdict, now,
+                    unusable_owners=unusable_owners,
                 )
             if (
                 purpose == "sign_in"
@@ -1740,14 +1762,21 @@ class TokenStore:
         *,
         actor: Actor,
         expected_epoch: int | None = None,
+        listed_providers: Collection[str] | None = None,
     ) -> UnlinkResult:
         """Remove one identity from an account; every session of the account ends.
 
         ``actor`` is the account itself (its key), another account that must be an active
         owner (re-checked in this transaction), or :data:`OPERATOR`. An account always keeps
-        at least one identity (``last_identity``: to cut a person off, disable the account),
-        and the only owner, whose role is granted by the Entra owner rule, keeps its last Entra
-        identity (``last_owner``).
+        at least one identity (``last_identity``: to cut a person off, disable the account), and
+        the server keeps at least one *usable owner* (``last_owner``): an unlink that would take
+        the last usable owner's last way to an owner session is refused. An active owner is usable
+        while a sign-in under ``listed_providers`` (the providers of ``SELFHOST_LOGIN_PROVIDERS``;
+        None: all) can show its role: one granted by the Entra owner rules needs an Entra identity
+        and Entra listed, any other needs one identity at a listed provider
+        (:func:`accounts.owner_is_usable`). The unlink is refused only when the account is usable
+        before and not after it and no other usable owner exists; the other owners' rows are read
+        ``FOR UPDATE`` inside the writer lock, so two owners cannot unlink their way out together.
         The count and the delete are one transaction under the writer lock, so two
         concurrent unlinks of a two-identity account cannot both succeed. A successful unlink
         bumps ``session_epoch`` (every browser session and every authorization code not yet
@@ -1779,18 +1808,25 @@ class TokenStore:
             self._pause("after_identity_count")
             if count <= 1:
                 return UnlinkResult(UNLINK_LAST, ident[1])
-            if (
-                ident[1] == acc.PROVIDER_ENTRA
-                and row[1] == STATUS_ACTIVE
-                and row[2] == ROLE_OWNER
-                and row[3] == acc.ROLE_SOURCE_RULES
-                and repos.identities.count_for_provider(conn, account_id, acc.PROVIDER_ENTRA) <= 1
-                and repos.accounts.count_active_owners(conn, exclude=account_id) == 0
-            ):
-                # The owner role of this account comes from the Entra owner rule and only an
-                # Entra sign-in carries that evidence: without its last Entra identity the sole
-                # owner would stay an owner in the database that no sign-in can use.
-                return UnlinkResult(UNLINK_LAST_OWNER, ident[1])
+            if row[1] == STATUS_ACTIVE and row[2] == ROLE_OWNER:
+                rows = repos.identities.list_with_ids(conn, account_id)
+                listed = _listed(listed_providers)
+                usable_before = acc.owner_is_usable(
+                    role=row[2], status=row[1], role_source=row[3],
+                    identity_providers=[r[1] for r in rows], listed=listed,
+                )
+                usable_after = acc.owner_is_usable(
+                    role=row[2], status=row[1], role_source=row[3],
+                    identity_providers=[r[1] for r in rows if int(r[0]) != identity_id],
+                    listed=listed,
+                )
+                if usable_before and not usable_after:
+                    others = repos.accounts.usable_owner_ids(
+                        conn, listed, exclude=account_id, for_update=True
+                    )
+                    self._pause("after_owner_count")
+                    if not others:
+                        return UnlinkResult(UNLINK_LAST_OWNER, ident[1])
             if not repos.identities.delete_one(conn, identity_id, account_id):
                 return UnlinkResult(UNLINK_NOT_FOUND)
             epoch = repos.accounts.end_sessions(conn, account_id, now)
@@ -1852,6 +1888,19 @@ class TokenStore:
             now=now,
         )
 
+    def _audit_bootstrap_override(
+        self, conn: Connection, account_id: str, unusable_owners: int, now: int
+    ) -> None:
+        """Audit a bootstrap owner made while the owners the database holds were all unusable."""
+        self._audit(
+            conn, SYSTEM_ACTOR, AUDIT_ROLE_CHANGED, target=acc.account_key_of(account_id),
+            detail={
+                "role": ROLE_OWNER, "source": acc.ROLE_SOURCE_BOOTSTRAP, "via": "sign_in",
+                "unusable_owners": unusable_owners,
+            },
+            now=now,
+        )
+
     def _apply_role(
         self,
         conn: Connection,
@@ -1861,6 +1910,8 @@ class TokenStore:
         purpose: acc.Purpose,
         verdict: Verdict,
         now: int,
+        *,
+        unusable_owners: int = 0,
     ) -> str | None:
         """Apply the role part of a decision to an existing account; returns the change made."""
         repos = self._repos
@@ -1879,11 +1930,12 @@ class TokenStore:
                 EVENT_OWNER_GAINED if decision.role == ROLE_OWNER else EVENT_OWNER_LOST
             )
             self._record_event(conn, key, event, None, "sign_in", epoch, now)
-            self._audit(
-                conn, SYSTEM_ACTOR, AUDIT_ROLE_CHANGED, target=key,
-                detail={"role": decision.role, "source": decision.role_source or "", "via": "sign_in"},
-                now=now,
-            )
+            detail: dict[str, Any] = {
+                "role": decision.role, "source": decision.role_source or "", "via": "sign_in",
+            }
+            if unusable_owners > 0:
+                detail["unusable_owners"] = unusable_owners
+            self._audit(conn, SYSTEM_ACTOR, AUDIT_ROLE_CHANGED, target=key, detail=detail, now=now)
             return event
         if decision.role_event == EVENT_OWNER_LOSS_REFUSED:
             self._record_event(conn, key, EVENT_OWNER_LOSS_REFUSED, None, "sign_in", epoch, now)

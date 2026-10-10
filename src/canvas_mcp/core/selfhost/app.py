@@ -238,28 +238,28 @@ def _owner_path_problem(settings: SelfhostSettings, store: TokenStore) -> str | 
     """Without Entra nobody can become an owner through the identity provider's data.
 
     An owner then needs ``SELFHOST_BOOTSTRAP_OWNER`` (a provider identity, or ``token_admin`` to
-    promote the first owner with the operator command) or an owner the database already holds
-    that can still sign in: one with an identity at a listed provider whose role the rules did
-    not grant (a role from ``OWNER_RULES`` needs the Entra sign-in that carried it). Otherwise
-    the server would start and nobody could ever open ``/account/admin``.
+    promote the first owner with the operator command) or a *usable owner* the database already
+    holds: an active owner with an identity at a listed provider whose role the rules did not
+    grant (a role from ``OWNER_RULES`` needs the Entra sign-in that carried it, so it is not
+    usable while Entra is not listed). The bootstrap owner applies while there is no usable
+    owner, so it also covers a database whose owners are all unusable. Otherwise the server
+    would start and nobody could ever open ``/account/admin``.
     """
     if settings.entra_enabled:
         return None
     policy = settings.access_policy
-    if policy.bootstrap_via_token_admin:
+    if policy.bootstrap_via_token_admin or policy.bootstrap_owner is not None:
         return None
-    if store.count_owners_reaching(settings.login_providers.ids) > 0:
+    if store.count_usable_owners(settings.login_providers.ids) > 0:
         return None
     stranded = store.count_active_owners()
-    if policy.bootstrap_owner is not None and stranded == 0:
-        return None
     if stranded > 0:
         return (
             "no owner can sign in: SELFHOST_LOGIN_PROVIDERS does not list entra and every active "
             f"owner in the database ({stranded}) either has no identity at a listed provider or "
-            "holds a role the Entra owner rule granted, which only an Entra sign-in can use "
-            "(SELFHOST_BOOTSTRAP_OWNER only applies while the database has no active owner); "
-            "list entra again, or make another account an owner with: "
+            "holds a role the Entra owner rule granted, which only an Entra sign-in can use; "
+            "list entra again, set SELFHOST_BOOTSTRAP_OWNER to a listed provider's identity "
+            "(it applies while no owner can sign in), or make another account an owner with: "
             "python -m canvas_mcp.core.selfhost.token_admin promote-owner ACCOUNT"
         )
     return (
@@ -336,6 +336,7 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         EntraClaimsPolicy(tenant_id=settings.tenant_id, client_id=settings.client_id),
         settings.access_policy,
         access=access,
+        login_providers=settings.login_providers.ids,
     )
     health = TokenHealth(store, account_url=settings.account_url)
     authz: AuthzRuntime | None = None

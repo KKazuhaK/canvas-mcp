@@ -3868,9 +3868,11 @@ class _AccountApp:
             return self.message_page(
                 409,
                 _bi(
-                    "这会让服务器没有可用的所有者：该所有者身份来自 Microsoft 登录。请先让另一位所有者就位。",
-                    "That would leave the server without a usable owner: this owner role comes from the "
-                    "Microsoft sign-in. Add another owner first.",
+                    "这会让服务器没有可用的所有者：来自 Microsoft 登录的所有者需要保留 Microsoft 身份，"
+                    "其他所有者需要保留一个已启用提供方的身份。请先让另一位所有者就位。",
+                    "That would leave the server without a usable owner: an owner whose role comes from "
+                    "the Microsoft sign-in has to keep a Microsoft identity, and any other owner an "
+                    "identity at a listed provider. Add another usable owner first.",
                 ),
             )
         if code == "pending_approval":

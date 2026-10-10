@@ -25,7 +25,7 @@ from canvas_mcp.core.selfhost.token_store import (
     TokenStore,
 )
 
-from ..conftest import OID_A, OID_B, acct_key, make_account, sign_in
+from ..conftest import OID_A, OID_B, TENANT, acct_key, make_account, sign_in
 
 WAIT = 20
 KEY_A = acct_key(OID_A)
@@ -489,3 +489,271 @@ class TestRaces:
         # And once A itself is disabled, a link started before is refused.
         assert second.disable_principal(KEY_A, actor=OPERATOR, reason="operator_disabled")
         assert link(second, KEY_A, google(), expected=started).code == "link_session_ended"
+
+
+# -- the usable owner: unlink, the bootstrap owner and the predicate -------------------------------
+
+OID_C = "cccccccc-0000-4000-8000-00000000000c"
+KEY_C = acct_key(OID_C)
+LISTED = frozenset({"entra", "github"})
+RULES_OWNER = TestUnlink.RULES_OWNER
+
+
+def rules_owner(store: TokenStore, oid: str, key: str, github_subject: str) -> int:
+    """Make ``key`` an owner through the Entra owner rule and link a GitHub identity; returns its Entra id."""
+    sign_in(store, oid, owner=True, policy=RULES_OWNER)
+    status = store.get_principal_status(key)
+    assert (status.role, status.role_source) == ("owner", "rules")
+    assert link(store, key, gh(github_subject), policy=OPEN).ok
+    return provider_identity(store, key, "entra")
+
+
+def provider_identity(store: TokenStore, key: str, provider: str) -> int:
+    return next(r.id for r in store.list_identities(key) if r.provider_id == provider)
+
+
+def providers(store: TokenStore, key: str) -> list[str]:
+    return [r.provider_id for r in store.list_identities(key)]
+
+
+class TestUsableOwnerUnlink:
+    def test_two_rules_owners_unlinking_entra_in_turn_the_second_is_refused(self, store: TokenStore) -> None:
+        entra_a = rules_owner(store, OID_A, KEY_A, "1001")
+        entra_b = rules_owner(store, OID_B, KEY_B, "1002")
+        assert store.count_usable_owners(LISTED) == 2
+        assert store.unlink_identity(KEY_A, entra_a, actor=KEY_A, listed_providers=LISTED).ok
+        assert store.count_usable_owners(LISTED) == 1
+        before = epoch(store, KEY_B)
+        refused = store.unlink_identity(KEY_B, entra_b, actor=KEY_B, listed_providers=LISTED)
+        assert refused.code == "last_owner" and not refused.ok
+        assert providers(store, KEY_B) == ["entra", "github"] and epoch(store, KEY_B) == before
+        # B's GitHub identity is not what makes it an owner, but an account keeps one identity.
+        github_b = provider_identity(store, KEY_B, "github")
+        assert store.unlink_identity(KEY_B, github_b, actor=KEY_B, listed_providers=LISTED).ok
+        assert store.count_usable_owners(LISTED) == 1
+
+    def test_the_refusal_holds_for_the_operator_too(self, store: TokenStore) -> None:
+        entra_a = rules_owner(store, OID_A, KEY_A, "1001")
+        for actor in (KEY_A, OPERATOR):
+            assert store.unlink_identity(KEY_A, entra_a, actor=actor, listed_providers=LISTED).code == "last_owner"
+        assert providers(store, KEY_A) == ["entra", "github"]
+
+    @pytest.mark.parametrize("source", ["operator", "bootstrap"])
+    def test_an_owner_not_made_by_the_rules_may_unlink_entra_while_a_listed_identity_remains(
+        self, store: TokenStore, source: str
+    ) -> None:
+        if source == "operator":
+            assert store.promote_owner(KEY_A)
+            key = KEY_A
+        else:
+            boot = AccessPolicy(
+                mode="open",
+                bootstrap_owner=acc.BootstrapOwner("entra", acc.entra_issuer(TENANT), OID_A),
+            )
+            sign_in(store, OID_A, member=False, policy=boot)
+            key = KEY_A
+        assert store.get_principal_status(key).role_source == source
+        assert link(store, key, gh(), policy=OPEN).ok
+        assert store.count_usable_owners(LISTED) == 1
+        entra = provider_identity(store, key, "entra")
+        assert store.unlink_identity(key, entra, actor=key, listed_providers=LISTED).ok
+        assert providers(store, key) == ["github"]
+        assert store.count_usable_owners(LISTED) == 1  # still a usable owner through GitHub
+
+    def test_a_non_rules_owner_cannot_unlink_its_last_listed_identity(self, store: TokenStore) -> None:
+        assert store.promote_owner(KEY_A)
+        key = KEY_A
+        assert link(store, key, gh(), policy=OPEN).ok
+        github = provider_identity(store, key, "github")
+        entra = provider_identity(store, key, "entra")
+        only_github = frozenset({"github"})  # Entra was delisted
+        assert store.unlink_identity(key, github, actor=key, listed_providers=only_github).code == "last_owner"
+        assert store.unlink_identity(key, entra, actor=key, listed_providers=only_github).ok  # unlisted anyway
+
+    def test_an_owner_that_is_already_unusable_may_change_its_identities(self, store: TokenStore) -> None:
+        entra_a = rules_owner(store, OID_A, KEY_A, "1001")
+        only_github = frozenset({"github"})  # Entra delisted: the rules owner is stranded already
+        assert store.count_usable_owners(only_github) == 0
+        assert store.unlink_identity(KEY_A, entra_a, actor=KEY_A, listed_providers=only_github).ok
+
+    def test_an_owner_force_unlinking_anothers_last_usable_identity_is_refused(self, store: TokenStore) -> None:
+        assert store.promote_owner(KEY_A)
+        target = KEY_A
+        assert link(store, target, gh("1001"), policy=OPEN).ok
+        github = provider_identity(store, target, "github")
+        only_github = frozenset({"github"})
+        actor = make_account(store, OID_C, role="owner")  # Entra only: no usable sign-in
+        assert store.count_usable_owners(only_github) == 1
+        refused = store.unlink_identity(target, github, actor=actor, listed_providers=only_github)
+        assert refused.code == "last_owner"
+        assert providers(store, target) == ["entra", "github"]
+        # A second usable owner makes the same force-unlink fine.
+        assert link(store, actor, gh("1003"), policy=OPEN).ok
+        assert store.unlink_identity(target, github, actor=actor, listed_providers=only_github).ok
+        assert actions(store, "identity_unlinked")[0].detail["by"] == "owner"
+
+    def test_an_entra_only_deployment_keeps_its_rule(self, store: TokenStore) -> None:
+        entra_only = frozenset({"entra"})
+        entra_a = rules_owner(store, OID_A, KEY_A, "1001")  # a stray identity at a provider that is not listed
+        assert store.unlink_identity(KEY_A, entra_a, actor=KEY_A, listed_providers=entra_only).code == "last_owner"
+        github = provider_identity(store, KEY_A, "github")
+        assert store.unlink_identity(KEY_A, github, actor=KEY_A, listed_providers=entra_only).ok
+        # A plain user is never held back.
+        assert link(store, KEY_B, gh("1002"), policy=OPEN).ok
+        entra_b = provider_identity(store, KEY_B, "entra")
+        assert store.unlink_identity(KEY_B, entra_b, actor=KEY_B, listed_providers=entra_only).ok
+
+    def test_without_a_listed_set_every_provider_counts_as_listed(self, store: TokenStore) -> None:
+        entra_a = rules_owner(store, OID_A, KEY_A, "1001")
+        assert store.count_usable_owners(None) == 1
+        assert store.unlink_identity(KEY_A, entra_a, actor=KEY_A).code == "last_owner"
+
+    def test_a_disabled_owner_does_not_count_as_usable(self, store: TokenStore) -> None:
+        entra_a = rules_owner(store, OID_A, KEY_A, "1001")
+        rules_owner(store, OID_B, KEY_B, "1002")
+        assert store.disable_principal(KEY_B, actor=OPERATOR, reason="operator_disabled")
+        assert store.count_usable_owners(LISTED) == 1
+        assert store.unlink_identity(KEY_A, entra_a, actor=KEY_A, listed_providers=LISTED).code == "last_owner"
+
+    def test_the_sql_count_is_the_pure_predicate(self, store: TokenStore) -> None:
+        """``usable_owner_ids`` (a statement) and ``owner_is_usable`` (Python) agree on every combination."""
+        db, repos = store.database, store._repos
+        identity_sets = [
+            (), ("entra",), ("github",), ("google",), ("entra", "github"), ("github", "google"),
+            ("entra", "oidc:corp"), ("oidc:corp",),
+        ]
+        listed_sets: list[frozenset[str] | None] = [
+            None, frozenset({"entra"}), frozenset({"github"}), frozenset({"entra", "google"}),
+            frozenset({"oidc:corp"}), frozenset(),
+        ]
+        made: list[tuple[str, str, str, str | None, tuple[str, ...]]] = []
+        n = 0
+        with db.write() as conn:
+            for role in ("owner", "user"):
+                for status in ("active", "disabled", "pending"):
+                    for source in (None, "rules", "bootstrap", "operator"):
+                        for held in identity_sets:
+                            n += 1
+                            account_id = f"00000000-0000-4000-8000-{n:012d}"
+                            repos.accounts.insert(
+                                conn, account_id=account_id, status=status, role=role, role_source=source,
+                                admitted_via="rules", display_name="", now=1, approved_by=None,
+                                disabled_reason="operator_disabled" if status == "disabled" else None,
+                                disabled_by="operator" if status == "disabled" else None,
+                            )
+                            for i, provider in enumerate(held):
+                                repos.identities.insert(
+                                    conn, account_id=account_id, provider_id=provider,
+                                    issuer=f"https://issuer.test/{provider}", subject=f"s{n}-{i}",
+                                    username="", email=None, email_verified=False, now=1,
+                                )
+                            made.append((account_id, status, role, source, held))
+        for listed in listed_sets:
+            want = sorted(
+                a for a, status, role, source, held in made
+                if acc.owner_is_usable(
+                    role=role, status=status, role_source=source, identity_providers=held, listed=listed
+                )
+            )
+            with db.read() as conn:
+                got = sorted(repos.accounts.usable_owner_ids(conn, None if listed is None else sorted(listed)))
+            assert got == want, listed
+            assert store.count_usable_owners(listed) == len(want)
+
+
+class TestBootstrapOwnerWithUnusableOwners:
+    """Decision: the bootstrap owner applies while there is no usable owner (it is audited then)."""
+
+    GOOGLE_ONLY = frozenset({"google"})
+    BOOT = AccessPolicy(
+        mode="open",
+        ack_public=True,
+        bootstrap_owner=acc.BootstrapOwner("google", acc.GOOGLE_ISSUER, "boot-1"),
+    )
+
+    def sign(self, store: TokenStore, ext: ExternalClaims, listed: frozenset[str] | None) -> Any:
+        return store.resolve_identity(
+            ext, verdict_for(ext, self.BOOT), self.BOOT, purpose="sign_in", listed_providers=listed
+        )
+
+    def test_it_fires_beside_owners_nobody_can_use_and_is_audited(self, store: TokenStore) -> None:
+        rules_owner(store, OID_A, KEY_A, "1001")  # an Entra-rule owner; Entra is delisted below
+        resolution = self.sign(store, google("boot-1"), self.GOOGLE_ONLY)
+        assert resolution.created and resolution.session_owner
+        key = resolution.principal_key
+        assert key is not None
+        status = store.get_principal_status(key)
+        assert (status.role, status.role_source) == ("owner", "bootstrap")
+        assert store.get_principal_status(KEY_A).role == "owner"  # the stranded owner stays an owner
+        entry = next(e for e in actions(store, "role_changed") if e.target == key)
+        assert entry.detail == {
+            "role": "owner", "source": "bootstrap", "via": "sign_in", "unusable_owners": 1,
+        }
+        assert store.count_usable_owners(self.GOOGLE_ONLY) == 1
+
+    def test_it_does_not_fire_while_a_usable_owner_exists(self, store: TokenStore) -> None:
+        rules_owner(store, OID_A, KEY_A, "1001")
+        resolution = self.sign(store, google("boot-1"), frozenset({"entra", "google"}))
+        assert resolution.created and not resolution.session_owner
+        key = resolution.principal_key
+        assert key is not None and store.get_principal_status(key).role == "user"
+
+    def test_an_existing_account_of_the_bootstrap_identity_becomes_an_owner_too(self, store: TokenStore) -> None:
+        rules_owner(store, OID_A, KEY_A, "1001")
+        first = self.sign(store, google("boot-1"), frozenset({"entra", "google"}))
+        key = first.principal_key
+        assert key is not None and store.get_principal_status(key).role == "user"
+        again = self.sign(store, google("boot-1"), self.GOOGLE_ONLY)
+        assert again.session_owner and store.get_principal_status(key).role_source == "bootstrap"
+        entry = next(e for e in actions(store, "role_changed") if e.target == key)
+        assert entry.detail["unusable_owners"] == 1
+
+    def test_another_google_identity_never_becomes_an_owner(self, store: TokenStore) -> None:
+        rules_owner(store, OID_A, KEY_A, "1001")
+        resolution = self.sign(store, google("someone-else"), self.GOOGLE_ONLY)
+        assert resolution.created and not resolution.session_owner
+        key = resolution.principal_key
+        assert key is not None and store.get_principal_status(key).role == "user"
+        assert store.count_usable_owners(self.GOOGLE_ONLY) == 0
+
+    def test_without_any_owner_nothing_is_overridden_and_nothing_extra_is_audited(self, store: TokenStore) -> None:
+        resolution = self.sign(store, google("boot-1"), self.GOOGLE_ONLY)
+        assert resolution.session_owner and resolution.principal_key is not None
+        assert actions(store, "role_changed") == []
+
+
+class TestUsableOwnerRaces:
+    def test_two_rules_owners_unlinking_entra_at_once_exactly_one_is_refused(
+        self, pair: tuple[TokenStore, TokenStore]
+    ) -> None:
+        first, second = pair
+        entra_a = rules_owner(first, OID_A, KEY_A, "1001")
+        entra_b = rules_owner(first, OID_B, KEY_B, "1002")
+        gate = Gate("after_owner_count")
+        first._pause_hook = gate
+        one = Runner(lambda: first.unlink_identity(KEY_A, entra_a, actor=KEY_A, listed_providers=LISTED))
+        assert gate.reached.wait(WAIT)
+        two = Runner(lambda: second.unlink_identity(KEY_B, entra_b, actor=KEY_B, listed_providers=LISTED))
+        assert two.blocked()  # the writer lock serialises the two transactions
+        gate.release.set()
+        assert sorted([one.join().code, two.join().code]) == ["last_owner", "unlinked"]
+        assert first.count_usable_owners(LISTED) == 1
+        stranded = [k for k in (KEY_A, KEY_B) if "entra" not in providers(first, k)]
+        assert len(stranded) == 1
+
+    def test_owners_force_unlinking_each_others_entra_identity_never_empty_the_set(
+        self, pair: tuple[TokenStore, TokenStore]
+    ) -> None:
+        first, second = pair
+        entra_a = rules_owner(first, OID_A, KEY_A, "1001")
+        rules_owner(first, OID_B, KEY_B, "1002")
+        entra_b = provider_identity(first, KEY_B, "entra")
+        gate = Gate("after_owner_count")
+        first._pause_hook = gate
+        one = Runner(lambda: first.unlink_identity(KEY_A, entra_a, actor=KEY_B, listed_providers=LISTED))
+        assert gate.reached.wait(WAIT)
+        two = Runner(lambda: second.unlink_identity(KEY_B, entra_b, actor=KEY_A, listed_providers=LISTED))
+        assert two.blocked()
+        gate.release.set()
+        assert sorted([one.join().code, two.join().code]) == ["last_owner", "unlinked"]
+        assert first.count_usable_owners(LISTED) == 1

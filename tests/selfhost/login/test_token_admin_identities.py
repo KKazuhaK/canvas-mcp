@@ -192,8 +192,33 @@ class TestUnlinkIdentity:
         ).ok
         entra = next(i.id for i in store.list_identities(KEY_A) if i.provider_id == "entra")
         assert token_admin.main(["unlink-identity", KEY_A, str(entra)]) == 3
-        assert "only owner" in capsys.readouterr().err
+        assert "without a usable owner" in capsys.readouterr().err
         assert [i.provider_id for i in store.list_identities(KEY_A)] == ["entra", "github"]
+
+    def test_two_rules_owners_cannot_both_drop_entra(self, store, capsys) -> None:
+        policy = acc.AccessPolicy(
+            mode="rules",
+            rules=(acc.AccessRule("entra", "role", "Canvas.User"),),
+            owner_rules=(acc.AccessRule("entra", "role", "Canvas.Owner"),),
+        )
+        open_policy = acc.AccessPolicy(mode="open")
+        for oid, key, subject in ((OID_A, KEY_A, "1001"), (OID_B, KEY_B, "1002")):
+            make_account(store, oid)
+            sign_in(store, oid, owner=True, policy=policy)
+            ext = github(subject)
+            assert store.link_identity(
+                key, ext, acc.evaluate_admission(ext, open_policy), open_policy,
+                expected_epoch=store.get_principal_status(key).session_epoch,
+            ).ok
+        first, second = (
+            next(i.id for i in store.list_identities(key) if i.provider_id == "entra")
+            for key in (KEY_A, KEY_B)
+        )
+        assert token_admin.main(["unlink-identity", KEY_A, str(first)]) == 0
+        capsys.readouterr()
+        assert token_admin.main(["unlink-identity", KEY_B, str(second)]) == 3
+        assert "without a usable owner" in capsys.readouterr().err
+        assert [i.provider_id for i in store.list_identities(KEY_B)] == ["entra", "github"]
 
 
 class TestLoginProviders:

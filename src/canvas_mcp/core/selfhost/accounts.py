@@ -48,7 +48,7 @@ through what the identity provider says (the bootstrap owner and the operator CL
 from __future__ import annotations
 
 import re
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -953,12 +953,44 @@ class AccountFacts:
         return self.status == STATUS_ACTIVE and self.role == ROLE_OWNER
 
 
+def owner_is_usable(
+    *,
+    role: str,
+    status: str,
+    role_source: str | None,
+    identity_providers: Iterable[str],
+    listed: Collection[str] | None,
+) -> bool:
+    """Whether an account is a *usable owner*: it can still get an owner session (pure).
+
+    An active owner is usable when a sign-in under the current ``SELFHOST_LOGIN_PROVIDERS`` (the
+    ``listed`` provider ids; None means every provider is listed) can show the role:
+
+    * a role the Entra owner rules granted (``role_source`` ``rules``) needs the evidence of an
+      Entra sign-in (:attr:`Verdict.owner_evidence`: Google, GitHub and OIDC data never shows an
+      owner role), so it is usable only while Entra is listed and the account still holds an
+      Entra identity;
+    * any other owner (bootstrap, operator) needs one identity at a listed provider.
+
+    ``repos.usable_owner_ids`` is the same rule as a statement; ``unlink_identity``, the startup
+    owner-path check and the bootstrap owner all use this one notion.
+    """
+    if role != ROLE_OWNER or status != STATUS_ACTIVE:
+        return False
+    held = set(identity_providers)
+    if role_source == ROLE_SOURCE_RULES:
+        return PROVIDER_ENTRA in held and (listed is None or PROVIDER_ENTRA in listed)
+    return bool(held) if listed is None else bool(held & set(listed))
+
+
 @dataclass(frozen=True)
 class DecisionFacts:
     """Counts read in the same transaction as the decision."""
 
     #: Active owners, including the account being decided when it is one.
     active_owner_count: int = 0
+    #: Usable owners (:func:`owner_is_usable`). None: not counted, ``active_owner_count`` stands in.
+    usable_owner_count: int | None = None
     pending_count: int = 0
     is_bootstrap_identity: bool = False
 
@@ -1052,9 +1084,17 @@ def decide(
     ``owner``; losing the rule lowers a rules-sourced owner unless that is the last
     active owner; a bootstrap or operator owner is never changed by rules. The MCP
     path (``purpose='request'``) never raises a role.
+
+    The bootstrap identity becomes an owner while the server has no *usable* owner
+    (:func:`owner_is_usable`), not only while it has no owner row: owners that no sign-in under
+    the listed providers can use (an Entra-rule owner after Entra was delisted, an owner whose
+    identities are all at delisted providers) do not block it. The operator named that identity
+    in ``SELFHOST_BOOTSTRAP_OWNER``; provider data from Google, GitHub or OIDC still never makes
+    an owner on its own.
     """
     owner_match = verdict.owner_by_rule
-    bootstrap = facts.is_bootstrap_identity and facts.active_owner_count == 0
+    usable = facts.active_owner_count if facts.usable_owner_count is None else facts.usable_owner_count
+    bootstrap = facts.is_bootstrap_identity and usable == 0
     sign_in = purpose == "sign_in"
 
     if existing is None:
