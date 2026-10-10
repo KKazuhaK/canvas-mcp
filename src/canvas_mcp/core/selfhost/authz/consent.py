@@ -15,6 +15,10 @@ Both redirects go through :func:`fastmcp_compat.client_redirect`, which sets exa
 RFC 9207 ``iss``. An account that is not active can never approve; a pending account
 sees the request but can only cancel (its transaction is not consumed by the refusal).
 
+The code is bound to the ``session_epoch`` of the ``/account`` session that approves: it is
+redeemable only while the account's epoch is still that one, so an approval that is racing
+a disablement or ``admission_lost`` can never end in a usable code (see ``AuthzStore``).
+
 Results are plain data with closed codes (:data:`CONSENT_CODES`); no text for people lives
 here.
 """
@@ -182,6 +186,7 @@ class ConsentService:
         *,
         account_key: str,
         session_iat: int,
+        session_epoch: int,
         account_pending: bool,
         decision: Decision,
     ) -> ConsentRedirect | ConsentRefusal:
@@ -230,6 +235,7 @@ class ConsentService:
                 scopes=pending.scopes,
                 resource=pending.resource,
                 upstream_auth_at=session_iat,
+                session_epoch=session_epoch,
             )
         )
         if not created:

@@ -150,6 +150,8 @@ class CodeRecord:
     client_host: str | None
     redirect_host: str
     upstream_auth_at: int
+    #: The ``session_epoch`` of the /account session that approved the code.
+    session_epoch: int
     created_at: int
     expires_at: int
     consumed_at: int | None
@@ -172,11 +174,12 @@ class CodeRecord:
             client_host=None if row[10] is None else str(row[10]),
             redirect_host=str(row[11]),
             upstream_auth_at=int(row[12]),
-            created_at=int(row[13]),
-            expires_at=int(row[14]),
-            consumed_at=None if row[15] is None else int(row[15]),
-            grant_id=None if row[16] is None else str(row[16]),
-            grace_replays=int(row[17]),
+            session_epoch=int(row[13]),
+            created_at=int(row[14]),
+            expires_at=int(row[15]),
+            consumed_at=None if row[16] is None else int(row[16]),
+            grant_id=None if row[17] is None else str(row[17]),
+            grace_replays=int(row[18]),
         )
 
 

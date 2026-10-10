@@ -39,7 +39,7 @@ def make_grant(authz: AuthzStore, account: str, *, kind: str = "dcr", client_id:
         code_hash=tk.hash_secret(raw), client_id=client_id, client_kind=kind, client_name=name,
         client_host="claude.ai" if kind == "cimd" else None, account_id=account.removeprefix("acct:"),
         redirect_uri=REDIRECT, redirect_uri_explicit=True, redirect_host="claude.ai", code_challenge=CHALLENGE,
-        scopes=(SCOPE,), resource=RESOURCE, upstream_auth_at=1_800_000_000,
+        scopes=(SCOPE,), resource=RESOURCE, upstream_auth_at=1_800_000_000, session_epoch=0,
     )
     result = authz.exchange_code(
         code_hash=tk.hash_secret(raw), client_id=client_id, grant_id=str(uuid.uuid4()),

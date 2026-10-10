@@ -22,6 +22,16 @@ What makes that safe is the order inside them:
 * **First exchange**: the account row is read ``FOR UPDATE`` before the grant is inserted;
   disabling an account takes the same lock before it revokes the grants, so a grant is
   never created behind a disablement that has already looked for grants.
+* **Codes and the session epoch**: a code carries the ``session_epoch`` of the ``/account``
+  session that approved it, and is redeemable only while the account is active *and* its
+  current epoch is still that one. Disabling, enabling and ``admission_lost`` all raise the
+  epoch, so a code approved before any of them is dead whatever the timing, including an
+  account that is enabled again within the code's five minutes, and an approval that
+  commits concurrently with ``admission_lost``. The check is made where the decisions are
+  already serialised: ``create_code`` reads the epoch in its own transaction (a code is
+  refused if the session it comes from has already ended), and the first exchange reads
+  the account row ``FOR UPDATE``. Nothing here takes a lock in a new order; deleting an
+  account's unredeemed codes is only cleanup.
 
 **Replays.** A code or refresh token that is presented again is usually not theft: a client
 retries a slow ``/token`` call, or two workers refresh together. So a replay within
@@ -164,6 +174,10 @@ class AuthzStore:
         row = self._repos.accounts.get(conn, account_id)
         return row is not None and row[1] == acc.STATUS_ACTIVE
 
+    def _account_standing_ok(self, conn: Connection, account_id: str, session_epoch: int) -> bool:
+        """Active, and still in the session epoch a code was approved in (no row lock)."""
+        return _standing_ok(self._repos.accounts.get(conn, account_id), session_epoch)
+
     # -- registered clients ---------------------------------------------------------
 
     def put_client(self, client_id: str, info_json: str, client_name: str, expires_at: int) -> None:
@@ -222,17 +236,23 @@ class AuthzStore:
         scopes: tuple[str, ...],
         resource: str,
         upstream_auth_at: int,
+        session_epoch: int,
     ) -> bool:
-        """Store a code for an approved request; False if the account is not active.
+        """Store a code for an approved request; False if the approval is not good any more.
 
-        The status is read in the same transaction as the insert, so an approval can never
-        produce a code for an account that was disabled before it. (The exchange checks
-        again: this only keeps dead codes from being minted.)
+        ``session_epoch`` is the epoch of the ``/account`` session that approved. The status
+        and the account's current epoch are read in the same transaction as the insert, so
+        a code is never minted for an account that is not active, nor for a session that
+        has already ended (the epoch moved on). The row is not locked: an approval that
+        reads just before a concurrent disablement or ``admission_lost`` commits does store
+        its code, but with the old epoch, and the exchange refuses it (see the module
+        docstring). This check only keeps dead codes from being minted.
         """
         now = self._now()
         with self._db.row_write() as conn:
-            if not self._account_active(conn, account_id):
+            if not self._account_standing_ok(conn, account_id, session_epoch):
                 return False
+            self._pause("after_code_standing_read")
             self._repos.codes.insert(
                 conn,
                 code_hash=code_hash,
@@ -248,6 +268,7 @@ class AuthzStore:
                 client_host=client_host,
                 redirect_host=redirect_host,
                 upstream_auth_at=upstream_auth_at,
+                session_epoch=session_epoch,
                 created_at=now,
                 expires_at=now + CODE_TTL_SECONDS,
             )
@@ -323,7 +344,12 @@ class AuthzStore:
                 return ExchangeResult(ExchangeOutcome.REPLAY_REVOKED, grant)
             if not self._repos.codes.bump_grace(conn, code_hash, MAX_GRACE_REPLAYS):
                 return ExchangeResult(ExchangeOutcome.CAPPED, grant)
-            if not self._account_active(conn, grant.account_id):
+            # A replay mints a sibling only for an account still in the epoch the code was
+            # approved in. Every transition that moves the epoch (disable, enable,
+            # admission_lost) also revokes the grants, so ``lock_live`` above has normally
+            # refused already: this is the same rule as the first exchange, kept here so
+            # the two paths cannot drift apart.
+            if not self._account_standing_ok(conn, grant.account_id, code.session_epoch):
                 return ExchangeResult(ExchangeOutcome.INACTIVE, grant)
             if refresh_hash is not None:
                 self._repos.refresh.insert(
@@ -350,7 +376,10 @@ class AuthzStore:
         # takes the same lock before it revokes the account's grants, so it either sees the
         # grant inserted below (and revokes it) or runs first (and this exchange is refused).
         account = self._repos.accounts.get(conn, code.account_id, for_update=True)
-        if account is None or account[1] != acc.STATUS_ACTIVE:
+        # Active is not enough: the account must still be in the session epoch that approved
+        # the code. A disablement followed by an enablement (or an ``admission_lost``) in the
+        # code's lifetime moves the epoch, and the code approved before it is dead.
+        if not _standing_ok(account, code.session_epoch):
             return ExchangeResult(ExchangeOutcome.INACTIVE)
         if now - code.upstream_auth_at > policy.max_upstream_auth_age:
             self._event(
@@ -600,10 +629,16 @@ class AuthzStore:
         """End every live connection of an account (``admission_lost``); returns how many.
 
         For ``admission_lost`` the account itself stays active, so this also ends its
-        ``/account`` sessions (``session_epoch``) and deletes the codes it approved but
-        nobody has redeemed: otherwise a browser that is still signed in could approve the
-        app again without a round trip to the identity provider, or an approved code could
-        still be exchanged for a new connection. (Disabling an account does both on its own.)
+        ``/account`` sessions (``session_epoch`` is raised): otherwise a browser that is
+        still signed in could approve the app again without a round trip to the identity
+        provider. (Disabling an account raises the epoch on its own.)
+
+        What makes an approved code unusable is the epoch, not a delete: a code is
+        redeemable only while the account's epoch equals the one of the session that
+        approved it, so raising it here kills every code approved before, and an approval
+        that commits concurrently stores a code that is dead on arrival. The unredeemed
+        codes of the account are deleted as well, but that is only cleanup (the delete
+        cannot see a code inserted after it).
         """
         assert reason in (REVOKE_ADMISSION_LOST, REVOKE_ACCOUNT_DISABLED), reason
         account_id = acc.account_id_of(account_key)
@@ -679,6 +714,11 @@ class AuthzStore:
             except StoreUnavailable:
                 removed[name] = 0
         return removed
+
+
+def _standing_ok(account: Any, session_epoch: int) -> bool:
+    """An account row (``accounts`` column order) that is active and in ``session_epoch``."""
+    return account is not None and account[1] == acc.STATUS_ACTIVE and int(account[16]) == session_epoch
 
 
 class _TokenRow:

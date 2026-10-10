@@ -34,6 +34,10 @@ class Env:
     def account_id(self) -> str:
         return self.account_key.removeprefix("acct:")
 
+    def epoch(self, account_id: str | None = None) -> int:
+        """The current ``session_epoch`` of an account (the one a fresh sign-in would carry)."""
+        return self.tokens.get_principal_status(f"acct:{account_id or self.account_id}").session_epoch
+
     def new_code(
         self,
         *,
@@ -42,9 +46,16 @@ class Env:
         account_id: str | None = None,
         upstream_auth_at: int | None = None,
         redirect_uri: str = REDIRECT,
+        session_epoch: int | None = None,
     ) -> str:
-        """Create a code for an approved request and return the raw code."""
+        """Create a code for an approved request and return the raw code.
+
+        The code is approved by a session of the account's current epoch unless
+        ``session_epoch`` says otherwise.
+        """
         raw = tk.new_auth_code()
+        if session_epoch is None:
+            session_epoch = self.epoch(account_id or self.account_id)
         ok = self.authz.create_code(
             code_hash=tk.hash_secret(raw),
             client_id=client_id,
@@ -59,6 +70,7 @@ class Env:
             scopes=(SCOPE,),
             resource=RESOURCE,
             upstream_auth_at=int(self.clock()) if upstream_auth_at is None else upstream_auth_at,
+            session_epoch=session_epoch,
         )
         assert ok
         self.codes.append(raw)

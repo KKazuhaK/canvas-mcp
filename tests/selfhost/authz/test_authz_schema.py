@@ -227,7 +227,7 @@ class TestTransferToPostgres:
                 conn, code_hash="b" * 64, client_id="c1", account_id="x", redirect_uri="https://e/cb",
                 redirect_uri_explicit=1, code_challenge="c" * 43, scopes="s", resource="r",
                 client_kind="dcr", client_name="", client_host=None, redirect_host="e",
-                upstream_auth_at=1, created_at=1, expires_at=2,
+                upstream_auth_at=1, session_epoch=0, created_at=1, expires_at=2,
             )
         from canvas_mcp.core.selfhost.authz.store import AuthzStore
 

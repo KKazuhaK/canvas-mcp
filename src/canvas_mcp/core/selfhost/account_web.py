@@ -2149,6 +2149,7 @@ class _AccountApp:
             request.cookies.get(self.authz.binding_cookie),
             account_key=session.acct,
             session_iat=session.iat,
+            session_epoch=session.ep,
             account_pending=session.pending,
             decision=decision,
         )

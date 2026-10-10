@@ -294,6 +294,9 @@ oauth_codes = Table(
     Column("client_host", Text),
     Column("redirect_host", Text, nullable=False, server_default=text("''")),
     Column("upstream_auth_at", _INT, nullable=False),
+    # The ``session_epoch`` of the /account session that approved the code: it is redeemable
+    # only while the account's current epoch is still this one (see ``AuthzStore``).
+    Column("session_epoch", _INT, nullable=False),
     Column("created_at", _INT, nullable=False),
     Column("expires_at", _INT, nullable=False),
     # Set when the code is exchanged; the row then stays as a tombstone (with the grant it

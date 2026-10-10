@@ -113,7 +113,12 @@ class World:
         self.sides.append(side)
         return side
 
-    def code(self, side: Side | None = None, *, account_id: str | None = None) -> str:
+    def epoch(self) -> int:
+        return self.a.tokens.get_principal_status(self.account_key).session_epoch
+
+    def code(
+        self, side: Side | None = None, *, account_id: str | None = None, session_epoch: int | None = None
+    ) -> str:
         side = side or self.a
         raw = tk.new_auth_code()
         assert side.authz.create_code(
@@ -122,6 +127,7 @@ class World:
             redirect_uri=REDIRECT, redirect_uri_explicit=True, redirect_host="claude.ai",
             code_challenge=CHALLENGE, scopes=(SCOPE,), resource=RESOURCE,
             upstream_auth_at=int(self.clock()),
+            session_epoch=self.epoch() if session_epoch is None else session_epoch,
         )
         return raw
 
@@ -337,6 +343,87 @@ class TestFirstExchangeAgainstDisabling:
         assert world.b.tokens.disable_principal(world.account_key, actor=OPERATOR, reason="operator_disabled")
         assert world.exchange(world.a, raw).outcome is X.INACTIVE
         assert raw_sql(world.a.tokens, "SELECT COUNT(*) FROM oauth_grants")[0][0] == 0
+
+
+class TestCodesAgainstTheEndOfTheApprovingSession:
+    """A code is bound to the session epoch it was approved in: whatever the timing of an
+    approval against a disablement, an enablement or ``admission_lost``, no code approved
+    before one of them is ever redeemable."""
+
+    @staticmethod
+    def end(world: World, via: str) -> Any:
+        if via == "admission_lost":
+            return world.b.authz.revoke_all_for_account(world.account_key, reason="admission_lost")
+        assert world.b.tokens.disable_principal(world.account_key, actor=OPERATOR, reason="operator_disabled")
+        if via == "disable_and_enable":
+            assert world.b.tokens.enable_principal(world.account_key, actor=OPERATOR)
+        return True
+
+    @staticmethod
+    def no_grants(world: World) -> None:
+        assert raw_sql(world.a.tokens, "SELECT COUNT(*) FROM oauth_grants")[0][0] == 0
+
+    @pytest.mark.parametrize("via", ["admission_lost", "disable", "disable_and_enable"])
+    def test_an_approval_that_commits_around_the_end_of_its_session_never_gives_a_redeemable_code(
+        self, world: World, via: str
+    ) -> None:
+        epoch = world.epoch()
+        gate = Gate("after_code_standing_read")
+        world.a.authz.pause_hook = gate
+        # The approval has read an active account in `epoch` and is about to insert its code.
+        approving = Runner(lambda: world.code(session_epoch=epoch))
+        assert gate.reached.wait(WAIT)
+        ending = Runner(lambda: self.end(world, via))
+        if IS_POSTGRES:
+            # Nothing is locked by the read: the session ends while the approval is open.
+            ending.join()
+            assert world.epoch() > epoch
+        else:
+            assert ending.still_blocked()  # SQLite: the write lock is held by the approval
+        gate.release.set()
+        raw = approving.join()
+        ending.join()
+        world.a.authz.pause_hook = None
+        if IS_POSTGRES:
+            # The code was created after the end of the session, and for an active account
+            # (admission_lost, enable): this is the window the epoch closes.
+            assert world.a.authz.load_code(tk.hash_secret(raw)) is not None
+        result = world.exchange(world.b, raw)
+        assert result.outcome in (X.INACTIVE, X.DEAD), result
+        self.no_grants(world)
+        # the account itself is fine afterwards: a code approved in the new epoch works
+        if via == "disable":
+            assert world.b.tokens.enable_principal(world.account_key, actor=OPERATOR)
+        assert world.exchange(world.a, world.code()).outcome is X.WON
+
+    @pytest.mark.parametrize("via", ["disable", "disable_and_enable"])
+    def test_a_code_consumed_just_before_the_account_is_read_is_refused_when_the_epoch_moved(
+        self, world: World, via: str
+    ) -> None:
+        raw = world.code()
+        gate = Gate("after_code_consume")
+        world.a.authz.pause_hook = gate
+        exchange = Runner(lambda: world.exchange(world.a, raw))
+        assert gate.reached.wait(WAIT)
+        ending = Runner(lambda: self.end(world, via))
+        if IS_POSTGRES:
+            ending.join()  # the exchange holds the code row only, not the account's
+        else:
+            assert ending.still_blocked()
+        gate.release.set()
+        result = exchange.join()
+        ending.join()
+        world.a.authz.pause_hook = None
+        if IS_POSTGRES:
+            # The account row is read after the end of the session: the epoch has moved.
+            assert result.outcome is X.INACTIVE
+            self.no_grants(world)
+        else:
+            # SQLite: the exchange held the write lock to its end, so the session ended after
+            # the grant existed, and the disablement revoked it.
+            assert result.outcome is X.WON and result.grant is not None
+            assert grant_row(world, result.grant.id)[0] is not None
+        assert world.exchange(world.b, raw).outcome is X.DEAD  # burned
 
 
 class TestRefreshRotation:

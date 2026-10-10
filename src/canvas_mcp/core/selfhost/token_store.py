@@ -1801,7 +1801,9 @@ class TokenStore:
         The account cannot sign in to ``/account``, cannot enroll, and every MCP
         request is refused, until an owner (or the operator) enables it again.
         Every ``/account`` session issued before is invalidated (``session_epoch``
-        is bumped). The enrollment row, if any, is kept untouched.
+        is bumped), and so is every authorization code those sessions approved: a code is
+        redeemable only in the epoch it was approved in, so it stays dead when the account
+        is enabled again. The enrollment row, if any, is kept untouched.
 
         ``actor`` is the acting owner's account key or :data:`OPERATOR`. An owner
         actor is re-checked inside the transaction (still active and an owner) and

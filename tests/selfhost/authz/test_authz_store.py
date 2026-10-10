@@ -57,6 +57,7 @@ class TestCodes:
             client_host=None, account_id=other.removeprefix("acct:"), redirect_uri="https://e.test/cb",
             redirect_uri_explicit=True, redirect_host="e.test", code_challenge="c" * 43,
             scopes=("Canvas.Access",), resource="r", upstream_auth_at=1,
+            session_epoch=env.epoch(other.removeprefix("acct:")),
         )
         assert not ok and rows(env, "SELECT COUNT(*) FROM oauth_codes")[0][0] == 0
 

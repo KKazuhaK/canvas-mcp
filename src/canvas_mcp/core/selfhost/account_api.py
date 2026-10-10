@@ -1343,6 +1343,7 @@ class ApiApp:
                 self._binding(ctx),
                 account_key=session.acct,
                 session_iat=session.iat,
+                session_epoch=session.ep,
                 account_pending=session.pending,
                 decision="approve" if decision == "approve" else "deny",
             )

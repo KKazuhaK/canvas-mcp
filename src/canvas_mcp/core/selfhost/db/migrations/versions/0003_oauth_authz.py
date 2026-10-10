@@ -7,7 +7,8 @@ tables whether or not the local mode is ever switched on:
 * ``oauth_clients``: dynamically registered clients (public clients only).
 * ``cimd_clients``: the last known good client metadata documents.
 * ``oauth_grants``: one row per connection of an app to an account (a refresh family).
-* ``oauth_codes``: authorization codes, kept as tombstones after use.
+* ``oauth_codes``: authorization codes, kept as tombstones after use. Each carries the
+  ``session_epoch`` of the ``/account`` session that approved it.
 * ``oauth_refresh_tokens``: SHA-256 hashes of refresh tokens and their rotation chain.
 * ``login_states``: one-time state that must survive between requests (an /authorize
   request waiting for the user to sign in and approve).
@@ -117,6 +118,7 @@ def upgrade() -> None:
         sa.Column("client_host", text),
         sa.Column("redirect_host", text, nullable=False, server_default=_EMPTY),
         sa.Column("upstream_auth_at", _INT, nullable=False),
+        sa.Column("session_epoch", _INT, nullable=False),
         sa.Column("created_at", _INT, nullable=False),
         sa.Column("expires_at", _INT, nullable=False),
         sa.Column("consumed_at", _INT),

@@ -261,6 +261,7 @@ CREATE TABLE oauth_codes (
     client_host TEXT,
     redirect_host TEXT DEFAULT '' NOT NULL,
     upstream_auth_at BIGINT NOT NULL,
+    session_epoch BIGINT NOT NULL,
     created_at BIGINT NOT NULL,
     expires_at BIGINT NOT NULL,
     consumed_at BIGINT,

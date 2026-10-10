@@ -77,6 +77,7 @@ CODE_COLUMNS = (
     "client_host",
     "redirect_host",
     "upstream_auth_at",
+    "session_epoch",
     "created_at",
     "expires_at",
     "consumed_at",
