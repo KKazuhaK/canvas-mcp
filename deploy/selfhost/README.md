@@ -19,6 +19,7 @@ Image: `ghcr.io/kkazuhak/canvas-mcp` (linux/amd64 + linux/arm64, non-root, data 
 - [Per-user enrollment (/account)](#per-user-enrollment-account)
 - [Account UI (React or legacy)](#account-ui-react-or-legacy)
 - [Accounts and admission](#accounts-and-admission)
+- [Sign-in providers (Google, GitHub, OIDC)](#sign-in-providers-google-github-oidc)
 - [Disabling tools](#disabling-tools)
 - [Multiple schools (optional)](#multiple-schools-optional)
 - [Prompt-injection risk of write tools](#prompt-injection-risk-of-write-tools)
@@ -247,7 +248,8 @@ The full example is in [`nginx.conf.example`](nginx.conf.example); the core is:
 # Rate-limit the sign-in-free /register and /authorize by IP (see "Disk and abuse protection" for why)
 limit_req_zone $binary_remote_addr zone=canvas_oauth:10m rate=10r/m;
 # SELFHOST_AUTH_MODE=local also has /token and /revoke: nginx.conf.example adds a canvas_token zone
-# (120r/m per IP, with claude.ai's egress range 160.79.104.0/21 exempt) for them
+# (120r/m per IP, with claude.ai's egress range 160.79.104.0/21 exempt) for them, and a canvas_signin zone
+# (30r/m per IP, burst 20) for /account/login and /account/callback (every sign-in provider)
 limit_req_status 429;
 
 server {
@@ -306,13 +308,13 @@ canvas.mcp.kazuhahub.com {
 }
 ```
 
-Standard Caddy has no rate-limiting feature. To limit `/register` and `/authorize` (and, with `SELFHOST_AUTH_MODE=local`, `/token` and `/revoke`) by IP, either build Caddy with xcaddy including [caddy-ratelimit](https://github.com/mholt/caddy-ratelimit) (the example file has the commented-out configuration), or add a rate-limiting rule in Cloudflare (see below).
+Standard Caddy has no rate-limiting feature. To limit `/register` and `/authorize` (and, with `SELFHOST_AUTH_MODE=local`, `/token`, `/revoke` and the sign-in paths `/account/login*` and `/account/callback*`) by IP, either build Caddy with xcaddy including [caddy-ratelimit](https://github.com/mholt/caddy-ratelimit) (the example file has the commented-out configuration), or add a rate-limiting rule in Cloudflare (see below).
 
 The service itself **does not trust** the `X-Forwarded-*` headers (every URL is generated from `PUBLIC_BASE_URL`), so how the proxy sets those headers does not affect security.
 
 ### Keep OAuth codes out of proxy logs
 
-The sign-in flow puts one-time values in URLs: `/authorize` receives `state` and a PKCE challenge, and the browser comes back to `/auth/callback?code=...&state=...` after Entra (this service's redirect back to the MCP client carries another `code`/`state` pair in its `Location` header). A default access log writes the whole request line, query string included, so these values end up in log files, log shippers and backups. They are short-lived and single use, but a code captured and replayed inside its lifetime is still an attack, and `state` is a CSRF defence. Log the path only.
+The sign-in flow puts one-time values in URLs: `/authorize` receives `state` and a PKCE challenge, and the browser comes back to `/auth/callback?code=...&state=...` after Entra (this service's redirect back to the MCP client carries another `code`/`state` pair in its `Location` header). With `SELFHOST_AUTH_MODE=local` the `/account` sign-in comes back to `/account/callback` (Entra) or `/account/callback/<provider>` (Google, GitHub, OIDC) with its own `code` and `state`. A default access log writes the whole request line, query string included, so these values end up in log files, log shippers and backups. They are short-lived and single use, but a code captured and replayed inside its lifetime is still an attack, and `state` is a CSRF defence. Log the path only.
 
 With `SELFHOST_AUTH_MODE=local` the request id of an app's authorization (`txn`) also travels in a URL: `/account/login?txn=...` and `/account/consent?txn=...` (with `ACCOUNT_UI=react`, the page's calls are `GET /account/api/consent?txn=...` and a `POST /account/api/consent` that carries it in the JSON body, so it is never part of a path). It is single use, tied to the browser that started the request and lives 10 minutes, but treat it like `state`: the nginx format below logs the path only, and the Caddy filter blanks it.
 
@@ -366,7 +368,7 @@ If the domain goes through the Cloudflare proxy (orange cloud):
 
 - **Use SSL/TLS mode Full (strict)**; the origin needs a valid certificate (Let's Encrypt or a Cloudflare Origin certificate).
 - **Allow claude.ai's egress range**: claude.ai makes requests from `160.79.104.0/21` (including fetching the client metadata document). Create a WAF custom rule: expression `ip.src in {160.79.104.0/21}`, action **Skip**, and check skipping all security features (skip the remaining custom rules, rate limiting, managed rules, Bot Fight / Super Bot Fight and so on).
-- **Turn off Bot Fight Mode / Super Bot Fight Mode**, and **do not use a JS challenge or managed challenge** on `/mcp`, `/token`, `/register`, `/revoke` and `/.well-known/*` (with `SELFHOST_AUTH_MODE=local` also none on `/authorize`, `/account/login`, `/account/callback`, `/account/consent` or `/account/api/consent`: they are part of the sign-in redirect chain). These are machine-to-machine interfaces, and a challenge page makes OAuth and MCP fail outright.
+- **Turn off Bot Fight Mode / Super Bot Fight Mode**, and **do not use a JS challenge or managed challenge** on `/mcp`, `/token`, `/register`, `/revoke` and `/.well-known/*` (with `SELFHOST_AUTH_MODE=local` also none on `/authorize`, `/account/login` and `/account/login/*`, `/account/callback` and `/account/callback/*`, `/account/consent` or `/account/api/consent`: they are part of the sign-in redirect chain). These are machine-to-machine interfaces, and a challenge page makes OAuth and MCP fail outright.
 - **Add a rate-limiting rule for `/register` and `/authorize`** (the free plan has 1): expression `(http.request.uri.path in {"/register" "/authorize"})`, 10 requests per minute per IP, then block. Behind Cloudflare, nginx sees Cloudflare's addresses, so for per-IP limiting either restore the real IP first (`CF-Connecting-IP`) or rely on this Cloudflare rule alone. Note that the first Skip rule lets claude.ai's egress range through, so that range is not subject to this limit.
 - **Do not cache**: add a cache rule that sets Bypass cache for the whole hostname.
 - **Turn off Rocket Loader** (it rewrites the scripts in pages).
@@ -644,7 +646,7 @@ Since the account model, every person who signs in has an **account**. Its key i
 | Issuer | `https://login.microsoftonline.com/<tenant id>/v2.0` |
 | Subject | the `oid` claim (the user's object id in your directory) |
 
-The subject is never the `sub` claim (Entra makes `sub` different for every application) and never the e-mail address or user principal name (neither is a verified identifier). The same person is therefore the same account whatever name or address they use. Entra is the only login provider; the model is ready for another one to attach to an existing account later without changing any table.
+The subject is never the `sub` claim (Entra makes `sub` different for every application) and never the e-mail address or user principal name (neither is a verified identifier). The same person is therefore the same account whatever name or address they use. Entra is the default login provider. With `SELFHOST_AUTH_MODE=local` Google, GitHub and generic OpenID Connect providers can be added, and attach to an account as further identities without changing any table: see [Sign-in providers](#sign-in-providers-google-github-oidc).
 
 ### Who is admitted
 
@@ -653,10 +655,10 @@ One policy decides, for both `/account` and the MCP endpoint, what happens to so
 | Setting | Values | Default |
 |---|---|---|
 | `ACCESS_POLICY` | `rules`: only people a rule admits get an account. `approval`: everybody who signs in gets an account that waits for an owner. `open`: everybody the tenant signs in gets an account at once. | `rules` |
-| `ACCESS_RULES` | With `rules`: comma-separated `provider:kind:value`. Any one match admits. | `entra:role:<ENTRA_REQUIRED_ROLE>` |
+| `ACCESS_RULES` | With `rules`: comma-separated `provider:kind:value`. Any one match admits. The kinds of the other providers are in [Sign-in providers](#sign-in-providers-google-github-oidc). | `entra:role:<ENTRA_REQUIRED_ROLE>` (required without Entra) |
 | `ACCESS_FALLBACK` | With `rules`, for someone no rule admits: `deny` or `approval`. | `deny` |
-| `OWNER_RULES` | Who is an owner: rules in the same grammar, or `none`. | `entra:role:<ENTRA_OWNER_ROLE>` |
-| `SELFHOST_BOOTSTRAP_OWNER` | `entra:<tenant id>:<object id>`: this person becomes an owner when they sign in, but only while the server has no active owner. | unset |
+| `OWNER_RULES` | Who is an owner: `entra:role` and `entra:group` rules, or `none`. Other providers can never make an owner. | `entra:role:<ENTRA_OWNER_ROLE>` |
+| `SELFHOST_BOOTSTRAP_OWNER` | `entra:<tenant id>:<object id>` (or `google:<subject>`, `github:<numeric user id>`, `oidc:<slug>:<subject>` with those providers): this person becomes an owner when they sign in, but only while the server has no active owner. `token_admin` names nobody and leaves the first promotion to the operator. | unset |
 
 Rule kinds (checked at startup):
 
@@ -664,7 +666,7 @@ Rule kinds (checked at startup):
 - `entra:group:<group object id>`: the group is in the token's `groups` claim. When Entra signals a groups *overage* (too many groups to list) the rule simply does not match; the server never calls Microsoft Graph. Entra only puts `groups` in the tokens when the app registration asks for it: set `groupMembershipClaims` in the app manifest (Token configuration, Groups claim) to `SecurityGroup` or `ApplicationGroup` so that both the ID token and the access token carry it. Prefer `ApplicationGroup` with groups assigned to the application, which keeps the list short. Without it nobody matches the rule. The claim is read only when a group rule is configured; entries that are not group object ids (on-premises names or SIDs) are ignored and match nothing.
 - `entra:tenant:<tenant id>`: the token comes from this tenant, which must be `ENTRA_TENANT_ID`.
 
-The server **refuses to start** on anything it cannot honour: an unknown rule kind or prefix, a `google:`, `github:` or `oidc:` rule (those providers are not enabled), `ACCESS_RULES` or `ACCESS_FALLBACK` together with a policy other than `rules`, a malformed value, `SELFHOST_BOOTSTRAP_OWNER` that names another tenant, and `TRUSTED_PROXY_CIDRS` (reserved: until a trusted-proxy mode exists, the sign-in history records the client address as `unknown` rather than trusting a forwarded header). `ACCESS_OPEN_ACKNOWLEDGE_PUBLIC` is accepted and reserved for login providers open to the whole internet, which Entra is not.
+The server **refuses to start** on anything it cannot honour: an unknown rule kind or prefix, a `google:`, `github:` or `oidc:` rule for a provider that `SELFHOST_LOGIN_PROVIDERS` does not list, `ACCESS_RULES` or `ACCESS_FALLBACK` together with a policy other than `rules`, a malformed value, `SELFHOST_BOOTSTRAP_OWNER` that names another tenant, and `TRUSTED_PROXY_CIDRS` (reserved: until a trusted-proxy mode exists, the sign-in history records the client address as `unknown` rather than trusting a forwarded header). `ACCESS_OPEN_ACKNOWLEDGE_PUBLIC=true` is required with `ACCESS_POLICY=open` when a provider anyone can use (Google, GitHub, OIDC) is listed; Entra, which is limited to your tenant, does not need it.
 
 Examples:
 
@@ -701,7 +703,7 @@ An account is an owner when `OWNER_RULES` match at **sign-in**. The role is take
 
 ### Operator commands
 
-`token_admin` names an account as `acct:<uuid>`, a bare uuid, `entra:<tenant id>:<object id>` (the form the earlier release used, found through the account's identity) or the tenant id and object id as two arguments, so existing scripts keep working.
+`token_admin` names an account as `acct:<uuid>`, a bare uuid, `entra:<tenant id>:<object id>` (the form the earlier release used, found through the account's identity), the tenant id and object id as two arguments, or, with the other sign-in providers, `google:<subject>`, `github:<numeric user id>` or `oidc:<slug>:<subject>`, so existing scripts keep working. `identities [PRINCIPAL]` lists the linked sign-in methods (never an e-mail address), `unlink-identity PRINCIPAL IDENTITY_ID` removes one (an account keeps at least one) and `login-providers [--check]` shows the configured providers and the redirect URIs.
 
 ```bash
 docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin accounts          # every account, tab-separated
@@ -711,6 +713,119 @@ docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin di
 ```
 
 `disable` with an Entra identity the server has not seen yet creates a disabled account for it, so you can block someone before their first sign-in. `list` keeps its first six columns and adds the account key as a seventh. The other listings changed shape, so a script that parses them must be updated: in `access` and `history` the first (`access`) or second (`history`) column is now the account key `acct:<uuid>` instead of `entra:<tenant id>:<object id>`, the `disabled_by` column of `access` shows an account key when an owner disabled the person, and the old key is appended as a last column (the ninth of `access`, the seventh of `history`). Arguments still accept the old form.
+
+## Sign-in providers (Google, GitHub, OIDC)
+
+Entra is the sign-in the first release had, and it stays the default: if you never set `SELFHOST_LOGIN_PROVIDERS`, nothing about the sign-in changes, including the redirect URI you registered in Entra. With `SELFHOST_AUTH_MODE=local` the server's own sign-in (the `/account` pages, and the sign-in step of an app's authorization) can also offer **Google**, **GitHub** and any **OpenID Connect** provider you configure (Keycloak, Authentik, a school's single sign-on), next to or instead of Entra.
+
+Everything but Entra needs `SELFHOST_AUTH_MODE=local`. With `entra_proxy` every MCP connection signs in through Entra at `/auth/callback`, so the server refuses to start with another provider and says so. Nothing about the authorization server changes: every provider ends at the same consent page, the same 10-minute rule for sensitive actions, the same `MAX_UPSTREAM_AUTH_AGE`, and the same disablement and approval checks.
+
+### Turning providers on
+
+| Variable | Meaning |
+|---|---|
+| `SELFHOST_LOGIN_PROVIDERS` | Comma-separated, in button order: `entra`, `google`, `github`, `oidc:<slug>` (a slug is 1 to 32 characters: `a-z`, `0-9` and `-`, starting with a letter; at most 8 providers, none twice). Unset means `entra` alone. |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | The Google Cloud web OAuth client (the id ends with `.apps.googleusercontent.com`). The secret is at least 16 characters. |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | The GitHub OAuth App. |
+| `OIDC_<SLUG>_ISSUER`, `OIDC_<SLUG>_CLIENT_ID`, `OIDC_<SLUG>_CLIENT_SECRET` | A generic OpenID Connect provider, `<SLUG>` being the slug in capitals with `-` written as `_`. The issuer is the exact https string the provider publishes, trailing slash included. |
+| `OIDC_<SLUG>_DISPLAY_NAME`, `OIDC_<SLUG>_SCOPES`, `OIDC_<SLUG>_TOKEN_AUTH_METHOD`, `OIDC_<SLUG>_USERINFO` | Optional: the button label (default: the slug), the scopes (default `openid email profile`, which must include `openid`), `client_secret_basic` or `client_secret_post` (default: what the provider's discovery document lists), and whether to also call the userinfo endpoint (default `false`). |
+| `ACCOUNT_LINK_BY_VERIFIED_EMAIL` | Reserved and not implemented: the server refuses to start if it is set. Accounts are linked only by a signed-in person (see below). |
+
+The server collects every problem and refuses to start with a message that names variables and never their values. A variable of a provider that is not listed is refused too (a leftover `GOOGLE_CLIENT_ID` while `google` is not in the list), so a typo cannot silently turn a provider off. `ACCESS_POLICY=open` together with a provider anyone can use (`google`, `github` or `oidc`) needs `ACCESS_OPEN_ACKNOWLEDGE_PUBLIC=true`: it would admit everyone who has such an account.
+
+**Running without Entra.** In `local` mode Entra becomes optional when at least one other provider is listed. Then `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`, `ENTRA_REQUIRED_ROLE` and `ENTRA_OWNER_ROLE` must stay unset, `ACCESS_RULES` is required (there is no default rule), and the server must have a way to get an owner: `SELFHOST_BOOTSTRAP_OWNER` naming a Google, GitHub or OIDC identity, `SELFHOST_BOOTSTRAP_OWNER=token_admin`, or an owner that already exists in the database. Otherwise it refuses to start and tells you how. `ENTRA_API_SCOPE` stays: it is the MCP scope the authorization server advertises.
+
+### Redirect URIs to register
+
+Each provider has its own callback path, always built from `PUBLIC_BASE_URL` (never from the `Host` header). Register exactly these, character for character:
+
+| Provider | Start | Redirect URI to register |
+|---|---|---|
+| Entra | `/account/login` (`/account/login/entra` with two or more providers) | `https://<host>/account/callback` |
+| Google | `/account/login/google` | `https://<host>/account/callback/google` |
+| GitHub | `/account/login/github` | `https://<host>/account/callback/github` |
+| Generic OIDC | `/account/login/oidc/<slug>` | `https://<host>/account/callback/oidc/<slug>` |
+
+`token_admin login-providers` prints this list for your configuration. `token_admin login-providers --check` also fetches each OpenID Connect provider's discovery document and key set and prints the issuer, the hosts of its endpoints, the signature algorithms, whether PKCE `S256` and the RFC 9207 `iss` response parameter are advertised, and for GitHub the scopes a sign-in would request. It asks for no token and never starts a sign-in.
+
+### Google
+
+1. In the Google Cloud console open **Google Auth Platform** and create an **OAuth client** of type **Web application**.
+2. Under **Authorized redirect URIs** add `https://<host>/account/callback/google`. Google compares it exactly (scheme, case and trailing slash) and requires https.
+3. The **Audience** decides who can sign in: **External** (any Google account) or **Internal** (only members of your Google Cloud organisation, for a Workspace). An External app in **Testing** status admits at most 100 listed test users and their authorizations expire after 7 days, so publish it (**In production**) for anything beyond a trial. The scopes the server asks for are `openid`, `email` and `profile`.
+4. Put the client id and secret in `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, add `google` to `SELFHOST_LOGIN_PROVIDERS`.
+
+The server identifies a Google person by `sub`, which Google documents as unique and never reused; the e-mail address can change and is shown for recognition only. Google's ID token carries the issuer as `https://accounts.google.com` or `accounts.google.com`, and the server accepts either and stores the https spelling. Google's discovery document advertises the RFC 9207 `iss` response parameter and its reference says it is always returned, so the server requires it on the callback and compares it exactly. Every request asks Google to show its account picker (`prompt=select_account`).
+
+### GitHub
+
+1. In GitHub open **Settings**, **Developer settings**, **OAuth apps**, **New OAuth App** (for an organisation, the same page under the organisation's settings).
+2. Set the **Authorization callback URL** to `https://<host>/account/callback/github`. Keep it exact: if the app's settings show wildcard matching for redirect URLs, turn it off (GitHub has it on by default for apps with a single callback URL created before 2026-08-03). Leave **Enable Device Flow** off.
+3. Generate a client secret. Expiring user tokens may stay on; the server never keeps the token.
+4. Put the client id and secret in `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`, add `github` to `SELFHOST_LOGIN_PROVIDERS`.
+
+The server asks for the `user:email` scope (and `read:org` only when an `ACCESS_RULES` entry is a `github:org` or `github:team` rule), uses PKCE `S256`, and identifies a person by the numeric account id, never the login (logins change). The access token GitHub issues is used inside the callback only (to read `/user`, `/user/emails` and, for org and team rules, the membership endpoints) and is then discarded: it is never stored, logged or put in a cookie. It is not revoked at GitHub; GitHub allows a user 10 tokens per application and scope and 10 new ones per hour, and past that shows its own re-authorization prompt. The primary verified address, when GitHub lets the server read it, is stored for display.
+
+**Organisation and team rules need the organisation's approval.** GitHub's OAuth app access restrictions are on by default for organisations, and an unapproved OAuth app gets no answer about private organisation resources. An owner of the organisation must approve the application in the organisation's OAuth app access settings (see GitHub's "About OAuth app access restrictions"), otherwise the server cannot tell whether someone is a member and **refuses them** (fail closed). `read:org` is shown on GitHub's consent screen only when such a rule exists, and a person who removes it there is refused for the same reason. Only an active membership counts, never a pending invitation, and members of child teams count as members of a team.
+
+### Any OpenID Connect provider
+
+The server needs: discovery at `<issuer>/.well-known/openid-configuration` whose `issuer` equals your `OIDC_<SLUG>_ISSUER` exactly, the authorization code flow with PKCE `S256` (a discovery document that lists methods must list `S256`), an ID token signed with an asymmetric algorithm (`RS*`, `PS*`, `ES*` or `EdDSA`; `none` and the `HS*` family are refused), and a client secret. Each ID token is checked for issuer, audience (and `azp` when there are several), expiry, issued-at (with 10 minutes of clock skew), the `nonce` the server sent (required) and a `sub` of at most 255 ASCII characters; the RFC 9207 `iss` response parameter is compared when the provider sends one and required when its metadata says it supports it. The identity is `(oidc:<slug>, issuer, sub)`.
+
+All requests to the provider use https only, with timeouts and size limits, no redirects, and no `localhost`, loopback, link-local, unspecified or multicast IP-literal hosts. The URLs come from your own configuration and discovery document and there is no DNS pinning, so the operator is trusted to configure issuers they trust.
+
+**Authentik.** Create an OAuth2/OpenID provider and an application. The issuer is per application and ends with a slash: `https://authentik.example/application/o/<application slug>/`, so `OIDC_AUTHENTIK_ISSUER` must include it. Use a confidential client, a **strict** redirect URI `https://<host>/account/callback/oidc/authentik`, and **select a signing key**: without one Authentik signs ID tokens with HS256 and publishes no key set, which this server refuses. The `profile` scope carries group membership, so a rule such as `oidc:authentik:claim:groups=canvas-users` admits that group.
+
+**Keycloak.** The issuer is `https://<keycloak host>/realms/<realm>`, discovery is at `/realms/<realm>/.well-known/openid-configuration`, and the client is a confidential client with the authorization code (standard) flow and the valid redirect URI `https://<host>/account/callback/oidc/<slug>`. Keycloak's documentation does not state its PKCE and `iss` defaults, so run `token_admin login-providers --check` and read what your realm advertises.
+
+### Who is admitted with these providers
+
+`ACCESS_POLICY`, `ACCESS_RULES` and `ACCESS_FALLBACK` keep their meaning; every provider has its own rule kinds, and any one match admits.
+
+| Rule | Matches when |
+|---|---|
+| `google:domain:<hd>` | the ID token's `hd` claim equals the domain (lower case) **and** `email_verified` is true. The `hd` request hint is never trusted. There is deliberately no rule on the e-mail domain: Google says it does not identify Workspace users. |
+| `google:email:<address>` | the address is verified and equals this one (compared in lower case). |
+| `github:user:<numeric id>` | the GitHub account id equals this (find it in the `id` field at `https://api.github.com/users/<login>`). |
+| `github:org:<org>` | the person is an active member of the organisation (needs `read:org` and the organisation's approval). |
+| `github:team:<org>/<team slug>` | the person is an active member of the team, child teams included. |
+| `oidc:<slug>:claim:<name>=<value>` | a top-level claim of that name is a string equal to the value, or a list of strings containing it. Exact and case-sensitive. The value is 1 to 256 printable ASCII characters, without a comma or leading or trailing spaces. The claim `email` is refused here. |
+| `oidc:<slug>:email:<address>` | the address is verified (the JSON value `true`) and equals this one. |
+| `oidc:<slug>:any` | everybody who signs in with that provider (use it only for a private provider). |
+
+At most 10 `github:org` and `github:team` rules together (each costs one API call per sign-in). `email_verified` only ever feeds a rule or the display: an e-mail address is never an identity. A rule for a provider that is not listed stops the server at startup.
+
+**Owners.** `OWNER_RULES` stay Entra-only (`entra:role`, `entra:group`): a Google, GitHub or OIDC claim can never make an owner. The bootstrap owner and `token_admin` can: set `SELFHOST_BOOTSTRAP_OWNER` to `google:<subject>`, `github:<numeric user id>` or `oidc:<slug>:<subject>`, or to `token_admin` to name nobody and promote the first owner by hand after they have signed in once:
+
+```bash
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin accounts
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin identities
+docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin promote-owner acct:<uuid>
+```
+
+`token_admin` also accepts `google:<subject>`, `github:<id>` and `oidc:<slug>:<subject>` wherever it takes an account (the issuer of an `oidc` identity comes from `OIDC_<SLUG>_ISSUER`; without it a subject that exactly one identity has is enough, otherwise the command exits 2 with a hint). An owner whose role comes from an Entra app role keeps it when they sign in another way, but that session is not an owner session: the admin pages need an Entra sign-in, because only Entra can show the role is still held. Bootstrap and operator owners are owners whichever way they sign in.
+
+### Linking sign-in methods
+
+With two or more providers, `/account` has a **Sign-in methods** page (a page of the React app, a card of the legacy UI). A signed-in, active person whose sign-in is from the last 10 minutes can add another provider: they are sent to it, prove they control that account, and come back. Rules the server keeps:
+
+- **Nothing is ever linked by e-mail address** (and `ACCOUNT_LINK_BY_VERIFIED_EMAIL` is reserved and refused). A link is a ceremony bound to the signed-in session; if that session ends, is replaced or is disabled in between, the link fails with a closed message.
+- **An identity that belongs to another account is refused** (`identity_in_use`). There is no merge; neither account changes, and the refusal is audited.
+- An account has at most one identity per provider, and an identity the rules would refuse at sign-in cannot be attached.
+- **Unlinking** keeps at least one identity (to cut someone off, disable them). It ends every browser session of the account and every authorization code not yet redeemed; the caller stays signed in when they used another identity, and is signed out when they removed the one they used. **Connected apps stay connected**: if the unlink was a reaction to a compromised account, end the connections too (Connected apps, or an owner at `/account/admin`).
+- Owners can unlink a person's identity from the admin page (with a sign-in from the last 10 minutes), and the operator with `token_admin unlink-identity`. Every link, refusal and unlink is in the audit log.
+- Every sign-in is judged by the identity it used. If someone signs in with a linked identity that the rules no longer admit, they are refused and their connected apps are ended, even if another linked identity would still qualify.
+- A removed identity is a stranger afterwards: its next sign-in is judged as a new person.
+
+### What is stored, and the limits
+
+- **Per identity:** provider, issuer, subject, the sign-in name, the e-mail address with the provider's verified flag (display only, never a key) and two timestamps. No provider token is stored. The sign-in history names the provider.
+- **During a sign-in:** a record with the PKCE verifier and nonce in the token database for at most 10 minutes (`login_states`), deleted by its first use, plus a sealed cookie (`__Host-cmcp_flow`) that must belong to the same browser.
+- **Secrets:** client secrets live in `.env` only, are never printed by `--config` or `token_admin`, and appear in no log. Logs carry provider ids, closed codes and HTTP status numbers, never a code, state, token, e-mail address or the provider's error text.
+- **Limits:** each provider's sign-in start allows 30 per minute for the whole process; a person may start 5 links and make 10 unlinks in 10 minutes. The proxy examples limit the sign-in and callback paths per IP (the limit also covers the Entra sign-in, and a campus network behind one address needs headroom). This is one process: `SELFHOST_STATE_BACKEND=memory` stays the only supported backend.
+- **Facts checked against the providers' own documentation:** [Google OpenID Connect](https://developers.google.com/identity/openid-connect/openid-connect) and its [reference](https://developers.google.com/identity/openid-connect/reference); [Google web-server flow](https://developers.google.com/identity/protocols/oauth2/web-server); [authorizing GitHub OAuth apps](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps), [scopes](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps) and [OAuth app access restrictions](https://docs.github.com/en/organizations/managing-oauth-access-to-your-organizations-data/about-oauth-app-access-restrictions); [RFC 9207](https://www.rfc-editor.org/rfc/rfc9207.html); [OpenID Connect Core](https://openid.net/specs/openid-connect-core-1_0.html) and [Discovery](https://openid.net/specs/openid-connect-discovery-1_0.html); [Authentik OAuth2 providers](https://docs.goauthentik.io/add-secure-apps/providers/oauth2/); [Keycloak OIDC](https://www.keycloak.org/securing-apps/oidc-layers).
+
+Smoke-testing a deployment with providers: `smoke-test.sh` can list the providers and check that each start link redirects to its provider (set `SMOKE_EXPECT_PROVIDERS`; it never signs in). `setup-env.sh` does not prompt for provider settings in this release: they need accounts at the providers, so add the variables by hand.
 
 ## Disabling tools
 
@@ -790,6 +905,7 @@ Be honest with the people you invite: they are trusting **you** and **the host y
 | **MCP access-token key and refresh tokens** (`SELFHOST_AUTH_MODE=local` only) | The access-token key is not stored: it is derived (HKDF) from `CANVAS_TOKEN_KEYS`, so **whoever holds the key ring can mint access tokens for any known connection**. Refresh tokens, authorization codes and sign-in request ids are stored only as SHA-256 hashes in the token database (`oauth_refresh_tokens`, `oauth_codes`, `login_states`); the connections (`oauth_grants`), client registrations and cached client metadata documents are plain rows (names, hosts, timestamps; no secret). | The server process; whoever has `CANVAS_TOKEN_KEYS` (access tokens), or the running clients (the raw refresh tokens they hold). A database-only leak yields no usable token. | `token_admin rotate-jwt-key` invalidates every access token; a new first key in `CANVAS_TOKEN_KEYS` changes the signing key. The epoch lives in the database, so `rotate-jwt-key` does not help if the key ring itself leaked: rotate that. | In database backups, as hashes and plain rows. Restoring an old backup brings back connections that were revoked since; run `token_admin list-grants` after a restore. | Ended and expired rows are removed by the cleanup (revoked connections after 30 days). |
 | **`ACCOUNT_SESSION_SECRET`** | `.env`, then the container environment. | Whoever reads `.env` or the environment. It seals the `/account` session and login cookies. **Treat it as owner-equivalent:** with it someone could forge a session cookie for any user; the owner flag in a cookie is re-checked against the stored owner status, but a forged cookie for a real owner would pass. | Edit `.env`, `docker compose up -d`; only open `/account` sessions end. | Offline with `.env`. Cheap to replace. | Sessions are sealed cookies with a fixed lifetime (`ACCOUNT_SESSION_TTL_SECONDS`, default 15 minutes) and live in the browser, not on the server. |
 | **`ENTRA_CLIENT_SECRET`** | `.env`, then the container environment; at Entra as the registered secret. | Whoever reads `.env` or the environment. It lets a holder authenticate as this application to Entra (for example to redeem an authorization code it intercepted). It cannot read Canvas. | Create a new secret in Entra, edit `.env`, `docker compose up -d`; no other effect. | Offline with `.env`, or simply create another. | Expires at the date you chose in Entra; delete the old secret there. |
+| **Sign-in provider client secrets** (`GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_SECRET`, `OIDC_<SLUG>_CLIENT_SECRET`; `SELFHOST_AUTH_MODE=local` only) | `.env`, then the container environment; at the provider as the registered secret. | Whoever reads `.env` or the environment. Each lets a holder authenticate as this application to its provider (for example to redeem an authorization code it intercepted). None can read Canvas. They are never printed by `--config` or `token_admin` and appear in no log. | Create a new secret at the provider, edit `.env`, `docker compose up -d`; no other effect. | Offline with `.env`, or simply create another. | Replace or delete the secret at the provider when you stop using it. GitHub user tokens obtained at sign-in are used inside the request and never stored. |
 | **`.env` itself** | The host file (mode 600) and the container environment. | Root on the host, the Docker group, anyone who can read the file or run `docker inspect`. | As listed above. | **Never in the same backup as `/data` or a `pg_dump` file.** A password manager is the right place. | Delete the file when you decommission the server. |
 | **Audit log** (optional) | `/data/audit/audit.jsonl` and container stderr when `LOG_ACCESS_EVENTS=true`. | Whoever can read the volume or the container logs. Holds principal keys, closed-set codes and sanitized endpoint paths; no tokens, names or Canvas content (endpoint paths mask numeric ids, page slugs, `sis_*:` ids and `by_path` folder paths). Free-form text is scrubbed of credentials and e-mail addresses and cut short. | n/a | In `/data` backups. | Rotating file (10 MB, six files in all), then overwritten. |
 
@@ -1041,6 +1157,7 @@ Revoking is an **access decision**, not the deletion of a database row. An owner
 | **Enable user** | `/account/admin`, or `token_admin enable` | Lifts it; the account is admitted as it was before (an approved person stays approved, anyone else is decided by the rules again). Sessions from before the change stay dead (the user signs in again). A kept enrollment works again as it is; a removed one is enrolled again. |
 | **Remove enrollment** | `/account/admin`, or `token_admin remove` | Deletes the stored Canvas token only. If the user is not disabled they can enroll again straight away. Use it after **Disable user** when you also want the encrypted token gone from the database. |
 | **Mark as invalid** | `/account/admin` | Asks the user for a new token (reason `revoked_by_admin`). Not an access decision. |
+| **Unlink a sign-in method** | `/account/admin`, or `token_admin unlink-identity` | Removes one way the person signs in (the account keeps at least one) and ends all of their browser sessions. Not an access decision: the person can still sign in with the others, and connected apps stay connected. |
 | **Delete my token** | the user's own `/account` | A self-disconnect. Only removes their own token; they may enroll again. |
 
 Who may do what:
@@ -1048,6 +1165,8 @@ Who may do what:
 - **Only owners** (accounts that `OWNER_RULES` matched at their last sign-in, by default the Entra role named by `ENTRA_OWNER_ROLE`, normally `Canvas.Owner`) can disable and enable from the browser, and the **operator** with shell access to the data volume can do the same with the CLI. Users cannot lift their own disablement, and an owner who is disabled can no longer act.
 - **An owner cannot disable themselves**, and nobody (owner or not) can disable the **last active owner**. "Active owner" means a person whose stored owner flag is still set, and that flag is lowered at a later sign-in or MCP request that no longer matches `OWNER_RULES`, except for the last active owner, who is never demoted. A former owner whose owner rule no longer matches and who never comes back therefore still counts, so the guard can be satisfied by someone who no longer holds the role; `token_admin access` lists `owner_seen_at` (the last time the role was seen) for checking. The check and the write are one database transaction, so two owners cannot disable each other at the same moment. The operator can force it with `token_admin disable ... --allow-last-owner` (break-glass), and if you are ever left without an owner, restore one with `OWNER_RULES` (a person matching it signs in again), `SELFHOST_BOOTSTRAP_OWNER` (only while no active owner exists) or `token_admin promote-owner`.
 - **Owner status is re-checked, not remembered.** The owner role in the browser session is only a snapshot. The admin page and every admin action need a sign-in from the **last 10 minutes** (the same window as turning a write tool on) and a stored owner flag that a sign-in recorded, and the database re-checks inside the transaction that the acting owner is still an active owner. The stored flag is lowered at the owner's next sign-in without the role, or by an MCP request whose token was issued after their last sign-in and no longer carries the role (a token issued earlier cannot undo a promotion). The server only learns about an owner role being *added* when that person signs in.
+
+With Google, GitHub or OIDC sign-in, removing someone from a GitHub organisation, a Google domain or an identity provider's group is seen at their **next sign-in** (and ends their connected apps then), not before: **disable first**. Their existing sessions and connections keep working until then or until `MAX_UPSTREAM_AUTH_AGE`.
 
 ### Revoking someone, in order
 
@@ -1153,4 +1272,10 @@ Use `--config` to see the value the server runs with.
 | *`SELFHOST_AUTH_MODE=local`:* the consent page says the app **could not be confirmed** | The app's registration expired, its client metadata document could not be read, or its return address is not on `OAUTH_ALLOWED_REDIRECT_URIS`. Nothing was granted. Check outbound access to the app's host and the allow-list, then connect again |
 | *`SELFHOST_AUTH_MODE=local`:* a client keeps being sent to sign in again | `invalid_grant` (HTTP 401): its refresh token was replayed outside the grace window, the connection was revoked, the account is disabled, or `MAX_UPSTREAM_AUTH_AGE` passed. `token_admin list-grants --all` shows the state (`revoked:<reason>`). The person connects again |
 | *`SELFHOST_AUTH_MODE=local`:* the server will not start and names `SELFHOST_AUTH_MODE` or one of its settings | A value is malformed or out of range (the table in [MCP authorization](#mcp-authorization-entra_proxy-default-or-local) lists them), or `PUBLIC_BASE_URL` has an explicit `:443`. No message repeats the value |
+| *Sign-in providers:* the server will not start and names `SELFHOST_LOGIN_PROVIDERS`, `GOOGLE_*`, `GITHUB_*` or `OIDC_<SLUG>_*` | A provider is mis-configured or half-configured (a missing secret, a variable of a provider that is not listed, a provider other than Entra with `SELFHOST_AUTH_MODE=entra_proxy`, no way to get an owner without Entra). The message names the variable, never its value. See [Sign-in providers](#sign-in-providers-google-github-oidc) |
+| *Sign-in providers:* the sign-in page shows "could not complete sign-in" (`provider_error`) | The provider could not be reached, its discovery document or key set was not acceptable (wrong issuer, no asymmetric algorithm), or it answered with an error. Run `token_admin login-providers --check`. For Authentik, select a signing key (without one it signs with HS256, which is refused). The provider's own error text is never shown or logged |
+| *Sign-in providers:* "The sign-in request is invalid or expired" (`state_invalid`) | The callback was not started by this browser, was used twice, or took longer than 10 minutes. Start again from the sign-in page in the same browser; check the redirect URI registered at the provider is exactly the one in the table above |
+| *Sign-in providers:* a GitHub person in the organisation is refused although a `github:org` or `github:team` rule exists | The organisation has not approved the OAuth application (OAuth app access restrictions), or the person removed `read:org` on GitHub's consent screen. The server cannot confirm membership and refuses. Have an owner of the organisation approve the application, then sign in again |
+| *Sign-in providers:* Google says "access blocked" or "redirect_uri_mismatch" | The authorized redirect URI of the OAuth client is not exactly `https://<host>/account/callback/google`, or the app is still in **Testing** and the person is not a listed test user |
+| *Sign-in providers:* adding a sign-in method says the account is already linked to another user | That Google, GitHub or OIDC account already belongs to a different account of this server. Nothing is merged. An owner can unlink it from the other account (`/account/admin`), or the operator with `token_admin unlink-identity`, and the person can then link it |
 | `/account` goes straight back to the sign-in page after signing in | The browser blocked cookies, or the domain visited differs from `PUBLIC_BASE_URL` (the session cookie is valid only over HTTPS and for that host) |
