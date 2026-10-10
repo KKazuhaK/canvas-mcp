@@ -239,7 +239,14 @@ class ConsentService:
             )
         )
         if not created:
-            return ConsentRefusal(CODE_ACCESS_DISABLED)
+            # Two reasons: the account is not active (disabled), or it is active but the
+            # approving sign-in ended in the meantime (the session epoch moved, for example a
+            # disable followed by an enable, or admission lost). The request is used up
+            # either way and no code exists. Telling the second case "access disabled" would
+            # be wrong, so it gets the generic "request no longer valid" page: start again
+            # from the app. The read only chooses the message.
+            active = await anyio.to_thread.run_sync(self._store.account_is_active, account_key.removeprefix("acct:"))
+            return ConsentRefusal(CODE_AUTHORIZATION_INVALID if active else CODE_ACCESS_DISABLED)
         params["code"] = raw_code
         log_info("oauth_consent", decision="approve", client_kind=client.kind)
         return ConsentRedirect(

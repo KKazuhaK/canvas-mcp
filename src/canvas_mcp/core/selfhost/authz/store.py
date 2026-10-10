@@ -174,6 +174,11 @@ class AuthzStore:
         row = self._repos.accounts.get(conn, account_id)
         return row is not None and row[1] == acc.STATUS_ACTIVE
 
+    def account_is_active(self, account_id: str) -> bool:
+        """Whether the account is active right now (a plain read; it decides a message only)."""
+        with self._db.read() as conn:
+            return self._account_active(conn, account_id)
+
     def _account_standing_ok(self, conn: Connection, account_id: str, session_epoch: int) -> bool:
         """Active, and still in the session epoch a code was approved in (no row lock)."""
         return _standing_ok(self._repos.accounts.get(conn, account_id), session_epoch)

@@ -18,6 +18,7 @@ from dbbackend import raw_sql
 from canvas_mcp.core.selfhost.authz import tokens as tk
 from canvas_mcp.core.selfhost.authz.consent import ConsentRedirect, ConsentRefusal
 from canvas_mcp.core.selfhost.authz.models import ExchangeOutcome as X
+from canvas_mcp.core.selfhost.authz.store import AuthzStore
 from canvas_mcp.core.selfhost.db.authz_repos import SqlAuthCodeRepo
 from canvas_mcp.core.selfhost.token_store import OPERATOR
 
@@ -231,6 +232,53 @@ class TestWholeStack:
         assert_invalid_grant(redeem(stack, client_id, verifier, code))
         assert grants(stack) == 0
 
+    @pytest.mark.parametrize("ending", ["disable_and_enable", "admission_lost", "disable"])
+    def test_a_session_that_ends_between_its_check_and_the_insert_gets_the_right_refusal(
+        self, any_stack: Stack, monkeypatch: pytest.MonkeyPatch, ending: str
+    ) -> None:
+        """The session is valid when the decision is read, then ends before the code is stored.
+
+        No code exists and the app gets nothing. An account that is active again (or never lost
+        access) is told the request is no longer valid, not that its access is disabled.
+        """
+        stack = any_stack
+        key = stack.enroll(ALICE)
+        browser = Browser(stack, react=stack.react)
+        browser.sign_in(ALICE)
+        _, txn, _ = start_request(stack, browser)
+        if stack.react:
+            csrf = browser.csrf_token()
+            assert browser.api("GET", f"/consent?txn={txn}").status_code == 200
+        else:
+            page = browser.get(f"/account/consent?txn={txn}")
+            assert page.status_code == 200
+
+        original = AuthzStore.create_code
+
+        def create_after_the_session_ended(self: AuthzStore, **kwargs: Any) -> bool:
+            if ending == "admission_lost":
+                self.revoke_all_for_account(key, reason="admission_lost")
+            else:
+                assert stack.store.disable_principal(key, actor=OPERATOR, reason="operator_disabled")
+                if ending == "disable_and_enable":
+                    assert stack.store.enable_principal(key, actor=OPERATOR)
+            return original(self, **kwargs)
+
+        monkeypatch.setattr(AuthzStore, "create_code", create_after_the_session_ended)
+        expected = "access_disabled" if ending == "disable" else "authorization_invalid"
+        if stack.react:
+            response = browser.api("POST", "/consent", body={"txn": txn, "decision": "approve"}, csrf=csrf)
+            assert response.status_code == (403 if ending == "disable" else 400), response.text
+            assert response.json()["error"]["code"] == expected
+            assert "redirect_to" not in response.text
+        else:
+            response = browser.decide(page, "approve")
+            assert response.status_code == (403 if ending == "disable" else 400), response.text
+            assert "location" not in response.headers
+            assert ("Access disabled" in response.text) == (ending == "disable")
+            assert ("Request expired" in response.text) == (ending != "disable")
+        assert codes(stack) == 0
+
     def test_the_normal_flow_works_and_so_does_a_session_signed_in_again_after_the_enablement(
         self, any_stack: Stack
     ) -> None:
@@ -298,8 +346,15 @@ class TestWholeStack:
         assert stack.store.disable_principal(key, actor=OPERATOR, reason="operator_disabled")
         assert stack.store.enable_principal(key, actor=OPERATOR)
         refused = decide(session_epoch)  # the epoch of the session before the disablement
-        assert isinstance(refused, ConsentRefusal) and refused.code == "access_disabled"
+        # the account is active again: the person is not told that access is disabled
+        assert isinstance(refused, ConsentRefusal) and refused.code == "authorization_invalid"
         assert codes(stack) == 0
+        # while an account that is still disabled keeps the "access disabled" refusal
+        assert stack.store.disable_principal(key, actor=OPERATOR, reason="operator_disabled")
+        disabled = decide(session_epoch)
+        assert isinstance(disabled, ConsentRefusal) and disabled.code == "access_disabled"
+        assert codes(stack) == 0
+        assert stack.store.enable_principal(key, actor=OPERATOR)
         approved = decide(stack.store.get_principal_status(key).session_epoch)
         assert isinstance(approved, ConsentRedirect) and approved.approved
         assert codes(stack) == 1
