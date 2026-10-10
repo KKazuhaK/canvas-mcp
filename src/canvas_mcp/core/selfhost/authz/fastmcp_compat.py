@@ -26,10 +26,33 @@ from fastmcp.server.auth.redirect_validation import (
     is_redirect_uri_allowed_for_application_type,
 )
 from fastmcp.server.auth.ssrf import SSRFError, SSRFFetchError, ssrf_safe_fetch_response
+
+# AuthenticatedUser is what the bearer middleware puts in ``scope["user"]``; it is re-exported so the
+# request-context middleware does not import the SDK's middleware package itself.
+from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
 from mcp.server.auth.middleware.client_auth import ClientAuthenticator
 from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import Response
+
+__all__ = [
+    "AuthenticatedUser",
+    "CIMDDocument",
+    "ClientDocument",
+    "DocumentRejected",
+    "Endpoint",
+    "FetchedDocument",
+    "MetadataFetchError",
+    "TokenHandler",
+    "AuthorizationHandler",
+    "authorization_endpoint",
+    "client_redirect",
+    "fetch_client_metadata",
+    "redirect_allowed_for_application_type",
+    "resource_url_of",
+    "token_endpoint",
+    "validate_client_document",
+]
 
 Endpoint = Callable[[Request], Awaitable[Response]]
 
