@@ -118,6 +118,15 @@ def _run_everything(dialect: Any, name: str) -> list[tuple[str, dict[str, Any]]]
         subject="s", username="u", email=None, email_verified=False, now=5,
     )
     repos.identities.touch(conn, "entra", "https://issuer", "s", username="u", now=5)
+    repos.identities.touch(
+        conn, "github", "https://github.com", "1", username="u", now=5, email="a@b.test",
+        email_verified=True,
+    )
+    repos.identities.list_with_ids(conn, ACCOUNT_ID)
+    repos.identities.get_for_account(conn, 7, ACCOUNT_ID, for_update=True)
+    repos.identities.count_for_account(conn, ACCOUNT_ID)
+    repos.identities.count_for_provider(conn, ACCOUNT_ID, "github")
+    repos.identities.delete_one(conn, 7, ACCOUNT_ID)
     repos.identities.for_account(conn, ACCOUNT_ID)
     repos.identities.all(conn)
     repos.identities.delete_for_accounts(conn, [ACCOUNT_ID])
@@ -233,6 +242,40 @@ class TestCompiledStatements:
         )
         for column in ("provider_id", "issuer", "subject"):
             assert f"external_identities.{column} =" in lookup
+
+
+class TestIdentityStatements:
+    @pytest.mark.parametrize(("dialect", "name"), [(PG, "postgresql"), (LITE, "sqlite")])
+    def test_an_identity_is_only_ever_addressed_together_with_its_account(
+        self, dialect: Any, name: str
+    ) -> None:
+        statements = [s for s, _ in _run_everything(dialect, name)]
+        get = next(s for s in statements if "external_identities.id," in s and "external_identities.id =" in s)
+        assert "external_identities.account_id =" in get
+        delete = next(s for s in statements if s.startswith("DELETE FROM external_identities WHERE external_identities.id"))
+        assert "external_identities.account_id =" in delete
+        counts = [s for s in statements if s.startswith("SELECT count(*)") and "external_identities" in s]
+        assert len(counts) == 2 and all("external_identities.account_id =" in s for s in counts)
+        assert any("external_identities.provider_id =" in s for s in counts)
+
+    def test_the_identity_row_is_locked_on_postgresql_when_asked(self) -> None:
+        locked = [
+            s for s, _ in _run_everything(PG, "postgresql")
+            if "external_identities.id =" in s and s.rstrip().endswith("FOR UPDATE")
+        ]
+        assert locked
+        assert not any(
+            "FOR UPDATE" in s for s, _ in _run_everything(LITE, "sqlite") if "external_identities" in s
+        )
+
+    @pytest.mark.parametrize(("dialect", "name"), [(PG, "postgresql"), (LITE, "sqlite")])
+    def test_touch_changes_the_email_only_when_one_is_given(self, dialect: Any, name: str) -> None:
+        touches = [
+            (s, p) for s, p in _run_everything(dialect, name) if s.startswith("UPDATE external_identities SET")
+        ]
+        plain, with_email = touches
+        assert "email" not in plain[0].split("WHERE")[0]
+        assert "email=" in with_email[0].replace(" ", "") and "a@b.test" not in with_email[0]
 
 
 class TestRowLocks:

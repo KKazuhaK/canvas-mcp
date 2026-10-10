@@ -606,10 +606,15 @@ class SqlIdentityRepo:
         *,
         username: str,
         now: int,
+        email: str | None = None,
+        email_verified: bool | None = None,
     ) -> None:
         values: dict[str, Any] = {"last_login_at": now}
         if username:
             values["username"] = username
+        if email is not None:
+            values["email"] = email
+            values["email_verified"] = 1 if email_verified else 0
         conn.execute(
             update(_ei)
             .where(
@@ -636,6 +641,54 @@ class SqlIdentityRepo:
             .order_by(_ei.c.id)
         )
         return list(conn.execute(stmt).all())
+
+    @staticmethod
+    def _with_id_columns() -> list[Any]:
+        return [
+            _ei.c.id,
+            _ei.c.provider_id,
+            _ei.c.issuer,
+            _ei.c.subject,
+            _ei.c.username,
+            _ei.c.email,
+            _ei.c.email_verified,
+            _ei.c.linked_at,
+            _ei.c.last_login_at,
+        ]
+
+    def list_with_ids(self, conn: Connection, account_id: str) -> list[Row]:
+        stmt = (
+            select(*self._with_id_columns())
+            .where(_ei.c.account_id == account_id)
+            .order_by(_ei.c.id)
+        )
+        return list(conn.execute(stmt).all())
+
+    def get_for_account(
+        self, conn: Connection, identity_id: int, account_id: str, *, for_update: bool = False
+    ) -> Row | None:
+        stmt = select(*self._with_id_columns()).where(
+            _ei.c.id == identity_id, _ei.c.account_id == account_id
+        )
+        return conn.execute(_for_update(stmt, for_update)).one_or_none()
+
+    def count_for_account(self, conn: Connection, account_id: str) -> int:
+        stmt = select(func.count()).select_from(_ei).where(_ei.c.account_id == account_id)
+        return int(conn.execute(stmt).scalar_one())
+
+    def count_for_provider(self, conn: Connection, account_id: str, provider_id: str) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(_ei)
+            .where(_ei.c.account_id == account_id, _ei.c.provider_id == provider_id)
+        )
+        return int(conn.execute(stmt).scalar_one())
+
+    def delete_one(self, conn: Connection, identity_id: int, account_id: str) -> bool:
+        result = conn.execute(
+            delete(_ei).where(_ei.c.id == identity_id, _ei.c.account_id == account_id)
+        )
+        return int(result.rowcount) == 1
 
     def all(self, conn: Connection) -> list[Row]:
         stmt = select(

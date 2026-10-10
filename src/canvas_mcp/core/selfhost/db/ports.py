@@ -238,11 +238,30 @@ class IdentityRepo(Protocol):
         *,
         username: str,
         now: int,
-    ) -> None: ...
+        email: str | None = None,
+        email_verified: bool | None = None,
+    ) -> None:
+        """Record a sign-in. A given ``email`` (with its verified flag) replaces the stored one."""
 
     def for_account(self, conn: Connection, account_id: str) -> list[Row]:
         """``(provider_id, issuer, subject, username, email, email_verified, linked_at,
         last_login_at)``, oldest first."""
+
+    def list_with_ids(self, conn: Connection, account_id: str) -> list[Row]:
+        """``(id, provider_id, issuer, subject, username, email, email_verified, linked_at,
+        last_login_at)`` of one account, oldest first."""
+
+    def get_for_account(
+        self, conn: Connection, identity_id: int, account_id: str, *, for_update: bool = False
+    ) -> Row | None:
+        """The same columns as :meth:`list_with_ids` if the identity belongs to the account."""
+
+    def count_for_account(self, conn: Connection, account_id: str) -> int: ...
+
+    def count_for_provider(self, conn: Connection, account_id: str, provider_id: str) -> int: ...
+
+    def delete_one(self, conn: Connection, identity_id: int, account_id: str) -> bool:
+        """Delete an identity of the account; True if a row was removed."""
 
     def all(self, conn: Connection) -> list[Row]:
         """``(account_id, provider_id, issuer, subject, username)`` of every identity."""

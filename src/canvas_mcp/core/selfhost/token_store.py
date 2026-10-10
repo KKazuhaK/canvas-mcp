@@ -173,6 +173,7 @@ EVENT_OWNER_LOST = acc.EVENT_OWNER_LOST
 EVENT_ACCOUNT_CREATED = acc.EVENT_ACCOUNT_CREATED
 EVENT_ACTIVATED = acc.EVENT_ACTIVATED
 EVENT_OWNER_LOSS_REFUSED = acc.EVENT_OWNER_LOSS_REFUSED
+EVENT_IDENTITY_UNLINKED = "identity_unlinked"
 
 # The actions of ``audit_log``: a closed set.
 AUDIT_ACCOUNT_CREATED = "account_created"
@@ -190,6 +191,9 @@ AUDIT_TOKEN_MARKED_INVALID = "token_marked_invalid"
 AUDIT_WRITE_TOOLS_CHANGED = "write_tools_changed"
 AUDIT_SCHEMA_MIGRATED = "schema_migrated"
 AUDIT_PENDING_PURGED = "pending_purged"
+AUDIT_IDENTITY_LINKED = "identity_linked"
+AUDIT_IDENTITY_UNLINKED = "identity_unlinked"
+AUDIT_IDENTITY_LINK_REFUSED = "identity_link_refused"
 # The local authorization server (SELFHOST_AUTH_MODE=local).
 AUDIT_GRANT_REVOKED = "grant_revoked"
 AUDIT_GRANTS_REVOKED_FOR_ACCOUNT = "grants_revoked_for_account"
@@ -214,8 +218,23 @@ AUDIT_ACTIONS = frozenset(
         AUDIT_WRITE_TOOLS_CHANGED,
         AUDIT_SCHEMA_MIGRATED,
         AUDIT_PENDING_PURGED,
+        AUDIT_IDENTITY_LINKED,
+        AUDIT_IDENTITY_UNLINKED,
+        AUDIT_IDENTITY_LINK_REFUSED,
     }
 )
+
+# Why a link or an unlink did not happen (``LinkResult.code`` / ``UnlinkResult.code``).
+LINK_OK = "linked"
+LINK_ALREADY = "already_linked"
+LINK_IN_USE = "identity_in_use"
+LINK_PROVIDER_TAKEN = "provider_already_linked"
+LINK_DENIED = "access_denied"
+LINK_SESSION_ENDED = "link_session_ended"
+UNLINK_OK = "unlinked"
+UNLINK_NOT_FOUND = "not_found"
+UNLINK_LAST = "last_identity"
+UNLINK_SESSION_ENDED = "link_session_ended"
 
 _KEY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 _GUID_RE = re.compile(
@@ -234,6 +253,7 @@ _NONCE_BYTES = 12
 _MAX_CANVAS_NAME = 200
 _MAX_DISPLAY_NAME = 200
 _MAX_USERNAME = 254
+_MAX_EMAIL = 254
 
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _MAX_PREF_TOOLS = 256
@@ -444,6 +464,48 @@ class IdentityInfo:
 
 
 @dataclass(frozen=True)
+class LinkedIdentity:
+    """One external identity of an account, with the id an unlink names."""
+
+    id: int
+    provider_id: str
+    issuer: str
+    subject: str
+    username: str
+    email: str | None
+    email_verified: bool
+    linked_at: int
+    last_login_at: int | None
+
+
+@dataclass(frozen=True)
+class LinkResult:
+    """The outcome of attaching an identity to an account (see :meth:`TokenStore.link_identity`)."""
+
+    code: str
+    provider_id: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.code in (LINK_OK, LINK_ALREADY)
+
+
+@dataclass(frozen=True)
+class UnlinkResult:
+    """The outcome of removing an identity (see :meth:`TokenStore.unlink_identity`)."""
+
+    code: str
+    provider_id: str = ""
+    issuer: str = ""
+    subject: str = ""
+    session_epoch: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return self.code == UNLINK_OK
+
+
+@dataclass(frozen=True)
 class AccountInfo:
     """An account with its identities, for the admin page and the operator CLI."""
 
@@ -548,6 +610,20 @@ def _status_from_row(row: Sequence[Any]) -> PrincipalStatus:
         session_epoch=int(row[16]),
         updated_at=int(row[17]),
         stored=True,
+    )
+
+
+def _linked_from_row(row: Sequence[Any]) -> LinkedIdentity:
+    return LinkedIdentity(
+        id=int(row[0]),
+        provider_id=row[1],
+        issuer=row[2],
+        subject=row[3],
+        username=row[4] or "",
+        email=row[5],
+        email_verified=bool(row[6]),
+        linked_at=int(row[7]),
+        last_login_at=None if row[8] is None else int(row[8]),
     )
 
 
@@ -1419,6 +1495,15 @@ class TokenStore:
             for r in rows
         ]
 
+    def list_identities(self, principal_key: str) -> list[LinkedIdentity]:
+        """The identities of an account with their ids, oldest first (unknown account: none)."""
+        account_id = _account_id(_validate_principal_key(principal_key))
+        if account_id is None:
+            return []
+        with self._db.read() as conn:
+            rows = self._repos.identities.list_with_ids(conn, account_id)
+        return [_linked_from_row(r) for r in rows]
+
     def count_active_owners(self) -> int:
         with self._db.read() as conn:
             return self._repos.accounts.count_active_owners(conn)
@@ -1510,7 +1595,12 @@ class TokenStore:
                     conn, account_id, display_name=ext.display_name[:_MAX_DISPLAY_NAME], now=now
                 )
                 repos.identities.touch(
-                    conn, *ext.identity, username=ext.username[:_MAX_USERNAME], now=now
+                    conn,
+                    *ext.identity,
+                    username=ext.username[:_MAX_USERNAME],
+                    now=now,
+                    email=(ext.email or None) and ext.email[:_MAX_EMAIL],
+                    email_verified=ext.email_verified,
                 )
             if created:
                 owner_change = decision.role_event if decision.role == ROLE_OWNER else None
@@ -1545,6 +1635,140 @@ class TokenStore:
             owner_change=owner_change,
         )
 
+    # -- accounts: linking identities --------------------------------------------------
+
+    def link_identity(
+        self,
+        principal_key: str,
+        ext: ExternalClaims,
+        verdict: Verdict,
+        policy: AccessPolicy,
+        *,
+        expected_epoch: int,
+        ua_hash: str | None = None,
+    ) -> LinkResult:
+        """Attach an external identity to an existing, active account in one transaction.
+
+        The writer lock is taken first (SQLite ``BEGIN IMMEDIATE`` plus the process lock;
+        PostgreSQL the advisory lock), then the account row is locked: it must be active and
+        its ``session_epoch`` must still be ``expected_epoch`` (the epoch of the session that
+        started the link), else ``link_session_ended``. An identity that already belongs to
+        another account is ``identity_in_use`` and nothing changes for either account (there
+        is no silent merge); an account holds at most one identity per provider
+        (``provider_already_linked``); and an identity the admission rules would refuse at
+        sign-in cannot be attached (``access_denied``: see :func:`accounts.link_admissible`).
+        A refusal is audited. The unique key on the identity is a second barrier; under the
+        writer lock it cannot fire, and if it ever does the error propagates (fail closed).
+        """
+        key = _require_account_key(principal_key)
+        account_id = acc.account_id_of(key)
+        now = self._now()
+        repos = self._repos
+        provider = ext.provider_id
+        with self._db.write() as conn:
+            row = repos.accounts.get(conn, account_id, for_update=True)
+            if row is None or row[1] != STATUS_ACTIVE or int(row[16]) != expected_epoch:
+                return LinkResult(LINK_SESSION_ENDED, provider)
+            owner = repos.identities.lookup(conn, *ext.identity)
+            self._pause("after_identity_lookup")
+            if owner == account_id:
+                return LinkResult(LINK_ALREADY, provider)
+            refusal: str | None = None
+            if owner is not None:
+                refusal = LINK_IN_USE
+            elif repos.identities.count_for_provider(conn, account_id, provider) > 0:
+                refusal = LINK_PROVIDER_TAKEN
+            elif not acc.link_admissible(_status_from_row(row).facts, verdict, policy):
+                refusal = LINK_DENIED
+            if refusal is not None:
+                self._audit(
+                    conn, key, AUDIT_IDENTITY_LINK_REFUSED, target=key, reason=refusal,
+                    detail={"provider": provider[:64]}, now=now,
+                )
+                return LinkResult(refusal, provider)
+            repos.identities.insert(
+                conn,
+                account_id=account_id,
+                provider_id=provider,
+                issuer=ext.issuer,
+                subject=ext.subject,
+                username=ext.username[:_MAX_USERNAME],
+                email=(ext.email or None) and ext.email[:_MAX_EMAIL],
+                email_verified=bool(ext.email) and ext.email_verified,
+                now=now,
+            )
+            self._audit(
+                conn, key, AUDIT_IDENTITY_LINKED, target=key,
+                detail={"provider": provider[:64]}, now=now,
+            )
+            self._record_auth_event(
+                conn,
+                now=now,
+                account_id=account_id,
+                provider_id=provider,
+                surface=acc.SURFACE_ACCOUNT,
+                outcome=acc.OUTCOME_SUCCESS,
+                reason=acc.REASON_IDENTITY_LINKED,
+                ip="unknown",
+                ua_hash=ua_hash,
+            )
+        return LinkResult(LINK_OK, provider)
+
+    def unlink_identity(
+        self,
+        principal_key: str,
+        identity_id: int,
+        *,
+        actor: Actor,
+        expected_epoch: int | None = None,
+    ) -> UnlinkResult:
+        """Remove one identity from an account; every session of the account ends.
+
+        ``actor`` is the account itself (its key), another account that must be an active
+        owner (re-checked in this transaction), or :data:`OPERATOR`. An account always keeps
+        at least one identity (``last_identity``: to cut a person off, disable the account).
+        The count and the delete are one transaction under the writer lock, so two
+        concurrent unlinks of a two-identity account cannot both succeed. A successful unlink
+        bumps ``session_epoch`` (every browser session and every authorization code not yet
+        redeemed dies with the old epoch; connected apps survive) and writes the status
+        history and the audit log. ``expected_epoch`` (an own unlink) ties the call to the
+        session that made it.
+        """
+        key = _require_account_key(principal_key)
+        account_id = acc.account_id_of(key)
+        by = self._actor_name(actor)
+        now = self._now()
+        repos = self._repos
+        with self._db.write() as conn:
+            self_service = not isinstance(actor, _Operator) and by == key
+            if not self_service:
+                self._require_owner_actor(conn, actor)
+            row = repos.accounts.get(conn, account_id, for_update=True)
+            if row is None:
+                return UnlinkResult(UNLINK_NOT_FOUND)
+            if self_service and (
+                row[1] != STATUS_ACTIVE
+                or (expected_epoch is not None and int(row[16]) != expected_epoch)
+            ):
+                return UnlinkResult(UNLINK_SESSION_ENDED)
+            ident = repos.identities.get_for_account(conn, identity_id, account_id, for_update=True)
+            if ident is None:
+                return UnlinkResult(UNLINK_NOT_FOUND)
+            count = repos.identities.count_for_account(conn, account_id)
+            self._pause("after_identity_count")
+            if count <= 1:
+                return UnlinkResult(UNLINK_LAST, ident[1])
+            if not repos.identities.delete_one(conn, identity_id, account_id):
+                return UnlinkResult(UNLINK_NOT_FOUND)
+            epoch = repos.accounts.end_sessions(conn, account_id, now)
+            self._record_event(conn, key, EVENT_IDENTITY_UNLINKED, by, ident[1][:64], epoch, now)
+            who = "operator" if isinstance(actor, _Operator) else ("self" if self_service else "owner")
+            self._audit(
+                conn, by, AUDIT_IDENTITY_UNLINKED, target=key,
+                detail={"provider": ident[1][:64], "by": who}, now=now,
+            )
+        return UnlinkResult(UNLINK_OK, ident[1], ident[2], ident[3], epoch)
+
     def _create_account(
         self,
         conn: Connection,
@@ -1573,8 +1797,8 @@ class TokenStore:
             issuer=ext.issuer,
             subject=ext.subject,
             username=ext.username[:_MAX_USERNAME],
-            email=None,
-            email_verified=False,
+            email=(ext.email or None) and ext.email[:_MAX_EMAIL],
+            email_verified=bool(ext.email) and ext.email_verified,
             now=now,
         )
         self._record_event(
