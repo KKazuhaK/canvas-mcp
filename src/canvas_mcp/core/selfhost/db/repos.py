@@ -58,6 +58,7 @@ STATUS_DISABLED = "disabled"
 STATUS_PENDING = "pending"
 ROLE_OWNER = "owner"
 ROLE_USER = "user"
+ROLE_SOURCE_RULES = "rules"
 REASON_DECRYPT_FAILED = "decrypt_failed"
 
 _ct = t.canvas_tokens
@@ -411,6 +412,25 @@ class SqlAccountRepo:
         )
         if exclude is not None:
             stmt = stmt.where(_a.c.id != exclude)
+        return int(conn.execute(stmt).scalar_one())
+
+    def count_owners_reaching(self, conn: Connection, provider_ids: Sequence[str]) -> int:
+        """Active owners a sign-in without Entra can still make an owner session for.
+
+        A role granted by the rules needs the evidence of an Entra sign-in; any other owner needs
+        only one identity at one of ``provider_ids``.
+        """
+        reachable = (
+            select(_ei.c.account_id)
+            .where(_ei.c.account_id == _a.c.id, _ei.c.provider_id.in_(list(provider_ids)))
+            .exists()
+        )
+        stmt = select(func.count()).select_from(_a).where(
+            _a.c.role == ROLE_OWNER,
+            _a.c.status == STATUS_ACTIVE,
+            or_(_a.c.role_source.is_(None), _a.c.role_source != ROLE_SOURCE_RULES),
+            reachable,
+        )
         return int(conn.execute(stmt).scalar_one())
 
     def count_pending(self, conn: Connection) -> int:

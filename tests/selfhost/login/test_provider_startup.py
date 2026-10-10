@@ -6,6 +6,8 @@ import pathlib
 
 import pytest
 
+from canvas_mcp.core.selfhost import accounts as acc
+from canvas_mcp.core.selfhost.accounts import ExternalClaims
 from canvas_mcp.core.selfhost.app import prepare_selfhost
 from canvas_mcp.core.selfhost.settings import (
     SelfhostConfigError,
@@ -14,7 +16,7 @@ from canvas_mcp.core.selfhost.settings import (
 from canvas_mcp.core.selfhost.token_store import OPERATOR
 
 from ..authz.stack import default_env
-from ..conftest import OID_A, make_account
+from ..conftest import OID_A, acct_key, make_account, sign_in
 from .test_provider_settings import GOOGLE_ID, GOOGLE_SECRET
 
 NO_ENTRA = {
@@ -62,16 +64,74 @@ def test_a_named_bootstrap_owner_or_token_admin_is_an_owner_path(tmp_path: pathl
         runtime.store.close()
 
 
+def google_owner(runtime, subject: str = "1234567890") -> str:  # type: ignore[no-untyped-def]
+    """An active owner the operator made, whose only identity is a Google one."""
+    return str(
+        runtime.store.create_operator_account(
+            provider_id="google", issuer=acc.GOOGLE_ISSUER, subject=subject,
+            status="active", role="owner",
+        )
+    )
+
+
 def test_an_owner_already_in_the_database_is_an_owner_path(tmp_path: pathlib.Path) -> None:
     env = env_for(tmp_path, SELFHOST_BOOTSTRAP_OWNER="token_admin")
     first = prepare_selfhost(load_selfhost_settings(env))
-    key = make_account(first.store, OID_A)
-    assert first.store.promote_owner(key, actor=OPERATOR)
+    google_owner(first)
     first.store.close()
     # Same database, no bootstrap setting any more: the existing owner is the path.
     again = prepare_selfhost(load_selfhost_settings({**env, "SELFHOST_BOOTSTRAP_OWNER": ""}))
     assert again.store.count_active_owners() == 1
     again.store.close()
+
+
+def test_owners_who_can_no_longer_sign_in_are_not_an_owner_path(tmp_path: pathlib.Path) -> None:
+    # A deployment that ran with Entra and drops it: its owner has only an Entra identity.
+    env = env_for(tmp_path, SELFHOST_BOOTSTRAP_OWNER="token_admin")
+    first = prepare_selfhost(load_selfhost_settings(env))
+    key = make_account(first.store, OID_A, role="owner")
+    assert first.store.count_active_owners() == 1
+    first.store.close()
+    for bootstrap in ("", "google:1234567890"):  # a bootstrap owner cannot fire beside an owner
+        with pytest.raises(SelfhostConfigError) as info:
+            prepare_selfhost(load_selfhost_settings({**env, "SELFHOST_BOOTSTRAP_OWNER": bootstrap}))
+        (message,) = info.value.problems
+        assert "no owner can sign in" in message and "promote-owner" in message
+    # The operator command is the way out, and token_admin as the bootstrap setting keeps the start.
+    again = prepare_selfhost(load_selfhost_settings(env))
+    google_owner(again, "99")
+    again.store.close()
+    ok = prepare_selfhost(load_selfhost_settings({**env, "SELFHOST_BOOTSTRAP_OWNER": ""}))
+    assert ok.store.count_active_owners() == 2 and key
+    ok.store.close()
+
+
+def test_a_rules_owner_with_a_google_identity_is_not_an_owner_path(tmp_path: pathlib.Path) -> None:
+    # Its role came from the Entra owner rule: no Google sign-in can give it an owner session.
+    env = env_for(tmp_path, SELFHOST_BOOTSTRAP_OWNER="token_admin")
+    first = prepare_selfhost(load_selfhost_settings(env))
+    policy = acc.AccessPolicy(
+        mode="rules",
+        rules=(acc.AccessRule("entra", "role", "Canvas.User"), acc.AccessRule("google", "domain", "example.test")),
+        owner_rules=(acc.AccessRule("entra", "role", "Canvas.Owner"),),
+    )
+    make_account(first.store, OID_A)
+    sign_in(first.store, OID_A, owner=True, policy=policy)
+    key = acct_key(OID_A)
+    assert first.store.get_principal_status(key).role_source == "rules"
+    ext = ExternalClaims(
+        provider_id="google", issuer=acc.GOOGLE_ISSUER, subject="g-1", email="g@example.test",
+        email_verified=True, hd="example.test",
+    )
+    assert first.store.link_identity(
+        key, ext, acc.evaluate_admission(ext, policy), policy,
+        expected_epoch=first.store.get_principal_status(key).session_epoch,
+    ).ok
+    assert first.store.count_owners_reaching({"google"}) == 0
+    first.store.close()
+    with pytest.raises(SelfhostConfigError) as info:
+        prepare_selfhost(load_selfhost_settings({**env, "SELFHOST_BOOTSTRAP_OWNER": ""}))
+    assert "no owner can sign in" in info.value.problems[0]
 
 
 def test_an_owner_that_was_disabled_is_not_an_owner_path(tmp_path: pathlib.Path) -> None:

@@ -238,16 +238,30 @@ def _owner_path_problem(settings: SelfhostSettings, store: TokenStore) -> str | 
     """Without Entra nobody can become an owner through the identity provider's data.
 
     An owner then needs ``SELFHOST_BOOTSTRAP_OWNER`` (a provider identity, or ``token_admin`` to
-    promote the first owner with the operator command) or an owner the database already holds.
-    Otherwise the server would start and nobody could ever open ``/account/admin``.
+    promote the first owner with the operator command) or an owner the database already holds
+    that can still sign in: one with an identity at a listed provider whose role the rules did
+    not grant (a role from ``OWNER_RULES`` needs the Entra sign-in that carried it). Otherwise
+    the server would start and nobody could ever open ``/account/admin``.
     """
     if settings.entra_enabled:
         return None
     policy = settings.access_policy
-    if policy.bootstrap_owner is not None or policy.bootstrap_via_token_admin:
+    if policy.bootstrap_via_token_admin:
         return None
-    if store.count_active_owners() > 0:
+    if store.count_owners_reaching(settings.login_providers.ids) > 0:
         return None
+    stranded = store.count_active_owners()
+    if policy.bootstrap_owner is not None and stranded == 0:
+        return None
+    if stranded > 0:
+        return (
+            "no owner can sign in: SELFHOST_LOGIN_PROVIDERS does not list entra and every active "
+            f"owner in the database ({stranded}) either has no identity at a listed provider or "
+            "holds a role the Entra owner rule granted, which only an Entra sign-in can use "
+            "(SELFHOST_BOOTSTRAP_OWNER only applies while the database has no active owner); "
+            "list entra again, or make another account an owner with: "
+            "python -m canvas_mcp.core.selfhost.token_admin promote-owner ACCOUNT"
+        )
     return (
         "no owner can be made: SELFHOST_LOGIN_PROVIDERS does not list entra, "
         "SELFHOST_BOOTSTRAP_OWNER is unset and the database has no active owner; set "

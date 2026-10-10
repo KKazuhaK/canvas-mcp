@@ -1518,6 +1518,15 @@ class TokenStore:
         with self._db.read() as conn:
             return self._repos.accounts.count_active_owners(conn)
 
+    def count_owners_reaching(self, provider_ids: Iterable[str]) -> int:
+        """Active owners that can still get an owner session when only ``provider_ids`` sign in.
+
+        An owner whose role comes from the rules needs an Entra sign-in, so it counts only
+        through the other kinds of owner; every owner needs one identity at a listed provider.
+        """
+        with self._db.read() as conn:
+            return self._repos.accounts.count_owners_reaching(conn, sorted(provider_ids))
+
     def lookup_identity(self, provider_id: str, issuer: str, subject: str) -> str | None:
         """The account key of an external identity, or None if it is not known."""
         with self._db.read() as conn:
