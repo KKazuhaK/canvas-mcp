@@ -108,8 +108,12 @@ def test_every_failure_kind_has_a_code_the_page_knows(ps: ProviderStack) -> None
     seen.add(urlsplit(person.get("/account/callback/github", params={"state": parse_qs(urlsplit(start.headers["location"]).query)["state"][0]}).headers["location"]).query)
     # rate_limited: the start bucket
     client = ps.stack.new_client()
-    for _ in range(31):
-        last = client.get("/account/login/github")
+    from .test_entra_only_golden import account_app
+
+    bucket = account_app(ps.stack).logins.start_buckets["github"]
+    while bucket.take() == 0:
+        pass
+    last = client.get("/account/login/github")
     seen.add(urlsplit(last.headers["location"]).query)
     assert seen == {"error=state_invalid", "error=sign_in_incomplete", "error=rate_limited"}
     assert {"state_invalid", "sign_in_incomplete", "rate_limited"} <= SIGN_IN_ERROR_CODES

@@ -34,7 +34,9 @@ limit_req_zone $canvas_token_key zone=canvas_token:10m rate=120r/m;
 # /account/callback/<provider>): a browser starts one sign-in and gets one callback, so 30 a minute per
 # IP is generous. It also covers the Microsoft sign-in, and people behind one address (a campus NAT, an
 # office) share the budget: raise the rate or the burst for them. The service has its own limit per
-# provider (30 a minute for the whole process) as a backstop, but it cannot tell source IPs apart.
+# provider (a burst of 600, refilled at 10 a second, for the whole process) only as a backstop on the
+# number of pending sign-ins: it cannot tell source IPs apart, so keep the per-IP rate here well below
+# it (the backstop must exceed the per-IP rate times the number of addresses you want to tolerate).
 limit_req_zone $binary_remote_addr zone=canvas_signin:10m rate=30r/m;
 limit_req_status 429;
 

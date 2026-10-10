@@ -35,10 +35,13 @@ if TYPE_CHECKING:
     from ..login_state import LoginStateStore
     from ..settings import SelfhostSettings
 
-#: Sign-in starts per minute and provider, for the whole process. Each start writes one row that
-#: lives ten minutes, so this bounds the table at a few hundred rows per provider.
-START_BURST = 30
-START_REFILL_PER_SECOND = 0.5
+#: A backstop on how many ceremony rows can pile up per provider, not a per-client throttle: the
+#: process cannot tell source addresses apart (it sits behind the proxy and has no trusted-proxy
+#: setting), so one bucket for everybody must be far above what any one proxied address is allowed
+#: to start (the proxy examples allow 30 a minute per IP). Each start writes one row that lives ten
+#: minutes, so a refill of 10 a second bounds the table at about 6000 live rows per provider.
+START_BURST = 600
+START_REFILL_PER_SECOND = 10.0
 
 
 @dataclass(frozen=True)
