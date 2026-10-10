@@ -143,3 +143,55 @@ class TestLoginStateContract:
     ) -> None:
         with pytest.raises(ValueError):
             await store.put(kind, payload, ttl)
+
+
+class TestLoginStateBinding:
+    """A state can belong to the browser that holds the secret behind ``binding_hash``."""
+
+    async def test_a_bound_state_needs_its_binding(self, store: InMemoryLoginStateStore) -> None:
+        state_id = await store.put("mcp_txn", b"payload", 60, binding_hash="h1")
+        assert await store.pop("mcp_txn", state_id) is None
+        assert await store.pop("mcp_txn", state_id, binding_hash="h2") is None
+        assert await store.peek("mcp_txn", state_id, binding_hash="h2") is None
+        assert await store.peek("mcp_txn", state_id) is None
+        assert await store.pop("mcp_txn", state_id, binding_hash="h1") == b"payload"
+        assert await store.pop("mcp_txn", state_id, binding_hash="h1") is None
+
+    async def test_a_refused_pop_does_not_consume_the_state(
+        self, store: InMemoryLoginStateStore
+    ) -> None:
+        state_id = await store.put("mcp_txn", b"payload", 60, binding_hash="h1")
+        for _ in range(3):
+            assert await store.pop("mcp_txn", state_id, binding_hash="wrong") is None
+        assert await store.peek("mcp_txn", state_id, binding_hash="h1") == b"payload"
+        assert await store.pop("mcp_txn", state_id, binding_hash="h1") == b"payload"
+
+    async def test_peek_never_consumes(self, store: InMemoryLoginStateStore) -> None:
+        state_id = await store.put("mcp_txn", b"payload", 60, binding_hash="h1")
+        for _ in range(3):
+            assert await store.peek("mcp_txn", state_id, binding_hash="h1") == b"payload"
+        assert await store.pop("mcp_txn", state_id, binding_hash="h1") == b"payload"
+
+    async def test_a_state_put_without_a_binding_is_popped_without_one(
+        self, store: InMemoryLoginStateStore
+    ) -> None:
+        state_id = await store.put("oidc", b"x", 60)
+        assert await store.pop("oidc", state_id, binding_hash="h1") is None
+        assert await store.pop("oidc", state_id) == b"x"
+
+    async def test_an_expired_bound_state_is_gone(self) -> None:
+        clock = Clock()
+        store = InMemoryLoginStateStore(clock=clock)
+        state_id = await store.put("mcp_txn", b"x", 30, binding_hash="h1")
+        clock.now += 31
+        assert await store.peek("mcp_txn", state_id, binding_hash="h1") is None
+        assert await store.pop("mcp_txn", state_id, binding_hash="h1") is None
+
+    async def test_concurrent_bound_pops_hand_the_payload_to_exactly_one_caller(
+        self, store: InMemoryLoginStateStore
+    ) -> None:
+        state_id = await store.put("mcp_txn", b"secret", 60, binding_hash="h1")
+        results = await asyncio.gather(
+            *(store.pop("mcp_txn", state_id, binding_hash="h1") for _ in range(16))
+        )
+        assert results.count(b"secret") == 1 and results.count(None) == 15
