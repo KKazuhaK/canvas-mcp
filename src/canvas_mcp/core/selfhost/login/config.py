@@ -18,6 +18,7 @@ connection itself always signs in through Entra.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -65,6 +66,8 @@ _OIDC_SUFFIXES = (
 # RFC 6749 section 3.3: scope-token = 1*( %x21 / %x23-5B / %x5D-7E )
 _SCOPE_TOKEN_RE = re.compile(r"^[\x21\x23-\x5b\x5d-\x7e]{1,128}$")
 _VISIBLE_ASCII_RE = re.compile(r"^[\x21-\x7e]+$")
+
+logger = logging.getLogger("canvas_mcp.selfhost.account")
 
 _TRUE_WORDS = frozenset({"true", "1", "yes"})
 _FALSE_WORDS = frozenset({"", "false", "0", "no"})
@@ -276,9 +279,14 @@ def parse_login_providers(
             if get(name):
                 problems.append(f"{name} is set but {LOGIN_PROVIDERS_ENV} does not list entra")
 
-    google = _parse_google(get, PROVIDER_GOOGLE in order, problems)
-    github = _parse_github(get, PROVIDER_GITHUB in order, problems)
-    oidc = _parse_oidc(env, get, [p[5:] for p in order if p.startswith("oidc:")], problems)
+    # A deployment that never set SELFHOST_LOGIN_PROVIDERS (every one from before the variable
+    # existed) keeps starting whatever else its environment holds, such as a shared env file with
+    # provider variables for another service: those are ignored (and named in the log). Once the
+    # operator lists providers, a variable for one that is not listed is a mistake and is refused.
+    strict = bool(raw)
+    google = _parse_google(get, PROVIDER_GOOGLE in order, problems, strict)
+    github = _parse_github(get, PROVIDER_GITHUB in order, problems, strict)
+    oidc = _parse_oidc(env, get, [p[5:] for p in order if p.startswith("oidc:")], problems, strict)
     return LoginProvidersConfig(order=tuple(order), google=google, github=github, oidc=oidc)
 
 
@@ -292,15 +300,22 @@ def _secret(name: str, value: str, problems: list[str]) -> str:
     return value
 
 
+def _unlisted(name: str, provider: str, problems: list[str], strict: bool) -> None:
+    if strict:
+        problems.append(f"{name} is set but {LOGIN_PROVIDERS_ENV} does not list {provider}")
+    else:
+        logger.warning("%s is set but %s is unset: it is ignored", name, LOGIN_PROVIDERS_ENV)
+
+
 def _parse_google(
-    get: Callable[[str], str], listed: bool, problems: list[str]
+    get: Callable[[str], str], listed: bool, problems: list[str], strict: bool = True
 ) -> GoogleConfig | None:
     client_id = get(GOOGLE_CLIENT_ID_ENV)
     client_secret = get(GOOGLE_CLIENT_SECRET_ENV)
     if not listed:
         for name, value in ((GOOGLE_CLIENT_ID_ENV, client_id), (GOOGLE_CLIENT_SECRET_ENV, client_secret)):
             if value:
-                problems.append(f"{name} is set but {LOGIN_PROVIDERS_ENV} does not list google")
+                _unlisted(name, "google", problems, strict)
         return None
     ok_id = ""
     if not client_id:
@@ -319,7 +334,7 @@ def _parse_google(
 
 
 def _parse_github(
-    get: Callable[[str], str], listed: bool, problems: list[str]
+    get: Callable[[str], str], listed: bool, problems: list[str], strict: bool = True
 ) -> GitHubConfig | None:
     client_id = get(GITHUB_CLIENT_ID_ENV)
     client_secret = get(GITHUB_CLIENT_SECRET_ENV)
@@ -327,7 +342,7 @@ def _parse_github(
         # Only these two exact names: other GITHUB_* variables (CI sets several) are ignored.
         for name, value in ((GITHUB_CLIENT_ID_ENV, client_id), (GITHUB_CLIENT_SECRET_ENV, client_secret)):
             if value:
-                problems.append(f"{name} is set but {LOGIN_PROVIDERS_ENV} does not list github")
+                _unlisted(name, "github", problems, strict)
         return None
     ok_id = ""
     if not client_id:
@@ -350,12 +365,16 @@ def _parse_oidc(
     get: Callable[[str], str],
     slugs: list[str],
     problems: list[str],
+    strict: bool = True,
 ) -> tuple[OidcConfig, ...]:
     # A variable of the OIDC_*_ISSUER family that belongs to no listed slug is refused, by name.
     known = {env_prefix(slug) + suffix for slug in slugs for suffix in _OIDC_SUFFIXES}
     for name in sorted(env):
         if _OIDC_VAR_RE.match(name) and name not in known and (env.get(name) or "").strip():
-            problems.append(f"{name} is set but {LOGIN_PROVIDERS_ENV} does not list its provider")
+            if strict:
+                problems.append(f"{name} is set but {LOGIN_PROVIDERS_ENV} does not list its provider")
+            else:
+                logger.warning("%s is set but %s is unset: it is ignored", name, LOGIN_PROVIDERS_ENV)
 
     parsed: list[OidcConfig] = []
     for slug in slugs:

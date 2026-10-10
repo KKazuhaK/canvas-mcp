@@ -272,7 +272,7 @@ def test_oidc_variables(extra: dict[str, Any], fragment: str) -> None:
 
 def test_stray_provider_variables_are_refused_by_name() -> None:
     found = problems(
-        **google(), **github(), **oidc("other"), ACCESS_RULES=None,
+        SELFHOST_LOGIN_PROVIDERS="entra", **google(), **github(), **oidc("other"), ACCESS_RULES=None,
     )
     for name in (
         "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET",
@@ -280,6 +280,22 @@ def test_stray_provider_variables_are_refused_by_name() -> None:
         assert f"{name} is set but SELFHOST_LOGIN_PROVIDERS does not list" in " ".join(found)
     assert "OIDC_OTHER_ISSUER is set but SELFHOST_LOGIN_PROVIDERS does not list its provider" in found
     assert "OIDC_OTHER_CLIENT_SECRET is set but SELFHOST_LOGIN_PROVIDERS does not list its provider" in found
+
+
+def test_an_entra_only_deployment_without_the_list_ignores_stray_provider_variables(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Every deployment from before SELFHOST_LOGIN_PROVIDERS existed keeps starting, whatever else a
+    # shared environment file holds; the ignored variables are named in the log, never their values.
+    stray = {**google(), **github(), **oidc("other")}
+    with caplog.at_level("WARNING", logger="canvas_mcp.selfhost.account"):
+        settings = load_selfhost_settings(env(**stray))
+    assert settings.login_providers.order == ("entra",)
+    text = caplog.text
+    for name in ("GOOGLE_CLIENT_ID", "GITHUB_CLIENT_SECRET", "OIDC_OTHER_ISSUER"):
+        assert f"{name} is set but SELFHOST_LOGIN_PROVIDERS is unset: it is ignored" in text
+    for value in stray.values():
+        assert value not in text
 
 
 def test_a_variable_of_another_slug_is_not_mistaken_for_a_listed_one() -> None:
@@ -407,12 +423,14 @@ def test_bootstrap_issuers() -> None:
 
 
 def test_link_by_verified_email_is_reserved() -> None:
-    for value in ("true", "false", "1"):
+    for value in ("true", "1", "yes", "on"):
         found = problems(ACCOUNT_LINK_BY_VERIFIED_EMAIL=value)
         assert any(
             "ACCOUNT_LINK_BY_VERIFIED_EMAIL is reserved and not implemented; leave it unset" in p for p in found
         )
-    load_selfhost_settings(env(ACCOUNT_LINK_BY_VERIFIED_EMAIL=""))
+    # Saying "no" (or nothing) is what the server does anyway.
+    for value in ("", "false", "False", "0", "no", "off"):
+        load_selfhost_settings(env(ACCOUNT_LINK_BY_VERIFIED_EMAIL=value))
 
 
 def test_more_than_ten_github_membership_rules_are_refused() -> None:

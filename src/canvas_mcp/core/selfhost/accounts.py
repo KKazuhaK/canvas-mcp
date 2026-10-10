@@ -826,7 +826,8 @@ def parse_access_settings(
             f"{TRUSTED_PROXY_ENV} is reserved and not implemented yet; leave it unset "
             "(sign-in history records the client address as 'unknown')"
         )
-    if get(LINK_BY_EMAIL_ENV):
+    if get(LINK_BY_EMAIL_ENV) and get(LINK_BY_EMAIL_ENV).lower() not in ("false", "0", "no", "off"):
+        # Only a value that asks for it is refused: an explicit "false" says what the server does.
         problems.append(
             f"{LINK_BY_EMAIL_ENV} is reserved and not implemented; leave it unset "
             "(accounts are linked only from /account)"
