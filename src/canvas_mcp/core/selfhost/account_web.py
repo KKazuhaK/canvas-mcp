@@ -1120,13 +1120,20 @@ class _AccountApp:
                 500, _bi("服务器出错了，请稍后再试。", "Something went wrong.")
             )
 
-    @staticmethod
-    def _toggle_path(request: Request) -> str:
+    def _toggle_path(self, request: Request) -> str:
         """Target of the language toggle: this page if it is a GET page, else /account.
 
-        Always one of the fixed route constants, never request input.
+        Always one of the fixed route constants plus, for the consent page and the provider
+        chooser, a request id that matches its exact shape (never other request input).
         """
         path = request.url.path
+        if path == _LOGIN_PATH and self.logins is not None and not self.react:
+            # The chooser of the server-rendered UI keeps the waiting app through a language switch.
+            txn = request.query_params.get("txn", "")
+            if _TXN_ID_RE.fullmatch(txn):
+                again = "&reauth=1" if request.query_params.get("reauth") == "1" else ""
+                return f"{_LOGIN_PATH}?txn={txn}{again}"
+            return _LOGIN_PATH
         if path == CONSENT_PATH:
             # Keep the transaction through a language switch (a validated token, not free text).
             txn = request.query_params.get("txn", "")
@@ -4154,6 +4161,42 @@ class _AccountApp:
             )
         return "".join(forms)
 
+    def _admin_user_header(self) -> str:
+        """"Entra user" while Entra is the only provider (the first release's wording), else "User"."""
+        if self.logins is None:
+            return _bi("Entra 用户", "Entra user")
+        return _bi("用户", "User")
+
+    def _admin_identities_dl(self, session: _Session, account: AccountInfo) -> str:
+        """The technical-details rows for every sign-in method of an account (two or more providers)."""
+        if not account.identities:
+            return ""
+        many = len(account.identities) > 1
+        linking = self.logins is not None and self.logins.linking_enabled
+        csrf = _csrf_field(session.csrf)
+        out = []
+        for ident in account.identities:
+            who = _e(_provider_label(ident.provider_id))
+            if ident.username:
+                who += f": {_e(ident.username)}"
+            lines = [f"<code>{_e(ident.subject)}</code>"]
+            if ident.provider_id.startswith("oidc:") and ident.issuer:
+                lines.append(f"{_bi('签发方', 'Issuer')}: <code>{_e(ident.issuer)}</code>")
+            lines.append(
+                f"{_bi('关联时间', 'Linked')}: {_e(_fmt_ts(ident.linked_at))}; "
+                f"{_bi('最近登录', 'Last sign-in')}: {_e(_fmt_ts(ident.last_login_at))}"
+            )
+            form = ""
+            if linking and many and ident.id > 0:
+                form = (
+                    f'<form method="post" action="{_ADMIN_UNLINK_PATH}">{csrf}'
+                    f'<input type="hidden" name="principal_key" value="{_e(account.principal_key)}">'
+                    f'<input type="hidden" name="identity" value="{ident.id}">'
+                    f'<button class="btn danger sm" type="submit">{_bi("移除", "Unlink")}</button></form>'
+                )
+            out.append(f"<dt>{who}</dt><dd>{'<br>'.join(lines)}{form}</dd>")
+        return "".join(out)
+
     def _admin_row(
         self,
         session: _Session,
@@ -4173,6 +4216,14 @@ class _AccountApp:
         )
         tenant = identity.tenant_id if identity is not None else ""
         subject = identity.subject if identity is not None else ""
+        if self.logins is None:
+            sign_in_rows = (
+                f"<dt>{_bi('登录方式', 'Sign-in')}</dt><dd>{_e(provider)}</dd>"
+                f"<dt>{_bi('租户', 'Tenant')}</dt><dd><code>{_e(tenant)}</code></dd>"
+                f"<dt>{_bi('对象 ID', 'Object')}</dt><dd><code>{_e(subject)}</code></dd>"
+            )
+        else:
+            sign_in_rows = self._admin_identities_dl(session, account)
         if row is not None:
             canvas = (
                 f'{_e(row.canvas_user_name)}<br><span class="muted">id {_e(row.canvas_user_id)}</span>'
@@ -4195,12 +4246,10 @@ class _AccountApp:
             used = "-"
         return (
             "<tr>"
-            f'<td data-label="{_e(_bi("Entra 用户", "Entra user"))}">{who}'
+            f'<td data-label="{_e(self._admin_user_header())}">{who}'
             '<details class="tech">'
             f"<summary>{_bi('技术信息', 'Technical details')}</summary><dl>"
-            f"<dt>{_bi('登录方式', 'Sign-in')}</dt><dd>{_e(provider)}</dd>"
-            f"<dt>{_bi('租户', 'Tenant')}</dt><dd><code>{_e(tenant)}</code></dd>"
-            f"<dt>{_bi('对象 ID', 'Object')}</dt><dd><code>{_e(subject)}</code></dd>"
+            f"{sign_in_rows}"
             f"<dt>{_bi('账户', 'Account')}</dt><dd><code>{_e(key)}</code></dd>"
             f"{enrolled}"
             "</dl></details>"
@@ -4250,7 +4299,7 @@ class _AccountApp:
         if lines:
             table = (
                 '<section class="card tablecard"><table><thead><tr>'
-                f"<th>{_bi('Entra 用户', 'Entra user')}</th>"
+                f"<th>{self._admin_user_header()}</th>"
                 f"<th>{_bi('Canvas 用户', 'Canvas user')}</th>"
                 f"<th>{_bi('学校', 'School')}</th>"
                 f"<th>{_bi('状态', 'Status')}</th>"
@@ -4575,6 +4624,12 @@ class _AccountApp:
             return _bi("断开了账户的全部已连接应用", "Connected apps ended for an account")
         if action == "jwt_key_rotated":
             return _bi("应用访问令牌已全部作废", "App access tokens invalidated")
+        if action == "identity_linked":
+            return _bi("关联了登录方式", "Sign-in method linked")
+        if action == "identity_unlinked":
+            return _bi("移除了登录方式", "Sign-in method unlinked")
+        if action == "identity_link_refused":
+            return _bi("关联登录方式被拒绝", "Sign-in method link refused")
         return action
 
     @staticmethod
