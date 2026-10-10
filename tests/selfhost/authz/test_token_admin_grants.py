@@ -122,6 +122,22 @@ def test_list_grants_for_one_account(env, capsys) -> None:
     assert out.strip().splitlines()[0].split("	")[0] == mine and theirs not in out
 
 
+def test_list_grants_for_one_account_is_not_cut_off_by_newer_grants_of_others(env, capsys, monkeypatch) -> None:
+    store, authz, alice = env
+    old = make_grant(authz, alice)
+    bob = make_account(store, OID_B)
+    later = AuthzStore(store.database, clock=lambda: 1_800_000_500)
+    for _ in range(4):
+        make_grant(later, bob)
+    monkeypatch.setattr(token_admin, "_MAX_LISTED_GRANTS", 2)
+    assert token_admin.main(["list-grants"]) == 0
+    assert old not in capsys.readouterr().out  # the page of newest grants does not reach it ...
+    assert token_admin.main(["list-grants", alice]) == 0  # ... but asking for the account does
+    assert [line.split("	")[0] for line in capsys.readouterr().out.strip().splitlines()] == [old]
+    assert token_admin.main(["list-grants", alice, "--all"]) == 0
+    assert [line.split("	")[0] for line in capsys.readouterr().out.strip().splitlines()] == [old]
+
+
 def test_list_grants_for_an_unknown_or_malformed_account(env, capsys) -> None:
     assert token_admin.main(["list-grants", "acct:00000000-0000-4000-8000-000000000000"]) == token_admin.EXIT_NOT_FOUND
     assert "no such account" in capsys.readouterr().err

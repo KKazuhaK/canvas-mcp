@@ -515,10 +515,18 @@ class AuthzStore:
             rows = self._repos.grants.list_for_account(conn, account_id, self._now())
         return [GrantRecord.from_row(r) for r in rows]
 
-    def list_all_grants(self, *, include_inactive: bool = False, limit: int = 500) -> list[GrantRecord]:
+    def list_all_grants(
+        self, *, include_inactive: bool = False, limit: int = 500, account_key: str | None = None
+    ) -> list[GrantRecord]:
+        """Newest first; ``account_key`` restricts the query itself to one account (not the page)."""
+        account_id = None if account_key is None else acc.account_id_of(account_key)
         with self._db.read() as conn:
             rows = self._repos.grants.list_all(
-                conn, include_inactive=include_inactive, now=self._now(), limit=max(1, min(limit, 2000))
+                conn,
+                include_inactive=include_inactive,
+                now=self._now(),
+                limit=max(1, min(limit, 2000)),
+                account_id=account_id,
             )
         return [GrantRecord.from_row(r) for r in rows]
 

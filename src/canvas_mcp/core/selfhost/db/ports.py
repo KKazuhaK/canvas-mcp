@@ -411,8 +411,15 @@ class GrantRepo(Protocol):
     def list_for_account(self, conn: Connection, account_id: str, now: int) -> list[Row]: ...
 
     def list_all(
-        self, conn: Connection, *, include_inactive: bool, now: int, limit: int
-    ) -> list[Row]: ...
+        self,
+        conn: Connection,
+        *,
+        include_inactive: bool,
+        now: int,
+        limit: int,
+        account_id: str | None = None,
+    ) -> list[Row]:
+        """Newest first; with ``account_id`` only that account's rows (filtered in SQL)."""
 
     def delete_inactive_before(self, conn: Connection, cutoff: int) -> int: ...
 
@@ -504,3 +511,6 @@ class JwtEpochRepo(Protocol):
     def get(self, conn: Connection) -> int: ...
 
     def bump(self, conn: Connection) -> int: ...
+
+    def set(self, conn: Connection, value: int) -> None:
+        """Store ``value`` (an import carries the source's epoch over; never lowers a live one)."""

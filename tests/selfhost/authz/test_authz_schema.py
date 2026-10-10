@@ -229,11 +229,18 @@ class TestTransferToPostgres:
                 client_kind="dcr", client_name="", client_host=None, redirect_host="e",
                 upstream_auth_at=1, created_at=1, expires_at=2,
             )
+        from canvas_mcp.core.selfhost.authz.store import AuthzStore
+
+        authz = AuthzStore(store.database)
+        authz.bump_jwt_epoch()
+        assert authz.bump_jwt_epoch() == 2  # a rotate-jwt-key done twice before the move
         store.close()
 
         reset_public_schema()
         target = Database(parse_database_url(PG_URL, pathlib.Path("/data")))
         report = transfer.import_sqlite(target, source, keyring)
+        # tokens that the rotations invalidated must not verify again on the new database
+        assert AuthzStore(target).jwt_epoch() == 2
         assert report.counts["oauth_clients"] == 1
         assert report.counts["oauth_grants"] == 1
         assert report.counts["oauth_refresh_tokens"] == 1

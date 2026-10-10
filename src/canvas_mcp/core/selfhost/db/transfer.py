@@ -44,7 +44,10 @@ from .engine import Database
 from .errors import StoreUnavailable, TokenStoreError
 from .repos import Repositories
 
-#: Tables copied, in order. ``meta`` is not copied: the target is created by Alembic.
+#: Tables copied, in order. ``meta`` is not copied as a table: the target is created by
+#: Alembic. The one value in it that matters, the access-token epoch (``rotate-jwt-key``),
+#: is carried over on its own (``_carry_jwt_epoch``): the grants are copied as live, so an
+#: import must not bring back tokens that a rotation had invalidated.
 COPIED_TABLES = (
     "canvas_tokens",
     "user_tool_prefs",
@@ -195,11 +198,12 @@ def _private_migrated_copy(
     *,
     mark_undecryptable_invalid: bool,
     report: AccountMigrationReport,
-) -> dict[str, list[Any]]:
+) -> tuple[dict[str, list[Any]], int]:
     """Copy ``source`` into ``workdir``, migrate the copy to head, return its rows.
 
     Touches neither ``source`` nor PostgreSQL. What the migration did is collected
-    in ``report`` (all zero for a file that is already current). Raises :class:`StoreUnavailable` if the
+    in ``report`` (all zero for a file that is already current). Returns the rows of the
+    copied tables and the access-token epoch. Raises :class:`StoreUnavailable` if the
     file cannot be read and :class:`TokenStoreError` (naming the migration, not the
     import) if the copy cannot be brought to the current schema.
     """
@@ -243,10 +247,12 @@ def _private_migrated_copy(
                 "its migration. Nothing was imported"
             )
         with origin.read() as oconn:
-            return {
+            rows = {
                 name: list(oconn.execute(select(schema.metadata.tables[name])).all())
                 for name in COPIED_TABLES
             }
+            epoch = Repositories(origin.kind).jwt_epoch.get(oconn)
+            return rows, epoch
     finally:
         origin.dispose()
 
@@ -401,7 +407,7 @@ def import_sqlite(
 
     migration = AccountMigrationReport()
     with tempfile.TemporaryDirectory(prefix="canvas-mcp-import-") as tmp:
-        rows = _private_migrated_copy(
+        rows, jwt_epoch = _private_migrated_copy(
             source,
             pathlib.Path(tmp),
             keyring,
@@ -414,6 +420,7 @@ def import_sqlite(
 
     def populate(conn: Connection) -> None:
         counts.update(_copy_rows(conn, rows))
+        Repositories("postgresql").jwt_epoch.set(conn, jwt_epoch)
         marked[0] = _verify_tokens(conn, keyring, mark_invalid=mark_undecryptable_invalid)
 
     migrate.ensure_ready(target, auto=True, populate=populate)

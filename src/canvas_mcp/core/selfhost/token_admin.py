@@ -486,9 +486,9 @@ def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
                 print("not found: no such account", file=sys.stderr)
                 return EXIT_NOT_FOUND
             wanted = found
-        for grant in authz.list_all_grants(include_inactive=args.all, limit=_MAX_LISTED_GRANTS):
-            if wanted is not None and grant.account_key != wanted:
-                continue
+        for grant in authz.list_all_grants(
+            include_inactive=args.all, limit=_MAX_LISTED_GRANTS, account_key=wanted
+        ):
             print(
                 "	".join(
                     [

@@ -304,9 +304,17 @@ class SqlGrantRepo:
         return list(conn.execute(stmt).all())
 
     def list_all(
-        self, conn: Connection, *, include_inactive: bool, now: int, limit: int
+        self,
+        conn: Connection,
+        *,
+        include_inactive: bool,
+        now: int,
+        limit: int,
+        account_id: str | None = None,
     ) -> list[Row]:
         stmt = select(*_grant_columns())
+        if account_id is not None:
+            stmt = stmt.where(_g.c.account_id == account_id)
         if not include_inactive:
             stmt = stmt.where(_g.c.revoked_at.is_(None), _g.c.expires_at > now)
         stmt = stmt.order_by(_g.c.created_at.desc(), _g.c.id).limit(limit)
@@ -545,6 +553,14 @@ class SqlJwtEpochRepo:
             new = 1
         conn.execute(update(_m).where(_m.c.key == self.KEY).values(value=str(new)))
         return new
+
+    def set(self, conn: Connection, value: int) -> None:
+        value = max(0, int(value))
+        current = conn.execute(select(_m.c.value).where(_m.c.key == self.KEY)).scalar_one_or_none()
+        if current is None:
+            conn.execute(insert(_m).values(key=self.KEY, value=str(value)))
+        else:
+            conn.execute(update(_m).where(_m.c.key == self.KEY).values(value=str(value)))
 
 
 __all__ = [
