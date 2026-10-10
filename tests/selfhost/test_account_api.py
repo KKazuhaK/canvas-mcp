@@ -2315,6 +2315,9 @@ class TestEveryAnswer:
             "directory_unavailable", "write_tool_not_allowed", "write_tools_unavailable",
             "last_owner", "cannot_disable_self",
             "authorization_invalid", "client_unavailable",
+            # linked sign-in methods
+            "identity_in_use", "provider_already_linked", "last_identity", "link_session_ended",
+            "provider_unavailable",
         }
         for status in account_api.ERROR_STATUS.values():
             assert 400 <= status < 600

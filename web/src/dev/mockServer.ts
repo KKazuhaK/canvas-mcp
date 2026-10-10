@@ -519,6 +519,11 @@ const STATUS: Partial<Record<ApiErrorCode, number>> = {
   write_tools_unavailable: 503,
   last_owner: 409,
   cannot_disable_self: 409,
+  identity_in_use: 409,
+  provider_already_linked: 409,
+  last_identity: 409,
+  link_session_ended: 409,
+  provider_unavailable: 503,
   authorization_invalid: 400,
   client_unavailable: 409,
 }

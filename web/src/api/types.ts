@@ -47,6 +47,12 @@ export type ApiOnlyErrorCode =
   // admin
   | 'last_owner' // 409
   | 'cannot_disable_self' // 409
+  // linked sign-in methods
+  | 'identity_in_use' // 409 (also the result of a link)
+  | 'provider_already_linked' // 409
+  | 'last_identity' // 409
+  | 'link_session_ended' // 409 (also the result of a link)
+  | 'provider_unavailable' // 503 (also the result of a link)
   // an app's authorization request (the server's own authorization server)
   | 'authorization_invalid' // 400 (also a sign-in error)
   | 'client_unavailable' // 409
@@ -65,6 +71,7 @@ export type SignInErrorCode =
   | 'access_disabled'
   | 'signups_paused'
   | 'token_store_unavailable'
+  | 'rate_limited'
   // An app (MCP client) was waiting for this sign-in, but its request is gone: it
   // expired, was started in another browser, or was already used.
   | 'authorization_invalid'
@@ -79,10 +86,10 @@ export interface ApiErrorBody {
 
 // ---- providers ---------------------------------------------------------------
 
-export type ProviderIcon = 'microsoft'
+export type ProviderIcon = 'microsoft' | 'google' | 'github' | 'key'
 export interface Provider {
   id: string
-  kind: 'oidc'
+  kind: 'oidc' | 'oauth2'
   name: string
   icon: ProviderIcon
   /** The server-side redirect that starts the sign-in (a full-page navigation). */

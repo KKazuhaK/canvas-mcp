@@ -130,6 +130,12 @@ ERROR_STATUS: Mapping[str, int] = {
     # admin
     "last_owner": 409,
     "cannot_disable_self": 409,
+    # linked sign-in methods
+    "identity_in_use": 409,
+    "provider_already_linked": 409,
+    "last_identity": 409,
+    "link_session_ended": 409,
+    "provider_unavailable": 503,
     # an app's authorization request (SELFHOST_AUTH_MODE=local)
     "authorization_invalid": 400,
     "client_unavailable": 409,
@@ -676,20 +682,30 @@ class ApiApp:
     # -- public ------------------------------------------------------------------------------
 
     async def providers(self, ctx: _Ctx) -> Response:
-        return self._ok(
-            {
-                "providers": [
-                    {
-                        "id": PROVIDER_ENTRA,
-                        "kind": "oidc",
-                        "name": "Microsoft",
-                        "icon": "microsoft",
-                        "start_url": web._LOGIN_PATH,
-                    }
-                ],
-                "mcp_url": self.app.base + "/mcp",
-            }
-        )
+        logins = self.app.logins
+        if logins is None:
+            # Entra alone: exactly the list the first release served.
+            entries = [
+                {
+                    "id": PROVIDER_ENTRA,
+                    "kind": "oidc",
+                    "name": "Microsoft",
+                    "icon": "microsoft",
+                    "start_url": web._LOGIN_PATH,
+                }
+            ]
+        else:
+            entries = [
+                {
+                    "id": entry.id,
+                    "kind": entry.kind,
+                    "name": _clean(entry.name, 40),
+                    "icon": entry.icon,
+                    "start_url": entry.start_path,
+                }
+                for entry in logins.entries()
+            ]
+        return self._ok({"providers": entries, "mcp_url": self.app.base + "/mcp"})
 
     # -- self --------------------------------------------------------------------------------------
 
@@ -741,7 +757,9 @@ class ApiApp:
                     "school_search": (not pending) and app.schools.search_enabled,
                     "write_tools": (not pending) and app.write_tools is not None,
                     "admin": session.owner,
-                    "identities": False,
+                    "identities": (not pending)
+                    and app.logins is not None
+                    and app.logins.linking_enabled,
                     # Local authorization server only (see the module docstring). A waiting
                     # account is still told so; its own screens and the API refuse it.
                     "connected_apps": app.authz is not None,

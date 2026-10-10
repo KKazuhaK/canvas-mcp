@@ -443,8 +443,13 @@ def _build(
     env: Mapping[str, str] | None,
     clock: Clock | None,
     tools: bool,
+    account_options: Mapping[str, Any] | None = None,
 ) -> tuple[Any, Stack]:
-    """The app and a Stack around it (without a client yet)."""
+    """The app and a Stack around it (without a client yet).
+
+    ``account_options`` are handed to ``install_selfhost`` (and on to the account routes), for
+    example a ``login_transport`` that replaces the network of the sign-in providers.
+    """
     monkeypatch.setattr(fastmcp.settings, "test_mode", True)
     monkeypatch.setattr(fastmcp.settings, "home", tmp_path / "fastmcp")
     monkeypatch.setenv("CANVAS_API_URL", f"https://{CANVAS_HOST}")
@@ -480,6 +485,7 @@ def _build(
     install_selfhost(
         mcp, runtime, config,
         id_token_verifier=idp.verify, http_client_factory=idp.factory, clock=clock,
+        **dict(account_options or {}),
     )
     app = build_selfhost_asgi_app(mcp, runtime, config)
     return app, Stack(None, runtime, settings, mcp, idp, cimd, clock, tmp_path)
@@ -493,9 +499,10 @@ def local_stack(
     env: Mapping[str, str] | None = None,
     clock: Clock | None = None,
     tools: bool = True,
+    account_options: Mapping[str, Any] | None = None,
 ) -> Iterator[Stack]:
     """Start the app in local mode and yield the stack (a context manager: it stops the app)."""
-    app, stack = _build(tmp_path, monkeypatch, env, clock, tools)
+    app, stack = _build(tmp_path, monkeypatch, env, clock, tools, account_options)
     with TestClient(app, base_url=BASE, follow_redirects=False) as client:
         stack.client = client
         stack.new_client = lambda: TestClient(app, base_url=BASE, follow_redirects=False)

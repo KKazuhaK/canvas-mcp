@@ -234,6 +234,29 @@ def _data_layer_problem(settings: SelfhostSettings) -> str | None:
     return None
 
 
+def _owner_path_problem(settings: SelfhostSettings, store: TokenStore) -> str | None:
+    """Without Entra nobody can become an owner through the identity provider's data.
+
+    An owner then needs ``SELFHOST_BOOTSTRAP_OWNER`` (a provider identity, or ``token_admin`` to
+    promote the first owner with the operator command) or an owner the database already holds.
+    Otherwise the server would start and nobody could ever open ``/account/admin``.
+    """
+    if settings.entra_enabled:
+        return None
+    policy = settings.access_policy
+    if policy.bootstrap_owner is not None or policy.bootstrap_via_token_admin:
+        return None
+    if store.count_active_owners() > 0:
+        return None
+    return (
+        "no owner can be made: SELFHOST_LOGIN_PROVIDERS does not list entra, "
+        "SELFHOST_BOOTSTRAP_OWNER is unset and the database has no active owner; set "
+        "SELFHOST_BOOTSTRAP_OWNER to the first owner's identity (google:<subject>, "
+        "github:<numeric user id> or oidc:<slug>:<subject>), or to token_admin and then run: "
+        "python -m canvas_mcp.core.selfhost.token_admin promote-owner ACCOUNT"
+    )
+
+
 def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
     """Open the encrypted token store and build the identity service.
 
@@ -287,6 +310,11 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         raise SelfhostConfigError([str(exc)]) from None
     except OSError:
         raise SelfhostConfigError(["the Canvas token database cannot be opened"]) from None
+
+    owner_problem = _owner_path_problem(settings, store)
+    if owner_problem is not None:
+        store.close()
+        raise SelfhostConfigError([owner_problem])
 
     access = PrincipalAccessCache(store)
     identity = IdentityService(
@@ -375,6 +403,20 @@ def install_selfhost(
 
     settings = runtime.settings
     spa = load_account_spa(settings) if settings.account_ui == "react" else None
+    logins = None
+    login_transport = account_options.pop("login_transport", None)
+    if settings.login_providers.public:
+        # Imported here: an Entra-only deployment never loads the relying-party modules.
+        from .login.registry import build_login_runtime
+
+        assert runtime.authz is not None, "other sign-in providers need SELFHOST_AUTH_MODE=local"
+        logins = build_login_runtime(
+            settings,
+            flow_store=runtime.authz.txns,
+            clock=account_options.get("clock") or time.time,
+            rate_limiters=runtime.limiters,
+            transport=login_transport,
+        )
     ceiling = tool_policy.allowed if tool_policy is not None and tool_policy.enforced else None
 
     async def registered_tool_names() -> list[str]:
@@ -413,6 +455,7 @@ def install_selfhost(
             "ui": settings.account_ui,
             "spa": spa,
             "authz": runtime.authz,
+            "logins": logins,
             **account_options,
         },
     )

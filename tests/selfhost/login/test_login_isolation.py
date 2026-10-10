@@ -76,3 +76,23 @@ def test_an_entra_only_start_never_imports_the_relying_party_modules() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().endswith("ok")
+
+
+def test_the_account_pages_load_no_relying_party_module_by_themselves() -> None:
+    env = {**os.environ, "PYTHONPATH": str(SRC), "PYTHON_DOTENV_DISABLED": "1", "PYTHONUTF8": "1"}
+    code = textwrap.dedent(
+        """
+        import sys
+        import canvas_mcp.core.selfhost.account_web
+        import canvas_mcp.core.selfhost.login.ceremony
+        loaded = sorted(m for m in sys.modules if m.startswith("canvas_mcp.core.selfhost.login"))
+        heavy = {"flows", "registry", "jwks", "idtoken", "oidc", "github", "google", "http", "metadata", "linking"}
+        assert not heavy & {m.rsplit(".", 1)[-1] for m in loaded}, loaded
+        print("ok")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("ok")
