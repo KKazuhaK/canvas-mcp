@@ -31,8 +31,10 @@ import type {
   ApiErrorCode,
   AuditEntry,
   CanvasTokenStatus,
+  ConsentResponse,
   ErrorParams,
   Features,
+  Grant,
   InvalidReason,
   LoginEvent,
   MeResponse,
@@ -60,6 +62,10 @@ export const MOCK_SCENARIOS = [
   'no-write-tools',
   'error-503',
   'rate-limited',
+  // The server's own authorization server (SELFHOST_AUTH_MODE=local): consent and connected apps.
+  'local',
+  'local-owner',
+  'local-pending',
 ] as const
 export type MockScenario = (typeof MOCK_SCENARIOS)[number]
 
@@ -69,6 +75,18 @@ const acct = (n: number) => `00000000-0000-4000-8000-00000000000${n}`
 const ago = (minutes: number) =>
   new Date(Date.now() - minutes * 60_000).toISOString().replace(/\.\d{3}Z$/, 'Z')
 const inDays = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10)
+
+/**
+ * Request ids the consent screen can be opened with in the mock (`/consent?txn=<id>`).
+ * Any other well-formed id answers authorization_invalid, like an expired or used one.
+ */
+const padTxn = (word: string) => word.padEnd(43, 'x')
+export const MOCK_TXN = {
+  verified: padTxn('mockverified'),
+  unverified: padTxn('mockunverified'),
+  loopback: padTxn('mockloopback'),
+  unavailable: padTxn('mockunavailable'),
+} as const
 
 const SCHOOL = { host: 'canvas.example.edu', name: 'Example University', offered: true }
 const SEARCHABLE = [
@@ -165,6 +183,10 @@ interface MockState {
   history: LoginEvent[]
   accounts: AdminAccount[]
   audit: AuditEntry[]
+  /** Live connected apps by account id (local scenarios). */
+  grants: Map<string, Grant[]>
+  /** Consent requests not decided yet. */
+  txns: Set<string>
 }
 
 function accountRow(
@@ -239,9 +261,43 @@ function auditEntry(
   return { id, at: ago(id * 37), action, actor, target, reason, detail }
 }
 
+function grantOf(
+  n: number,
+  client: Grant['client'],
+  redirectHost: string,
+  lastUsedMinutes: number | null,
+): Grant {
+  return {
+    id: `00000000-0000-4000-8000-0000000001${String(n).padStart(2, '0')}`,
+    client,
+    redirect_host: redirectHost,
+    created_at: ago(60 * 24 * n),
+    last_used_at: lastUsedMinutes === null ? null : ago(lastUsedMinutes),
+    expires_at: ago(-60 * 24 * (30 - n)),
+  }
+}
+
+function seedGrants(selfId: string): Map<string, Grant[]> {
+  return new Map<string, Grant[]>([
+    [
+      selfId,
+      [
+        grantOf(1, { kind: 'cimd', label: 'claude.ai', name: 'Claude', host: 'claude.ai', verified: true }, 'claude.ai', 12),
+        grantOf(2, { kind: 'cimd', label: 'claude.ai', name: 'Claude Code', host: 'claude.ai', verified: true }, '127.0.0.1', 60 * 5),
+        grantOf(3, { kind: 'dcr', label: 'Sample Desktop Tool', name: 'Sample Desktop Tool', host: null, verified: false }, 'tool.example.test', null),
+      ],
+    ],
+    [
+      acct(3),
+      [grantOf(4, { kind: 'dcr', label: 'Cleo Notes', name: 'Cleo Notes', host: null, verified: false }, 'notes.example.test', 90)],
+    ],
+  ])
+}
+
 function buildState(scenario: MockScenario): MockState {
-  const owner = scenario === 'owner' || scenario === 'stale-owner'
-  const pending = scenario === 'pending'
+  const local = scenario.startsWith('local')
+  const owner = scenario === 'owner' || scenario === 'stale-owner' || scenario === 'local-owner'
+  const pending = scenario === 'pending' || scenario === 'local-pending'
   const picker = scenario === 'picker'
 
   const canvas =
@@ -263,8 +319,8 @@ function buildState(scenario: MockScenario): MockState {
     write_tools: !pending && scenario !== 'no-write-tools',
     admin: owner,
     identities: false,
-    connected_apps: false,
-    consent: false,
+    connected_apps: local && !pending,
+    consent: local,
     logout_everywhere: false,
     role_management: false,
   }
@@ -368,6 +424,8 @@ function buildState(scenario: MockScenario): MockState {
     ],
     accounts,
     audit,
+    grants: local ? seedGrants(SELF_ID) : new Map(),
+    txns: new Set(local ? Object.values(MOCK_TXN) : []),
   }
 }
 
@@ -461,6 +519,8 @@ const STATUS: Partial<Record<ApiErrorCode, number>> = {
   write_tools_unavailable: 503,
   last_owner: 409,
   cannot_disable_self: 409,
+  authorization_invalid: 400,
+  client_unavailable: 409,
 }
 const fail = (code: ApiErrorCode, params?: ErrorParams): Fail => ({
   status: STATUS[code] ?? 500,
@@ -842,6 +902,91 @@ route('GET /admin/audit', 'owner', (c, s) => {
     entries: page,
     next_cursor: page.length >= AUDIT_PAGE ? String(page[page.length - 1].id) : null,
   })
+})
+
+// ---- apps (local scenarios only) ---------------------------------------------------------
+
+const TXN_SHAPE = /^[A-Za-z0-9_-]{43}$/
+
+function consentView(txn: string, state: MockState): ConsentResponse {
+  const pending = state.me.account.status === 'pending'
+  const client: ConsentResponse['client'] =
+    txn === MOCK_TXN.unverified
+      ? { kind: 'dcr', label: 'Sample Desktop Tool', name: 'Sample Desktop Tool', host: null, verified: false }
+      : { kind: 'cimd', label: 'claude.ai', name: 'Claude', host: 'claude.ai', verified: true }
+  const loopback = txn === MOCK_TXN.loopback
+  return {
+    client,
+    redirect: loopback ? { host: '127.0.0.1', loopback: true } : { host: 'claude.ai', loopback: false },
+    scopes: [{ name: 'Canvas.Access' }],
+    account: { display_name: state.me.account.display_name, username: state.me.account.username },
+    can_approve: !pending,
+    expires_at: ago(-8),
+  }
+}
+
+route('GET /consent/{id}', 'session', (c, s) => {
+  if (!s.me.features.consent) return fail('not_found')
+  const txn = decodeURIComponent(c.match[1])
+  if (!TXN_SHAPE.test(txn) || !s.txns.has(txn)) return fail('authorization_invalid')
+  if (txn === MOCK_TXN.unavailable) return fail('client_unavailable')
+  return ok(consentView(txn, s))
+})
+
+route('POST /consent/{id}', 'session', (c, s) => {
+  if (!s.me.features.consent) return fail('not_found')
+  const bad = onlyFields(c.body, ['decision'])
+  if (bad) return bad
+  const decision = c.body.decision
+  if (decision !== 'approve' && decision !== 'deny') return fail('validation_failed', { field: 'decision' })
+  const txn = decodeURIComponent(c.match[1])
+  if (!TXN_SHAPE.test(txn) || !s.txns.has(txn)) return fail('authorization_invalid')
+  if (decision === 'approve' && s.me.account.status === 'pending') return fail('pending_approval')
+  s.txns.delete(txn)
+  if (txn === MOCK_TXN.unavailable) return fail('client_unavailable')
+  const loopback = txn === MOCK_TXN.loopback
+  const base = loopback ? 'http://127.0.0.1:39211/callback' : 'https://claude.ai/api/mcp/auth_callback'
+  const query =
+    decision === 'approve'
+      ? 'code=mock-code&state=mock-state&iss=https%3A%2F%2Fmcp.example.test%2F'
+      : 'error=access_denied&state=mock-state&iss=https%3A%2F%2Fmcp.example.test%2F'
+  return ok({ redirect_to: `${base}?${query}` })
+})
+
+route('GET /me/grants', 'active', (_c, s) => {
+  if (!s.me.features.connected_apps) return fail('not_found')
+  return ok({ grants: s.grants.get(SELF_ID) ?? [] })
+})
+
+route('DELETE /me/grants/{id}', 'active', (c, s) => {
+  if (!s.me.features.connected_apps) return fail('not_found')
+  const id = decodeURIComponent(c.match[1])
+  if (!UUID.test(id)) return fail('validation_failed', { field: 'id' })
+  const mine = s.grants.get(SELF_ID) ?? []
+  if (!mine.some((grant) => grant.id === id)) return fail('not_found')
+  s.grants.set(SELF_ID, mine.filter((grant) => grant.id !== id))
+  return noContent()
+})
+
+route('GET /admin/accounts/{id}/grants', 'owner', (c, s) => {
+  if (!s.me.features.connected_apps) return fail('not_found')
+  const id = decodeURIComponent(c.match[1])
+  if (!UUID.test(id)) return fail('validation_failed', { field: 'id' })
+  return ok({ grants: s.grants.get(id) ?? [] })
+})
+
+route('DELETE /admin/grants/{id}', 'owner', (c, s) => {
+  if (!s.me.features.connected_apps) return fail('not_found')
+  const id = decodeURIComponent(c.match[1])
+  if (!UUID.test(id)) return fail('validation_failed', { field: 'id' })
+  let changed = false
+  for (const [account, list] of s.grants) {
+    if (list.some((grant) => grant.id === id)) {
+      s.grants.set(account, list.filter((grant) => grant.id !== id))
+      changed = true
+    }
+  }
+  return ok({ changed })
 })
 
 // ---- the adapter -------------------------------------------------------------------

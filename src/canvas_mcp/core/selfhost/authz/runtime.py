@@ -15,6 +15,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import anyio.to_thread
+
 from ...logging import log_warning
 from ..principal_access import PrincipalAccessCache
 from ..settings import SelfhostSettings
@@ -73,6 +75,12 @@ class AuthzRuntime:
 
     async def list_own_grants(self, account_key: str) -> list[GrantRecord]:
         return await self.grants.list_grants(account_key)
+
+    async def list_all_grants(self, limit: int = 500) -> list[GrantRecord]:
+        """Every live connection of every account (the owner's admin page)."""
+        return await anyio.to_thread.run_sync(
+            lambda: self.store.list_all_grants(include_inactive=False, limit=limit)
+        )
 
     async def revoke_own_grant(self, grant_id: str, account_key: str) -> bool:
         return await self.grants.revoke_own(grant_id, account_key)

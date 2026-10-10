@@ -40,6 +40,7 @@ const CODE_SET: Record<ApiErrorCode, true> = {
   write_tools_unavailable: true,
   last_owner: true,
   cannot_disable_self: true,
+  client_unavailable: true,
   state_invalid: true,
   provider_error: true,
   sign_in_incomplete: true,

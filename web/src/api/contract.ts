@@ -7,6 +7,11 @@ import type {
   AdminStatusFilter,
   CanvasTokenRequest,
   CanvasTokenStatus,
+  ConsentDecision,
+  ConsentDecisionResponse,
+  ConsentResponse,
+  GrantRevokeResponse,
+  GrantsResponse,
   LoginHistoryResponse,
   MeResponse,
   ProvidersResponse,
@@ -55,6 +60,15 @@ export interface Contract {
   'POST /admin/enrollments/{id}/mark-invalid': { response: AdminActionResponse }
   'DELETE /admin/enrollments/{id}': { response: AdminActionResponse }
   'GET /admin/audit': { query: { before?: string }; response: AdminAuditResponse }
+  // Only with the server's own authorization server (SELFHOST_AUTH_MODE=local): the
+  // server answers not_found for these otherwise, and GET /me `features` says so.
+  // `{id}` is the request id (consent), a connection's id, or an account id.
+  'GET /consent/{id}': { response: ConsentResponse }
+  'POST /consent/{id}': { body: { decision: ConsentDecision }; response: ConsentDecisionResponse }
+  'GET /me/grants': { response: GrantsResponse }
+  'DELETE /me/grants/{id}': { response: void }
+  'GET /admin/accounts/{id}/grants': { response: GrantsResponse }
+  'DELETE /admin/grants/{id}': { response: GrantRevokeResponse }
 }
 
 export type RouteKey = keyof Contract

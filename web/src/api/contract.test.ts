@@ -13,12 +13,23 @@ const contract = read('api/contract.ts')
 const KEYS = [...contract.matchAll(/^\s*'((?:GET|POST|PUT|PATCH|DELETE) \/[^']*)':/gm)].map((m) => m[1])
 
 describe('api/contract.ts', () => {
-  it('lists the routes of the server (and nothing for identities, grants or consent)', () => {
-    expect(KEYS).toHaveLength(23)
+  it('lists the routes of the server (and nothing for identities or the sign-in)', () => {
+    expect(KEYS).toHaveLength(29)
     expect(new Set(KEYS).size).toBe(KEYS.length)
     for (const key of KEYS) {
-      expect(key, key).not.toMatch(/identit|grant|consent|login\//)
+      expect(key, key).not.toMatch(/identit|login\//)
     }
+  })
+
+  it('lists the consent and connected-apps routes the server serves only in local mode', () => {
+    expect(KEYS.filter((key) => /consent|grants/.test(key)).sort()).toEqual([
+      'DELETE /admin/grants/{id}',
+      'DELETE /me/grants/{id}',
+      'GET /admin/accounts/{id}/grants',
+      'GET /consent/{id}',
+      'GET /me/grants',
+      'POST /consent/{id}',
+    ])
   })
 
   it('splits a key into method and path', () => {

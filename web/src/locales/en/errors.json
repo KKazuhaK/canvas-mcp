@@ -37,6 +37,7 @@
   "write_tools_unavailable": "Your write-tool settings cannot be read right now. Try again later.",
   "last_owner": "That would leave the server without an active owner.",
   "cannot_disable_self": "You cannot disable your own account.",
+  "client_unavailable": "The app that asked to connect could not be confirmed, or its return address is no longer allowed. Nothing was granted. Go back to the app and connect again.",
   "state_invalid": "That sign-in attempt expired or was not started here. Please start again.",
   "provider_error": "The sign-in provider could not complete the request. Please try again.",
   "sign_in_incomplete": "The sign-in response was incomplete. Please try again.",

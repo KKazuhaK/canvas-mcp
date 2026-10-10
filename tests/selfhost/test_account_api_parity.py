@@ -95,6 +95,18 @@ LEGACY_TO_API: dict[tuple[str, str], list[tuple[str, str]] | None] = {
     ],
 }
 
+#: The routes of the local authorization server (``SELFHOST_AUTH_MODE=local``): the legacy
+#: pages register them only then, and the API answers ``not_found`` for them otherwise.
+#: ``tests/selfhost/authz/test_account_api_authz.py`` checks this table against a local-mode app.
+LOCAL_LEGACY_TO_API: dict[tuple[str, str], list[tuple[str, str]]] = {
+    ("GET", "/account/consent"): [("GET", f"{P}/consent/{{id}}")],
+    ("POST", "/account/consent"): [("POST", f"{P}/consent/{{id}}")],
+    ("POST", "/account/grants/revoke"): [("DELETE", f"{P}/me/grants/{{id}}")],
+    ("POST", "/account/admin/grants/revoke"): [
+        ("DELETE", f"{P}/admin/grants/{{id}}"),
+    ],
+}
+
 #: API routes that read what the pages render inline (no legacy route of their own).
 READ_MODELS = {
     ("GET", f"{P}/me/canvas-token"),
@@ -102,6 +114,8 @@ READ_MODELS = {
     ("GET", f"{P}/me/write-tools"),
     ("GET", f"{P}/me/login-history"),
     ("PUT", f"{P}/me/ui-locale"),  # the ?lang= toggle of the pages
+    ("GET", f"{P}/me/grants"),  # the "Connected apps" card of GET /account (local mode)
+    ("GET", f"{P}/admin/accounts/{{id}}/grants"),  # the per-account block of the admin page
 }
 
 
@@ -133,6 +147,7 @@ class TestRouteMatrix:
         app = legacy_app(tmp_path)
         registered = account_api.ApiApp(app).route_keys()
         mapped = {t for targets in LEGACY_TO_API.values() for t in (targets or [])}
+        mapped |= {t for targets in LOCAL_LEGACY_TO_API.values() for t in targets}
         extra = registered - mapped - READ_MODELS
         assert extra == set(), f"API routes with no legacy counterpart or read-model entry: {extra}"
         assert READ_MODELS <= registered

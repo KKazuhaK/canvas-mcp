@@ -47,6 +47,9 @@ export type ApiOnlyErrorCode =
   // admin
   | 'last_owner' // 409
   | 'cannot_disable_self' // 409
+  // an app's authorization request (the server's own authorization server)
+  | 'authorization_invalid' // 400 (also a sign-in error)
+  | 'client_unavailable' // 409
 
 /** Codes that only ever arrive as ?error= on /account/sign-in, never as JSON. */
 export type SignInErrorCode =
@@ -193,8 +196,9 @@ export interface Features {
   school_search: boolean
   write_tools: boolean
   admin: boolean
-  // Not built yet (identities, connected apps, consent, ...): always false today.
+  // Not built yet: always false today.
   identities: boolean
+  // The server's own authorization server (SELFHOST_AUTH_MODE=local) only.
   connected_apps: boolean
   consent: boolean
   logout_everywhere: boolean
@@ -256,6 +260,59 @@ export interface LoginEvent {
 }
 export interface LoginHistoryResponse {
   events: LoginEvent[]
+}
+
+// ---- apps: consent and connected apps (SELFHOST_AUTH_MODE=local) ---------------------------
+
+export type ClientKind = 'dcr' | 'cimd'
+
+/**
+ * Who an app is. `verified` is true only for an app that identifies itself with a
+ * metadata document at a domain: then `label` and `host` are that domain. Otherwise
+ * `label` is the name the app registered for itself, which anyone can choose.
+ */
+export interface AppClient {
+  kind: ClientKind
+  label: string
+  name: string
+  host: string | null
+  verified: boolean
+}
+
+export interface ConsentScope {
+  name: string
+}
+
+export interface ConsentResponse {
+  client: AppClient
+  /** Where the answer is sent; `loopback` means an app on the person's own computer. */
+  redirect: { host: string; loopback: boolean }
+  scopes: ConsentScope[]
+  account: { display_name: string; username: string }
+  /** False for an account that waits for approval: it can only cancel. */
+  can_approve: boolean
+  expires_at: string | null
+}
+
+export type ConsentDecision = 'approve' | 'deny'
+export interface ConsentDecisionResponse {
+  /** The app's own return address, with the code or the error. Open it as it is. */
+  redirect_to: string
+}
+
+export interface Grant {
+  id: string
+  client: AppClient
+  redirect_host: string
+  created_at: string | null
+  last_used_at: string | null
+  expires_at: string | null
+}
+export interface GrantsResponse {
+  grants: Grant[]
+}
+export interface GrantRevokeResponse {
+  changed: boolean
 }
 
 // ---- owner admin ------------------------------------------------------------------------

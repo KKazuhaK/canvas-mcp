@@ -22,8 +22,17 @@ It serves the single-page UI with the data and the actions the server-rendered
   {"code": ..., "params": {...}}}``). No body ever holds Entra text, Canvas text, a
   token or an exception message.
 
-Only the features that exist today are served. Linked identities, connected apps and
-consent are not; ``GET /me`` says so in ``features`` and their paths answer 404.
+Only the features that exist are served. Linked identities are not; ``GET /me`` says so in
+``features``. The consent screen and the connected apps (``/consent/{txn}``,
+``/me/grants``, ``/admin/accounts/{id}/grants``, ``/admin/grants/{id}``) belong to the
+server's own authorization server (``SELFHOST_AUTH_MODE=local``): the routes are always in
+the route table (the web app and the server must list the same ones), but every one of them
+answers ``not_found`` before anything else when that mode is off, and ``features.consent``
+and ``features.connected_apps`` are false. The consent endpoints are the pages' own
+``ConsentService`` (:mod:`.authz.consent`): the same checks decide both UIs. They need the
+``__Host-cmcp_bind`` cookie of the browser that started the request, so an id copied into
+another browser is refused. The decision answers ``{"redirect_to": ...}`` and the page
+navigates there itself; it is never a form post, so the page's ``form-action`` does not apply.
 """
 
 from __future__ import annotations
@@ -35,7 +44,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import anyio.to_thread
 from starlette.requests import Request
@@ -71,6 +80,9 @@ from canvas_mcp.core.selfhost.tool_prefs import (
     user_can_enable,
 )
 from canvas_mcp.core.tool_policy import TOOL_EFFECTS, Effect
+
+if TYPE_CHECKING:
+    from canvas_mcp.core.selfhost.authz.models import GrantRecord
 
 logger = logging.getLogger("canvas_mcp.selfhost.account_api")
 
@@ -118,6 +130,9 @@ ERROR_STATUS: Mapping[str, int] = {
     # admin
     "last_owner": 409,
     "cannot_disable_self": 409,
+    # an app's authorization request (SELFHOST_AUTH_MODE=local)
+    "authorization_invalid": 400,
+    "client_unavailable": 409,
 }
 API_ERROR_CODES = frozenset(ERROR_STATUS)
 
@@ -151,6 +166,8 @@ _HISTORY_REASONS = frozenset(
 )
 _DISABLED_REASONS = frozenset({DISABLE_REASON_ADMIN, DISABLE_REASON_OPERATOR, DISABLE_REASON_DENIED})
 _ADMIN_STATUSES = ("active", "pending", "disabled")
+_TXN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_DECISIONS = ("approve", "deny")
 
 Scalar = str | int
 
@@ -294,6 +311,8 @@ class _Endpoint:
     #: A GET that still needs the CSRF header (the school search).
     csrf: bool = False
     body: BodyKind = "none"
+    #: Served only with the local authorization server; ``not_found`` otherwise, before any other check.
+    local_authz: bool = False
 
 
 class ApiApp:
@@ -366,6 +385,45 @@ class ApiApp:
                 {"DELETE": e(self.admin_remove_enrollment, access="owner", mutating=True, body="empty")},
             ),
             (f"{API_PREFIX}/admin/audit", {"GET": e(self.admin_audit, access="owner")}),
+            # SELFHOST_AUTH_MODE=local only (not_found otherwise).
+            (
+                f"{API_PREFIX}/consent/{{id}}",
+                {
+                    "GET": e(self.get_consent, access="session", local_authz=True),
+                    "POST": e(
+                        self.post_consent,
+                        access="session",
+                        mutating=True,
+                        body="json",
+                        local_authz=True,
+                    ),
+                },
+            ),
+            (f"{API_PREFIX}/me/grants", {"GET": e(self.my_grants, local_authz=True)}),
+            (
+                f"{API_PREFIX}/me/grants/{{id}}",
+                {
+                    "DELETE": e(
+                        self.delete_my_grant, mutating=True, body="empty", local_authz=True
+                    )
+                },
+            ),
+            (
+                f"{API_PREFIX}/admin/accounts/{{id}}/grants",
+                {"GET": e(self.admin_account_grants, access="owner", local_authz=True)},
+            ),
+            (
+                f"{API_PREFIX}/admin/grants/{{id}}",
+                {
+                    "DELETE": e(
+                        self.admin_revoke_grant,
+                        access="owner",
+                        mutating=True,
+                        body="empty",
+                        local_authz=True,
+                    )
+                },
+            ),
         ]
 
     def route_keys(self) -> set[tuple[str, str]]:
@@ -409,6 +467,9 @@ class ApiApp:
 
     async def _handle(self, request: Request, endpoints: dict[str, _Endpoint]) -> Response:
         """method, session, active, owner, origin, csrf, body, then the action."""
+        if self.app.authz is None and any(e.local_authz for e in endpoints.values()):
+            # Not served in this mode: as if the path did not exist, for any method.
+            raise _Fail("not_found")
         endpoint = endpoints.get(request.method)
         if endpoint is None:
             raise _Fail("method_not_allowed", headers={"Allow": ", ".join(sorted(endpoints))})
@@ -681,8 +742,10 @@ class ApiApp:
                     "write_tools": (not pending) and app.write_tools is not None,
                     "admin": session.owner,
                     "identities": False,
-                    "connected_apps": False,
-                    "consent": False,
+                    # Local authorization server only. A waiting account can still see (and
+                    # cancel) a request, but has no connected apps.
+                    "connected_apps": (not pending) and app.authz is not None,
+                    "consent": app.authz is not None,
                     "logout_everywhere": False,
                     "role_management": False,
                 },
@@ -1182,6 +1245,144 @@ class ApiApp:
                 "next_cursor": str(entries[-1].id) if len(entries) >= AUDIT_PAGE else None,
             }
         )
+
+
+    # -- connected apps and consent (SELFHOST_AUTH_MODE=local) ------------------------------------
+
+    @staticmethod
+    def _grant_view(grant: GrantRecord) -> dict[str, Any]:
+        """A connection as the pages show it: who, where it returns to, when. No ids of clients."""
+        verified = grant.client_host is not None
+        name = _clean(grant.client_name, 100)
+        return {
+            "id": grant.id,
+            "client": {
+                "kind": grant.client_kind if grant.client_kind in ("dcr", "cimd") else "dcr",
+                "label": _clean(grant.client_host, 253) if grant.client_host else name,
+                "name": name,
+                "host": _clean(grant.client_host, 253) if grant.client_host else None,
+                "verified": verified,
+            },
+            "redirect_host": _clean(grant.redirect_host, 253),
+            "created_at": _ts(grant.created_at),
+            "last_used_at": _ts(grant.last_used_at),
+            "expires_at": _ts(grant.expires_at),
+        }
+
+    @staticmethod
+    def _txn(ctx: _Ctx) -> str:
+        """The request id in the path; a malformed one is as good as an unknown one."""
+        raw = ctx.params.get("id", "")
+        if not _TXN_ID_RE.fullmatch(raw):
+            raise _Fail("authorization_invalid")
+        return raw
+
+    def _binding(self, ctx: _Ctx) -> str | None:
+        assert self.app.authz is not None
+        return ctx.request.cookies.get(self.app.authz.binding_cookie)
+
+    async def get_consent(self, ctx: _Ctx) -> Response:
+        from canvas_mcp.core.selfhost.authz.consent import ConsentRefusal
+
+        session = ctx.session
+        assert session is not None and self.app.authz is not None
+        txn = self._txn(ctx)
+        try:
+            shown = await self.app.authz.consent.describe(
+                txn, self._binding(ctx), account_pending=session.pending
+            )
+        except Exception as exc:  # noqa: BLE001 - never leak details
+            logger.error("account api consent read failed: %s", type(exc).__name__)
+            raise _Fail("token_store_unavailable") from None
+        if isinstance(shown, ConsentRefusal):
+            raise _Fail(shown.code)
+        verified = shown.verified
+        return self._ok(
+            {
+                "client": {
+                    "kind": shown.client_kind if shown.client_kind in ("dcr", "cimd") else "dcr",
+                    "label": _clean(shown.label, 253),
+                    "name": _clean(shown.client_name, 100),
+                    "host": _clean(shown.label, 253) if verified else None,
+                    "verified": verified,
+                },
+                "redirect": {
+                    "host": _clean(shown.redirect_host, 253),
+                    "loopback": shown.redirect_is_loopback,
+                },
+                "scopes": [{"name": _clean(name, 128)} for name in shown.scopes],
+                "account": {
+                    "display_name": _clean(session.name),
+                    "username": _clean(session.upn, 254),
+                },
+                "can_approve": shown.can_approve,
+                "expires_at": _ts(shown.expires_at),
+            }
+        )
+
+    async def post_consent(self, ctx: _Ctx) -> Response:
+        from canvas_mcp.core.selfhost.authz.consent import ConsentRefusal
+
+        session, body = ctx.session, ctx.body
+        assert session is not None and body is not None and self.app.authz is not None
+        txn = self._txn(ctx)
+        _closed(body, required=("decision",))
+        decision = body["decision"]
+        if decision not in _DECISIONS:
+            raise _invalid("decision")
+        try:
+            outcome = await self.app.authz.consent.decide(
+                txn,
+                self._binding(ctx),
+                account_key=session.acct,
+                session_iat=session.iat,
+                account_pending=session.pending,
+                decision="approve" if decision == "approve" else "deny",
+            )
+        except Exception as exc:  # noqa: BLE001 - never leak details
+            logger.error("account api consent decision failed: %s", type(exc).__name__)
+            raise _Fail("token_store_unavailable") from None
+        if isinstance(outcome, ConsentRefusal):
+            raise _Fail(outcome.code)
+        return self._ok({"redirect_to": outcome.url})
+
+    async def my_grants(self, ctx: _Ctx) -> Response:
+        assert ctx.session is not None
+        grants = await self.app.list_own_grants(ctx.session)
+        if isinstance(grants, Refusal):
+            raise _refusal_to_fail(grants)
+        return self._ok({"grants": [self._grant_view(grant) for grant in grants]})
+
+    @staticmethod
+    def _grant_id(ctx: _Ctx) -> str:
+        raw = ctx.params.get("id", "")
+        if not _UUID_RE.fullmatch(raw):
+            raise _invalid("id")
+        return raw
+
+    async def delete_my_grant(self, ctx: _Ctx) -> Response:
+        assert ctx.session is not None
+        outcome = await self.app.revoke_own_grant(ctx.session, self._grant_id(ctx))
+        if isinstance(outcome, Refusal):
+            raise _refusal_to_fail(outcome)
+        if not outcome:
+            # Not this account's, unknown, or already over: all the same to the caller.
+            raise _Fail("not_found")
+        return self._no_content()
+
+    async def admin_account_grants(self, ctx: _Ctx) -> Response:
+        assert ctx.session is not None
+        grants = await self.app.list_account_grants(ctx.session, self._target(ctx))
+        if isinstance(grants, Refusal):
+            raise _refusal_to_fail(grants)
+        return self._ok({"grants": [self._grant_view(grant) for grant in grants]})
+
+    async def admin_revoke_grant(self, ctx: _Ctx) -> Response:
+        assert ctx.session is not None
+        outcome = await self.app.owner_revoke_grant(ctx.session, self._grant_id(ctx))
+        if isinstance(outcome, Refusal):
+            raise _refusal_to_fail(outcome)
+        return self._ok({"changed": outcome})
 
 
 def build_api_routes(app: web._AccountApp) -> list[Route]:

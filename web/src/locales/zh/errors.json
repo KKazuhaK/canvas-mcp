@@ -37,6 +37,7 @@
   "write_tools_unavailable": "暂时无法读取你的写入工具设置。请稍后再试。",
   "last_owner": "这样做会让服务器没有可用的所有者。",
   "cannot_disable_self": "你不能停用自己的账户。",
+  "client_unavailable": "无法确认请求连接的应用，或它的回调地址已不被允许。没有向它授予任何权限。请回到应用，重新连接。",
   "state_invalid": "这次登录已过期，或不是从此处发起的。请重新开始。",
   "provider_error": "登录提供方未能完成请求，请重试。",
   "sign_in_incomplete": "登录响应不完整，请重试。",

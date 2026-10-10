@@ -205,6 +205,9 @@ _ADMIN_INVALIDATE_PATH = "/account/admin/invalidate"
 _ADMIN_APPROVE_PATH = "/account/admin/approve"
 _ADMIN_DENY_PATH = "/account/admin/deny"
 _ADMIN_AUDIT_PATH = "/account/admin/audit"
+#: Connected apps (SELFHOST_AUTH_MODE=local): a user ends their own, an owner ends any.
+_GRANTS_REVOKE_PATH = "/account/grants/revoke"
+_ADMIN_GRANTS_REVOKE_PATH = "/account/admin/grants/revoke"
 _SCHOOLS_PATH = "/account/schools"
 _WRITE_TOOLS_PATH = "/account/write-tools"
 #: The consent screen of the local authorization server (registered only in that mode).
@@ -884,6 +887,8 @@ class _AccountApp:
         table = self._base_route_table()
         if self.authz is not None:
             table.append((CONSENT_PATH, {"GET": self.consent_page, "POST": self.consent_submit}))
+            table.append((_GRANTS_REVOKE_PATH, {"POST": self.revoke_grant_form}))
+            table.append((_ADMIN_GRANTS_REVOKE_PATH, {"POST": self.admin_revoke_grants_form}))
         return table
 
     def _base_route_table(self) -> list[tuple[str, dict[str, Handler]]]:
@@ -910,13 +915,11 @@ class _AccountApp:
     def routes(self) -> list[Route]:
         table = self.route_table()
         if self.react:
-            # One UI per mode: the single-page app owns every page, so only the two
-            # server-side halves of the sign-in stay.
-            # (The consent screen stays server-rendered until the single-page UI has its own.)
+            # One UI per mode: the single-page app owns every page (the consent screen
+            # and the connected apps too), so only the two server-side halves of the
+            # sign-in stay.
             table = [
-                entry
-                for entry in table
-                if entry[0] in (_LOGIN_PATH, ACCOUNT_CALLBACK_PATH, CONSENT_PATH)
+                entry for entry in table if entry[0] in (_LOGIN_PATH, ACCOUNT_CALLBACK_PATH)
             ]
         return [
             Route(path, self._endpoint(handlers), methods=_ALL_METHODS)
@@ -1505,6 +1508,7 @@ class _AccountApp:
         parts.append(self._search_section())
         parts.append(self._mcp_url_section())
         parts.append(await self._write_tools_section(session, write_notice))
+        parts.append(await self._connected_apps_section(session))
         parts.append(await self._sign_in_history(session))
         return self.html_page(status, _bi("Canvas 账户", "Canvas account"), "".join(parts))
 
@@ -2195,6 +2199,159 @@ class _AccountApp:
         except Exception as exc:  # noqa: BLE001
             logger.error("account owner revoke grant failed: %s", type(exc).__name__)
             return Refusal("token_store_unavailable")
+
+    async def owner_revoke_account_grants(
+        self, session: _Session, target: str
+    ) -> int | Refusal:
+        """An owner ends every live connection of one account; how many ended (each one audited)."""
+        listed = await self.list_account_grants(session, target)
+        if isinstance(listed, Refusal):
+            return listed
+        ended = 0
+        for grant in listed:
+            outcome = await self.owner_revoke_grant(session, grant.id)
+            if isinstance(outcome, Refusal):
+                return outcome
+            ended += 1 if outcome else 0
+        return ended
+
+    # -- connected apps pages ---------------------------------------------------------------------
+
+    @staticmethod
+    def _app_label(grant: GrantRecord) -> str:
+        """Who a connection is, as HTML: a verified domain, or a name the app chose itself."""
+        name = _e(grant.client_name) if grant.client_name else ""
+        if grant.client_host:
+            label = (
+                f"<strong>{_e(grant.client_host)}</strong> "
+                f'<span class="muted small">({_bi("已验证的域名", "verified domain")})</span>'
+            )
+            if name and grant.client_name != grant.client_host:
+                label += f'<br><span class="muted small">{name}</span>'
+            return label
+        label = f"<strong>{name or _bi('未命名的应用', 'Unnamed app')}</strong>"
+        return (
+            label + f'<br><span class="muted small">'
+            f"{_bi('未经验证：应用自己注册的名称', 'Unverified: a self-registered app')}</span>"
+        )
+
+    @staticmethod
+    def _app_facts(grant: GrantRecord) -> str:
+        """Where it returns to, when it was connected and last used (muted lines)."""
+        return (
+            f'<span class="muted small">{_bi("回到：", "Returns to:")} '
+            f"<code>{_e(grant.redirect_host or '-')}</code><br>"
+            f"{_bi('连接于', 'Connected')} {_e(_fmt_ts(grant.created_at))} · "
+            f"{_bi('最近使用', 'Last used')} {_e(_fmt_ts(grant.last_used_at))}</span>"
+        )
+
+    async def _connected_apps_section(self, session: _Session) -> str:
+        """The "Connected apps" card of ``GET /account`` (local mode only; "" otherwise)."""
+        if self.authz is None or session.pending:
+            return ""
+        grants = await self.list_own_grants(session)
+        title = f"<h2>{_bi('已连接的应用', 'Connected apps')}</h2>"
+        if isinstance(grants, Refusal):
+            return (
+                f'<section class="card" id="connected-apps">{title}<p class="muted">'
+                f"{_bi('暂时无法读取已连接的应用。', 'Connected apps cannot be read right now.')}</p></section>"
+            )
+        intro = (
+            f'<p class="muted small">{_bi("这些应用可以通过 MCP 以你的身份使用 Canvas 工具。断开后它们立刻（最多约 30 秒内）失去访问权限，之后需要重新授权。", "These apps can use the Canvas tools as you through MCP. Ending a connection cuts the app off right away (within about 30 seconds at most); it has to ask for your approval again.")}</p>'
+        )
+        if not grants:
+            return (
+                f'<section class="card" id="connected-apps">{title}{intro}'
+                f"<p>{_bi('还没有连接任何应用。', 'No apps are connected.')}</p></section>"
+            )
+        csrf = _csrf_field(session.csrf)
+        items = "".join(
+            "<li>"
+            f"{self._app_label(grant)}<br>{self._app_facts(grant)}"
+            f'<form method="post" action="{_GRANTS_REVOKE_PATH}">{csrf}'
+            f'<input type="hidden" name="grant" value="{_e(grant.id)}">'
+            f'<button class="btn danger sm" type="submit">{_bi("断开", "Revoke")}</button>'
+            "</form></li>"
+            for grant in grants
+        )
+        return f'<section class="card" id="connected-apps">{title}{intro}<ul>{items}</ul></section>'
+
+    async def revoke_grant_form(self, request: Request) -> Response:
+        """POST /account/grants/revoke: a signed-in person ends one of their own connections."""
+        guarded = await self._guard_post(request, active_only=True)
+        if isinstance(guarded, Response):
+            return guarded
+        session, form = guarded
+        grant_id = form.get("grant", "")
+        if not _GUID_RE.fullmatch(grant_id):
+            return self.message_page(400, _bi("请求格式不正确。", "Malformed request."))
+        outcome = await self.revoke_own_grant(session, grant_id.lower())
+        if isinstance(outcome, Refusal):
+            return self._refused_page(outcome.code)
+        return self.redirect(f"{ACCOUNT_PATH}#connected-apps", 303)
+
+    async def _grants_by_account(self) -> dict[str, list[GrantRecord]]:
+        """Every live connection, by account key (for the admin page); empty if unreadable."""
+        if self.authz is None:
+            return {}
+        try:
+            grants = await self.authz.list_all_grants()
+        except Exception as exc:  # noqa: BLE001 - the admin page works without this block
+            logger.error("account admin list grants failed: %s", type(exc).__name__)
+            return {}
+        out: dict[str, list[GrantRecord]] = {}
+        for grant in grants:
+            out.setdefault(grant.account_key, []).append(grant)
+        return out
+
+    def _admin_apps_block(
+        self, session: _Session, key: str, grants: list[GrantRecord]
+    ) -> str:
+        """The per-account "Connected apps (N)" block of the admin table."""
+        if self.authz is None or not grants:
+            return ""
+        csrf = _csrf_field(session.csrf)
+        items = "".join(
+            "<li>"
+            f"{self._app_label(grant)}<br>{self._app_facts(grant)}"
+            f'<form method="post" action="{_ADMIN_GRANTS_REVOKE_PATH}">{csrf}'
+            f'<input type="hidden" name="grant" value="{_e(grant.id)}">'
+            f'<button class="btn danger sm" type="submit">{_bi("断开", "Revoke")}</button>'
+            "</form></li>"
+            for grant in grants
+        )
+        everything = (
+            f'<form method="post" action="{_ADMIN_GRANTS_REVOKE_PATH}">{csrf}'
+            f'<input type="hidden" name="principal_key" value="{_e(key)}">'
+            f'<button class="btn danger sm" type="submit">'
+            f'{_bi("断开此账户的全部应用", "Revoke all for this account")}</button></form>'
+        )
+        return (
+            '<details class="tech">'
+            f"<summary>{_bi('已连接的应用', 'Connected apps')} ({len(grants)})</summary>"
+            f"<ul>{items}</ul>{everything}</details>"
+        )
+
+    async def admin_revoke_grants_form(self, request: Request) -> Response:
+        """POST /account/admin/grants/revoke: an owner ends one connection, or all of an account's."""
+        guarded = await self._guard_post(request, owner_only=True)
+        if isinstance(guarded, Response):
+            return guarded
+        session, form = guarded
+        grant_id = form.get("grant", "")
+        outcome: bool | int | Refusal
+        if grant_id:
+            if not _GUID_RE.fullmatch(grant_id):
+                return self.message_page(400, _bi("请求格式不正确。", "Malformed request."))
+            outcome = await self.owner_revoke_grant(session, grant_id.lower())
+        else:
+            target = valid_principal_key(form.get("principal_key"))
+            if target is None:
+                return self._bad_target_page()
+            outcome = await self.owner_revoke_account_grants(session, target)
+        if isinstance(outcome, Refusal):
+            return self._refused_page(outcome.code)
+        return self.redirect(_ADMIN_PATH, 303)
 
     def _owner_op_refusal(self, session: _Session) -> Refusal | None:
         if self.authz is None:
@@ -3329,6 +3486,7 @@ class _AccountApp:
         session: _Session,
         account: AccountInfo,
         row: EnrollmentInfo | None,
+        grants: list[GrantRecord] | None = None,
     ) -> str:
         access = account.status
         key = account.principal_key
@@ -3372,7 +3530,8 @@ class _AccountApp:
             f"<dt>{_bi('对象 ID', 'Object')}</dt><dd><code>{_e(subject)}</code></dd>"
             f"<dt>{_bi('账户', 'Account')}</dt><dd><code>{_e(key)}</code></dd>"
             f"{enrolled}"
-            "</dl></details></td>"
+            "</dl></details>"
+            f"{self._admin_apps_block(session, key, grants or [])}</td>"
             f'<td data-label="{_e(_bi("Canvas 用户", "Canvas user"))}">{canvas}</td>'
             f'<td data-label="{_e(_bi("学校", "School"))}">{school}</td>'
             f'<td data-label="{_e(_bi("状态", "Status"))}">{self._admin_status(row, access)}</td>'
@@ -3410,7 +3569,11 @@ class _AccountApp:
         entries.sort(key=lambda entry: 0 if entry[0].status.pending else 1)
         disabled_total = sum(1 for a in accounts if a.status.disabled)
         pending_total = sum(1 for a in accounts if a.status.pending)
-        lines = [self._admin_row(session, account, row) for account, row in entries]
+        grants = await self._grants_by_account()
+        lines = [
+            self._admin_row(session, account, row, grants.get(account.principal_key))
+            for account, row in entries
+        ]
         if lines:
             table = (
                 '<section class="card tablecard"><table><thead><tr>'
@@ -3733,6 +3896,12 @@ class _AccountApp:
             return _bi("数据库已升级", "Database upgraded")
         if action == "pending_purged":
             return _bi("清理了过期的待批准账户", "Stale pending accounts removed")
+        if action == "grant_revoked":
+            return _bi("断开了已连接的应用", "Connected app ended")
+        if action == "grants_revoked_for_account":
+            return _bi("断开了账户的全部已连接应用", "Connected apps ended for an account")
+        if action == "jwt_key_rotated":
+            return _bi("应用访问令牌已全部作废", "App access tokens invalidated")
         return action
 
     @staticmethod

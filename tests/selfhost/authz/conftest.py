@@ -93,3 +93,21 @@ def proxy_stack(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):  # typ
 
     with local_stack(tmp_path, monkeypatch, env={"SELFHOST_AUTH_MODE": "entra_proxy"}) as running:
         yield running
+
+
+@pytest.fixture
+def react_env(tmp_path: pathlib.Path) -> dict[str, str]:
+    """The environment of the single-page UI over a stub bundle (the JSON API is served)."""
+    from ..test_account_spa import make_dist
+
+    dist = make_dist(tmp_path / "dist")
+    return {"ACCOUNT_UI": "react", "ACCOUNT_WEB_DIST": str(dist)}
+
+
+@pytest.fixture
+def react_stack(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, react_env: dict[str, str]):  # type: ignore[no-untyped-def]
+    """The app in local mode with ``ACCOUNT_UI=react``."""
+    from .stack import local_stack
+
+    with local_stack(tmp_path / "app", monkeypatch, env=react_env) as running:
+        yield running

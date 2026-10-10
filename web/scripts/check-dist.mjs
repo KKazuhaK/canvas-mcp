@@ -90,6 +90,8 @@ const MOCK_MARKERS = [
   'Cleo Example',
   'ada@example.edu',
   'VITE_MOCK',
+  'MOCK_TXN',
+  'Sample Desktop Tool',
 ]
 
 for (const file of files) {

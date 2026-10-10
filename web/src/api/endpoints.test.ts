@@ -4,13 +4,18 @@ import {
   LOGIN_PATH,
   adminAccessAction,
   adminAudit,
+  adminGrants,
   adminListAccounts,
   adminListEnrollments,
   adminMarkInvalid,
   adminRemoveEnrollment,
+  adminRevokeGrant,
+  decideConsent,
   deleteCanvasToken,
   deleteWriteTools,
   getCanvasToken,
+  getConsent,
+  getGrants,
   getLoginHistory,
   getMe,
   getProviders,
@@ -21,12 +26,14 @@ import {
   putUiLocale,
   putWriteTools,
   recheckCanvasToken,
+  revokeGrant,
   searchSchools,
   signInUrl,
 } from './endpoints'
 import { meFixture, scriptAdapter } from '@/test/fixtures'
 
 const ID = '00000000-0000-4000-8000-000000000002'
+const TXN = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO_-'
 
 beforeEach(() => {
   clearCsrfToken()
@@ -44,6 +51,11 @@ describe('the wire shape of every endpoint', () => {
     ['deleteWriteTools', () => deleteWriteTools(), 'DELETE', '/me/write-tools'],
     ['getLoginHistory', () => getLoginHistory(), 'GET', '/me/login-history'],
     ['logout', () => logout(), 'POST', '/session/logout'],
+    ['getGrants', () => getGrants(), 'GET', '/me/grants'],
+    ['revokeGrant', () => revokeGrant(ID), 'DELETE', `/me/grants/${ID}`],
+    ['adminGrants', () => adminGrants(ID), 'GET', `/admin/accounts/${ID}/grants`],
+    ['adminRevokeGrant', () => adminRevokeGrant(ID), 'DELETE', `/admin/grants/${ID}`],
+    ['getConsent', () => getConsent(TXN), 'GET', `/consent/${TXN}`],
     ['adminMarkInvalid', () => adminMarkInvalid(ID), 'POST', `/admin/enrollments/${ID}/mark-invalid`],
     ['adminRemoveEnrollment', () => adminRemoveEnrollment(ID), 'DELETE', `/admin/enrollments/${ID}`],
     ['approve', () => adminAccessAction(ID, 'approve'), 'POST', `/admin/accounts/${ID}/approve`],
@@ -97,6 +109,27 @@ describe('the wire shape of every endpoint', () => {
     await searchSchools('state univ')
     expect(seen[0]).toMatchObject({ method: 'GET', url: '/me/schools/search', params: { q: 'state univ' } })
     expect(seen[0].headers['x-csrf-token']).toBe('c')
+  })
+
+  it('POST /consent/{id} sends exactly {decision} with the CSRF header', async () => {
+    const seen = scriptAdapter(() => ({ status: 200, data: { redirect_to: 'https://app.test/cb' } }))
+    setCsrfToken('c')
+    await decideConsent(TXN, 'approve')
+    expect(seen[0]).toMatchObject({ method: 'POST', url: `/consent/${TXN}` })
+    expect(JSON.parse(seen[0].data as string)).toEqual({ decision: 'approve' })
+    expect(seen[0].headers['x-csrf-token']).toBe('c')
+  })
+
+  it('the revoke calls carry the CSRF header and no body', async () => {
+    const seen = scriptAdapter(() => ({ status: 200, data: { changed: true } }))
+    setCsrfToken('c')
+    await revokeGrant(ID)
+    await adminRevokeGrant(ID)
+    for (const request of seen) {
+      expect(request.method).toBe('DELETE')
+      expect(request.headers['x-csrf-token']).toBe('c')
+      expect(request.data).toBeUndefined()
+    }
   })
 
   it('PUT /me/write-tools sends {enabled}', async () => {

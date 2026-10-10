@@ -200,6 +200,11 @@ class Stack:
         return self.runtime.store
 
     @property
+    def react(self) -> bool:
+        """Whether the account UI is the single-page app (consent through the JSON API)."""
+        return bool(self.settings.account_ui == "react")
+
+    @property
     def authz(self) -> Any:
         assert self.runtime.authz is not None
         return self.runtime.authz
@@ -256,7 +261,7 @@ class Stack:
         """Run the browser part for ``user``. Returns (client id, verifier, code, browser)."""
         client_id = client_id or self.register(redirect_uri)
         verifier, challenge = pkce()
-        browser = browser or Browser(self)
+        browser = browser or Browser(self, react=self.react)
         result = browser.connect(
             self.authorize_params(client_id, challenge, redirect_uri=redirect_uri, **overrides), user
         )
@@ -312,9 +317,12 @@ class Landed:
 class Browser:
     """A scripted user agent (own cookie jar) that follows /authorize through sign-in and consent."""
 
-    def __init__(self, stack: Stack, *, client: Any = None) -> None:
+    def __init__(self, stack: Stack, *, client: Any = None, react: bool = False) -> None:
         self.stack = stack
         self.client = client or stack.new_client()
+        #: Decide on a request through the single-page UI's JSON API (``ACCOUNT_UI=react``)
+        #: instead of the server-rendered consent page.
+        self.react = react
         self.trail: list[str] = []
 
     def get(self, url: str, **kw: Any) -> httpx.Response:
@@ -355,6 +363,35 @@ class Browser:
             headers={**ORIGIN, **headers},
         )
 
+    # -- the single-page UI's JSON API ----------------------------------------------------------
+
+    def api(
+        self, method: str, path: str, *, body: Any = None, csrf: str | None = None, **headers: str
+    ) -> httpx.Response:
+        """A call to ``/account/api`` as the page makes it (cookie jar, Origin and CSRF header)."""
+        sent = {"Origin": BASE, "Sec-Fetch-Site": "same-origin", **headers}
+        if csrf is not None:
+            sent["X-CSRF-Token"] = csrf
+        response = self.client.request(method, "/account/api" + path, json=body, headers=sent)
+        self.trail.append(f"{response.status_code} api {method} {path.split('/')[1] if '/' in path else path}")
+        return response
+
+    def csrf_token(self) -> str:
+        me = self.api("GET", "/me")
+        assert me.status_code == 200, me.text
+        return str(me.json()["csrf_token"])
+
+    def decide_api(self, location: str, decision: str = "approve") -> Landed:
+        """What the consent screen does: read the request, decide, return where the browser goes."""
+        txn = query_of(location)["txn"]
+        csrf = self.csrf_token()
+        shown = self.api("GET", f"/consent/{txn}")
+        assert shown.status_code == 200, shown.text
+        done = self.api("POST", f"/consent/{txn}", body={"decision": decision}, csrf=csrf)
+        assert done.status_code == 200, done.text
+        target = str(done.json()["redirect_to"])
+        return Landed(target, query_of(target))
+
     def connect(self, params: Mapping[str, str], user: User, *, decision: str = "approve") -> Landed:
         """/authorize, sign in if needed, decide on the consent page; stop at the app's redirect."""
         response = self.start(params)
@@ -366,6 +403,8 @@ class Browser:
                     query = {k: v[0] for k, v in parse_qs(split.query).items()}
                     return Landed(location, query, response)
                 path = urlsplit(location).path
+                if path == "/account/consent" and self.react:
+                    return self.decide_api(location, decision)
                 if path == "/account/login":
                     response = self.get(location)
                     if response.status_code == 302 and "login.microsoftonline.com" in response.headers["location"]:

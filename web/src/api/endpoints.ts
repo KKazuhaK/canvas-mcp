@@ -11,6 +11,7 @@ import type {
   AdminEnrollmentFilter,
   AdminStatusFilter,
   CanvasTokenRequest,
+  ConsentDecision,
   UiLocale,
 } from './types'
 
@@ -116,6 +117,26 @@ export const adminRemoveEnrollment = (id: string) => call('DELETE /admin/enrollm
 
 export const adminAudit = (before?: string | null) =>
   call('GET /admin/audit', { query: before ? { before } : {} })
+
+// ---- apps (the server's own authorization server) --------------------------------
+
+/** What an app asks for, to show before the person decides. `txn` is the request id from the URL. */
+export const getConsent = (txn: string) => call('GET /consent/{id}', { id: txn })
+
+/** The one decision on a request; the answer says where to send the browser next. */
+export const decideConsent = (txn: string, decision: ConsentDecision) =>
+  call('POST /consent/{id}', { id: txn, body: { decision } })
+
+export const getGrants = () => call('GET /me/grants')
+
+export async function revokeGrant(id: string): Promise<void> {
+  await call('DELETE /me/grants/{id}', { id })
+}
+
+export const adminGrants = (accountId: string) =>
+  call('GET /admin/accounts/{id}/grants', { id: accountId })
+
+export const adminRevokeGrant = (id: string) => call('DELETE /admin/grants/{id}', { id })
 
 // ---- sign-in ------------------------------------------------------------------------
 

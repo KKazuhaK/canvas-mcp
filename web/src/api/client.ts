@@ -67,9 +67,13 @@ http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   return config
 })
 
-/** The signed-out probe: a 401 here is an answer, not a session loss. */
+/**
+ * Requests whose 401 is an answer, not a session loss: the signed-out probe, and the
+ * consent screen, which sends a signed-out person to the sign-in of the app's request
+ * itself (a plain navigation that keeps the request id) instead of the generic sign-in page.
+ */
 function isMeProbe(url: string | undefined): boolean {
-  return url === '/me' || url === '/providers'
+  return url === '/me' || url === '/providers' || (url?.startsWith('/consent/') ?? false)
 }
 
 http.interceptors.response.use(

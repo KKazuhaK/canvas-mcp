@@ -48,6 +48,8 @@ describe('closed error code set', () => {
         // admin
         'last_owner',
         'cannot_disable_self',
+        // an app's authorization request
+        'client_unavailable',
         // only on the sign-in page
         'state_invalid',
         'provider_error',
