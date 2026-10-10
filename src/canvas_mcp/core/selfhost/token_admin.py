@@ -13,8 +13,9 @@ Usage::
     python -m canvas_mcp.core.selfhost.token_admin history [PRINCIPAL] [--limit N]
     python -m canvas_mcp.core.selfhost.token_admin remove PRINCIPAL
     python -m canvas_mcp.core.selfhost.token_admin rotate
-    python -m canvas_mcp.core.selfhost.token_admin list-grants [--all]
+    python -m canvas_mcp.core.selfhost.token_admin list-grants [PRINCIPAL] [--all]
     python -m canvas_mcp.core.selfhost.token_admin revoke-grant GRANT_ID
+    python -m canvas_mcp.core.selfhost.token_admin revoke-grant --account PRINCIPAL
     python -m canvas_mcp.core.selfhost.token_admin rotate-jwt-key
     python -m canvas_mcp.core.selfhost.token_admin db current
     python -m canvas_mcp.core.selfhost.token_admin db upgrade [--backup PATH] [--dry-run]
@@ -52,11 +53,14 @@ display name, sign-in name, provider, created, last sign-in and the legacy
 app: grant id, account key, client kind (``dcr`` or ``cimd``, which answers how a client
 identifies itself), client id (the metadata URL for CIMD), the app's name for itself, the
 return host, created, last used, expires, and the state (``active``, ``expired`` or
-``revoked:<reason>``); ``--all`` includes the ended ones. ``revoke-grant`` ends one
-connection (exit 1 if there is none to end); the running server notices within
+``revoked:<reason>``); ``--all`` includes the ended ones, ``PRINCIPAL`` keeps one account's
+(exit 1 if there is no such account). It never prints a token, a code or a hash.
+``revoke-grant`` ends one connection by its id, or all of one account's with ``--account``
+(each one is audited; exit 1 if there is nothing to end); the running server notices within
 ``GRANT_STATUS_CACHE_S``. ``rotate-jwt-key`` invalidates every access token (apps simply
 refresh; connections are untouched; running servers notice within 30 seconds). To rotate
-the signing key itself, put a new key first in ``CANVAS_TOKEN_KEYS``.
+the signing key itself, put a new key first in ``CANVAS_TOKEN_KEYS``. ``check`` also prints
+how many connections are live.
 
 ``db current`` prints the backend (without credentials), the Alembic revision, the
 schema version marker and whether the database is current; it needs no keys and
@@ -206,9 +210,17 @@ def _build_parser() -> argparse.ArgumentParser:
     list_grants = sub.add_parser(
         "list-grants", help="list connected apps (SELFHOST_AUTH_MODE=local; tab-separated, no secrets)"
     )
+    principal(list_grants, optional=True)
     list_grants.add_argument("--all", action="store_true", help="include ended and expired connections")
-    revoke_grant = sub.add_parser("revoke-grant", help="end one connected app's connection")
-    revoke_grant.add_argument("grant_id", help="the grant id printed by list-grants")
+    revoke_grant = sub.add_parser(
+        "revoke-grant", help="end one connected app's connection, or all of one account's"
+    )
+    revoke_grant.add_argument("grant_id", nargs="?", help="the grant id printed by list-grants")
+    revoke_grant.add_argument(
+        "--account",
+        metavar="PRINCIPAL",
+        help="end every live connection of this account (acct:<uuid>, a bare uuid or entra:<tenant id>:<object id>)",
+    )
     sub.add_parser("rotate-jwt-key", help="invalidate every access token (apps refresh; grants stay)")
     db = sub.add_parser("db", help="inspect and upgrade the database schema")
     db_sub = db.add_subparsers(dest="db_command", required=True)
@@ -431,6 +443,8 @@ def _identity_columns(account: AccountInfo | None) -> tuple[str, str]:
 
 
 _GRANT_ID_RE = _UUID_RE
+#: ``list-grants`` reads at most this many connections (the store's own ceiling).
+_MAX_LISTED_GRANTS = 2000
 
 
 def _grant_state(grant: object, now: int) -> str:
@@ -438,6 +452,17 @@ def _grant_state(grant: object, now: int) -> str:
     if revoked_at is not None:
         return f"revoked:{getattr(grant, 'revoked_reason', None) or '-'}"
     return "expired" if getattr(grant, "expires_at", 0) <= now else "active"
+
+
+def _live_grants(store: TokenStore) -> str:
+    """How many connected apps are live (``check``); "-" if the table cannot be read."""
+    from canvas_mcp.core.selfhost.authz.store import AuthzStore
+
+    try:
+        count = len(AuthzStore(store.database).list_all_grants(limit=_MAX_LISTED_GRANTS))
+    except Exception:  # noqa: BLE001 - check must work on any readable store
+        return "-"
+    return f"{count}+" if count >= _MAX_LISTED_GRANTS else str(count)
 
 
 def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
@@ -450,7 +475,20 @@ def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
     command: str = args.command
     if command == "list-grants":
         now = int(time.time())
-        for grant in authz.list_all_grants(include_inactive=args.all):
+        wanted: str | None = None
+        if args.principal is not None:
+            try:
+                found = _lookup(store, _parse_target(args.principal, args.object_id))
+            except (ValueError, _BadPrincipal):
+                print(_BAD_PRINCIPAL, file=sys.stderr)
+                return EXIT_CONFIG
+            if found is None:
+                print("not found: no such account", file=sys.stderr)
+                return EXIT_NOT_FOUND
+            wanted = found
+        for grant in authz.list_all_grants(include_inactive=args.all, limit=_MAX_LISTED_GRANTS):
+            if wanted is not None and grant.account_key != wanted:
+                continue
             print(
                 "	".join(
                     [
@@ -469,6 +507,24 @@ def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
             )
         return EXIT_OK
     if command == "revoke-grant":
+        if (args.grant_id is None) == (args.account is None):
+            print("error: give a GRANT_ID, or --account PRINCIPAL (not both)", file=sys.stderr)
+            return EXIT_CONFIG
+        if args.account is not None:
+            try:
+                key = _lookup(store, _parse_target(args.account, None))
+            except (ValueError, _BadPrincipal):
+                print(_BAD_PRINCIPAL, file=sys.stderr)
+                return EXIT_CONFIG
+            ended = 0
+            if key is not None:
+                for grant in authz.list_grants(key):
+                    ended += 1 if authz.operator_revoke_grant(grant.id) else 0
+            if ended == 0:
+                print("not found: no live connection for that account")
+                return EXIT_NOT_FOUND
+            print(f"revoked {ended} connection(s)")
+            return EXIT_OK
         grant_id = str(args.grant_id).strip().lower()
         if not _GRANT_ID_RE.match(grant_id) or not authz.operator_revoke_grant(grant_id):
             print("not found: no live connection with that id")
@@ -476,7 +532,10 @@ def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
         print("revoked 1 connection")
         return EXIT_OK
     epoch = authz.bump_jwt_epoch()
-    print(f"access tokens invalidated (epoch {epoch}); running servers notice within 30 seconds")
+    print(
+        f"rotated to epoch {epoch}: access tokens stop verifying within 30 s; "
+        "refresh tokens and grants are kept"
+    )
     return EXIT_OK
 
 
@@ -501,6 +560,7 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
         known = {st.principal_key for st in accounts}
         orphans = sum(1 for row in rows if row.principal_key not in known)
         print(f"tokens of principals without an account: {orphans}")
+        print(f"live connected apps: {_live_grants(store)}")
         print(f"disabled users: {by_status['disabled']}")
         print(
             f"active owners seen: {store.count_active_owners()}"

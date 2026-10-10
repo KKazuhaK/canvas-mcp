@@ -14,7 +14,7 @@ from canvas_mcp.core.selfhost.authz import tokens as tk
 from canvas_mcp.core.selfhost.authz.store import AuthzStore
 from canvas_mcp.core.selfhost.token_store import Keyring, token_db_path
 
-from ..conftest import OID_A, make_account
+from ..conftest import OID_A, OID_B, make_account
 from .helpers import CHALLENGE, CLIENT, REDIRECT, RESOURCE, SCOPE
 
 KEY = base64.b64encode(bytes([1]) * 32).decode()
@@ -93,7 +93,9 @@ def test_rotate_jwt_key_raises_the_epoch(env, capsys) -> None:
     store, authz, _ = env
     assert authz.jwt_epoch() == 0
     assert token_admin.main(["rotate-jwt-key"]) == 0
-    assert "epoch 1" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "epoch 1" in out
+    assert "access tokens stop verifying within 30 s; refresh tokens and grants are kept" in out
     assert authz.jwt_epoch() == 1
     assert any(e.action == "jwt_key_rotated" for e in store.list_audit())
 
@@ -101,3 +103,61 @@ def test_rotate_jwt_key_raises_the_epoch(env, capsys) -> None:
 def test_the_commands_work_on_a_database_that_never_had_a_grant(env, capsys) -> None:
     assert token_admin.main(["list-grants"]) == 0
     assert capsys.readouterr().out == ""
+
+
+def test_list_grants_for_one_account(env, capsys) -> None:
+    store, authz, alice = env
+    bob = make_account(store, OID_B)
+    mine = make_grant(authz, alice)
+    theirs = make_grant(authz, bob)
+    assert token_admin.main(["list-grants", alice]) == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert [line.split("	")[0] for line in lines] == [mine]
+    # the bare uuid works too, and an ended one needs --all
+    authz.operator_revoke_grant(mine)
+    assert token_admin.main(["list-grants", alice.removeprefix("acct:")]) == 0
+    assert capsys.readouterr().out == ""
+    assert token_admin.main(["list-grants", alice, "--all"]) == 0
+    out = capsys.readouterr().out
+    assert out.strip().splitlines()[0].split("	")[0] == mine and theirs not in out
+
+
+def test_list_grants_for_an_unknown_or_malformed_account(env, capsys) -> None:
+    assert token_admin.main(["list-grants", "acct:00000000-0000-4000-8000-000000000000"]) == token_admin.EXIT_NOT_FOUND
+    assert "no such account" in capsys.readouterr().err
+    assert token_admin.main(["list-grants", "nonsense"]) == token_admin.EXIT_CONFIG
+
+
+def test_revoke_grant_for_a_whole_account_audits_each_one(env, capsys) -> None:
+    store, authz, alice = env
+    bob = make_account(store, OID_B)
+    first, second = make_grant(authz, alice), make_grant(authz, alice)
+    other = make_grant(authz, bob)
+    assert token_admin.main(["revoke-grant", "--account", alice]) == 0
+    assert "revoked 2 connection(s)" in capsys.readouterr().out
+    rows = dict(raw_sql(store, "SELECT id, revoked_reason FROM oauth_grants"))
+    assert rows[first] == rows[second] == "operator_revoked" and rows[other] is None
+    assert len([e for e in store.list_audit() if e.action == "grant_revoked"]) == 2
+    assert token_admin.main(["revoke-grant", "--account", alice]) == token_admin.EXIT_NOT_FOUND
+    assert token_admin.main(["revoke-grant", "--account", "acct:00000000-0000-4000-8000-000000000000"]) == token_admin.EXIT_NOT_FOUND
+
+
+def test_revoke_grant_wants_exactly_one_target(env, capsys) -> None:
+    _, authz, alice = env
+    grant_id = make_grant(authz, alice)
+    assert token_admin.main(["revoke-grant"]) == token_admin.EXIT_CONFIG
+    assert token_admin.main(["revoke-grant", grant_id, "--account", alice]) == token_admin.EXIT_CONFIG
+    assert "not both" in capsys.readouterr().err
+    assert token_admin.main(["list-grants"]) == 0
+    assert grant_id in capsys.readouterr().out  # nothing was revoked
+
+
+def test_check_prints_the_number_of_live_connections(env, capsys) -> None:
+    _, authz, alice = env
+    assert token_admin.main(["check"]) == 0
+    assert "live connected apps: 0" in capsys.readouterr().out
+    make_grant(authz, alice)
+    revoked = make_grant(authz, alice)
+    authz.operator_revoke_grant(revoked)
+    assert token_admin.main(["check"]) == 0
+    assert "live connected apps: 1" in capsys.readouterr().out
