@@ -1694,8 +1694,10 @@ class _AccountApp:
                 return self._authorization_invalid()
             session = self._session_of(request)
             reauth = request.query_params.get("reauth") == "1"
-            if session is not None and (session.pending or (session.iat > 0 and not reauth)):
-                # Already signed in (a waiting account only gets to cancel): straight to the app's request.
+            if session is not None and not reauth and (session.pending or session.iat > 0):
+                # Already signed in (a waiting account only gets to cancel): straight to the app's
+                # request. "Use a different account" (reauth) always goes to the identity provider,
+                # a waiting account included.
                 return self.redirect(f"{CONSENT_PATH}?{urllib.parse.urlencode({'txn': txn_id})}", 303)
         state = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(32)
@@ -2023,9 +2025,11 @@ class _AccountApp:
             _header()
             + '<section class="card"><p>'
             + _bi(
-                "这个连接请求已过期、已被使用，或不是在这个浏览器里发起的。请回到应用，重新连接。",
+                "这个连接请求已过期、已被使用，或不是在这个浏览器里发起的。"
+                "如果你刚才点了两次按钮，应用可能已经连接成功，请先回到应用查看；否则请重新连接。",
                 "This connection request has expired, was already used, or was opened in another browser. "
-                "Go back to your app and connect again.",
+                "If you pressed the button twice, the app may already be connected: check the app first, "
+                "and connect again only if it is not.",
             )
             + "</p></section>",
             csp=_CONSENT_CSP,
@@ -2122,7 +2126,7 @@ class _AccountApp:
         """POST /account/consent: approve or deny. Same pipeline as every other post."""
         assert self.authz is not None
         if self._session_of(request) is None:
-            return self.redirect(ACCOUNT_PATH, 303)
+            return await self._consent_session_ended(request)
         guarded = await self._guard_post(request)
         if isinstance(guarded, Response):
             return guarded
@@ -2152,7 +2156,22 @@ class _AccountApp:
             return self._consent_refusal(outcome.code)
         return self.redirect(outcome.url, 303, csp=_CONSENT_CSP)
 
-    # -- connected apps (the operations behind a future page; no UI yet) ----------------------
+    async def _consent_session_ended(self, request: Request) -> Response:
+        """The sign-in ended between the consent page and its button: sign in again, same request.
+
+        The form is read only after the Origin check, and only its transaction id is used
+        (validated by shape; the sign-in page checks that the request exists and belongs to
+        this browser). Anything else goes to the account page, as for every other post.
+        """
+        if request.headers.get("origin") == self.base:
+            form = await self._read_form(request, 10)
+            if not isinstance(form, Response):
+                txn_id = form.get("txn", "")
+                if _TXN_ID_RE.fullmatch(txn_id):
+                    return self.redirect(f"{_LOGIN_PATH}?{urllib.parse.urlencode({'txn': txn_id})}", 303)
+        return self.redirect(ACCOUNT_PATH, 303)
+
+    # -- connected apps and the owner's grant operations (the pages call these) -----------------
 
     async def list_own_grants(self, session: _Session) -> list[GrantRecord] | Refusal:
         """The apps connected to the signed-in account, newest first."""

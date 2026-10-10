@@ -48,7 +48,7 @@
   "bad_roles": "The roles on that account are not valid for this server.",
   "access_denied": "Sign-in was denied. This account is not allowed to use this server.",
   "signups_paused": "New sign-ups are paused. Existing accounts can still sign in.",
-  "authorization_invalid": "That connection request expired, was started in a different browser, or was already used. Go back to the app and connect again.",
+  "authorization_invalid": "That connection request expired, was started in a different browser, or was already used. If you pressed the button twice, the app may already be connected: check the app first, and connect again only if it is not.",
   "network_error": "Could not reach the server. Check your connection and try again.",
   "timeout": "The server took too long to answer. Try again."
 }

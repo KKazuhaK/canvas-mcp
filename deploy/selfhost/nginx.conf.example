@@ -86,8 +86,9 @@ server {
     }
 
     # SELFHOST_AUTH_MODE=local: the token endpoint and the revocation endpoint. Bodies are tiny
-    # (the service refuses more than 16 KiB itself). They do not exist in entra_proxy mode, where
-    # /token is FastMCP's and /revoke answers 404; the block is harmless there.
+    # (the service refuses more than 16 KiB itself). In entra_proxy mode /token is FastMCP's and
+    # /revoke answers 404, but these blocks still apply there: they rate-limit /token to 120 requests a
+    # minute per IP (claude.ai's egress range is exempt). Delete the two blocks if you do not want that.
     location = /token {
         limit_req zone=canvas_token burst=60 nodelay;
         proxy_pass http://127.0.0.1:8819;

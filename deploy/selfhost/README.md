@@ -314,7 +314,7 @@ The service itself **does not trust** the `X-Forwarded-*` headers (every URL is 
 
 The sign-in flow puts one-time values in URLs: `/authorize` receives `state` and a PKCE challenge, and the browser comes back to `/auth/callback?code=...&state=...` after Entra (this service's redirect back to the MCP client carries another `code`/`state` pair in its `Location` header). A default access log writes the whole request line, query string included, so these values end up in log files, log shippers and backups. They are short-lived and single use, but a code captured and replayed inside its lifetime is still an attack, and `state` is a CSRF defence. Log the path only.
 
-With `SELFHOST_AUTH_MODE=local` the request id of an app's authorization (`txn`) also travels in a URL: `/account/login?txn=...` and `/account/consent?txn=...`. It is single use, tied to the browser that started the request and lives 10 minutes, but treat it like `state`: the nginx format below logs the path only, and the Caddy filter blanks it.
+With `SELFHOST_AUTH_MODE=local` the request id of an app's authorization (`txn`) also travels in a URL: `/account/login?txn=...` and `/account/consent?txn=...` (with `ACCOUNT_UI=react`, the page's calls are `GET /account/api/consent?txn=...` and a `POST /account/api/consent` that carries it in the JSON body, so it is never part of a path). It is single use, tied to the browser that started the request and lives 10 minutes, but treat it like `state`: the nginx format below logs the path only, and the Caddy filter blanks it.
 
 nginx (the full example is in [`nginx.conf.example`](nginx.conf.example)): define a format that uses `$uri`, which has no query string, instead of `$request`, and use it for every `access_log`:
 
@@ -366,7 +366,7 @@ If the domain goes through the Cloudflare proxy (orange cloud):
 
 - **Use SSL/TLS mode Full (strict)**; the origin needs a valid certificate (Let's Encrypt or a Cloudflare Origin certificate).
 - **Allow claude.ai's egress range**: claude.ai makes requests from `160.79.104.0/21` (including fetching the client metadata document). Create a WAF custom rule: expression `ip.src in {160.79.104.0/21}`, action **Skip**, and check skipping all security features (skip the remaining custom rules, rate limiting, managed rules, Bot Fight / Super Bot Fight and so on).
-- **Turn off Bot Fight Mode / Super Bot Fight Mode**, and **do not use a JS challenge or managed challenge** on `/mcp`, `/token`, `/register`, `/revoke` and `/.well-known/*` (with `SELFHOST_AUTH_MODE=local` also none on `/authorize`, `/account/login`, `/account/callback` or `/account/consent`: they are part of the sign-in redirect chain). These are machine-to-machine interfaces, and a challenge page makes OAuth and MCP fail outright.
+- **Turn off Bot Fight Mode / Super Bot Fight Mode**, and **do not use a JS challenge or managed challenge** on `/mcp`, `/token`, `/register`, `/revoke` and `/.well-known/*` (with `SELFHOST_AUTH_MODE=local` also none on `/authorize`, `/account/login`, `/account/callback`, `/account/consent` or `/account/api/consent`: they are part of the sign-in redirect chain). These are machine-to-machine interfaces, and a challenge page makes OAuth and MCP fail outright.
 - **Add a rate-limiting rule for `/register` and `/authorize`** (the free plan has 1): expression `(http.request.uri.path in {"/register" "/authorize"})`, 10 requests per minute per IP, then block. Behind Cloudflare, nginx sees Cloudflare's addresses, so for per-IP limiting either restore the real IP first (`CF-Connecting-IP`) or rely on this Cloudflare rule alone. Note that the first Skip rule lets claude.ai's egress range through, so that range is not subject to this limit.
 - **Do not cache**: add a cache rule that sets Bypass cache for the whole hostname.
 - **Turn off Rocket Loader** (it rewrites the scripts in pages).
@@ -453,7 +453,7 @@ The same app registration serves both modes. In `local` mode you need only `http
 
 ### The settings
 
-All of them go in `.env` ([`env.example`](env.example) has them commented out). They are parsed and checked in both modes, so a typo fails closed at startup, and only `local` uses them (`--config` marks them "ignored (entra_proxy)"). A duration is a whole number of seconds, or a number followed by `s`, `m`, `h` or `d`. No message names a rejected value.
+All of them go in `.env` ([`env.example`](env.example) has them commented out). They are parsed and checked in both modes, so a typo fails closed at startup, and only `local` uses them (in `entra_proxy` mode `--config` prints `MCP authorization: entra_proxy (FastMCP OAuth proxy); local-mode settings ignored`, and in `local` mode it prints the effective values). A duration is a whole number of seconds, or a number followed by `s`, `m`, `h` or `d`. No message names a rejected value.
 
 | Variable | Default | Range | Meaning |
 |---|---|---|---|
@@ -479,6 +479,11 @@ The local authorization server is built on FastMCP and the MCP SDK and uses a fe
 
 Nothing is deployed from this release yet, so there are no live connectors to migrate. Either go live on `entra_proxy` and move later, or run `local` on a **staging hostname** first: its own DNS name, its own `PUBLIC_BASE_URL`, and its own Entra redirect `https://<staging host>/account/callback`. Work through the list, then set `SELFHOST_AUTH_MODE=local` in production. Record what you see (the `token_admin list-grants` column `client_kind` says whether a client used CIMD or registered itself).
 
+**Before you start**
+
+- Enroll a Canvas token for the test account (sign in at `https://<host>/account` and save one). Without it the tool-call steps below fail for reasons that have nothing to do with the authorization server.
+- Check that the server can reach the internet by name: it must resolve and fetch `https://claude.ai/oauth/mcp-oauth-client-metadata` over TLS (outbound DNS and HTTPS are required for client metadata documents). If it cannot, `/authorize` shows a **Client Not Registered** page instead of the consent page (see [Troubleshooting](#troubleshooting)); the log has `cimd_fetch` lines saying why.
+
 **claude.ai on the web**
 
 1. Settings → Connectors → Add custom connector with `https://<host>/mcp`. Leave the client id and secret empty. Connect.
@@ -488,6 +493,7 @@ Nothing is deployed from this release yet, so there are no live connectors to mi
 5. Disconnect the connector in claude.ai and check whether the grant disappears (claude.ai may call `/revoke`; if it does not, the connection stays listed until you revoke it under Connected apps).
 6. Connect again, then revoke the app under **Connected apps**: the next tool call must fail and claude.ai must offer to reconnect.
 7. Disable the account (`/account/admin`, or `token_admin disable`): tool calls must be refused.
+8. Repeat steps 1 to 4 once with the other registration path: remove the connector and add it again, choosing the dialog's option to register automatically if it offers one (dynamic client registration). `token_admin list-grants` then shows a `dcr` line next to the `cimd` one, and both must work, because which path a client takes is its own choice and can change.
 
 **Claude Desktop** reuses the claude.ai connector. The authorization callback goes to claude.ai and then on to the app (`claude://`); check that the consent page's **Allow** completes that hop.
 
@@ -536,11 +542,11 @@ Each approved connection is listed by the person it belongs to: the app's name (
 
 ### Edge, WAF and rate limits for the local server
 
-The endpoints are the same ones a proxy-mode deployment already exposes, plus `/revoke`, and `/token` is now busy. In `local` mode the service itself limits `/token` to 120 requests a minute and `/revoke` to 30 (process-wide, with the existing `/register`, `/authorize` and `/register`-per-day limits), and accepts at most 16 KiB of body on `/token`, `/revoke`, `/authorize` and `/register`. Per-IP limits can only live in the proxy: `nginx.conf.example` adds a `canvas_token` zone for `/token` and `/revoke`, and the Caddy example a commented rate-limit block.
+The endpoints are the same ones a proxy-mode deployment already exposes, plus `/revoke`, and `/token` is now busy. In `local` mode the service itself limits `/token` to 120 requests a minute and `/revoke` to 30 (process-wide, with the existing `/register`, `/authorize` and `/register`-per-day limits), and accepts at most 16 KiB of body on `/token`, `/revoke`, `/authorize` and `/register`. Per-IP limits can only live in the proxy: `nginx.conf.example` adds a `canvas_token` zone for `/token` and `/revoke` (note that this also rate-limits `/token` of an `entra_proxy` deployment that uses the file; delete the two `location` blocks if you do not want that), and the Caddy example a commented rate-limit block.
 
 claude.ai's refreshes all come from Anthropic's shared egress range `160.79.104.0/21`, so a per-IP limit on `/token` would throttle every claude.ai user at once if it counted that range. The nginx example exempts it; do the same in any other limiter.
 
-Do **not** put a challenge (JS or managed) or bot protection on `/.well-known/*`, `/token`, `/register`, `/revoke`, `/authorize`, `/account/login`, `/account/callback` or `/account/consent`: they are machine-to-machine or part of the sign-in redirect chain, and a challenge page makes the connection fail. The sign-in request id travels in the `txn` query value of `/account/login` and `/account/consent`; see [Keep OAuth codes out of proxy logs](#keep-oauth-codes-out-of-proxy-logs).
+Do **not** put a challenge (JS or managed) or bot protection on `/.well-known/*`, `/token`, `/register`, `/revoke`, `/authorize`, `/account/login`, `/account/callback`, `/account/consent` or `/account/api/consent`: they are machine-to-machine or part of the sign-in redirect chain, and a challenge page makes the connection fail. The sign-in request id travels in the `txn` query value of `/account/login`, `/account/consent` and `GET /account/api/consent`; see [Keep OAuth codes out of proxy logs](#keep-oauth-codes-out-of-proxy-logs).
 
 ## Per-user enrollment (/account)
 
@@ -1143,6 +1149,7 @@ Use `--config` to see the value the server runs with.
 | Long-running tool calls return 504 / 524 | The Cloudflare free plan has a 100-second timeout: switch to DNS only (gray cloud) |
 | **429** (with `Retry-After`) while connecting or authorizing | The rate limit on `/register` or `/authorize` was hit (see "Disk and abuse protection"). Wait a minute and retry; if it keeps happening, someone is hammering these two entry points, so check the proxy's access log |
 | *`SELFHOST_AUTH_MODE=local`:* a page says **This connection request has expired or was opened in another browser** | The app's authorization request is tied to the browser that made the `/authorize` request (a `__Host-cmcp_bind` cookie), lives 10 minutes and works once. Finish the sign-in in the same browser, window or in-app browser that started it, do not open the link elsewhere, and connect again from the app. Check the browser keeps cookies for the host |
+| *`SELFHOST_AUTH_MODE=local`:* `/authorize` shows a page titled **Client Not Registered** (HTTP 400) | The client is unknown to this server: its registration expired, its client metadata document could not be fetched (the server has no outbound DNS/HTTPS to the client's host, the document is invalid, or the fetch took longer than 3 seconds), or the redirect URI it sent is not registered or not on `OAUTH_ALLOWED_REDIRECT_URIS`. Nothing was granted and no sign-in was started. Look for `cimd_fetch` lines in the log, check outbound access and the allow-list, then connect again |
 | *`SELFHOST_AUTH_MODE=local`:* the consent page says the app **could not be confirmed** | The app's registration expired, its client metadata document could not be read, or its return address is not on `OAUTH_ALLOWED_REDIRECT_URIS`. Nothing was granted. Check outbound access to the app's host and the allow-list, then connect again |
 | *`SELFHOST_AUTH_MODE=local`:* a client keeps being sent to sign in again | `invalid_grant` (HTTP 401): its refresh token was replayed outside the grace window, the connection was revoked, the account is disabled, or `MAX_UPSTREAM_AUTH_AGE` passed. `token_admin list-grants --all` shows the state (`revoked:<reason>`). The person connects again |
 | *`SELFHOST_AUTH_MODE=local`:* the server will not start and names `SELFHOST_AUTH_MODE` or one of its settings | A value is malformed or out of range (the table in [MCP authorization](#mcp-authorization-entra_proxy-default-or-local) lists them), or `PUBLIC_BASE_URL` has an explicit `:443`. No message repeats the value |

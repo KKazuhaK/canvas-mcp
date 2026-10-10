@@ -137,6 +137,10 @@ function ConsentCard({ txn }: { txn: string }) {
         if (target === null) setUnsafe(true)
         else hardNavigate(target)
       },
+      // The session ended between the screen and the button: sign in again for this same request.
+      onError: (error) => {
+        if (isUnauthenticated(error)) hardNavigate(consentLoginPath(txn))
+      },
     })
   }
 
@@ -195,7 +199,7 @@ function ConsentCard({ txn }: { txn: string }) {
  * sign-in page but straight to the server-side sign-in of this very request (a full-page
  * navigation that keeps the request id), and comes back here.
  *
- * Everything shown comes from GET /consent/{id}; what happens next comes from the answer to the
+ * Everything shown comes from GET /consent?txn=...; what happens next comes from the answer to the
  * decision: the page navigates to the app's own return address (checked first) and never
  * submits a form. The request id is single-use and tied to the browser that started it, so
  * a link opened elsewhere only shows an error.
