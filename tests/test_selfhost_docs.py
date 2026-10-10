@@ -1269,7 +1269,10 @@ def test_the_google_notes_match_what_the_server_asks_for(readme):
 
 
 def test_the_proxy_example_keeps_the_per_ip_rate_below_the_service_backstop():
-    from canvas_mcp.core.selfhost.login.registry import START_BURST, START_REFILL_PER_SECOND
+    from canvas_mcp.core.selfhost.login.registry import (
+        START_BURST,
+        START_REFILL_PER_SECOND,
+    )
 
     nginx = (SELFHOST / "nginx.conf.example").read_text(encoding="utf-8")
     per_ip = int(re.search(r"zone=canvas_signin:\w+ rate=(\d+)r/m", nginx).group(1))

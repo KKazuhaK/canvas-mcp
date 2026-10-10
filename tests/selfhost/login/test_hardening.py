@@ -8,10 +8,8 @@ import pytest
 from dbbackend import raw_sql
 
 from .fake_idp import GitHubUser
-
 from .stack_providers import provider_stack
 from .test_entra_only_golden import account_app
-
 
 # -- the iss requirement survives a restart between the start and the callback ------------------
 
