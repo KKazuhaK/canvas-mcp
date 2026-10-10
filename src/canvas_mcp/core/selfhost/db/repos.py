@@ -127,8 +127,10 @@ def _account_columns() -> list[Any]:
 
 
 def _for_update(stmt: Select[Any], enabled: bool) -> Select[Any]:
-    # SQLite has no row locks and renders nothing for FOR UPDATE; on PostgreSQL the
-    # global writer lock already serialises writers, so this is defence in depth.
+    # SQLite has no row locks and renders nothing for FOR UPDATE (its write lock already
+    # serialises writers). On PostgreSQL this is a real row lock: inside the global writer
+    # lock it is defence in depth, inside ``row_write`` (no advisory lock) it is what
+    # makes a transaction wait for a concurrent change of the same account.
     return stmt.with_for_update() if enabled else stmt
 
 

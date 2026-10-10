@@ -243,6 +243,102 @@ class TestAuthorizationCode:
         assert grant_row(world, result.grant.id)[1] == "code_replay"
 
 
+class TestCodeReplayAgainstRotation:
+    """A replay inside the window makes a sibling of the first token; a rotation retires siblings.
+
+    The two must serialise on the grant row, or the family ends with two live branches
+    (the replay's window decision read the family before the rotation, its insert came after).
+    """
+
+    def test_a_rotation_waits_for_a_replay_and_retires_its_sibling(self, world: World) -> None:
+        raw = world.code()
+        raw_a = tk.new_refresh_token()
+        first = world.a.authz.exchange_code(
+            code_hash=tk.hash_secret(raw), client_id=CLIENT, grant_id=str(uuid.uuid4()),
+            refresh_hash=tk.hash_secret(raw_a),
+        )
+        assert first.outcome is X.WON and first.grant is not None
+        raw_b = tk.new_refresh_token()
+        gate = Gate("after_code_grant_lock")
+        world.b.authz.pause_hook = gate
+        replay = Runner(
+            lambda: world.b.authz.exchange_code(
+                code_hash=tk.hash_secret(raw), client_id=CLIENT, grant_id=str(uuid.uuid4()),
+                refresh_hash=tk.hash_secret(raw_b),
+            )
+        )
+        assert gate.reached.wait(WAIT)
+        rotation = Runner(lambda: world.rotate(world.a, raw_a))
+        assert rotation.still_blocked()  # the replay holds the grant row, on both backends
+        gate.release.set()
+        assert replay.join().outcome is X.GRACE
+        rotated, successor = rotation.join()
+        assert rotated.outcome is R.ROTATED
+        world.b.authz.pause_hook = None
+        # The sibling the replay issued was retired by the rotation: no second live branch.
+        assert world.rotate(world.b, raw_b)[0].outcome is R.REUSE_REVOKED
+        assert world.rotate(world.a, successor)[0].outcome is R.DEAD
+        assert grant_row(world, first.grant.id)[1] == "refresh_reuse"
+
+    def test_a_replay_waits_for_a_rotation_and_then_revokes(self, world: World) -> None:
+        raw = world.code()
+        raw_a = tk.new_refresh_token()
+        first = world.a.authz.exchange_code(
+            code_hash=tk.hash_secret(raw), client_id=CLIENT, grant_id=str(uuid.uuid4()),
+            refresh_hash=tk.hash_secret(raw_a),
+        )
+        assert first.outcome is X.WON and first.grant is not None
+        gate = Gate("after_grant_lock")
+        world.a.authz.pause_hook = gate
+        rotation = Runner(lambda: world.rotate(world.a, raw_a))
+        assert gate.reached.wait(WAIT)
+        replay = Runner(lambda: world.exchange(world.b, raw))
+        assert replay.still_blocked()
+        gate.release.set()
+        assert rotation.join()[0].outcome is R.ROTATED
+        # The family has moved on by the time the replay looks: outside the window.
+        assert replay.join().outcome is X.REPLAY_REVOKED
+        assert grant_row(world, first.grant.id)[1] == "code_replay"
+
+
+class TestFirstExchangeAgainstDisabling:
+    """A grant created while the account is being disabled must not outlive the disablement."""
+
+    @pytest.mark.parametrize("via", ["disable_principal", "admission_lost"])
+    def test_the_disablement_revokes_a_grant_that_is_being_created(self, world: World, via: str) -> None:
+        raw = world.code()
+        gate = Gate("after_grant_insert")
+        world.a.authz.pause_hook = gate
+        exchange = Runner(lambda: world.exchange(world.a, raw))
+        assert gate.reached.wait(WAIT)
+
+        def disable() -> Any:
+            if via == "disable_principal":
+                return world.b.tokens.disable_principal(
+                    world.account_key, actor=OPERATOR, reason="operator_disabled"
+                )
+            return world.b.authz.revoke_all_for_account(world.account_key, reason="admission_lost")
+
+        disabling = Runner(disable)
+        assert disabling.still_blocked()  # it waits for the account row the exchange locked
+        gate.release.set()
+        result = exchange.join()
+        assert result.outcome is X.WON and result.grant is not None
+        assert disabling.join()
+        reason = grant_row(world, result.grant.id)
+        assert reason[0] is not None and reason[1] == via.replace("disable_principal", "account_disabled")
+        if via == "disable_principal":
+            world.b.tokens.enable_principal(world.account_key, actor=OPERATOR)
+        status = world.a.authz.grant_status(result.grant.id)
+        assert not status.usable(int(world.clock()))  # re-enabling the account does not revive it
+
+    def test_an_exchange_after_the_disablement_is_refused(self, world: World) -> None:
+        raw = world.code()
+        assert world.b.tokens.disable_principal(world.account_key, actor=OPERATOR, reason="operator_disabled")
+        assert world.exchange(world.a, raw).outcome is X.INACTIVE
+        assert raw_sql(world.a.tokens, "SELECT COUNT(*) FROM oauth_grants")[0][0] == 0
+
+
 class TestRefreshRotation:
     def test_the_second_rotation_waits_and_then_gets_a_sibling(self, world: World) -> None:
         grant_id, refresh = world.grant()

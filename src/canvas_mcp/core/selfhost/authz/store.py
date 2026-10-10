@@ -17,6 +17,11 @@ What makes that safe is the order inside them:
   family, every revocation of the grant and every disabling of the account write that
   row, so they serialise on it, and each of them re-evaluates "is the grant still live"
   after the wait. No decision in these transactions rests on a predicate over many rows.
+  The replay of an already-consumed code takes the same grant lock before it looks at
+  the family (the window decision reads many rows), so it serialises with rotations too.
+* **First exchange**: the account row is read ``FOR UPDATE`` before the grant is inserted;
+  disabling an account takes the same lock before it revokes the grants, so a grant is
+  never created behind a disablement that has already looked for grants.
 
 **Replays.** A code or refresh token that is presented again is usually not theft: a client
 retries a slow ``/token`` call, or two workers refresh together. So a replay within
@@ -295,12 +300,17 @@ class AuthzStore:
             # Not consumed by this call: unknown for this client, expired, or a replay.
             if code.consumed_at is None or code.client_id != client_id or code.grant_id is None:
                 return ExchangeResult(ExchangeOutcome.DEAD)
+            # The grant row lock comes first, as on the refresh path: whether this replay is
+            # inside the window depends on whether the family has rotated (``any_used``), and
+            # a rotation (which also writes this row) must not slip in between that read and
+            # the sibling insert below, or the family would end with two live branches.
+            if not self._repos.grants.lock_live(conn, code.grant_id, now):
+                return ExchangeResult(ExchangeOutcome.DEAD)
+            self._pause("after_code_grant_lock")
             grant_row = self._repos.grants.get(conn, code.grant_id)
-            if grant_row is None:
+            if grant_row is None:  # pragma: no cover - the lock just matched it
                 return ExchangeResult(ExchangeOutcome.DEAD)
             grant = GrantRecord.from_row(grant_row)
-            if grant.revoked_at is not None:
-                return ExchangeResult(ExchangeOutcome.DEAD)
             inside_window = (
                 policy.refresh_reuse_grace_s > 0
                 and now - code.consumed_at <= policy.refresh_reuse_grace_s
@@ -313,8 +323,6 @@ class AuthzStore:
                 return ExchangeResult(ExchangeOutcome.REPLAY_REVOKED, grant)
             if not self._repos.codes.bump_grace(conn, code_hash, MAX_GRACE_REPLAYS):
                 return ExchangeResult(ExchangeOutcome.CAPPED, grant)
-            if not self._repos.grants.lock_live(conn, grant.id, now):
-                return ExchangeResult(ExchangeOutcome.DEAD)
             if not self._account_active(conn, grant.account_id):
                 return ExchangeResult(ExchangeOutcome.INACTIVE, grant)
             if refresh_hash is not None:
@@ -338,7 +346,11 @@ class AuthzStore:
     ) -> ExchangeResult:
         """The call that consumed the code: checks, then the grant and its first token."""
         policy = self.settings
-        if not self._account_active(conn, code.account_id):
+        # The account row is read FOR UPDATE: disabling an account (and ``admission_lost``)
+        # takes the same lock before it revokes the account's grants, so it either sees the
+        # grant inserted below (and revokes it) or runs first (and this exchange is refused).
+        account = self._repos.accounts.get(conn, code.account_id, for_update=True)
+        if account is None or account[1] != acc.STATUS_ACTIVE:
             return ExchangeResult(ExchangeOutcome.INACTIVE)
         if now - code.upstream_auth_at > policy.max_upstream_auth_age:
             self._event(
@@ -372,6 +384,7 @@ class AuthzStore:
                 now=now,
                 expires_at=expires_at,
             )
+        self._pause("after_grant_insert")
         if code.client_kind == CLIENT_KIND_DCR:
             # A registration lives as long as the longest connection made with it.
             self._repos.clients.extend(conn, code.client_id, expires_at)
@@ -581,6 +594,9 @@ class AuthzStore:
         account_id = acc.account_id_of(account_key)
         now = self._now()
         with self._db.row_write() as conn:
+            # Serialise with a first code exchange of the account (which reads the row FOR
+            # UPDATE) so that a grant created concurrently is seen by the revocation below.
+            self._repos.accounts.get(conn, account_id, for_update=True)
             count = self._repos.grants.revoke_for_account(
                 conn, account_id, reason=reason, by=BY_SYSTEM, now=now
             )
