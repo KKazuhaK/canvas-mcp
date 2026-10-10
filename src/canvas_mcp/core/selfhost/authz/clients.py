@@ -411,6 +411,8 @@ class CimdResolver:
 
     def _accept(self, url: str, fetched: compat.FetchedDocument) -> CimdClientData:
         """Validate a fetched document against everything this server requires."""
+        if len(fetched.content) > compat.MAX_DOCUMENT_BYTES:
+            raise compat.DocumentRejected(compat.DOC_INVALID)
         try:
             raw = json.loads(fetched.content.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
