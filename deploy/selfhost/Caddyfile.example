@@ -15,7 +15,8 @@
 # trusted_proxies together with {client_ip}, or simply use option 2.
 #
 # Logging: the sign-in flow puts one-time values in URLs (/authorize?...state=...,
-# /auth/callback?code=...&state=...). The log block below blanks them, and the headers that
+# /auth/callback?code=...&state=..., and with SELFHOST_AUTH_MODE=local the request id in
+# /account/login?txn=... and /account/consent?txn=...). The log block below blanks them, and the headers that
 # carry credentials, before anything is written. Keep it when you add log outputs or sinks.
 canvas.mcp.kazuhahub.com {
 	log {
@@ -25,6 +26,7 @@ canvas.mcp.kazuhahub.com {
 			request>uri query {
 				replace code REDACTED
 				replace state REDACTED
+				replace txn REDACTED
 				replace session_state REDACTED
 				replace id_token REDACTED
 				replace access_token REDACTED
@@ -43,6 +45,21 @@ canvas.mcp.kazuhahub.com {
 	# 	zone oauth_open {
 	# 		key    {remote_host}
 	# 		events 10
+	# 		window 1m
+	# 	}
+	# }
+	#
+	# SELFHOST_AUTH_MODE=local also serves /token (every token refresh) and /revoke, which the MCP
+	# clients call themselves: a higher limit, and not for claude.ai's shared egress range
+	# 160.79.104.0/21, whose users would otherwise be throttled together.
+	# @oauth_token {
+	# 	path /token /revoke
+	# 	not remote_ip 160.79.104.0/21
+	# }
+	# rate_limit @oauth_token {
+	# 	zone oauth_token {
+	# 		key    {remote_host}
+	# 		events 120
 	# 		window 1m
 	# 	}
 	# }

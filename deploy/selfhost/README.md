@@ -15,6 +15,7 @@ Image: `ghcr.io/kkazuhak/canvas-mcp` (linux/amd64 + linux/arm64, non-root, data 
 - [Cloudflare notes](#cloudflare-notes)
 - [Step 5: Pull the image and start](#step-5-pull-the-image-and-start)
 - [Step 6: Connect claude.ai and Claude Code](#step-6-connect-claudeai-and-claude-code)
+- [MCP authorization: entra_proxy (default) or local](#mcp-authorization-entra_proxy-default-or-local)
 - [Per-user enrollment (/account)](#per-user-enrollment-account)
 - [Account UI (React or legacy)](#account-ui-react-or-legacy)
 - [Accounts and admission](#accounts-and-admission)
@@ -46,6 +47,8 @@ Image: `ghcr.io/kkazuhak/canvas-mcp` (linux/amd64 + linux/arm64, non-root, data 
  │  /mcp            MCP endpoint: accepts only tokens issued by this service, and        │
  │                  checks tenant tid, application azp and roles on every request        │
  │  /authorize /token /register /consent /auth/callback   OAuth proxy (FastMCP)          │
+ │      (SELFHOST_AUTH_MODE=local instead: /authorize /token /register /revoke, the      │
+ │       server's own authorization server; consent is at /account/consent)              │
  │  /account /account/*   browser pages: sign in, enroll / delete your own Canvas        │
  │                        token, owner administration                                    │
  │  /healthz        health check                                                         │
@@ -94,6 +97,8 @@ Under Authentication → Platform configurations → Web, there must be exactly 
 
 - `https://canvas.mcp.kazuhahub.com/auth/callback` (MCP sign-in)
 - `https://canvas.mcp.kazuhahub.com/account/callback` (/account sign-in)
+
+With `SELFHOST_AUTH_MODE=local` only the second one is used (see [MCP authorization](#mcp-authorization-entra_proxy-default-or-local)); keep both so you can switch back.
 
 Further down the same page, leave both "Implicit grant and hybrid flows" checkboxes (access tokens, ID tokens) **unchecked** (no implicit grant).
 
@@ -241,6 +246,8 @@ The full example is in [`nginx.conf.example`](nginx.conf.example); the core is:
 ```nginx
 # Rate-limit the sign-in-free /register and /authorize by IP (see "Disk and abuse protection" for why)
 limit_req_zone $binary_remote_addr zone=canvas_oauth:10m rate=10r/m;
+# SELFHOST_AUTH_MODE=local also has /token and /revoke: nginx.conf.example adds a canvas_token zone
+# (120r/m per IP, with claude.ai's egress range 160.79.104.0/21 exempt) for them
 limit_req_status 429;
 
 server {
@@ -299,13 +306,15 @@ canvas.mcp.kazuhahub.com {
 }
 ```
 
-Standard Caddy has no rate-limiting feature. To limit `/register` and `/authorize` by IP, either build Caddy with xcaddy including [caddy-ratelimit](https://github.com/mholt/caddy-ratelimit) (the example file has the commented-out configuration), or add a rate-limiting rule in Cloudflare (see below).
+Standard Caddy has no rate-limiting feature. To limit `/register` and `/authorize` (and, with `SELFHOST_AUTH_MODE=local`, `/token` and `/revoke`) by IP, either build Caddy with xcaddy including [caddy-ratelimit](https://github.com/mholt/caddy-ratelimit) (the example file has the commented-out configuration), or add a rate-limiting rule in Cloudflare (see below).
 
 The service itself **does not trust** the `X-Forwarded-*` headers (every URL is generated from `PUBLIC_BASE_URL`), so how the proxy sets those headers does not affect security.
 
 ### Keep OAuth codes out of proxy logs
 
 The sign-in flow puts one-time values in URLs: `/authorize` receives `state` and a PKCE challenge, and the browser comes back to `/auth/callback?code=...&state=...` after Entra (this service's redirect back to the MCP client carries another `code`/`state` pair in its `Location` header). A default access log writes the whole request line, query string included, so these values end up in log files, log shippers and backups. They are short-lived and single use, but a code captured and replayed inside its lifetime is still an attack, and `state` is a CSRF defence. Log the path only.
+
+With `SELFHOST_AUTH_MODE=local` the request id of an app's authorization (`txn`) also travels in a URL: `/account/login?txn=...` and `/account/consent?txn=...`. It is single use, tied to the browser that started the request and lives 10 minutes, but treat it like `state`: the nginx format below logs the path only, and the Caddy filter blanks it.
 
 nginx (the full example is in [`nginx.conf.example`](nginx.conf.example)): define a format that uses `$uri`, which has no query string, instead of `$request`, and use it for every `access_log`:
 
@@ -326,6 +335,7 @@ log {
 		request>uri query {
 			replace code REDACTED
 			replace state REDACTED
+			replace txn REDACTED
 			replace session_state REDACTED
 			replace id_token REDACTED
 			replace access_token REDACTED
@@ -346,7 +356,7 @@ Any other proxy, load balancer, CDN or WAF in front (Cloudflare logs, a cloud lo
 
 1. **Per-IP rate limit in the reverse proxy (the main defense)**: the nginx example above allows these two paths 10 requests per minute per IP with a burst of 5. The service itself cannot tell source IPs apart (it does not trust `X-Forwarded-*`), so this layer can only live in the proxy.
 2. **A backstop limit inside the service**: the whole process accepts at most 30 `/register` and 30 `/authorize` requests per minute (beyond that it returns 429 with `Retry-After`), `/register` has an additional total cap of 300 per day, and a registration request body may not exceed 16 KiB. These counts are shared by the whole process, so during an attack they may also block legitimate users' connections; they cannot replace layer 1.
-3. **Records expire**: dynamically registered client records are kept for 30 days (FastMCP's default is never to expire them); after expiry the client has to register again (most clients do this automatically, otherwise the user adds the connection once more); expired authorization transactions, authorization codes and similar records are cleaned off the disk by the service (at most once an hour, triggered by `/register` and `/authorize` requests). CIMD clients (the path claude.ai uses by default) take no disk space.
+3. **Records expire** (with `SELFHOST_AUTH_MODE=local` the same rows live in the token database and the cleanup there removes expired sign-in requests, codes, refresh tokens, ended connections, registrations and stale client documents; `/token` and `/revoke` trigger it too): dynamically registered client records are kept for 30 days (FastMCP's default is never to expire them); after expiry the client has to register again (most clients do this automatically, otherwise the user adds the connection once more); expired authorization transactions, authorization codes and similar records are cleaned off the disk by the service (at most once an hour, triggered by `/register` and `/authorize` requests). CIMD clients (the path claude.ai uses by default) take no disk space.
 
 Optional: to keep the OAuth proxy state apart from the Canvas token store, mount a separate volume at `/data/fastmcp` (`docker-compose.yml` has a commented-out `canvas-mcp-oauth` example; the image already creates this directory, owned by uid 10001). Note that two named volumes on the same disk still share the remaining space; for real isolation put it on a separate filesystem or a directory with a quota. The only consequence of losing this volume is that all MCP clients reconnect once.
 
@@ -356,7 +366,7 @@ If the domain goes through the Cloudflare proxy (orange cloud):
 
 - **Use SSL/TLS mode Full (strict)**; the origin needs a valid certificate (Let's Encrypt or a Cloudflare Origin certificate).
 - **Allow claude.ai's egress range**: claude.ai makes requests from `160.79.104.0/21` (including fetching the client metadata document). Create a WAF custom rule: expression `ip.src in {160.79.104.0/21}`, action **Skip**, and check skipping all security features (skip the remaining custom rules, rate limiting, managed rules, Bot Fight / Super Bot Fight and so on).
-- **Turn off Bot Fight Mode / Super Bot Fight Mode**, and **do not use a JS challenge or managed challenge** on `/mcp`, `/token`, `/register` and `/.well-known/*`. These are machine-to-machine interfaces, and a challenge page makes OAuth and MCP fail outright.
+- **Turn off Bot Fight Mode / Super Bot Fight Mode**, and **do not use a JS challenge or managed challenge** on `/mcp`, `/token`, `/register`, `/revoke` and `/.well-known/*` (with `SELFHOST_AUTH_MODE=local` also none on `/authorize`, `/account/login`, `/account/callback` or `/account/consent`: they are part of the sign-in redirect chain). These are machine-to-machine interfaces, and a challenge page makes OAuth and MCP fail outright.
 - **Add a rate-limiting rule for `/register` and `/authorize`** (the free plan has 1): expression `(http.request.uri.path in {"/register" "/authorize"})`, 10 requests per minute per IP, then block. Behind Cloudflare, nginx sees Cloudflare's addresses, so for per-IP limiting either restore the real IP first (`CF-Connecting-IP`) or rely on this Cloudflare rule alone. Note that the first Skip rule lets claude.ai's egress range through, so that range is not subject to this limit.
 - **Do not cache**: add a cache rule that sets Bypass cache for the whole hostname.
 - **Turn off Rocket Loader** (it rewrites the scripts in pages).
@@ -399,7 +409,7 @@ Image channels (choose in `image:` of `docker-compose.yml`):
 
 1. Settings → **Connectors** → **Add custom connector**.
 2. Enter `https://canvas.mcp.kazuhahub.com/mcp` as the URL. **Do not fill in** the client ID and client secret (leave them empty; claude.ai uses dynamic registration / the client metadata document).
-3. Click **Connect**, approve on the consent page, then sign in with a Microsoft account (one that has been assigned `Canvas.User`).
+3. Click **Connect**, approve on the consent page, then sign in with a Microsoft account (one that has been assigned `Canvas.User`). (With `SELFHOST_AUTH_MODE=local` the order is the other way round: sign in first, then approve on the server's consent page, which names the app.)
 4. Once connected, go to `/account` and enroll your Canvas token (see the next section); before you enroll, tool calls return a message pointing at `/account`.
 5. **Set the write tools to "Ask before using"**: in the connector's tool permission list, choose Ask before using for every tool that writes, not Always allow (for why, see [Prompt-injection risk](#prompt-injection-risk-of-write-tools)).
 6. The desktop and mobile apps use the **same connector**; there is nothing more to configure.
@@ -411,6 +421,126 @@ claude mcp add --transport http canvas https://canvas.mcp.kazuhahub.com/mcp
 ```
 
 Then type `/mcp` in Claude Code and choose `canvas` to authenticate; the browser opens the consent page and the Microsoft sign-in (the callback goes to a loopback address on your machine).
+
+## MCP authorization: entra_proxy (default) or local
+
+`SELFHOST_AUTH_MODE` decides who authorizes an MCP client (claude.ai, Claude Code, ...) before it may call `/mcp`. The sign-in of the people themselves is always the Microsoft Entra sign-in; what differs is who stands between the MCP client and Entra, and what the client is given afterwards.
+
+| | `entra_proxy` (default) | `local` (opt-in) |
+|---|---|---|
+| Who authorizes the client | FastMCP's OAuth proxy. The browser is sent to Entra at `/auth/callback`, and the proxy keeps the upstream Entra tokens under `/data/fastmcp`. | This server, as its own OAuth authorization server. The sign-in is the `/account` Microsoft sign-in (`/account/callback`), followed by a consent page that names the app. No proxy is built and `/data/fastmcp` is not touched. |
+| What the client gets | A FastMCP-signed token that wraps an Entra token. | An HS256 JWT access token (default 1 hour) and an opaque refresh token. The access-token key is derived from `CANVAS_TOKEN_KEYS`; refresh tokens and authorization codes are stored only as SHA-256 hashes. |
+| Where its state lives | Files under `/data/fastmcp` (encrypted), plus the token database. | The token database only: registrations (`oauth_clients`), cached client metadata documents (`cimd_clients`), connections (`oauth_grants`), codes, refresh tokens and short-lived sign-in requests (`login_states`). Migration `0003_oauth_authz` creates them. |
+| Roles removed in Entra | Seen when the proxy re-validates the upstream token, normally within an hour. | Seen only at the person's next `/account` sign-in, or when `MAX_UPSTREAM_AUTH_AGE` (14 days by default) forces one. **Disable the user first**, as always. |
+| Each connected app is listed and revocable by the user | No | Yes ([Connected apps](#connected-apps)) |
+| Proven with claude.ai, Desktop, mobile and Claude Code | Yes. This is why it stays the default. | Covered by the automated tests (the official MCP SDK client, the recorded client metadata documents), **not yet by a live connector**. Use the [checklist below](#first-deployment-and-staging-checklist) before you switch a deployment other people rely on. |
+
+The default does not change with this release: if you never set `SELFHOST_AUTH_MODE`, nothing about MCP authorization changes. The tables and the migration are present either way (the schema is shared), but they stay empty in `entra_proxy`.
+
+### When to choose `local`
+
+- You want people to see and end the apps they connected (**Connected apps**), and owners to end any of them.
+- You want the consent step to name the app and show where it returns to, and to be able to say "no".
+- You want the refresh behaviour under your control (rotation, a 30-day cap, a revocation when a refresh token is replayed) and fewer moving parts at runtime (no FastMCP proxy storage, no upstream tokens held).
+
+Stay on `entra_proxy` if you cannot test the switch first, if you rely on Entra's own revocation of an existing session reaching your clients within an hour, or if the server cannot reach `claude.ai` directly (client metadata documents are fetched by this server itself; `FASTMCP_SSRF_TRUST_PROXY` is refused, so an egress-proxy-only host cannot do it).
+
+### Entra registration for each mode
+
+The same app registration serves both modes. In `local` mode you need only `https://<your host>/account/callback` as a redirect URI, the app roles and the assignment settings (steps 1.5 and 1.8). Keep the rest of step 1 anyway: `/auth/callback`, "Expose an API" with the `Canvas.Access` scope (the scope string doubles as the MCP scope that the server advertises), the access-token version and the client secret (the `/account` sign-in uses it). Keeping them is what makes switching back possible.
+
+`OAUTH_JWT_SIGNING_KEY` and `FASTMCP_HOME` stay required in both modes, for the same reason. In `local` mode they sign and store nothing.
+
+### The settings
+
+All of them go in `.env` ([`env.example`](env.example) has them commented out). They are parsed and checked in both modes, so a typo fails closed at startup, and only `local` uses them (`--config` marks them "ignored (entra_proxy)"). A duration is a whole number of seconds, or a number followed by `s`, `m`, `h` or `d`. No message names a rejected value.
+
+| Variable | Default | Range | Meaning |
+|---|---|---|---|
+| `SELFHOST_AUTH_MODE` | `entra_proxy` | `entra_proxy` or `local` | The mode. `local` also requires `PUBLIC_BASE_URL` without a default port (no `:443`). |
+| `ACCESS_TOKEN_TTL` | `3600` | 5 minutes to 24 hours | Lifetime of an access token. |
+| `REFRESH_ABSOLUTE_TTL` | `30d` | 1 hour to 90 days, and longer than `ACCESS_TOKEN_TTL` | Absolute lifetime of one connection. Rotating a refresh token never extends it. |
+| `REFRESH_REUSE_GRACE_S` | `30` | 0 to 120 | A replay of a just-used code or refresh token within this many seconds is a retry, not theft (see [below](#how-the-local-authorization-server-treats-replayed-codes-and-refresh-tokens)). `0` is strict. |
+| `GRANT_STATUS_CACHE_S` | `30` | 0 to 60 | How long one process reuses "this connection is live and its account active". A revocation made elsewhere (another process, the CLI) is noticed within it. `0` checks the database on every request. |
+| `CIMD_ENABLED` | `true` | `true` or `false` | Accept client ids that are URLs (Client ID Metadata Documents, which claude.ai uses). |
+| `CIMD_FETCH_TIMEOUT_S` | `3` | 1 to 5 | Time allowed to fetch one client metadata document. |
+| `CIMD_STALE_MAX` | `7d` | 0 to 30 days | How old a stored document may be and still serve a token refresh when it cannot be fetched again. A new authorization always needs a fresh one. |
+| `MAX_UPSTREAM_AUTH_AGE` | `14d` | 1 hour to 90 days | A connection stops refreshing, and the person signs in again, once their last Microsoft sign-in is older than this. |
+
+`OAUTH_ALLOWED_REDIRECT_URIS` applies to both kinds of client in `local` mode: a client registers or publishes redirect URIs, and each one must also match an entry of this list (https, or http on `localhost`, `127.0.0.1` or `[::1]` where an entry without a port matches any port). A client whose document lists no allowed redirect cannot connect until you add one.
+
+The access token is verified with a key derived from the active key of `CANVAS_TOKEN_KEYS` (and every other key in the ring). It is independent of `OAUTH_JWT_SIGNING_KEY`, so a token from the other mode never verifies. `token_admin rotate-jwt-key` invalidates every access token at once (clients refresh; connections are untouched; a running server notices within 30 seconds). Putting a new key first in `CANVAS_TOKEN_KEYS` rotates the signing key itself.
+
+### Dependencies
+
+The local authorization server is built on FastMCP and the MCP SDK and uses a few of their internals (the `/authorize` and `/token` handlers, the registration handler, the SSRF-pinned fetcher). The supported ranges are `fastmcp` `>=4.0.3,<5`, `mcp` `>=2.1.1,<3` and, for the access-token JWTs, `joserfc` `>=1.7.2,<2` (an explicit dependency of the `selfhost` extra). Only one module imports those internals, and a contract test pins every one of them against the versions in `uv.lock` and against the newest installed ones. If you build the image yourself, use `uv sync --locked`; read the release notes of FastMCP and the MCP SDK before you widen a range.
+
+### First deployment and staging checklist
+
+Nothing is deployed from this release yet, so there are no live connectors to migrate. Either go live on `entra_proxy` and move later, or run `local` on a **staging hostname** first: its own DNS name, its own `PUBLIC_BASE_URL`, and its own Entra redirect `https://<staging host>/account/callback`. Work through the list, then set `SELFHOST_AUTH_MODE=local` in production. Record what you see (the `token_admin list-grants` column `client_kind` says whether a client used CIMD or registered itself).
+
+**claude.ai on the web**
+
+1. Settings → Connectors → Add custom connector with `https://<host>/mcp`. Leave the client id and secret empty. Connect.
+2. You are sent to the Microsoft sign-in, then to a consent page that names `claude.ai` as a verified domain. Allow it.
+3. Ask for a tool call. Then run `token_admin list-grants`: one line, and `client_kind` tells you whether claude.ai used the metadata document (`cimd`) or registered (`dcr`).
+4. Leave it for more than an hour (or run `token_admin rotate-jwt-key` to force it) and call a tool again: the connector must refresh without asking you to sign in.
+5. Disconnect the connector in claude.ai and check whether the grant disappears (claude.ai may call `/revoke`; if it does not, the connection stays listed until you revoke it under Connected apps).
+6. Connect again, then revoke the app under **Connected apps**: the next tool call must fail and claude.ai must offer to reconnect.
+7. Disable the account (`/account/admin`, or `token_admin disable`): tool calls must be refused.
+
+**Claude Desktop** reuses the claude.ai connector. The authorization callback goes to claude.ai and then on to the app (`claude://`); check that the consent page's **Allow** completes that hop.
+
+**Claude mobile**: connect again from the app. The sign-in opens in the system's in-app browser; check that it does not end on "This connection request has expired or was opened in another browser". That page means the browser that finished the sign-in was not the one that started the request (the request is tied to a cookie; see [Troubleshooting](#troubleshooting)).
+
+**Claude Code**
+
+1. `claude mcp add --transport http canvas https://<host>/mcp`, then `/mcp` and choose `canvas` to authenticate.
+2. The callback is a random loopback port. Check it works with `localhost` and with `127.0.0.1` (the consent page warns that the approval goes to an app on your own computer).
+3. Quit Claude Code, start it again, call a tool: the stored tokens refresh without a new sign-in.
+4. If you pin the port with `--callback-port`, it must match an allowed loopback redirect (the defaults accept any port).
+
+If anything fails, switching back is the rollback ([below](#switching-modes-and-rolling-back)). A failed attempt costs the people who tried one reconnect.
+
+### Switching modes and rolling back
+
+- **Every user has to reconnect** after a switch in either direction: tokens, registrations and client ids of one mode mean nothing to the other. In claude.ai, if a connector keeps showing an error, remove it and add it again. claude.ai caches the server's metadata for about 5 minutes, so the first minutes after a switch can look odd.
+- **The rollback is the setting.** Set `SELFHOST_AUTH_MODE=entra_proxy` (or remove it), keep `FASTMCP_HOME` and `OAUTH_JWT_SIGNING_KEY`, and run `docker compose up -d`. Everyone reconnects.
+- **An image rollback is different.** Once migration `0003_oauth_authz` is applied, every older image refuses the database (unknown revision). Rolling the image back means restoring the backup you took before the upgrade (see [Upgrading](#upgrading)); flipping the setting does not need it.
+
+### How the local authorization server treats replayed codes and refresh tokens
+
+Observed and pinned by `tests/selfhost/authz/` (the races run against two real database connections on SQLite and PostgreSQL). Every consume is one atomic statement in the database, so two requests presenting the same code or token at the same moment cannot both win.
+
+| Request | What happens | Why |
+|---|---|---|
+| An authorization code used once | Tokens are issued, the code stays as a used marker for about an hour. A wrong `code_verifier`, a wrong redirect URI or another client's id is refused **before** the code is touched, so a thief who has the code but not the verifier cannot burn it or revoke anything. | S256 PKCE is checked first. |
+| The same code again within `REFRESH_REUSE_GRACE_S`, up to twice, and before any refresh token of that connection has been used | A new token pair on the **same** connection: a client that retried because the first response was lost. | A duplicate delivery must not log the person out. |
+| The same code again outside the window, or after the connection's tokens have started rotating | The whole connection is revoked (`code_replay`) and the request fails with `invalid_grant`. | The code was used by two parties. |
+| A refresh token | Rotated on every use: the old one is marked used and a new one is issued, with the same absolute expiry. | Limits what a stolen refresh token is worth. |
+| A used refresh token again, within the window, up to twice | A **sibling**: another new token with the same parent. Using one sibling retires the others. | Two requests of one client racing each other (a retry, two tabs) must both be answered. |
+| A used refresh token again outside the window, a retired sibling, or a token whose successor has already been used | The whole connection is revoked (`refresh_reuse`) and the request fails with `invalid_grant`. | That is the signature of a copied token. |
+| `MAX_UPSTREAM_AUTH_AGE` passed | The connection is revoked (`reauth_required`) and the request fails with `invalid_grant`; the client starts a new authorization, which needs a `/account` session no older than `ACCOUNT_SESSION_TTL_SECONDS` (a fresh Microsoft sign-in otherwise) and a new consent. | An Entra removal is only noticed at a sign-in. |
+| The account is disabled, pending or gone | `invalid_grant`. | Checked at every exchange and refresh, and at every MCP request. |
+
+`invalid_grant` is answered with HTTP 401, not the 400 of RFC 6749: that is the MCP convention that tells a client to authorize again. A bad or unknown client id is `invalid_client` (also 401); a `resource` other than this server's `/mcp` URL is `invalid_target`; asking for a scope the connection was not given is `invalid_scope` and consumes nothing. The grace window weakens theft detection a little (a thief who replays a stolen token inside it gets a sibling branch); detection returns as soon as one sibling is used and the other is later presented. `REFRESH_REUSE_GRACE_S=0` makes it strict, at the price that a client that retries at the wrong moment loses its connection.
+
+### Connected apps
+
+Each approved connection is listed by the person it belongs to: the app's name (a verified domain, or a self-chosen name marked as unverified), where it returns to, when it was connected and last used.
+
+- **Users** open **Connected apps** (a card on `/account` in the legacy UI, a page in the React UI) and **Revoke** an app. It loses access at once in the process that handled the request and within `GRANT_STATUS_CACHE_S` in any other, and has to ask for consent again.
+- **Owners** can list and revoke any account's connections from `/account/admin` (a per-account "Connected apps" block, or a dialog in the React UI). It needs the same sign-in from the last 10 minutes as every owner action, the database re-checks inside the transaction that the actor is still an active owner, and the audit log records `grant_revoked`.
+- **The operator** has `token_admin list-grants [PRINCIPAL] [--all]`, `token_admin revoke-grant GRANT_ID` or `revoke-grant --account PRINCIPAL`, and `token_admin rotate-jwt-key`. `token_admin check` prints how many connections are live. The listing never prints a token, a code or a hash.
+- **Disabling an account** ends its connections in the same transaction. A person who is no longer admitted and signs in at `/account` has theirs ended too.
+
+### Edge, WAF and rate limits for the local server
+
+The endpoints are the same ones a proxy-mode deployment already exposes, plus `/revoke`, and `/token` is now busy. In `local` mode the service itself limits `/token` to 120 requests a minute and `/revoke` to 30 (process-wide, with the existing `/register`, `/authorize` and `/register`-per-day limits), and accepts at most 16 KiB of body on `/token`, `/revoke`, `/authorize` and `/register`. Per-IP limits can only live in the proxy: `nginx.conf.example` adds a `canvas_token` zone for `/token` and `/revoke`, and the Caddy example a commented rate-limit block.
+
+claude.ai's refreshes all come from Anthropic's shared egress range `160.79.104.0/21`, so a per-IP limit on `/token` would throttle every claude.ai user at once if it counted that range. The nginx example exempts it; do the same in any other limiter.
+
+Do **not** put a challenge (JS or managed) or bot protection on `/.well-known/*`, `/token`, `/register`, `/revoke`, `/authorize`, `/account/login`, `/account/callback` or `/account/consent`: they are machine-to-machine or part of the sign-in redirect chain, and a challenge page makes the connection fail. The sign-in request id travels in the `txn` query value of `/account/login` and `/account/consent`; see [Keep OAuth codes out of proxy logs](#keep-oauth-codes-out-of-proxy-logs).
 
 ## Per-user enrollment (/account)
 
@@ -650,7 +780,8 @@ Be honest with the people you invite: they are trusting **you** and **the host y
 | **Canvas personal access tokens** (one per user) | The token database: `tokens.sqlite3` in the `/data` volume, or the `canvas-mcp-postgres` volume (or your external server) if `DATABASE_URL` is set. AES-256-GCM, the ciphertext bound to the account, the Canvas host (when the row has one) and the key id. Also in process memory, decrypted, for the duration of each request that uses it. | The server process; the operator or anyone with `.env` **and** the volume. The user can see (and revoke) it in Canvas under Approved Integrations. Owners cannot read it in the UI. | The user creates a new token in Canvas and enrolls it. Key ring rotation re-encrypts rows (see [Secret rotation](#secret-rotation)). | Included in `/data` backups (SQLite) or in `pg_dump` files (PostgreSQL) as ciphertext; useless without `CANVAS_TOKEN_KEYS`. A restore brings back tokens the user has since replaced or deleted; dead ones fail the next health check. | Removed by the user (**Delete my token**), an owner (**Remove enrollment**) or `token_admin remove`. The row is deleted, but bytes can survive in SQLite free pages and the write-ahead log, or on PostgreSQL in dead tuples and WAL until vacuum, and in older backups and `pg_dump` files until overwritten, and are readable by anyone who also has the key. **The only deletion that makes a token worthless is revoking it in Canvas.** An invalid token keeps its ciphertext so that **Check again** can restore it, until removed. |
 | **`CANVAS_TOKEN_KEYS`** (AES-256 key ring) | `.env`, then the container environment. | Whoever can read `.env`, the environment of the container (`docker inspect`, root on the host) or the process. | `token_admin rotate` (see [Secret rotation](#secret-rotation)). | Keep a copy **offline and apart from the data backups**. If lost, enrolled tokens cannot be decrypted and users enroll again. | Until you remove an old key id from `.env`; the server refuses to start if a row still needs it. |
 | **Upstream Entra tokens** (access and refresh token per signed-in MCP client) | Encrypted files under `/data/fastmcp/oauth-proxy/<key fingerprint>/` (Fernet; the key is derived from `OAUTH_JWT_SIGNING_KEY`). Entra's access token is for this application's own API scope (`Canvas.Access`) and is not a Canvas credential. | The server process; whoever has `OAUTH_JWT_SIGNING_KEY` **and** the volume. A refresh token redeemed together with `ENTRA_CLIENT_SECRET` yields new Entra tokens for this application until Entra stops honouring it. | Change `OAUTH_JWT_SIGNING_KEY` (every client reconnects; the old directory is unreadable and can be deleted). To cut one person off at Entra: **Revoke sessions** on their user. | In `/data` backups. Not needed for a restore: losing it only makes clients reconnect. | Expired records are deleted by the cleanup the service runs; the refresh token lives as long as Entra reports (up to about a year). Remove the whole directory to forget all of them. |
-| **`OAUTH_JWT_SIGNING_KEY`** | `.env`, then the container environment. | Whoever reads `.env` or the environment. It signs the MCP access tokens the server issues and is the root of the storage key above, so holding it together with the volume means decrypting the Entra tokens. | Edit `.env`, `docker compose up -d`; all MCP clients reconnect. | Offline with `.env`. If lost, clients reconnect; nothing else is lost. | Replaced on rotation; the old fingerprint directory stays until you delete it. |
+| **`OAUTH_JWT_SIGNING_KEY`** | `.env`, then the container environment. | Whoever reads `.env` or the environment. It signs the MCP access tokens the server issues and is the root of the storage key above, so holding it together with the volume means decrypting the Entra tokens. (With `SELFHOST_AUTH_MODE=local` it signs and stores nothing; it stays so that switching back keeps working.) | Edit `.env`, `docker compose up -d`; all MCP clients reconnect. | Offline with `.env`. If lost, clients reconnect; nothing else is lost. | Replaced on rotation; the old fingerprint directory stays until you delete it. |
+| **MCP access-token key and refresh tokens** (`SELFHOST_AUTH_MODE=local` only) | The access-token key is not stored: it is derived (HKDF) from `CANVAS_TOKEN_KEYS`, so **whoever holds the key ring can mint access tokens for any known connection**. Refresh tokens, authorization codes and sign-in request ids are stored only as SHA-256 hashes in the token database (`oauth_refresh_tokens`, `oauth_codes`, `login_states`); the connections (`oauth_grants`), client registrations and cached client metadata documents are plain rows (names, hosts, timestamps; no secret). | The server process; whoever has `CANVAS_TOKEN_KEYS` (access tokens), or the running clients (the raw refresh tokens they hold). A database-only leak yields no usable token. | `token_admin rotate-jwt-key` invalidates every access token; a new first key in `CANVAS_TOKEN_KEYS` changes the signing key. The epoch lives in the database, so `rotate-jwt-key` does not help if the key ring itself leaked: rotate that. | In database backups, as hashes and plain rows. Restoring an old backup brings back connections that were revoked since; run `token_admin list-grants` after a restore. | Ended and expired rows are removed by the cleanup (revoked connections after 30 days). |
 | **`ACCOUNT_SESSION_SECRET`** | `.env`, then the container environment. | Whoever reads `.env` or the environment. It seals the `/account` session and login cookies. **Treat it as owner-equivalent:** with it someone could forge a session cookie for any user; the owner flag in a cookie is re-checked against the stored owner status, but a forged cookie for a real owner would pass. | Edit `.env`, `docker compose up -d`; only open `/account` sessions end. | Offline with `.env`. Cheap to replace. | Sessions are sealed cookies with a fixed lifetime (`ACCOUNT_SESSION_TTL_SECONDS`, default 15 minutes) and live in the browser, not on the server. |
 | **`ENTRA_CLIENT_SECRET`** | `.env`, then the container environment; at Entra as the registered secret. | Whoever reads `.env` or the environment. It lets a holder authenticate as this application to Entra (for example to redeem an authorization code it intercepted). It cannot read Canvas. | Create a new secret in Entra, edit `.env`, `docker compose up -d`; no other effect. | Offline with `.env`, or simply create another. | Expires at the date you chose in Entra; delete the old secret there. |
 | **`.env` itself** | The host file (mode 600) and the container environment. | Root on the host, the Docker group, anyone who can read the file or run `docker inspect`. | As listed above. | **Never in the same backup as `/data` or a `pg_dump` file.** A password manager is the right place. | Delete the file when you decommission the server. |
@@ -673,6 +804,8 @@ Back up `/data` and `.env` **separately**, in places that different people (or d
 The reverse proxy sees the OAuth query strings (`code`, `state`) of `/authorize` and `/auth/callback`, and the `Authorization` header of every MCP request. Configure it as described in [Keep OAuth codes out of proxy logs](#keep-oauth-codes-out-of-proxy-logs). Application logs (including the lines FastMCP, the `mcp` library and uvicorn write through their own handlers, which get the same filter at startup) and audit events are scrubbed of bearer tokens, JWTs, Canvas tokens, Entra refresh tokens, `code=`/`state=`-style parameters and URL credentials before they are written. The scrub recognises shapes, so a bare OAuth transaction id that FastMCP logs without a `state=` label (for example in "Transaction ... missing consent_token") is an opaque, short-lived server-side id and is not redacted; treat container logs as sensitive and not as a place for secrets.
 
 ### How the OAuth proxy treats replayed codes and refresh tokens
+
+This is the default mode, `entra_proxy`. For `SELFHOST_AUTH_MODE=local` see [How the local authorization server treats replayed codes and refresh tokens](#how-the-local-authorization-server-treats-replayed-codes-and-refresh-tokens).
 
 The MCP sign-in is FastMCP's OAuth proxy. What follows was observed by running the real proxy and MCP SDK in `tests/test_multiuser_e2e.py::TestOAuthProxyHardening` against FastMCP 4.0.3 (the version `uv.lock` pins) and 4.0.10; read it again after any FastMCP upgrade.
 
@@ -697,6 +830,8 @@ docker compose pull && docker compose up -d
 ```
 
 `docker-compose.yml` sets `pull_policy: always`, so a plain `docker compose up -d` also pulls the chosen tag again. To pin a version, replace `:latest` in `image:` with a specific version (for example `:1.13.0-uci.1`). An upgrade restarts the container; users stay signed in and enrolled (the state is stored in `/data`).
+
+Upgrading to the version that has the server's own authorization server applies migration `0003_oauth_authz` on first start: six new tables, additive only, nothing is read or written there until you set `SELFHOST_AUTH_MODE=local`. Back up first anyway (see [Backup and restore](#backup-and-restore)): once the migration has run, an older image refuses the database (unknown revision), so an image rollback needs that backup. Setting `SELFHOST_AUTH_MODE` back is the rollback for the mode and needs no backup.
 
 Upgrading to the version with multiple schools migrates the token database (`/data/canvas-mcp/tokens.sqlite3`) to schema version 2 on first start. The migration is automatic and safe to repeat, existing enrollments keep working on the default school and are re-sealed with their school the next time the user saves a token, and key rotation works for both kinds of rows. Back up `/data` first: an older image refuses a version 2 database, so rolling back needs that backup.
 
@@ -927,6 +1062,10 @@ Who may do what:
 | A server restart | The decision survives (it is in the database). | |
 | **Removing the user or their role in Entra only** | Their MCP access keeps working until the Entra **access token lifetime** ends, normally **60 to 90 minutes** (the token the server issued expires with it); at the next refresh Entra applies the removal (usually `AADSTS50105`). Roles in an already issued token stay as they were until then. | Entra does not cancel tokens it already issued, and this server cannot ask it to. This is why step 1 above exists: disable first. |
 | An owner losing the Entra owner role | Admin pages and actions stop at the latest **10 minutes** after that owner's last sign-in; earlier if their next sign-in or MCP token shows the role gone. | The owner window above. |
+| *With `SELFHOST_AUTH_MODE=local`:* disabling a user | Their connections are revoked in the same transaction. The MCP endpoint answers **403 within 5 seconds** (the access cache) and **401 at once** in the process that handled the change, within `GRANT_STATUS_CACHE_S` (30 seconds) in another. | Each request checks the connection and the account, cached for that long. |
+| *With `SELFHOST_AUTH_MODE=local`:* a person or an owner revokes a connected app | **At once** in the process that handled it, within `GRANT_STATUS_CACHE_S` elsewhere. The refresh token stops working immediately. | The access token is a JWT, so the per-request connection check is what ends it before it expires. |
+| *With `SELFHOST_AUTH_MODE=local`:* `token_admin rotate-jwt-key` | Every access token fails within **30 seconds**; clients refresh and carry on. | The signing epoch is cached for 30 seconds. |
+| *With `SELFHOST_AUTH_MODE=local`:* removing the user or their role in Entra only | Not seen until their next `/account` sign-in, or `MAX_UPSTREAM_AUTH_AGE` (14 days by default) at the latest, when the connection stops refreshing. At a sign-in that is refused, their connections are ended. **Slower than `entra_proxy` (about an hour): disable first.** | Access tokens do not carry roles. |
 | A user losing the Entra role, `/account` | Their open session lasts at most `ACCOUNT_SESSION_TTL_SECONDS` (default 15 minutes, never renewed); signing in again is refused by Entra's role check. | The session is a sealed cookie with a fixed lifetime. |
 
 Every change is recorded: the transitions (disabled, enabled, owner gained or lost, with who did it) are written in the same database transaction to `principal_status_events` (read them with `token_admin history`; this also covers the CLI, which has no audit log of its own), and with `LOG_ACCESS_EVENTS=true` they are emitted as audit events of type `principal_status` (the principal key, the actor's key or `operator`, and a short code; never a name, e-mail address or token). Refused attempts (a disabled user trying to sign in or enroll, an owner trying to disable themselves) are audited too.
@@ -1003,4 +1142,8 @@ Use `--config` to see the value the server runs with.
 | You see a Cloudflare challenge page, or OAuth / tool calls get 403 / 5xx | Turn off Bot Fight / Super Bot Fight, do not challenge `/mcp`, `/token`, `/register` or `/.well-known/*`, and add the allow rule for `160.79.104.0/21` |
 | Long-running tool calls return 504 / 524 | The Cloudflare free plan has a 100-second timeout: switch to DNS only (gray cloud) |
 | **429** (with `Retry-After`) while connecting or authorizing | The rate limit on `/register` or `/authorize` was hit (see "Disk and abuse protection"). Wait a minute and retry; if it keeps happening, someone is hammering these two entry points, so check the proxy's access log |
+| *`SELFHOST_AUTH_MODE=local`:* a page says **This connection request has expired or was opened in another browser** | The app's authorization request is tied to the browser that made the `/authorize` request (a `__Host-cmcp_bind` cookie), lives 10 minutes and works once. Finish the sign-in in the same browser, window or in-app browser that started it, do not open the link elsewhere, and connect again from the app. Check the browser keeps cookies for the host |
+| *`SELFHOST_AUTH_MODE=local`:* the consent page says the app **could not be confirmed** | The app's registration expired, its client metadata document could not be read, or its return address is not on `OAUTH_ALLOWED_REDIRECT_URIS`. Nothing was granted. Check outbound access to the app's host and the allow-list, then connect again |
+| *`SELFHOST_AUTH_MODE=local`:* a client keeps being sent to sign in again | `invalid_grant` (HTTP 401): its refresh token was replayed outside the grace window, the connection was revoked, the account is disabled, or `MAX_UPSTREAM_AUTH_AGE` passed. `token_admin list-grants --all` shows the state (`revoked:<reason>`). The person connects again |
+| *`SELFHOST_AUTH_MODE=local`:* the server will not start and names `SELFHOST_AUTH_MODE` or one of its settings | A value is malformed or out of range (the table in [MCP authorization](#mcp-authorization-entra_proxy-default-or-local) lists them), or `PUBLIC_BASE_URL` has an explicit `:443`. No message repeats the value |
 | `/account` goes straight back to the sign-in page after signing in | The browser blocked cookies, or the domain visited differs from `PUBLIC_BASE_URL` (the session cookie is valid only over HTTPS and for that host) |

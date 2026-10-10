@@ -346,8 +346,10 @@ def test_container_port_health_path_and_mcp_path_match_the_code():
 def test_token_admin_commands_in_the_docs_exist():
     readme = (SELFHOST / "README.md").read_text(encoding="utf-8")
     source = (SRC / "core" / "selfhost" / "token_admin.py").read_text(encoding="utf-8")
-    for command in set(re.findall(r"token_admin (check|list|accounts|approve|promote-owner|revoke|remove|disable|enable|access|history|rotate|db)\b", readme)):
-        assert f'add_parser("{command}"' in source
+    for command in set(re.findall(r"token_admin (check|list-grants|revoke-grant|rotate-jwt-key|list|accounts|approve|promote-owner|revoke|remove|disable|enable|access|history|rotate|db)\b", readme)):
+        assert re.search(rf'add_parser\(\s*"{command}"', source), command
+    for command in ("list-grants", "revoke-grant", "rotate-jwt-key"):
+        assert f"token_admin {command}" in readme, command
 
 
 # --- findings from the integration review ---
@@ -793,3 +795,238 @@ def test_the_documented_rule_kinds_are_the_ones_the_parser_accepts():
             owner_role="Canvas.Owner", problems=refused,
         )
         assert refused, rule
+
+
+# --- the server's own MCP authorization server (SELFHOST_AUTH_MODE=local) ---
+
+AUTHZ_HEADING = "## MCP authorization: entra_proxy (default) or local"
+
+
+def _authz_section(readme: str) -> str:
+    return readme.split(AUTHZ_HEADING, 1)[1].split("\n## ", 1)[0]
+
+
+def _documented_duration(seconds: int) -> str:
+    return f"{seconds // 86400}d" if seconds >= 86400 and seconds % 86400 == 0 else str(seconds)
+
+
+def _authz_defaults() -> dict[str, str]:
+    from canvas_mcp.core.selfhost.settings import AuthzSettings
+
+    d = AuthzSettings()
+    return {
+        "SELFHOST_AUTH_MODE": "entra_proxy",
+        "ACCESS_TOKEN_TTL": _documented_duration(d.access_token_ttl),
+        "REFRESH_ABSOLUTE_TTL": _documented_duration(d.refresh_absolute_ttl),
+        "REFRESH_REUSE_GRACE_S": str(d.refresh_reuse_grace_s),
+        "GRANT_STATUS_CACHE_S": str(d.grant_status_cache_s),
+        "CIMD_ENABLED": "true" if d.cimd_enabled else "false",
+        "CIMD_FETCH_TIMEOUT_S": str(d.cimd_fetch_timeout_s),
+        "CIMD_STALE_MAX": _documented_duration(d.cimd_stale_max),
+        "MAX_UPSTREAM_AUTH_AGE": _documented_duration(d.max_upstream_auth_age),
+    }
+
+
+def test_the_authorization_modes_are_documented_and_linked(readme):
+    assert "(#mcp-authorization-entra_proxy-default-or-local)" in readme
+    section = _authz_section(readme)
+    for needle in (
+        "`entra_proxy`",
+        "`local`",
+        "opt-in",
+        "does not change with this release",
+        "Every user has to reconnect",
+        "FASTMCP_HOME",
+        "OAUTH_JWT_SIGNING_KEY",
+        "/account/callback",
+        "/auth/callback",
+        "0003_oauth_authz",
+        "Connected apps",
+        "token_admin list-grants",
+        "token_admin revoke-grant",
+        "token_admin rotate-jwt-key",
+        "client_kind",
+        "OAUTH_ALLOWED_REDIRECT_URIS",
+        "CANVAS_TOKEN_KEYS",
+        "FASTMCP_SSRF_TRUST_PROXY",
+        "160.79.104.0/21",
+        "invalid_grant",
+        "invalid_target",
+        "HTTP 401",
+        "challenge",
+        "txn",
+        "restoring the backup",
+    ):
+        assert needle in section, f"the MCP authorization section is missing {needle!r}"
+
+
+def test_the_staging_checklist_covers_every_client(readme):
+    section = _authz_section(readme)
+    checklist = section[section.index("### First deployment and staging checklist") :]
+    checklist = checklist[: checklist.index("\n### ", 5)]
+    for needle in (
+        "staging hostname",
+        "**claude.ai on the web**",
+        "**Claude Desktop**",
+        "**Claude mobile**",
+        "**Claude Code**",
+        "Add custom connector",
+        "client id and secret empty",
+        "token_admin list-grants",
+        "cimd",
+        "dcr",
+        "rotate-jwt-key",
+        "/revoke",
+        "Connected apps",
+        "claude://",
+        "opened in another browser",
+        "claude mcp add --transport http canvas",
+        "localhost",
+        "127.0.0.1",
+        "--callback-port",
+    ):
+        assert needle in checklist, f"the staging checklist is missing {needle!r}"
+
+
+def test_the_authorization_settings_are_documented_with_the_defaults_the_code_has(readme, env_text):
+    section = _authz_section(readme)
+    commented = _commented_assignments(env_text)
+    for name, default in _authz_defaults().items():
+        row = re.search(rf"^\| `{name}` \| `([^`]*)` \|", section, re.MULTILINE)
+        assert row, f"the settings table has no row for {name}"
+        assert row.group(1) == default, f"{name}: the table says {row.group(1)!r}, the code {default!r}"
+        assert commented[name] == default, f"env.example documents {name}={commented[name]!r}, the code {default!r}"
+        assert name not in _assignments(env_text), f"{name} must stay commented out in env.example"
+
+
+def test_the_authorization_setting_ranges_in_the_docs_are_the_ones_the_code_enforces(readme):
+    # Each documented range is exercised at and just outside its edges.
+    from canvas_mcp.core.selfhost.settings import SelfhostConfigError, load_selfhost_settings
+
+    import base64
+
+    def good_env() -> dict[str, str]:
+        return {
+            "PUBLIC_BASE_URL": "https://canvas.example.test",
+            "ENTRA_TENANT_ID": "11111111-2222-3333-4444-555555555555",
+            "ENTRA_CLIENT_ID": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "ENTRA_CLIENT_SECRET": "s3cret-value-of-entra-client",
+            "OAUTH_JWT_SIGNING_KEY": "k" * 48,
+            "ACCOUNT_SESSION_SECRET": base64.b64encode(bytes(range(32))).decode(),
+            "CANVAS_TOKEN_KEYS": "k1:" + base64.b64encode(bytes(32)).decode(),
+            "FASTMCP_HOME": "/data/fastmcp",
+            "CANVAS_API_URL": "https://canvas.example.edu",
+        }
+
+    cases = {
+        "ACCESS_TOKEN_TTL": (("5m", "24h"), ("4m", "25h")),
+        "REFRESH_ABSOLUTE_TTL": (("2h", "90d"), ("59m", "91d")),
+        "REFRESH_REUSE_GRACE_S": (("0", "120"), ("-1", "121")),
+        "GRANT_STATUS_CACHE_S": (("0", "60"), ("-1", "61")),
+        "CIMD_FETCH_TIMEOUT_S": (("1", "5"), ("0", "6")),
+        "CIMD_STALE_MAX": (("0", "30d"), ("31d", "99d")),
+        "MAX_UPSTREAM_AUTH_AGE": (("1h", "90d"), ("59m", "91d")),
+    }
+    for name, (inside, outside) in cases.items():
+        for value in inside:
+            load_selfhost_settings({**good_env(), name: value})
+        for value in outside:
+            with pytest.raises(SelfhostConfigError):
+                load_selfhost_settings({**good_env(), name: value})
+    section = _authz_section(readme)
+    for text in ("5 minutes to 24 hours", "1 hour to 90 days", "0 to 120", "0 to 60", "1 to 5", "0 to 30 days"):
+        assert text in section, text
+
+
+def test_the_replay_rules_of_the_local_server_are_documented(readme):
+    heading = "### How the local authorization server treats replayed codes and refresh tokens"
+    assert heading in readme
+    assert "(#how-the-local-authorization-server-treats-replayed-codes-and-refresh-tokens)" in readme
+    section = readme[readme.index(heading) :]
+    section = section[: section.index("\n### ", 5)]
+    for needle in (
+        "code_replay",
+        "refresh_reuse",
+        "reauth_required",
+        "REFRESH_REUSE_GRACE_S",
+        "MAX_UPSTREAM_AUTH_AGE",
+        "sibling",
+        "invalid_grant",
+        "HTTP 401",
+        "S256",
+        "atomic",
+        "REFRESH_REUSE_GRACE_S=0",
+    ):
+        assert needle in section, f"the replay notes no longer mention {needle!r}"
+    from canvas_mcp.core.selfhost.authz.models import REVOKE_CODE_REPLAY, REVOKE_REAUTH_REQUIRED, REVOKE_REFRESH_REUSE
+
+    for reason in (REVOKE_CODE_REPLAY, REVOKE_REFRESH_REUSE, REVOKE_REAUTH_REQUIRED):
+        assert reason in section
+
+
+def test_the_change_speeds_of_the_local_server_are_documented(readme):
+    section = readme.split("### How fast each change takes effect", 1)[1].split("\n## ", 1)[0]
+    for needle in (
+        "SELFHOST_AUTH_MODE=local",
+        "GRANT_STATUS_CACHE_S",
+        "rotate-jwt-key",
+        "MAX_UPSTREAM_AUTH_AGE",
+        "Slower than `entra_proxy`",
+    ):
+        assert needle in section, f"the change-speed table is missing {needle!r}"
+
+
+def test_the_inventory_names_what_the_local_server_adds(readme):
+    section = _custody_section(readme)
+    for needle in ("MCP access-token key and refresh tokens", "derived (HKDF) from `CANVAS_TOKEN_KEYS`", "SHA-256 hashes", "oauth_refresh_tokens"):
+        assert needle in section, needle
+
+
+def test_the_readme_states_the_dependency_ranges_pyproject_declares(readme):
+    pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+    section = _authz_section(readme)
+    for name in ("fastmcp", "mcp", "joserfc"):
+        declared = re.search(rf'"{name}(>=[0-9.]+,<[0-9]+)"', pyproject)
+        assert declared, f"pyproject.toml has no range for {name}"
+        assert f"`{name}` `{declared.group(1)}`" in section, f"the README does not state {name}{declared.group(1)}"
+
+
+def test_the_proxy_examples_limit_and_redact_the_local_servers_endpoints():
+    nginx = (SELFHOST / "nginx.conf.example").read_text(encoding="utf-8")
+    assert "limit_req_zone $canvas_token_key zone=canvas_token:10m rate=120r/m;" in nginx
+    assert "160.79.104.0/21" in nginx
+    for path in ("/token", "/revoke"):
+        block = nginx[nginx.index(f"location = {path} {{") :]
+        block = block[: block.index("}")]
+        assert "limit_req zone=canvas_token burst=60 nodelay;" in block
+        assert "proxy_set_header Host $host;" in block
+        assert "client_max_body_size 16k;" in block
+    # the existing entry points keep their own zone
+    assert "limit_req zone=canvas_oauth burst=5 nodelay;" in nginx
+    caddy = (SELFHOST / "Caddyfile.example").read_text(encoding="utf-8")
+    active = "\n".join(line for line in caddy.splitlines() if not line.lstrip().startswith("#"))
+    assert "replace txn REDACTED" in active
+    assert "path /token /revoke" in caddy and "160.79.104.0/21" in caddy
+    assert "replace txn REDACTED" in (SELFHOST / "README.md").read_text(encoding="utf-8")
+
+
+def test_the_changelog_announces_the_local_authorization_server():
+    changelog = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    unreleased = changelog[changelog.index("## [Unreleased]") :].split("\n## [")[0]
+    added = unreleased.split("### Added", 1)[1].split("\n### ", 1)[0]
+    for needle in (
+        "SELFHOST_AUTH_MODE=local",
+        "opt-in",
+        "0003_oauth_authz",
+        "Switching modes makes every user reconnect",
+        "list-grants",
+        "revoke-grant",
+        "rotate-jwt-key",
+        "Connected apps",
+        "REFRESH_REUSE_GRACE_S",
+        "MAX_UPSTREAM_AUTH_AGE",
+        "staging checklist",
+    ):
+        assert needle in added, f"the changelog entry is missing {needle!r}"
+    security = unreleased.split("### Security", 1)[1].split("\n### ", 1)[0]
+    assert "form-action" in security and "grace window" in security
