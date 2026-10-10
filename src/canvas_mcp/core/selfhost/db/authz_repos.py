@@ -172,7 +172,8 @@ class SqlCimdRepo:
         """Store a document unless a newer one is stored; True if this call wrote.
 
         Monotonic: a fetch that finished late (an older ``fetched_at``) never overwrites
-        a newer document. The comparison is part of the one statement.
+        a newer document (nor one fetched in the same second). The comparison is part of
+        the one statement.
         """
         stmt = _upsert_insert(self._dialect, _cc).values(
             url=url,
@@ -193,8 +194,10 @@ class SqlCimdRepo:
                 "last_error": None,
             },
             where=excluded.fetched_at > _cc.c.fetched_at,
-        )
-        return conn.execute(stmt).rowcount == 1
+        ).returning(_cc.c.url)
+        # RETURNING, not rowcount: the PostgreSQL driver reports -1 for an upsert. A row
+        # comes back only if the row was inserted or really updated.
+        return conn.execute(stmt).first() is not None
 
     def record_error(self, conn: Connection, url: str, *, now: int, code: str) -> bool:
         """Note why the last refresh failed; only for a URL that has a stored document."""
@@ -489,8 +492,11 @@ class SqlLoginStateRepo:
     @staticmethod
     def _match(kind: str, id_hash: str, binding_hash: str | None, now: int) -> list[Any]:
         conditions = [_ls.c.kind == kind, _ls.c.id_hash == id_hash, _ls.c.expires_at > now]
-        if binding_hash is not None:
-            conditions.append(_ls.c.binding_hash == binding_hash)
+        # A bound state needs its binding and an unbound one is read without: knowing the
+        # id alone is never enough to read or to consume a state that belongs to a browser.
+        conditions.append(
+            _ls.c.binding_hash.is_(None) if binding_hash is None else _ls.c.binding_hash == binding_hash
+        )
         return conditions
 
     def peek(
