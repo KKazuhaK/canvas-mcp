@@ -16,7 +16,7 @@ import pytest
 from canvas_mcp.core.selfhost import account_api
 from canvas_mcp.core.selfhost import account_web as web
 
-from ..authz.stack import ALICE, BOB, OWNER, Browser
+from ..authz.stack import ALICE, BOB, OWNER, Browser, User
 from ..test_account_api_parity import (
     LEGACY_TO_API,
     LINKING_LEGACY_TO_API,
@@ -547,6 +547,13 @@ class TestAdmin:
         admin, *_ = self.seeded(ps)
         admin.complete(admin.link("oidc:school"), "oidc:school")
         mine = {i["provider_id"]: i["id"] for i in admin.identities()["identities"]}
+        # The only owner, whose role comes from the Entra owner rule, keeps its Entra identity.
+        refused = admin.send("DELETE", f"/admin/identities/{mine['entra']}")
+        assert code_of(refused, 409) == "last_owner"
+        assert admin.get("/me").status_code == 200
+        # With a second active owner the first may let it go and is signed out.
+        other = ps.person()
+        assert other.sign_in_entra(User("Otto", "dddddddd-0000-4000-8000-00000000000d", roles=("Canvas.Owner",))).status_code == 303
         response = admin.send("DELETE", f"/admin/identities/{mine['entra']}")
         assert response.status_code == 200
         assert code_of(admin.get("/me"), 401) == "not_authenticated"

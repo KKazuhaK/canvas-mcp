@@ -819,6 +819,13 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
                 file=sys.stderr,
             )
             return EXIT_REFUSED
+        if result.code == "last_owner":
+            print(
+                "refused: this is the only owner and its owner role comes from the Entra owner rule, "
+                "which only the Microsoft sign-in carries; promote another owner first",
+                file=sys.stderr,
+            )
+            return EXIT_REFUSED
         print("not found: that account has no sign-in method with that id", file=sys.stderr)
         return EXIT_NOT_FOUND
     if command == "promote-owner":

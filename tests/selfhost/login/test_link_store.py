@@ -213,6 +213,50 @@ class TestUnlink:
         owner = make_account(store, "cccccccc-0000-4000-8000-00000000000c", role="owner")
         assert store.unlink_identity(KEY_A, only, actor=owner).code == "last_identity"
 
+    RULES_OWNER = AccessPolicy(
+        mode="rules",
+        rules=(acc.AccessRule("entra", "role", "Canvas.User"), acc.AccessRule("github", "user", "1001")),
+        owner_rules=(acc.AccessRule("entra", "role", "Canvas.Owner"),),
+    )
+
+    def entra_id(self, store: TokenStore) -> int:
+        return next(r.id for r in store.list_identities(KEY_A) if r.provider_id == "entra")
+
+    def rules_owner(self, store: TokenStore) -> None:
+        sign_in(store, OID_A, owner=True, policy=self.RULES_OWNER)
+        assert store.get_principal_status(KEY_A).role == "owner"
+        assert store.get_principal_status(KEY_A).role_source == "rules"
+        assert link(store, KEY_A, gh(), policy=self.RULES_OWNER).ok
+
+    def test_the_only_owner_of_an_entra_rule_keeps_its_last_entra_identity(self, store: TokenStore) -> None:
+        self.rules_owner(store)
+        entra = self.entra_id(store)
+        before = epoch(store)
+        for actor in (KEY_A, OPERATOR):
+            result = store.unlink_identity(KEY_A, entra, actor=actor)
+            assert result.code == "last_owner" and not result.ok
+        assert [i.provider_id for i in store.list_identities(KEY_A)] == ["entra", "github"]
+        assert epoch(store) == before
+
+    def test_another_active_owner_lets_the_entra_identity_go(self, store: TokenStore) -> None:
+        self.rules_owner(store)
+        sign_in(store, OID_B, owner=True, policy=self.RULES_OWNER)
+        assert store.count_active_owners() == 2
+        assert store.unlink_identity(KEY_A, self.entra_id(store), actor=KEY_A).ok
+
+    def test_an_operator_made_owner_may_unlink_entra(self, tmp_path: pathlib.Path) -> None:
+        made = make_store(tmp_path / "op" / "tokens.sqlite3", _ring(), clock=Clock())
+        made.initialize()
+        key = make_account(made, OID_A, name="Ada", role="owner")
+        assert made.get_principal_status(key).role_source == "operator"
+        assert link(made, key, gh(), policy=self.RULES_OWNER).ok
+        entra = next(r.id for r in made.list_identities(key) if r.provider_id == "entra")
+        assert made.unlink_identity(key, entra, actor=key).ok
+
+    def test_a_plain_user_may_unlink_entra(self, store: TokenStore) -> None:
+        assert link(store, KEY_A, gh()).ok
+        assert store.unlink_identity(KEY_A, self.entra_id(store), actor=KEY_A).ok
+
     def test_unlinking_removes_it_bumps_the_epoch_and_leaves_history(self, store: TokenStore) -> None:
         extra = self.two(store)
         before = epoch(store)

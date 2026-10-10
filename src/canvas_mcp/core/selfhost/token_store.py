@@ -234,6 +234,7 @@ LINK_SESSION_ENDED = "link_session_ended"
 UNLINK_OK = "unlinked"
 UNLINK_NOT_FOUND = "not_found"
 UNLINK_LAST = "last_identity"
+UNLINK_LAST_OWNER = "last_owner"
 UNLINK_SESSION_ENDED = "link_session_ended"
 
 _KEY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
@@ -1735,7 +1736,9 @@ class TokenStore:
 
         ``actor`` is the account itself (its key), another account that must be an active
         owner (re-checked in this transaction), or :data:`OPERATOR`. An account always keeps
-        at least one identity (``last_identity``: to cut a person off, disable the account).
+        at least one identity (``last_identity``: to cut a person off, disable the account),
+        and the only owner, whose role is granted by the Entra owner rule, keeps its last Entra
+        identity (``last_owner``).
         The count and the delete are one transaction under the writer lock, so two
         concurrent unlinks of a two-identity account cannot both succeed. A successful unlink
         bumps ``session_epoch`` (every browser session and every authorization code not yet
@@ -1767,6 +1770,18 @@ class TokenStore:
             self._pause("after_identity_count")
             if count <= 1:
                 return UnlinkResult(UNLINK_LAST, ident[1])
+            if (
+                ident[1] == acc.PROVIDER_ENTRA
+                and row[1] == STATUS_ACTIVE
+                and row[2] == ROLE_OWNER
+                and row[3] == acc.ROLE_SOURCE_RULES
+                and repos.identities.count_for_provider(conn, account_id, acc.PROVIDER_ENTRA) <= 1
+                and repos.accounts.count_active_owners(conn, exclude=account_id) == 0
+            ):
+                # The owner role of this account comes from the Entra owner rule and only an
+                # Entra sign-in carries that evidence: without its last Entra identity the sole
+                # owner would stay an owner in the database that no sign-in can use.
+                return UnlinkResult(UNLINK_LAST_OWNER, ident[1])
             if not repos.identities.delete_one(conn, identity_id, account_id):
                 return UnlinkResult(UNLINK_NOT_FOUND)
             epoch = repos.accounts.end_sessions(conn, account_id, now)

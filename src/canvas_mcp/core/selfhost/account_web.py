@@ -3856,6 +3856,15 @@ class _AccountApp:
                     "An account must keep at least one sign-in method. To cut someone off, disable the account.",
                 ),
             )
+        if code == "last_owner":
+            return self.message_page(
+                409,
+                _bi(
+                    "这会让服务器没有可用的所有者：该所有者身份来自 Microsoft 登录。请先让另一位所有者就位。",
+                    "That would leave the server without a usable owner: this owner role comes from the "
+                    "Microsoft sign-in. Add another owner first.",
+                ),
+            )
         if code == "pending_approval":
             return self.message_page(403, self._pending_message())
         if code == "provider_already_linked":

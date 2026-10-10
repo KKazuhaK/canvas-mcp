@@ -15,7 +15,7 @@ from canvas_mcp.core.selfhost.login import registry as login_registry
 from canvas_mcp.core.selfhost.login.http import SafeHttp
 from canvas_mcp.core.selfhost.token_store import Keyring, TokenStore, token_db_path
 
-from ..conftest import OID_A, OID_B, acct_key, make_account
+from ..conftest import OID_A, OID_B, acct_key, make_account, sign_in
 from .fake_idp import FakeNetwork, FakeOidcIdp, google_idp
 from .test_provider_settings import (
     GITHUB_ID,
@@ -175,6 +175,25 @@ class TestUnlinkIdentity:
         assert "keeps at least one sign-in method" in capsys.readouterr().err
         assert token_admin.main(["unlink-identity", KEY_A, "99999"]) == 1
         assert token_admin.main(["unlink-identity", "acct:11111111-2222-4333-8444-555555555555", "1"]) == 1
+
+
+    def test_the_only_rules_owner_keeps_its_entra_identity(self, store, capsys) -> None:
+        policy = acc.AccessPolicy(
+            mode="rules",
+            rules=(acc.AccessRule("entra", "role", "Canvas.User"), acc.AccessRule("github", "user", "1001")),
+            owner_rules=(acc.AccessRule("entra", "role", "Canvas.Owner"),),
+        )
+        make_account(store, OID_A)
+        sign_in(store, OID_A, owner=True, policy=policy)
+        ext = github()
+        assert store.link_identity(
+            KEY_A, ext, acc.evaluate_admission(ext, policy), policy,
+            expected_epoch=store.get_principal_status(KEY_A).session_epoch,
+        ).ok
+        entra = next(i.id for i in store.list_identities(KEY_A) if i.provider_id == "entra")
+        assert token_admin.main(["unlink-identity", KEY_A, str(entra)]) == 3
+        assert "only owner" in capsys.readouterr().err
+        assert [i.provider_id for i in store.list_identities(KEY_A)] == ["entra", "github"]
 
 
 class TestLoginProviders:
