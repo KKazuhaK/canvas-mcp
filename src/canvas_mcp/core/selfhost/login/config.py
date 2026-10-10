@@ -158,16 +158,23 @@ def env_prefix(slug: str) -> str:
 # -- hosts an outbound provider URL may never name -----------------------------------------
 
 
+_LEGACY_IPV4_RE = re.compile(r"(?:0x[0-9a-f]*|[0-9]+)(?:\.(?:0x[0-9a-f]*|[0-9]+)){0,3}")
+
+
 def blocked_host(host: str) -> bool:
     """True for a host the server must not call: ``localhost``, ``*.localhost`` and IP literals
-    that are loopback, link-local, unspecified or multicast (IPv4-mapped IPv6 included)."""
+    that are loopback, link-local, unspecified or multicast (IPv4-mapped IPv6 included), and every
+    host spelled as a non-canonical IPv4 number (``127.1``, ``2130706433``, ``0x7f000001``)."""
     name = host.strip().strip("[]").lower().rstrip(".")
     if not name or name == "localhost" or name.endswith(".localhost"):
         return True
     try:
         address = ipaddress.ip_address(name.split("%", 1)[0])
     except ValueError:
-        return False
+        # Not a canonical address. The C resolver of the production image still reads the old
+        # spellings (127.1, 2130706433, 0x7f000001, 0177.0.0.1) as IPv4 addresses, so a host made
+        # only of such numbers is refused whatever it points at; a real name is never one.
+        return _LEGACY_IPV4_RE.fullmatch(name) is not None
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
         address = address.ipv4_mapped
     return (

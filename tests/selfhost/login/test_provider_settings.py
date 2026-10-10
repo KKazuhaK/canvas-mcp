@@ -247,6 +247,8 @@ def test_github_variables(overrides: dict[str, Any], fragment: str) -> None:
         ({"ISSUER": "https://idp.example.edu/#frag"}, "OIDC_SCHOOL_ISSUER must be the exact https issuer"),
         ({"ISSUER": "https://localhost/realm"}, "OIDC_SCHOOL_ISSUER must be the exact https issuer"),
         ({"ISSUER": "https://127.0.0.1/realm"}, "OIDC_SCHOOL_ISSUER must be the exact https issuer"),
+        ({"ISSUER": "https://127.1/realm"}, "OIDC_SCHOOL_ISSUER must be the exact https issuer"),
+        ({"ISSUER": "https://0x7f000001/realm"}, "OIDC_SCHOOL_ISSUER must be the exact https issuer"),
         ({"ISSUER": "https://[::1]/realm"}, "OIDC_SCHOOL_ISSUER must be the exact https issuer"),
         ({"ISSUER": "https://169.254.169.254/x"}, "OIDC_SCHOOL_ISSUER must be the exact https issuer"),
         ({"ISSUER": "https://" + "a" * 260 + ".test"}, "OIDC_SCHOOL_ISSUER must be the exact https issuer"),
@@ -424,7 +426,10 @@ def test_more_than_ten_github_membership_rules_are_refused() -> None:
     [
         ("localhost", True), ("app.localhost", True), ("127.0.0.1", True), ("[::1]", True),
         ("169.254.169.254", True), ("0.0.0.0", True), ("::ffff:127.0.0.1", True), ("224.0.0.1", True),
-        ("fe80::1", True), ("idp.example.edu", False), ("8.8.8.8", False), ("10.0.0.5", False),
+        ("fe80::1", True),
+        ("127.1", True), ("2130706433", True), ("0x7f000001", True), ("0", True), ("2852039166", True),
+        ("0177.0.0.1", True), ("127.000.000.001", True), ("0x7f.1", True), ("1.2.3.4.example.com", False),
+        ("idp.example.edu", False), ("8.8.8.8", False), ("10.0.0.5", False),
     ],
 )
 def test_blocked_hosts(host: str, blocked: bool) -> None:

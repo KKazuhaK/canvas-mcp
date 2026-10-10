@@ -57,7 +57,8 @@ class TestParseDiscovery:
     @pytest.mark.parametrize(
         "bad",
         ["http://idp.example.edu/x", "https://user:pw@idp.example.edu/x", "https://localhost/x",
-         "https://169.254.169.254/x", "ftp://x", "", 5],
+         "https://169.254.169.254/x", "https://127.1/x", "https://2130706433/x", "https://0x7f000001/x",
+         "ftp://x", "", 5],
     )
     def test_every_endpoint_must_be_a_plain_https_url(self, field: str, bad: Any) -> None:
         with pytest.raises(ProviderUnavailable):
