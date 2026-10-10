@@ -178,6 +178,15 @@ class TestAuthorize:
         response = stack.client.post("/authorize", data=stack.authorize_params(client_id, challenge))
         assert response.status_code == 302 and "/account/login?txn=" in response.headers["location"]
 
+    def test_head_authorize_with_a_form_body_creates_no_transaction(self, stack: Stack) -> None:
+        client_id = stack.register(CLAUDE_REDIRECT)
+        _, challenge = pkce()
+        params = stack.authorize_params(client_id, challenge)
+        for _ in range(40):
+            response = stack.client.request("HEAD", "/authorize", data=params)
+            assert response.status_code in (405, 429)
+        assert raw_sql(stack.store, "SELECT COUNT(*) FROM login_states")[0][0] == 0
+
 
 # ------------------------------------------------------------------------- /account/login?txn
 

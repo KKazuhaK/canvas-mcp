@@ -130,6 +130,43 @@ class TestLocalMode:
         assert ran == [1]  # at most once per interval
 
 
+class TestHeadAuthorize:
+    async def test_head_is_metered_with_get_and_never_reaches_the_app(self) -> None:
+        inner = Inner()
+        g = guard(inner, Clock(), local=True)
+        form = b"client_id=x&response_type=code"
+        for _ in range(15):
+            assert (await request(g, "GET", "/authorize"))[0] == 200
+        statuses = []
+        for _ in range(20):
+            status, headers, _ = await request(g, "HEAD", "/authorize", form)
+            statuses.append(status)
+            assert status in (405, 429)
+        # Fifteen GETs and fifteen HEADs drain the shared bucket of 30; the rest are refused.
+        assert statuses[:15] == [405] * 15 and statuses[15:] == [429] * 5
+        assert all(method == "GET" for method, _, _ in inner.calls) and len(inner.calls) == 15
+
+    async def test_head_answers_405_with_allow_and_no_body(self) -> None:
+        inner = Inner()
+        g = guard(inner, Clock(), local=True)
+        status, headers, body = await request(g, "HEAD", "/authorize", b"a=" + b"b" * (64 * 1024))
+        assert status == 405 and headers[b"allow"] == b"GET, POST" and body == b""
+        assert inner.calls == []
+
+    async def test_head_on_other_paths_is_untouched(self) -> None:
+        inner = Inner()
+        g = guard(inner, Clock(), local=True)
+        assert (await request(g, "HEAD", "/token"))[0] == 200
+        assert (await request(g, "HEAD", "/.well-known/oauth-authorization-server"))[0] == 200
+
+    async def test_the_default_mode_still_passes_head_through(self) -> None:
+        inner = Inner()
+        g = guard(inner, Clock(), local=False)
+        for _ in range(60):
+            assert (await request(g, "HEAD", "/authorize", b"a=b"))[0] == 200
+        assert len(inner.calls) == 60
+
+
 class TestDefaultMode:
     async def test_nothing_about_token_and_revoke_changes(self) -> None:
         inner = Inner()

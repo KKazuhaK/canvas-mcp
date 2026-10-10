@@ -19,8 +19,9 @@ sign-in:
 
 With ``authz_local`` (``SELFHOST_AUTH_MODE=local``) two more endpoints reach the
 database without a sign-in and get a bucket as well: ``POST /token`` and
-``POST /revoke``; and their bodies, like ``POST /authorize``, are capped at 16 KiB. Without
-it nothing about these paths changes.
+``POST /revoke``; and their bodies, like ``POST /authorize``, are capped at 16 KiB. ``HEAD
+/authorize`` is metered and answered with 405 there (the handler would otherwise treat a HEAD
+with a body as a full request). Without it nothing about these paths changes.
 """
 
 from __future__ import annotations
@@ -117,6 +118,17 @@ class SelfhostEdgeGuard:
             method = scope.get("method", "")
             if path == REGISTER_PATH and method == "POST":
                 await self._guarded_register(scope, receive, send)
+                return
+            if self._authz_local and path == AUTHORIZE_PATH and method == "HEAD":
+                # Starlette serves HEAD wherever GET is routed, and the SDK handler reads the
+                # form of every non-GET request, so a HEAD with a body would be a whole
+                # /authorize request (a transaction row, a metadata fetch) outside the
+                # bucket and the body cap. Nobody needs HEAD here: meter it, then refuse it.
+                retry = self._authorize.take()
+                if retry > 0:
+                    await _too_many_requests(send, retry)
+                    return
+                await _method_not_allowed(send, "GET, POST")
                 return
             if path == AUTHORIZE_PATH and method in ("GET", "POST"):
                 retry = self._authorize.take()
@@ -240,6 +252,16 @@ async def _respond(send: Send, status: int, payload: dict[str, Any], *, retry_af
         headers.append((b"retry-after", str(retry_after).encode()))
     await send({"type": "http.response.start", "status": status, "headers": headers})
     await send({"type": "http.response.body", "body": body})
+
+
+async def _method_not_allowed(send: Send, allow: str) -> None:
+    headers = [
+        (b"allow", allow.encode()),
+        (b"content-length", b"0"),
+        (b"cache-control", b"no-store"),
+    ]
+    await send({"type": "http.response.start", "status": 405, "headers": headers})
+    await send({"type": "http.response.body", "body": b""})
 
 
 async def _too_many_requests(send: Send, retry_after_seconds: float) -> None:
