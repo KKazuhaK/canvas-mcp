@@ -495,6 +495,8 @@ class TestConsentDecision:
         assert browser.decide(page, "approve").status_code == 303
         again = browser.decide(page, "approve")
         assert again.status_code == 400 and "location" not in again.headers
+        # a double click: the person is told the app may already be connected
+        assert "pressed the button twice" in again.text and "may already be connected" in again.text
         assert raw_sql(stack.store, "SELECT COUNT(*) FROM oauth_codes")[0][0] == 1
 
     def test_an_expired_transaction_cannot_be_decided(self, stack: Stack) -> None:
