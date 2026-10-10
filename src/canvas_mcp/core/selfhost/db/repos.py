@@ -940,6 +940,16 @@ class SqlMetaRepo:
         else:
             conn.execute(insert(t.meta).values(key="schema_version", value=value))
 
+    def get(self, conn: Connection, key: str) -> str | None:
+        value = conn.execute(select(t.meta.c.value).where(t.meta.c.key == key)).scalar_one_or_none()
+        return None if value is None else str(value)
+
+    def put(self, conn: Connection, key: str, value: str) -> None:
+        if self.get(conn, key) is None:
+            conn.execute(insert(t.meta).values(key=key, value=value))
+        else:
+            conn.execute(update(t.meta).where(t.meta.c.key == key).values(value=value))
+
 
 class Repositories:
     """The repositories of one dialect, bundled for the store.

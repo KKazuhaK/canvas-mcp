@@ -722,6 +722,104 @@ class TestBootstrapOwnerWithUnusableOwners:
         assert actions(store, "role_changed") == []
 
 
+class TestStrandedOwnerAndTheBootstrapIdentity:
+    """The bootstrap identity's own account is an owner no sign-in can use (Entra was delisted)."""
+
+    GOOGLE_ONLY = frozenset({"google"})
+    BOTH = frozenset({"entra", "google"})
+    BOOT = TestBootstrapOwnerWithUnusableOwners.BOOT
+
+    def sign(self, store: TokenStore, ext: ExternalClaims, listed: frozenset[str], policy: AccessPolicy = BOOT) -> Any:
+        return store.resolve_identity(
+            ext, verdict_for(ext, policy), policy, purpose="sign_in", listed_providers=listed
+        )
+
+    def stranded(self, store: TokenStore) -> None:
+        """A became an owner through the Entra owner rule and linked the bootstrap Google identity."""
+        sign_in(store, OID_A, owner=True, policy=RULES_OWNER)
+        assert store.get_principal_status(KEY_A).role_source == "rules"
+        assert link(store, KEY_A, google("boot-1")).ok
+
+    def test_its_own_sign_in_re_sources_the_owner_to_bootstrap(self, store: TokenStore) -> None:
+        self.stranded(store)
+        assert store.count_usable_owners(self.BOTH) == 1  # usable while Entra is listed
+        assert store.count_usable_owners(self.GOOGLE_ONLY) == 0
+        resolution = self.sign(store, google("boot-1"), self.GOOGLE_ONLY)
+        assert resolution.outcome == "allow" and resolution.session_owner
+        assert resolution.principal_key == KEY_A and not resolution.created
+        status = store.get_principal_status(KEY_A)
+        assert (status.role, status.role_source) == ("owner", "bootstrap")
+        assert store.count_usable_owners(self.GOOGLE_ONLY) == 1
+        entry = next(e for e in actions(store, "role_changed") if e.target == KEY_A)
+        assert entry.detail == {
+            "role": "owner", "source": "bootstrap", "via": "sign_in", "unusable_owners": 1, "was": "rules",
+        }
+        # A second sign-in changes nothing more and is still an owner session.
+        before = len(store.list_audit(200))
+        again = self.sign(store, google("boot-1"), self.GOOGLE_ONLY)
+        assert again.session_owner and len(store.list_audit(200)) == before
+
+    def test_it_is_left_alone_while_a_usable_owner_exists(self, store: TokenStore) -> None:
+        self.stranded(store)
+        store.create_operator_account(
+            provider_id="google", issuer=acc.GOOGLE_ISSUER, subject="someone-else",
+            status="active", role="owner",
+        )
+        assert store.count_usable_owners(self.GOOGLE_ONLY) == 1
+        resolution = self.sign(store, google("boot-1"), self.GOOGLE_ONLY)
+        assert resolution.outcome == "allow" and not resolution.session_owner
+        assert store.get_principal_status(KEY_A).role_source == "rules"
+
+    def test_a_usable_rules_owner_is_not_re_sourced(self, store: TokenStore) -> None:
+        self.stranded(store)
+        resolution = self.sign(store, google("boot-1"), self.BOTH)
+        assert not resolution.session_owner  # Google data never shows an owner role
+        assert store.get_principal_status(KEY_A).role_source == "rules"
+
+    def test_promote_owner_re_sources_an_unusable_owner_to_operator(self, store: TokenStore) -> None:
+        self.stranded(store)
+        assert store.promote_owner(KEY_A, listed_providers=self.GOOGLE_ONLY) is True
+        status = store.get_principal_status(KEY_A)
+        assert (status.role, status.role_source) == ("owner", "operator")
+        assert store.count_usable_owners(self.GOOGLE_ONLY) == 1
+        entry = next(e for e in actions(store, "role_changed") if e.target == KEY_A and e.actor == "operator")
+        assert entry.detail == {"role": "owner", "source": "operator", "was": "rules"}
+        assert store.promote_owner(KEY_A, listed_providers=self.GOOGLE_ONLY) is False  # nothing left to do
+
+    def test_promote_owner_leaves_a_usable_owner_alone(self, store: TokenStore) -> None:
+        self.stranded(store)
+        assert store.promote_owner(KEY_A) is False  # every provider listed
+        assert store.promote_owner(KEY_A, listed_providers=self.BOTH) is False
+        assert store.get_principal_status(KEY_A).role_source == "rules"
+
+    def test_promote_owner_does_not_touch_an_owner_it_could_not_make_usable(self, store: TokenStore) -> None:
+        sign_in(store, OID_A, owner=True, policy=RULES_OWNER)  # an Entra identity only
+        assert store.promote_owner(KEY_A, listed_providers=self.GOOGLE_ONLY) is False
+        assert store.get_principal_status(KEY_A).role_source == "rules"
+
+    def test_an_active_account_the_rules_no_longer_admit_is_admitted_as_the_bootstrap_identity(
+        self, store: TokenStore
+    ) -> None:
+        domain = lambda d: AccessPolicy(  # noqa: E731
+            mode="rules", rules=(acc.AccessRule("google", "domain", d),), owner_rules=(),
+            bootstrap_owner=self.BOOT.bootstrap_owner, ack_public=True,
+        )
+        sign_in(store, OID_A, owner=True, policy=RULES_OWNER)  # a usable owner, for now
+        created = self.sign(store, google("boot-1"), self.BOTH, domain("example.test"))
+        assert created.created and not created.session_owner
+        key = created.principal_key
+        assert key is not None and store.get_principal_status(key).admitted_via == "rules"
+        # The domain rule moves on. While an owner is usable the account is refused, as before.
+        refused = self.sign(store, google("boot-1"), self.BOTH, domain("other.edu"))
+        assert refused.outcome == "deny" and refused.reason == "access_denied"
+        # With no usable owner the bootstrap identity is admitted, like a new or pending one.
+        admitted = self.sign(store, google("boot-1"), self.GOOGLE_ONLY, domain("other.edu"))
+        assert admitted.outcome == "allow" and admitted.session_owner
+        assert store.get_principal_status(key).role_source == "bootstrap"
+        # Another account of the same rules stays refused.
+        assert self.sign(store, google("someone"), self.GOOGLE_ONLY, domain("other.edu")).outcome == "deny"
+
+
 class TestUsableOwnerGuards:
     """UO-1: disabling and demoting count usable owners, so a stranded owner is no replacement."""
 

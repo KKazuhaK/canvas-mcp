@@ -114,6 +114,10 @@ if TYPE_CHECKING:
 
 SCHEMA_VERSION = 5
 
+#: ``meta`` key holding the server's listed sign-in providers (see ``record_login_providers``).
+LOGIN_PROVIDERS_META_KEY = "login_providers"
+_PROVIDER_ID_RE = re.compile(r"[a-z0-9][a-z0-9:_.-]{0,63}")
+
 # Health of a stored token (``canvas_tokens.status``).
 STATUS_ACTIVE = "active"
 STATUS_INVALID = "invalid"
@@ -1534,6 +1538,34 @@ class TokenStore:
         with self._db.read() as conn:
             return self._repos.accounts.count_usable_owners(conn, _listed(provider_ids))
 
+    def record_login_providers(self, provider_ids: Iterable[str]) -> None:
+        """Remember the providers of ``SELFHOST_LOGIN_PROVIDERS`` this server runs with.
+
+        ``token_admin`` is usually run from a shell that lacks the server's variables, and it
+        needs the list to decide which owners are usable; it reads this record first. The
+        server writes it at startup (``meta['login_providers']``, a comma-separated list; an
+        existing value is replaced only when it differs). A deployment with Entra alone and no
+        earlier record writes nothing, so it keeps the database exactly as it was: no record
+        means "Entra alone".
+        """
+        value = ",".join(sorted(set(provider_ids)))
+        with self._db.write() as conn:
+            current = self._repos.meta.get(conn, LOGIN_PROVIDERS_META_KEY)
+            if current == value or (current is None and value == acc.PROVIDER_ENTRA):
+                return
+            self._repos.meta.put(conn, LOGIN_PROVIDERS_META_KEY, value)
+
+    def recorded_login_providers(self) -> frozenset[str] | None:
+        """The providers the server last recorded (None: none recorded, or unreadable)."""
+        with self._db.read() as conn:
+            raw = self._repos.meta.get(conn, LOGIN_PROVIDERS_META_KEY)
+        if raw is None:
+            return None
+        ids = [part for part in raw.split(",") if part]
+        if not ids or any(not _PROVIDER_ID_RE.fullmatch(part) for part in ids):
+            return None
+        return frozenset(ids)
+
     def lookup_identity(self, provider_id: str, issuer: str, subject: str) -> str | None:
         """The account key of an external identity, or None if it is not known."""
         with self._db.read() as conn:
@@ -1582,12 +1614,29 @@ class TokenStore:
             row = repos.accounts.get(conn, account_id, for_update=True) if account_id else None
             existing = None if row is None else _status_from_row(row).facts
             active_owners = repos.accounts.count_active_owners(conn)
-            usable_owners = repos.accounts.count_usable_owners(conn, _listed(listed_providers))
+            listed = _listed(listed_providers)
+            usable_owners = repos.accounts.count_usable_owners(conn, listed)
+            is_bootstrap = acc.is_bootstrap_identity(ext, policy)
+            owner_usable = True
+            if (
+                is_bootstrap
+                and row is not None
+                and account_id is not None
+                and row[1] == STATUS_ACTIVE
+                and row[2] == ROLE_OWNER
+            ):
+                # Only the bootstrap identity may re-source an owner: whether this one is usable.
+                held = repos.identities.list_with_ids(conn, account_id)
+                owner_usable = acc.owner_is_usable(
+                    role=row[2], status=row[1], role_source=row[3],
+                    identity_providers=[r[1] for r in held], listed=listed,
+                )
             facts = DecisionFacts(
                 active_owner_count=active_owners,
                 usable_owner_count=usable_owners,
                 pending_count=repos.accounts.count_pending(conn),
-                is_bootstrap_identity=acc.is_bootstrap_identity(ext, policy),
+                is_bootstrap_identity=is_bootstrap,
+                existing_owner_usable=owner_usable,
             )
             decision = acc.decide(existing, verdict, policy, facts, purpose)
             self._pause("after_decision")
@@ -1935,6 +1984,10 @@ class TokenStore:
             }
             if unusable_owners > 0:
                 detail["unusable_owners"] = unusable_owners
+            if row[2] == ROLE_OWNER and decision.role == ROLE_OWNER:
+                # An owner re-sourced at a sign-in (the bootstrap identity took over a role no
+                # sign-in could use): say where it came from.
+                detail["was"] = (row[3] or "")[:32]
             self._audit(conn, SYSTEM_ACTOR, AUDIT_ROLE_CHANGED, target=key, detail=detail, now=now)
             return event
         if decision.role_event == EVENT_OWNER_LOSS_REFUSED:
@@ -2260,12 +2313,25 @@ class TokenStore:
         self._publish_generation(key, generation)
         return True
 
-    def promote_owner(self, principal_key: str, *, actor: Actor = OPERATOR) -> bool:
+    def promote_owner(
+        self,
+        principal_key: str,
+        *,
+        actor: Actor = OPERATOR,
+        listed_providers: Collection[str] | None = None,
+    ) -> bool:
         """Make an active account an owner (``role_source`` operator); operator only.
 
         The emergency entrance of the CLI: owners otherwise come from ``OWNER_RULES``
-        or the bootstrap owner. Returns False when the account is not active or already
-        an owner. A role the operator granted is not taken back by the rules.
+        or the bootstrap owner. A role the operator granted is not taken back by the rules.
+
+        An account that is already an owner is left alone unless it is not a *usable* owner
+        under ``listed_providers`` (the providers of ``SELFHOST_LOGIN_PROVIDERS``; None: all;
+        see :func:`accounts.owner_is_usable`) and the operator's say-so would make it one: an
+        owner whose role the Entra owner rules granted keeps that source after Entra is
+        delisted, and no sign-in can show it, so it is re-sourced to ``operator`` (audited).
+        Returns False when the account is not active, or is already an owner that needs no
+        change.
         """
         if not isinstance(actor, _Operator):
             raise AccessActionRefused(AccessActionRefused.NOT_OWNER)
@@ -2274,8 +2340,23 @@ class TokenStore:
         now = self._now()
         with self._db.write() as conn:
             row = self._repos.accounts.get(conn, account_id, for_update=True)
-            if row is None or row[1] != STATUS_ACTIVE or row[2] == ROLE_OWNER:
+            if row is None or row[1] != STATUS_ACTIVE:
                 return False
+            previous_source: str | None = None
+            if row[2] == ROLE_OWNER:
+                held = [r[1] for r in self._repos.identities.list_with_ids(conn, account_id)]
+                listed = _listed(listed_providers)
+                usable_now = acc.owner_is_usable(
+                    role=row[2], status=row[1], role_source=row[3],
+                    identity_providers=held, listed=listed,
+                )
+                usable_as_operator = acc.owner_is_usable(
+                    role=row[2], status=row[1], role_source=acc.ROLE_SOURCE_OPERATOR,
+                    identity_providers=held, listed=listed,
+                )
+                if usable_now or not usable_as_operator:
+                    return False
+                previous_source = row[3] or ""
             self._repos.accounts.set_role(
                 conn, account_id, role=ROLE_OWNER, source=acc.ROLE_SOURCE_OPERATOR,
                 seen_at=now, now=now,
@@ -2285,7 +2366,15 @@ class TokenStore:
             )
             self._audit(
                 conn, OPERATOR_ACTOR, AUDIT_ROLE_CHANGED, target=key,
-                detail={"role": ROLE_OWNER, "source": acc.ROLE_SOURCE_OPERATOR}, now=now,
+                detail=(
+                    {"role": ROLE_OWNER, "source": acc.ROLE_SOURCE_OPERATOR}
+                    if previous_source is None
+                    else {
+                        "role": ROLE_OWNER, "source": acc.ROLE_SOURCE_OPERATOR,
+                        "was": previous_source[:32],
+                    }
+                ),
+                now=now,
             )
         return True
 

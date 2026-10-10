@@ -114,17 +114,19 @@ unless ``DATABASE_AUTO_MIGRATE=false``. Never prints a token, a key, a database
 password or any other secret.
 
 Exit codes: 0 ok, 1 not found, 2 configuration, keyring or database error, 3
-refused (for example disabling the last active owner), 4 ``db current`` found the
+refused (for example disabling the last usable owner), 4 ``db current`` found the
 schema behind this build (run ``db upgrade``).
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import pathlib
 import re
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -236,7 +238,7 @@ def _build_parser() -> argparse.ArgumentParser:
     disable.add_argument(
         "--allow-last-owner",
         action="store_true",
-        help="allow disabling the last active owner (break-glass)",
+        help="allow disabling the last usable or last active owner (break-glass)",
     )
     enable = sub.add_parser("enable", help="lift a disablement")
     principal(enable)
@@ -772,14 +774,15 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
                 actor=OPERATOR,
                 reason=DISABLE_REASON_OPERATOR,
                 allow_last_owner=args.allow_last_owner,
-                listed_providers=_listed_providers(),
+                listed_providers=_listed_providers(store),
             )
         except AccessActionRefused as exc:
             if exc.code == AccessActionRefused.LAST_OWNER:
                 print(
-                    "refused: that user is the last active owner as far as the stored "
-                    "owner roles show (a former owner who never signed in again still "
-                    "counts; check 'access' for the owner_seen_at column). "
+                    "refused: that user is the last usable owner (an active owner who can still "
+                    "sign in as one under the listed sign-in providers) or the only active owner "
+                    "as far as the stored owner roles show (a former owner who never signed in "
+                    "again still counts; check 'access' for the owner_seen_at column). "
                     "Add another owner first, or pass --allow-last-owner",
                     file=sys.stderr,
                 )
@@ -807,7 +810,7 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
             print("not found: no such account", file=sys.stderr)
             return EXIT_NOT_FOUND
         result = store.unlink_identity(
-            key, args.identity_id, actor=OPERATOR, listed_providers=_listed_providers()
+            key, args.identity_id, actor=OPERATOR, listed_providers=_listed_providers(store)
         )
         if result.ok:
             print(
@@ -833,7 +836,9 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
         print("not found: that account has no sign-in method with that id", file=sys.stderr)
         return EXIT_NOT_FOUND
     if command == "promote-owner":
-        changed = key is not None and store.promote_owner(key, actor=OPERATOR)
+        changed = key is not None and store.promote_owner(
+            key, actor=OPERATOR, listed_providers=_listed_providers(store)
+        )
         if not changed:
             print("nothing to do: no such active account, or it is already an owner")
             return EXIT_NOT_FOUND
@@ -926,32 +931,53 @@ def _endpoint_hosts(meta: Any) -> str:
     return ",".join(hosts)
 
 
-def _listed_providers() -> frozenset[str] | None:
-    """The providers of ``SELFHOST_LOGIN_PROVIDERS`` in this environment (None: unreadable).
+def _listed_providers(store: TokenStore) -> frozenset[str] | None:
+    """The providers of ``SELFHOST_LOGIN_PROVIDERS`` the usable-owner checks use (None: all).
 
-    They decide which owners are usable. When the full settings do not load (the operator shell
-    often lacks the server's other variables), only ``SELFHOST_LOGIN_PROVIDERS`` is parsed, so an
-    explicit list still holds. Only a list that cannot be read at all leaves every provider
-    counted as listed, and then a note says so.
+    They decide which owners are usable, so they must be the server's. In this order:
+
+    1. the list the server recorded in the database at its last startup (``meta``): an operator
+       shell often lacks the server's variables, and this does not depend on them;
+    2. this environment: the full settings, else ``SELFHOST_LOGIN_PROVIDERS`` alone.
+
+    A note on stderr says so when the answer had to be assumed: the list is unreadable (every
+    provider is then counted as listed, which is more permissive than the server), or nothing
+    names it (no record, no variable) while the database holds sign-in methods at providers other
+    than Entra (Entra alone is then assumed). A deployment with Entra alone gets no note.
     """
-    from canvas_mcp.core.selfhost.login.config import parse_login_providers
+    from canvas_mcp.core.selfhost.login.config import (
+        LOGIN_PROVIDERS_ENV,
+        parse_login_providers,
+    )
     from canvas_mcp.core.selfhost.settings import (
         SelfhostConfigError,
         load_selfhost_settings,
     )
 
+    recorded = store.recorded_login_providers()
+    if recorded is not None:
+        return recorded
+    named = bool((os.environ.get(LOGIN_PROVIDERS_ENV) or "").strip())
     try:
-        return load_selfhost_settings().login_providers.ids
+        with _quiet_login_config():
+            loaded = load_selfhost_settings().login_providers.ids
     except SelfhostConfigError:
         pass
+    else:
+        if not named:
+            _note_assumed_entra_only(store)
+        return loaded
     ignored: list[str] = []
     try:
         # authz_mode "local": the mode of the other settings is not known here, and this reads
         # the list alone.
-        ids = parse_login_providers(os.environ, ignored, authz_mode="local").ids
+        with _quiet_login_config():
+            ids = parse_login_providers(os.environ, ignored, authz_mode="local").ids
     except Exception:  # noqa: BLE001 - an unreadable list falls back to "all listed"
         ids = frozenset()
-    if ids and not any(p.startswith("SELFHOST_LOGIN_PROVIDERS") for p in ignored):
+    if ids and not any(p.startswith(LOGIN_PROVIDERS_ENV) for p in ignored):
+        if not named:
+            _note_assumed_entra_only(store)
         return ids
     print(
         "note: SELFHOST_LOGIN_PROVIDERS is not readable in this environment; every provider is "
@@ -959,6 +985,53 @@ def _listed_providers() -> frozenset[str] | None:
         file=sys.stderr,
     )
     return None
+
+
+def _note_assumed_entra_only(store: TokenStore) -> None:
+    """Tell the operator when Entra alone is assumed for a database that holds other providers."""
+    others = sorted(
+        {
+            identity.provider_id
+            for account in store.list_accounts()
+            for identity in account.identities
+            if identity.provider_id != acc.PROVIDER_ENTRA
+        }
+    )
+    if others:
+        print(
+            "note: the server has not recorded its SELFHOST_LOGIN_PROVIDERS and this environment "
+            f"does not set it, so only entra is assumed to be listed, but the database holds "
+            f"sign-in methods at {', '.join(others[:5])}; run this command with the server's "
+            "environment (or start the server once) so the usable-owner check matches it",
+            file=sys.stderr,
+        )
+
+
+@contextlib.contextmanager
+def _quiet_login_config() -> Iterator[None]:
+    """Keep the stray-provider-variable warnings of the settings parser out of this command.
+
+    ``GOOGLE_CLIENT_ID`` and the like, set while ``SELFHOST_LOGIN_PROVIDERS`` is not, are ignored
+    and logged as a warning where the server starts; here they would only add noise to a command
+    whose output people and scripts read. Nothing else the logger says is touched.
+    """
+    import logging
+
+    from canvas_mcp.core.selfhost.login import config as login_config
+
+    class _Stray(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return not (
+                record.levelno == logging.WARNING
+                and "is unset: it is ignored" in record.getMessage()
+            )
+
+    stray = _Stray()
+    login_config.logger.addFilter(stray)
+    try:
+        yield
+    finally:
+        login_config.logger.removeFilter(stray)
 
 
 def _run_login_providers(args: argparse.Namespace) -> int:

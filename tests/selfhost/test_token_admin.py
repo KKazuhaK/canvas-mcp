@@ -336,7 +336,7 @@ def test_the_last_owner_needs_the_break_glass_flag(env, capsys) -> None:
     store = _seed(env)
     assert store.promote_owner(KEY_A)
     assert token_admin.main(["disable", TID, OID_A]) == 3
-    assert "last active owner" in capsys.readouterr().err
+    assert "last usable owner" in capsys.readouterr().err
     assert not store.get_principal_status(KEY_A).disabled
     assert store.promote_owner(KEY_B)
     assert token_admin.main(["disable", TID, OID_A]) == 0  # a second owner exists

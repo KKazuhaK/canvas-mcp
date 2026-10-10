@@ -228,7 +228,7 @@ class TestUnlinkIdentity:
         for name in ("GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"):
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("SELFHOST_LOGIN_PROVIDERS", "github")
-        assert token_admin._listed_providers() == frozenset({"github"})
+        assert token_admin._listed_providers(store) == frozenset({"github"})
         make_account(store, OID_A)
         assert store.promote_owner(KEY_A)
         link(store, KEY_A, github())
@@ -242,8 +242,83 @@ class TestUnlinkIdentity:
         self, store, monkeypatch, capsys
     ) -> None:
         monkeypatch.setenv("SELFHOST_LOGIN_PROVIDERS", "not-a-provider")
-        assert token_admin._listed_providers() is None
+        assert token_admin._listed_providers(store) is None
         assert "assumed to be listed" in capsys.readouterr().err
+
+
+class TestRecordedLoginProviders:
+    """The usable-owner checks use the providers the server recorded, not the shell's variables."""
+
+    @pytest.fixture(autouse=True)
+    def bare_shell(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in ("SELFHOST_LOGIN_PROVIDERS", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"):
+            monkeypatch.delenv(name, raising=False)
+
+    @staticmethod
+    def google_only_world(store: TokenStore) -> str:
+        """S: an Entra-rule owner (stranded once Entra is delisted); C: a Google-only operator owner."""
+        sign_in(store, OID_A, owner=True)
+        return store.create_operator_account(
+            provider_id="google", issuer=acc.GOOGLE_ISSUER, subject="1234567890",
+            status="active", role="owner",
+        )
+
+    def test_the_servers_record_decides_without_its_variables(self, store, capsys) -> None:
+        c = self.google_only_world(store)
+        store.record_login_providers({"google"})
+        assert token_admin.main(["disable", c]) == 3
+        err = capsys.readouterr().err
+        assert "last usable owner" in err and "note:" not in err
+        assert store.get_principal_status(c).status == "active"
+
+    def test_the_record_beats_a_different_variable_in_the_shell(self, store, monkeypatch, capsys) -> None:
+        c = self.google_only_world(store)
+        store.record_login_providers({"google"})
+        monkeypatch.setenv("SELFHOST_LOGIN_PROVIDERS", "entra")
+        assert token_admin.main(["disable", c]) == 3
+        assert store.get_principal_status(c).status == "active"
+
+    def test_nothing_recorded_and_nothing_set_assumes_entra_and_says_so(self, store, capsys) -> None:
+        c = self.google_only_world(store)
+        assert token_admin.main(["disable", c]) == 0  # the assumption, as before
+        err = capsys.readouterr().err
+        assert "has not recorded" in err and "google" in err
+
+    def test_an_entra_only_database_gets_no_note(self, store, capsys) -> None:
+        sign_in(store, OID_A, owner=True)
+        sign_in(store, OID_B, owner=True)
+        assert token_admin.main(["disable", KEY_B]) == 0
+        captured = capsys.readouterr()
+        assert captured.err == "" and captured.out.strip() == "disabled 1 user"
+
+    def test_an_unlisted_provider_variable_is_not_logged_by_the_command(
+        self, store, monkeypatch, capsys, caplog
+    ) -> None:
+        sign_in(store, OID_A, owner=True)
+        sign_in(store, OID_B, owner=True)
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", GOOGLE_ID)
+        with caplog.at_level("DEBUG"):
+            assert token_admin.main(["disable", KEY_B]) == 0
+        assert not [r for r in caplog.records if "is ignored" in r.getMessage()]
+        captured = capsys.readouterr()
+        assert captured.err == "" and "ignored" not in captured.out
+
+    def test_promote_owner_re_sources_a_stranded_rules_owner(self, store, capsys) -> None:
+        sign_in(store, OID_A, owner=True)
+        link(store, KEY_A, ExternalClaims(
+            provider_id="google", issuer=acc.GOOGLE_ISSUER, subject="1234567890",
+            email="a@example.test", email_verified=True,
+        ))
+        # Entra alone: the rules owner is usable, so there is nothing to do.
+        assert token_admin.main(["promote-owner", KEY_A]) == 1
+        assert store.get_principal_status(KEY_A).role_source == "rules"
+        capsys.readouterr()
+        store.record_login_providers({"google"})
+        assert token_admin.main(["promote-owner", KEY_A]) == 0
+        assert capsys.readouterr().out.strip() == "promoted 1 account to owner"
+        assert store.get_principal_status(KEY_A).role_source == "operator"
+        assert store.count_usable_owners({"google"}) == 1
+        assert token_admin.main(["promote-owner", KEY_A]) == 1
 
 
 class TestLoginProviders:

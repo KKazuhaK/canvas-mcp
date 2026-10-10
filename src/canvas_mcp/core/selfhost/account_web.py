@@ -46,7 +46,7 @@ Security notes:
   a sign-in from the last ten minutes *and* the stored owner role, and the store
   re-checks that the acting owner is still an active owner inside the transaction
   that disables, enables, approves or denies someone. An owner cannot disable
-  themselves or the last active owner.
+  themselves or the last usable owner.
 * With ``ACCESS_POLICY=approval`` (or the ``approval`` fallback) a new user lands in
   a ``pending`` state: they can sign in and see that they are waiting, but the token
   form and the write-tool switches are hidden and refused, and the store refuses a
@@ -4388,7 +4388,7 @@ class _AccountApp:
             f"<li><strong>{_bi('移除绑定', 'Remove enrollment')}</strong>: "
             f"{_bi('只删除保存的 Canvas 令牌。对方仍可重新绑定，除非已被停用。', 'deletes the saved Canvas token only. The person can enroll again unless they are disabled.')}</li>"
             "</ul>"
-            f'<p class="muted small">{_bi("用户自己删除令牌只是断开自己的连接，与停用无关。你不能停用自己，也不能停用最后一位仍在启用的所有者。", "A user deleting their own token is only a self-disconnect and is not a disablement. You cannot disable yourself or the last active owner.")}</p></section>'
+            f'<p class="muted small">{_bi("用户自己删除令牌只是断开自己的连接，与停用无关。你不能停用自己，也不能停用最后一位可用的所有者。", "A user deleting their own token is only a self-disconnect and is not a disablement. You cannot disable yourself or the last usable owner.")}</p></section>'
         )
         body = (
             _header(session)
@@ -4516,8 +4516,10 @@ class _AccountApp:
             return self.message_page(
                 409,
                 _bi(
-                    "不能停用最后一位仍在启用的所有者。请先添加或启用另一位所有者。",
-                    "You cannot disable the last active owner. Add or enable another owner first.",
+                    "不能停用最后一位可用的所有者（仍能以所有者身份登录的启用所有者），"
+                    "也不能停用最后一位启用的所有者。请先添加或启用另一位所有者。",
+                    "You cannot disable the last usable owner (an active owner who can still sign in as "
+                    "one) or the last active owner. Add or enable another owner first.",
                 ),
             )
         if code == "cannot_disable_self":
@@ -4546,7 +4548,7 @@ class _AccountApp:
         """Owner action on an account's access; True if it changed anything.
 
         The store re-checks inside the transaction that the acting account is still an
-        active owner, and refuses to disable the actor or the last active owner. The
+        active owner, and refuses to disable the actor or the last usable owner. The
         MCP side's access cache is dropped for the target afterwards.
         """
         actor = self._principal_key(session)

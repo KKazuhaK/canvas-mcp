@@ -364,11 +364,16 @@ class PrefsRepo(Protocol):
 
 
 class MetaRepo(Protocol):
-    """``meta``: the cross-release compatibility marker."""
+    """``meta``: the cross-release compatibility marker and small server facts."""
 
     def schema_version(self, conn: Connection) -> str | None: ...
 
     def set_schema_version(self, conn: Connection, value: str) -> None: ...
+
+    def get(self, conn: Connection, key: str) -> str | None:
+        """Any other ``meta`` row (for example ``login_providers``)."""
+
+    def put(self, conn: Connection, key: str, value: str) -> None: ...
 
 
 # -- the self-hosted authorization server (revision 0003) ---------------------------------

@@ -35,7 +35,7 @@
   "directory_unavailable": "学校目录暂时不可用，请稍后再试。",
   "write_tool_not_allowed": "本服务器不允许其中某个工具，因此未保存任何内容。",
   "write_tools_unavailable": "暂时无法读取你的写入工具设置。请稍后再试。",
-  "last_owner": "这样做会让服务器没有可用的所有者。",
+  "last_owner": "这样做会让服务器没有可用的所有者（仍能以所有者身份登录的启用所有者）。请先让另一个账号成为可用的所有者。",
   "cannot_disable_self": "你不能停用自己的账户。",
   "identity_in_use": "这个账号已经关联到本服务器的另一位用户，没有做任何更改。",
   "provider_already_linked": "你已经关联了这个提供方的登录方式。",

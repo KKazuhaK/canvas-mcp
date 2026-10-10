@@ -167,7 +167,7 @@ describe('Admin accounts', () => {
     await user.click(await screen.findByRole('button', { name: 'Disable: Cleo Example' }))
     const dialog = await screen.findByRole('dialog')
     await user.click(within(dialog).getByRole('button', { name: 'Disable' }))
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent('without an active owner')
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('without a usable owner')
   })
 
   it('shows no empty Directory row for an account that signs in with Google', async () => {

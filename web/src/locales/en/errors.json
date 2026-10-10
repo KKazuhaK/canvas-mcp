@@ -35,7 +35,7 @@
   "directory_unavailable": "The school directory is unavailable right now. Try again in a moment.",
   "write_tool_not_allowed": "This server does not allow one of those tools, so nothing was saved.",
   "write_tools_unavailable": "Your write-tool settings cannot be read right now. Try again later.",
-  "last_owner": "That would leave the server without an active owner.",
+  "last_owner": "That would leave the server without a usable owner (an active owner who can still sign in as one). Make another account a usable owner first.",
   "cannot_disable_self": "You cannot disable your own account.",
   "identity_in_use": "That account is already linked to another user of this server. Nothing was changed.",
   "provider_already_linked": "You already have a sign-in method from that provider.",

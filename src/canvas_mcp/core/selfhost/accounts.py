@@ -993,6 +993,10 @@ class DecisionFacts:
     usable_owner_count: int | None = None
     pending_count: int = 0
     is_bootstrap_identity: bool = False
+    #: Whether the account being decided, when it is an active owner, is a usable owner. Read
+    #: only for the bootstrap identity (the one sign-in that may re-source an owner); True
+    #: means "no reason to change its role".
+    existing_owner_usable: bool = True
 
 
 Purpose = Literal["sign_in", "request"]
@@ -1078,6 +1082,8 @@ def decide(
     active                  open / approval / a rule matches / owner  allow
                             rule / personally admitted
     active                  rules, no match, admitted by rules/open   deny ``access_denied``
+                            (not for the bootstrap identity while no
+                            owner is usable: it is admitted)
     ======================  ========================================  ==========================
 
     Roles are recomputed at a sign-in only: an owner rule raises ``user`` to
@@ -1090,7 +1096,10 @@ def decide(
     the listed providers can use (an Entra-rule owner after Entra was delisted, an owner whose
     identities are all at delisted providers) do not block it. The operator named that identity
     in ``SELFHOST_BOOTSTRAP_OWNER``; provider data from Google, GitHub or OIDC still never makes
-    an owner on its own.
+    an owner on its own. While it applies it also overrides what would refuse the identity's own
+    account: an active account the rules no longer admit is admitted (as a new or pending one is),
+    and an owner that is not usable, such as one whose role the Entra owner rules granted after
+    Entra was delisted, is re-sourced to ``bootstrap`` so that this sign-in is an owner session.
     """
     owner_match = verdict.owner_by_rule
     usable = facts.active_owner_count if facts.usable_owner_count is None else facts.usable_owner_count
@@ -1131,8 +1140,9 @@ def decide(
             session_owner=role == ROLE_OWNER,
         )
 
-    # An active account.
-    if not link_admissible(existing, verdict, policy):
+    # An active account. The bootstrap identity (while no owner is usable) is admitted whatever
+    # the rules say, like a new or pending account of the same identity.
+    if not (bootstrap or link_admissible(existing, verdict, policy)):
         return _deny(
             DENY_ACCESS_DENIED,
             reason=verdict.reason
@@ -1207,7 +1217,18 @@ def _recompute_role(
         if bootstrap:
             return ROLE_OWNER, ROLE_SOURCE_BOOTSTRAP, EVENT_OWNER_GAINED
         return None, None, None
-    # An owner. Only a role that rules granted is taken back by rules.
+    # An owner. The bootstrap identity, while no owner is usable, takes over an owner that no
+    # sign-in could use (a rules owner without a listed Entra identity): the operator named this
+    # identity, so its own account becomes the owner the server needs. An owner that is usable
+    # is left alone (then the bootstrap does not apply at all).
+    if (
+        bootstrap
+        and existing.is_active_owner
+        and not facts.existing_owner_usable
+        and existing.role_source != ROLE_SOURCE_BOOTSTRAP
+    ):
+        return ROLE_OWNER, ROLE_SOURCE_BOOTSTRAP, EVENT_OWNER_GAINED
+    # Only a role that rules granted is taken back by rules.
     if existing.role_source == ROLE_SOURCE_RULES and not owner_match and owner_evidence:
         # Stranded owners (no sign-in can show their role) do not count as a replacement: the
         # account being decided signs in with owner evidence, so it is itself usable.
@@ -1217,6 +1238,33 @@ def _recompute_role(
             return None, None, EVENT_OWNER_LOSS_REFUSED
         return ROLE_USER, None, EVENT_OWNER_LOST
     return None, None, None
+
+
+def bootstrap_sign_in_gives_owner(
+    existing: AccountFacts | None, policy: AccessPolicy, *, active_owner_count: int = 0
+) -> bool:
+    """Whether the bootstrap identity's next sign-in would be an owner session (pure).
+
+    The startup check asks it while the server has no usable owner: it runs :func:`decide` for
+    the bootstrap identity with no rule matching, so it answers from the same table as the
+    sign-in. ``existing`` is the identity's account (None: not known yet). An account that is
+    disabled is refused, and any other state the table does not turn into an owner session says
+    False too.
+    """
+    boot = policy.bootstrap_owner
+    if boot is None:
+        return False
+    verdict = Verdict(
+        admitted_by_rule=False, owner_by_rule=False, owner_evidence=boot.provider_id == PROVIDER_ENTRA
+    )
+    facts = DecisionFacts(
+        active_owner_count=active_owner_count,
+        usable_owner_count=0,
+        is_bootstrap_identity=True,
+        existing_owner_usable=False,
+    )
+    decision = decide(existing, verdict, policy, facts, "sign_in")
+    return decision.outcome == "allow" and decision.session_owner
 
 
 def _decide_new(

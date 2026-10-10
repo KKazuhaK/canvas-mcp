@@ -175,7 +175,7 @@ class TestListingsAndGuards:
     def test_the_last_owner_cannot_be_disabled_without_the_flag(self, store, capsys) -> None:
         make_account(store, OID_A, role="owner")
         assert token_admin.main(["disable", KEY_A]) == 3
-        assert "last active owner" in capsys.readouterr().err
+        assert "last usable owner" in capsys.readouterr().err
         assert token_admin.main(["disable", "--allow-last-owner", KEY_A]) == 0
         assert store.get_principal_status(KEY_A).disabled
 

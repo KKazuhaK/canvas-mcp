@@ -20,7 +20,7 @@ from starlette.types import ASGIApp
 from ..config import Config, validate_canvas_url_scheme
 from ..logging import log_info, log_warning
 from ..token_health import set_token_health_monitor
-from .accounts import STATUS_DISABLED, EntraClaimsPolicy
+from .accounts import STATUS_DISABLED, EntraClaimsPolicy, bootstrap_sign_in_gives_owner
 from .edge_guard import SelfhostEdgeGuard
 from .identity import IdentityService
 from .limits import RateLimiters, build_rate_limiters
@@ -254,10 +254,20 @@ def _owner_path_problem(settings: SelfhostSettings, store: TokenStore) -> str | 
         return None
     boot = policy.bootstrap_owner
     if boot is not None:
-        # The bootstrap identity makes an owner at its next sign-in, unless its account exists
-        # and is disabled: a disabled account is refused before any role is applied.
+        # The bootstrap identity makes an owner at its next sign-in, and that sign-in is asked
+        # the same table the server uses (accounts.decide): a new or pending account becomes
+        # the owner, an active one is admitted whatever the rules say and, when it is an owner
+        # no sign-in could use, re-sourced to bootstrap. Only an account the table refuses
+        # (a disabled one) leaves the server without an owner path.
         key = store.lookup_identity(boot.provider_id, boot.issuer, boot.subject)
-        if key is not None and store.get_principal_status(key).status == STATUS_DISABLED:
+        if key is None:
+            return None
+        status = store.get_principal_status(key)
+        if bootstrap_sign_in_gives_owner(
+            status.facts, policy, active_owner_count=store.count_active_owners()
+        ):
+            return None
+        if status.status == STATUS_DISABLED:
             return (
                 "no owner can sign in: the account of SELFHOST_BOOTSTRAP_OWNER is disabled and "
                 "no other usable owner exists; enable it with: "
@@ -265,7 +275,12 @@ def _owner_path_problem(settings: SelfhostSettings, store: TokenStore) -> str | 
                 "account an owner with: python -m canvas_mcp.core.selfhost.token_admin "
                 "promote-owner ACCOUNT"
             )
-        return None
+        return (
+            "no owner can sign in: signing in as SELFHOST_BOOTSTRAP_OWNER would not give an owner "
+            f"session (its account is {status.status}) and no other usable owner exists; make "
+            "another account an owner with: python -m canvas_mcp.core.selfhost.token_admin "
+            "promote-owner ACCOUNT"
+        )
     stranded = store.count_active_owners()
     if stranded > 0:
         return (
@@ -343,6 +358,9 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
     if owner_problem is not None:
         store.close()
         raise SelfhostConfigError([owner_problem])
+    # token_admin reads this to know which owners are usable (it often runs without the
+    # server's variables). An Entra-only server with no earlier record writes nothing.
+    store.record_login_providers(settings.login_providers.ids)
 
     access = PrincipalAccessCache(store)
     identity = IdentityService(
