@@ -171,6 +171,12 @@ class TestRouteTables:
                     assert target in registered, target
             assert ("GET", "/account/api/me/identities") in registered and ("GET", "/account/api/me/identities") in READ_MODELS
 
+    def test_the_page_a_link_returns_to_is_the_single_page_app(self, ps: ProviderStack) -> None:
+        spa = alice(ps)
+        for query in ("?linked=1", "?error=identity_in_use"):
+            page = spa.person.get("/account/sign-in-methods" + query)
+            assert page.status_code == 200 and 'id="root"' in page.text, query
+
     def test_the_react_ui_registers_the_two_halves_of_every_provider_and_nothing_of_linking(
         self, ps: ProviderStack
     ) -> None:

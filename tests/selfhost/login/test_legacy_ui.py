@@ -168,6 +168,36 @@ class TestAccountPage:
         other.sign_in("school")
         assert ">school<" in other.get("/account").text
 
+    def test_the_account_page_names_the_sign_in_methods_and_links_to_the_page_that_changes_them(
+        self, ps: ProviderStack
+    ) -> None:
+        person = ps.person()
+        person.sign_in("github")
+        page = person.get("/account")
+        card = page.text[page.text.index('id="sign-in-methods"') :]
+        card = card[: card.index("</section>")]
+        assert "Sign-in methods" in card and "GitHub." in card
+        assert 'href="/account/sign-in-methods"' in card
+        person.link("google")
+        assert "GitHub, Google." in person.get("/account").text
+
+    def test_entra_alone_has_no_sign_in_methods_card(self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from ..authz.stack import Browser
+
+        with provider_stack(tmp_path, monkeypatch, providers="entra") as ps:
+            person = ps.person()
+            browser = Browser(ps.stack, client=person.client)
+            browser.entra_login(OWNER, browser.get("/account/login"))
+            assert 'id="sign-in-methods"' not in person.get("/account").text
+
+    def test_a_single_non_entra_provider_has_no_card_either(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with provider_stack(tmp_path, monkeypatch, providers="github") as ps:
+            person = ps.person()
+            person.sign_in("github")
+            assert 'id="sign-in-methods"' not in person.get("/account").text
+
     def test_a_refusal_is_provider_neutral_in_both_languages(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

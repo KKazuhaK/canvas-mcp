@@ -1680,6 +1680,7 @@ class _AccountApp:
         parts.append(self._mcp_url_section())
         parts.append(await self._write_tools_section(session, write_notice))
         parts.append(await self._connected_apps_section(session))
+        parts.append(await self._sign_in_methods_card(session))
         parts.append(await self._sign_in_history(session))
         return self.html_page(status, _bi("Canvas 账户", "Canvas account"), "".join(parts))
 
@@ -2623,6 +2624,25 @@ class _AccountApp:
             f"<code>{_e(grant.redirect_host or '-')}</code><br>"
             f"{_bi('连接于', 'Connected')} {_e(_fmt_ts(grant.created_at))} · "
             f"{_bi('最近使用', 'Last used')} {_e(_fmt_ts(grant.last_used_at))}</span>"
+        )
+
+    async def _sign_in_methods_card(self, session: _Session) -> str:
+        """The "Sign-in methods" card of ``GET /account`` (two or more providers; "" otherwise).
+
+        It names the ways this account can sign in and links to the page that adds and removes
+        them; the forms live there so the account page stays short.
+        """
+        if self.logins is None or not self.logins.linking_enabled or session.pending:
+            return ""
+        views = await self.list_own_identities(session)
+        if isinstance(views, Refusal):
+            return ""
+        names = ", ".join(_e(_provider_label(view.provider_id)) for view in views)
+        return (
+            f'<section class="card" id="sign-in-methods"><h2>{_bi("登录方式", "Sign-in methods")}</h2>'
+            f'<p class="muted small">{_bi("你可以用这些方式登录这个账户：", "You can sign in to this account with:")} {names}.</p>'
+            f'<p><a href="{SIGN_IN_METHODS_PATH}">{_bi("添加或移除登录方式", "Add or remove a sign-in method")}</a></p>'
+            "</section>"
         )
 
     async def _connected_apps_section(self, session: _Session) -> str:

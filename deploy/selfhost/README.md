@@ -807,7 +807,7 @@ docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin pr
 
 ### Linking sign-in methods
 
-With two or more providers, `/account` has a **Sign-in methods** page (a page of the React app, a card of the legacy UI). A signed-in, active person whose sign-in is from the last 10 minutes can add another provider: they are sent to it, prove they control that account, and come back. Rules the server keeps:
+With two or more providers, `/account` has a **Sign-in methods** page (`/account/sign-in-methods`, in the React app and in the legacy UI; the legacy `/account` page has a card that links to it). A signed-in, active person whose sign-in is from the last 10 minutes can add another provider: they are sent to it, prove they control that account, and come back. Rules the server keeps:
 
 - **Nothing is ever linked by e-mail address** (and `ACCOUNT_LINK_BY_VERIFIED_EMAIL` is reserved and refused). A link is a ceremony bound to the signed-in session; if that session ends, is replaced or is disabled in between, the link fails with a closed message.
 - **An identity that belongs to another account is refused** (`identity_in_use`). There is no merge; neither account changes, and the refusal is audited.
