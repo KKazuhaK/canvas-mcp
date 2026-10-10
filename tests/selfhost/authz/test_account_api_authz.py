@@ -186,6 +186,21 @@ class TestGetConsent:
             "verified": True,
         }
 
+    def test_a_second_person_connecting_within_the_documents_freshness_window_is_not_refused(self, react: Stack) -> None:
+        # The metadata document is shared by everybody who uses the app. /authorize reuses the copy
+        # an earlier request fetched, and the consent screen must accept that same copy.
+        react.cimd.serve(CIMD_URL, cimd_document(CIMD_URL, client_name="Client Example"))
+        react.enroll(ALICE)
+        react.enroll(BOB)
+        react.tokens_for(ALICE, client_id=CIMD_URL)
+        calls = len(react.cimd.calls)
+        react.clock.advance(120)  # still fresh (the fake host says max-age=300)
+        browser, txn = open_request(react, user=BOB, client_id=CIMD_URL)
+        assert len(react.cimd.calls) == calls  # authorize used the stored copy
+        shown = get_consent(browser, txn)
+        assert shown.status_code == 200 and shown.json()["client"]["host"] == "client.example"
+        assert decide(browser, txn).status_code == 200
+
     def test_a_loopback_return_address_is_flagged(self, react: Stack) -> None:
         client_id = react.register(LOOPBACK_REDIRECT)
         browser, txn = open_request(react, client_id=client_id, redirect_uri=LOOPBACK_REDIRECT)

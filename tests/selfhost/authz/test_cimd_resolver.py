@@ -132,15 +132,40 @@ class TestFreshness:
         snapshot = env.authz.cimd_snapshot(URL)
         assert snapshot is not None and snapshot.fresh_until - snapshot.fetched_at == expected
 
-    async def test_consent_needs_a_copy_no_older_than_the_request(self, env: Env) -> None:
+    async def test_consent_accepts_a_copy_that_was_fresh_when_the_request_began(self, env: Env) -> None:
+        # The document is shared by every user of the app: a request that comes ten minutes after
+        # the fetch was verified against that copy (it was fresh), and its consent must accept it.
         cimd = FakeCimd()
         cimd.serve(URL, doc())
         resolver = build(env, cimd)
         await resolver.get(URL)
         fetched = env.authz.cimd_snapshot(URL).fetched_at
+        fresh_until = env.authz.cimd_snapshot(URL).fresh_until
         assert await resolver.snapshot_only(URL, not_before=fetched) is not None
-        assert await resolver.snapshot_only(URL, not_before=fetched + 1) is None
+        assert await resolver.snapshot_only(URL, not_before=fetched + 1) is not None
+        assert await resolver.snapshot_only(URL, not_before=fresh_until - 1) is not None
+        assert len(cimd.calls) == 1  # consent never fetches
+
+    async def test_consent_refuses_a_copy_that_was_already_stale_when_the_request_began(self, env: Env) -> None:
+        cimd = FakeCimd()
+        cimd.serve(URL, doc())
+        resolver = build(env, cimd)
+        await resolver.get(URL)
+        snapshot = env.authz.cimd_snapshot(URL)
+        # stale at that moment and not fetched since: /authorize could not have verified it
+        assert await resolver.snapshot_only(URL, not_before=snapshot.fresh_until + 1) is None
+        # a copy fetched after the request began is acceptable (it is newer, and rechecked at consent)
+        assert await resolver.snapshot_only(URL, not_before=snapshot.fetched_at - 3) is not None
         assert await resolver.snapshot_only("https://never.example/c.json", not_before=0) is None
+
+    async def test_a_no_store_copy_must_have_been_fetched_for_this_request(self, env: Env) -> None:
+        cimd = FakeCimd()
+        cimd.serve(URL, doc(), cache_control="no-store")
+        resolver = build(env, cimd)
+        await resolver.get(URL)
+        fetched = env.authz.cimd_snapshot(URL).fetched_at
+        assert await resolver.snapshot_only(URL, not_before=fetched + 1) is not None  # the same second boundary
+        assert await resolver.snapshot_only(URL, not_before=fetched + 60) is None
 
 
 class TestBudgets:

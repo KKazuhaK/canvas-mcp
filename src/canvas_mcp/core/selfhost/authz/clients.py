@@ -268,6 +268,10 @@ def _freshness(headers: dict[str, str] | Any) -> tuple[int, bool]:
 Fetcher = Callable[[str, float], Awaitable[compat.FetchedDocument]]
 
 
+#: A fetch that ended this many seconds before a request was recorded still counts as made for it.
+CONSENT_FETCH_SLACK_S = 10
+
+
 class CimdResolver:
     """Resolve a client id URL to its (validated) metadata document. Never raises."""
 
@@ -327,11 +331,21 @@ class CimdResolver:
         )
 
     async def snapshot_only(self, url: str, not_before: int = 0) -> CimdClientData | None:
-        """The stored document, without any fetch, if it is not older than ``not_before`` (consent)."""
+        """The stored document, without any fetch, if ``/authorize`` can have relied on it (consent).
+
+        ``not_before`` is when the request began. The copy is good if it was fetched since, or if
+        it was still fresh at that moment (then ``/authorize`` used it without fetching: the
+        document is shared by every user of the app, so most requests find a copy that an earlier
+        request fetched). A copy that was already stale then, and was not refreshed since, is not
+        something ``/authorize`` could have verified. ``CONSENT_FETCH_SLACK_S`` covers a fetch that
+        finished just before the request was written down.
+        """
         if not self._settings.cimd_enabled or not cimd_url_ok(url):
             return None
         snapshot = await anyio.to_thread.run_sync(self._store.cimd_snapshot, url)
-        if snapshot is None or snapshot.fetched_at < not_before:
+        if snapshot is None:
+            return None
+        if snapshot.fetched_at < not_before - CONSENT_FETCH_SLACK_S and snapshot.fresh_until <= not_before:
             return None
         return self._from_snapshot(snapshot)
 
