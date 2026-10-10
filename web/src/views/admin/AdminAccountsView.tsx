@@ -31,7 +31,8 @@ function Details({ account }: { account: AdminAccount }) {
       </Typography>
       <Box component="dl" sx={{ m: 0, mt: 0.5, display: 'grid', gridTemplateColumns: 'auto 1fr', columnGap: 1.5, rowGap: 0.25 }}>
         {rows.map(([label, value]) =>
-          value === null ? null : (
+          // The tenant is empty for a Google, GitHub or OIDC identity: no empty row.
+          !value ? null : (
             <Box key={label} sx={{ display: 'contents' }}>
               <Typography component="dt" variant="caption" color="text.secondary">
                 {label}

@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { errorBody, scriptAdapter } from '@/test/fixtures'
 import { renderApp } from '@/test/renderWithProviders'
@@ -106,6 +106,27 @@ describe('SignInView with several providers', () => {
 
   it('still sends a signed-in visitor on when nothing asks for a new sign-in', async () => {
     const { router } = await renderApp('/sign-in', 'multi')
+    await screen.findByRole('navigation', { name: 'Main navigation' })
+    expect(router.state.location.pathname).toBe('/')
+  })
+
+  it('takes a signed-in person whose link failed to the Sign-in methods screen with the closed code', async () => {
+    const { router } = await renderApp('/sign-in?error=provider_error', 'multi')
+    await waitFor(() => expect(router.state.location.pathname).toBe('/sign-in-methods'))
+    expect(router.state.location.search).toBe('?error=provider_error')
+    const alert = await screen.findByRole('alert')
+    expect(within(alert).getByText('The sign-in method was not added')).toBeInTheDocument()
+  })
+
+  it('never shows provider text from a forwarded code', async () => {
+    const { router } = await renderApp('/sign-in?error=%3Cb%3Ex%3C%2Fb%3E', 'multi')
+    await waitFor(() => expect(router.state.location.pathname).toBe('/sign-in-methods'))
+    await screen.findByRole('alert')
+    expect(screen.queryByText('x', { selector: 'b' })).toBeNull()
+  })
+
+  it('without the Sign-in methods screen a signed-in visitor with an error still goes home', async () => {
+    const { router } = await renderApp('/sign-in?error=provider_error', 'enrolled')
     await screen.findByRole('navigation', { name: 'Main navigation' })
     expect(router.state.location.pathname).toBe('/')
   })

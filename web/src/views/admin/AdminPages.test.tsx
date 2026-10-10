@@ -170,6 +170,47 @@ describe('Admin accounts', () => {
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('without an active owner')
   })
 
+  it('shows no empty Directory row for an account that signs in with Google', async () => {
+    const user = userEvent.setup()
+    await renderApp('/admin', 'owner', () => {
+      scriptAdapter((r) => {
+        if (r.url === '/me') return { status: 200, data: meFixture({ role: 'owner' }, { features: { ...meFixture().features, admin: true } }) }
+        return {
+          status: 200,
+          data: {
+            accounts: [
+              {
+                id: CLEO,
+                key: `acct:${CLEO}`,
+                display_name: 'Cleo Example',
+                username: 'cleo@example.edu',
+                role: 'user',
+                status: 'active',
+                disabled_reason: null,
+                disabled_at: null,
+                created_at: null,
+                approved_at: null,
+                last_login_at: null,
+                is_self: false,
+                identity: { provider_id: 'google', tenant_id: '', subject: '1234567890' },
+                enrollment: null,
+                actions: [],
+              },
+            ],
+            counts: { total: 1, active: 1, pending: 0, disabled: 0, owners: 0 },
+          },
+        }
+      })
+    })
+    await screen.findByText('Cleo Example')
+    await user.click(screen.getAllByText('Technical details')[0])
+    const terms = Array.from(document.querySelectorAll('dt')).map((dt) => dt.textContent)
+    expect(terms).toContain('Provider')
+    expect(terms).toContain('Subject')
+    expect(terms).not.toContain('Directory')
+    for (const dd of document.querySelectorAll('dd')) expect(dd.textContent).not.toBe('')
+  })
+
   it('asks for a fresh sign-in when the owner session is too old', async () => {
     const user = userEvent.setup()
     await renderApp('/admin', 'stale-owner')
