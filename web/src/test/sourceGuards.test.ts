@@ -94,6 +94,17 @@ describe('source guards', () => {
     expect(main).not.toMatch(/^import .*dev\/mockServer/m)
   })
 
+  it('navigates the browser only through utils/navigate, and the consent screen never submits a form', () => {
+    expect(
+      offenders(/window\.location\.(?:assign|replace|href)|(?<![\w$])location\.href\s*=|window\.open\s*\(/, ['utils/navigate.ts']),
+    ).toEqual([])
+    const consent = code(join(SRC, 'views/ConsentView.tsx'))
+    expect(consent).not.toMatch(/<form|\.submit\s*\(|component=["']form["']/)
+    // the address the server gave is checked before the browser is sent there
+    expect(consent).toMatch(/safeAppRedirect\(/)
+    expect(consent).toMatch(/hardNavigate\(/)
+  })
+
   it('keeps the Canvas token out of useMutation', () => {
     const hooks = read(join(SRC, 'query/hooks.ts'))
     expect(hooks).not.toMatch(/putCanvasToken/)

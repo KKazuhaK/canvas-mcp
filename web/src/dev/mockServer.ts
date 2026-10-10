@@ -319,7 +319,7 @@ function buildState(scenario: MockScenario): MockState {
     write_tools: !pending && scenario !== 'no-write-tools',
     admin: owner,
     identities: false,
-    connected_apps: local && !pending,
+    connected_apps: local,
     consent: local,
     logout_everywhere: false,
     role_management: false,

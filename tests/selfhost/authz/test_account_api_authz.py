@@ -127,12 +127,13 @@ class TestFeaturesAndThePrefix:
         assert features["consent"] is True and features["connected_apps"] is True
         assert features["identities"] is False
 
-    def test_a_waiting_account_has_the_consent_screen_but_no_connected_apps(self, tmp_path, monkeypatch, react_env) -> None:
+    def test_a_waiting_account_may_see_a_request_but_the_connected_apps_api_refuses_it(self, tmp_path, monkeypatch, react_env) -> None:
         with local_stack(tmp_path, monkeypatch, env={**react_env, "ACCESS_POLICY": "approval"}) as stack:
             browser = signed_in(stack)
             features = browser.api("GET", "/me").json()["features"]
-            assert features["consent"] is True and features["connected_apps"] is False
+            assert features["consent"] is True and features["connected_apps"] is True
             error_of(browser.api("GET", "/me/grants"), 403, "pending_approval")
+            error_of(browser.api("DELETE", f"/me/grants/{'0' * 8}-0000-4000-8000-{'0' * 12}", csrf=browser.csrf_token()), 403, "pending_approval")
 
     def test_in_the_default_mode_every_route_is_not_found_whatever_the_caller(self, tmp_path, monkeypatch, react_env) -> None:
         env = {**react_env, "SELFHOST_AUTH_MODE": "entra_proxy"}

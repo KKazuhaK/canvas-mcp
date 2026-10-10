@@ -742,9 +742,9 @@ class ApiApp:
                     "write_tools": (not pending) and app.write_tools is not None,
                     "admin": session.owner,
                     "identities": False,
-                    # Local authorization server only. A waiting account can still see (and
-                    # cancel) a request, but has no connected apps.
-                    "connected_apps": (not pending) and app.authz is not None,
+                    # Local authorization server only (see the module docstring). A waiting
+                    # account is still told so; its own screens and the API refuse it.
+                    "connected_apps": app.authz is not None,
                     "consent": app.authz is not None,
                     "logout_everywhere": False,
                     "role_management": False,
