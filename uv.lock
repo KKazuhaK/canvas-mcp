@@ -278,11 +278,13 @@ hosted = [
 ]
 postgres = [
     { name = "alembic" },
+    { name = "joserfc" },
     { name = "psycopg", extra = ["binary"] },
     { name = "sqlalchemy" },
 ]
 selfhost = [
     { name = "alembic" },
+    { name = "joserfc" },
     { name = "sqlalchemy" },
 ]
 
@@ -290,6 +292,7 @@ selfhost = [
 dev = [
     { name = "alembic" },
     { name = "black" },
+    { name = "joserfc" },
     { name = "mypy" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pypdf" },
@@ -313,7 +316,8 @@ requires-dist = [
     { name = "cryptography", specifier = ">=44.0.0,<51" },
     { name = "fastmcp", specifier = ">=4.0.3,<5" },
     { name = "httpx", specifier = ">=0.28.1,<1" },
-    { name = "mcp", specifier = ">=2,<3" },
+    { name = "joserfc", marker = "extra == 'selfhost'", specifier = ">=1.7.2,<2" },
+    { name = "mcp", specifier = ">=2.1.1,<3" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.3,<4" },
     { name = "py-key-value-aio", extras = ["filetree"], specifier = ">=0.4.6,<0.5" },
     { name = "pydantic", specifier = ">=2.13.1,<3" },
@@ -332,6 +336,7 @@ provides-extras = ["hosted", "documents", "selfhost", "postgres"]
 dev = [
     { name = "alembic", specifier = ">=1.19,<2" },
     { name = "black", specifier = ">=25.0.0" },
+    { name = "joserfc", specifier = ">=1.7.2,<2" },
     { name = "mypy", specifier = ">=1.15.0,<3" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3,<4" },
     { name = "pypdf", specifier = ">=6.19.0,<7" },

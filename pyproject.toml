@@ -28,7 +28,10 @@ classifiers = [
 keywords = ["canvas", "lms", "mcp", "claude", "education", "api"]
 dependencies = [
     "fastmcp>=4.0.3,<5",
-    "mcp>=2,<3",
+    # 2.1.1 is the release the lock pins: the self-hosted authorization server
+    # (SELFHOST_AUTH_MODE=local) is built on its provider protocol, handlers and
+    # models, and tests/selfhost/authz pins what it relies on.
+    "mcp>=2.1.1,<3",
     "httpx>=0.28.1,<1",
     "python-dotenv>=1.2.2,<2",
     "pydantic>=2.13.1,<3",
@@ -81,6 +84,10 @@ documents = [
 selfhost = [
     "sqlalchemy>=2.1.3,<2.2",
     "alembic>=1.19,<2",
+    # The access tokens of the self-hosted authorization server
+    # (SELFHOST_AUTH_MODE=local) are JWTs signed with joserfc. Already installed
+    # transitively through fastmcp; named here because this code imports it directly.
+    "joserfc>=1.7.2,<2",
 ]
 # PostgreSQL for the self-hosted mode (DATABASE_URL=postgresql+psycopg://...).
 # psycopg[binary] ships wheels that bundle libpq, so no system packages are needed.
@@ -196,4 +203,5 @@ dev = [
     "sqlalchemy>=2.1.3,<2.2",
     "alembic>=1.19,<2",
     "psycopg[binary]>=3.3,<4",
+    "joserfc>=1.7.2,<2",
 ]

@@ -240,12 +240,29 @@ class TestSupportedDependencyRange:
         assert Version("4.0.0") not in spec
         assert Version("5.0.0") not in spec
 
+    def test_the_mcp_floor_is_the_release_the_authorization_server_is_pinned_against(self):
+        spec = _requirement("mcp").specifier
+        assert Version("2.1.1") in spec
+        assert Version("2.2.0") in spec
+        assert Version("2.1.0") not in spec
+        assert Version("3.0.0") not in spec
+
+    def test_joserfc_is_an_explicit_dependency_of_the_selfhost_extra(self):
+        pyproject = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
+        extra = [Requirement(line) for line in pyproject["project"]["optional-dependencies"]["selfhost"]]
+        (joserfc,) = [r for r in extra if r.name == "joserfc"]
+        assert Version("1.7.2") in joserfc.specifier
+        assert Version("1.7.1") not in joserfc.specifier
+        assert Version("2.0.0") not in joserfc.specifier
+        assert _locked_version("joserfc") in joserfc.specifier
+
     @pytest.mark.parametrize(
         ("locked", "direct"),
         [
             ("py-key-value-aio", "py-key-value-aio"),
             ("fastmcp", "fastmcp"),
             ("fastmcp-slim", "fastmcp"),
+            ("mcp", "mcp"),
         ],
     )
     def test_the_lock_resolves_inside_the_range(self, locked, direct):
