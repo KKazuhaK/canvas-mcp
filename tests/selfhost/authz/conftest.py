@@ -75,3 +75,21 @@ def make_second_store(
 
 def now_of(clock: Callable[[], float] = time.time) -> int:
     return int(clock())
+
+
+@pytest.fixture
+def stack(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+    """The whole app in ``SELFHOST_AUTH_MODE=local`` (see ``stack.py``)."""
+    from .stack import local_stack
+
+    with local_stack(tmp_path, monkeypatch) as running:
+        yield running
+
+
+@pytest.fixture
+def proxy_stack(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+    """The same app in the default ``entra_proxy`` mode."""
+    from .stack import local_stack
+
+    with local_stack(tmp_path, monkeypatch, env={"SELFHOST_AUTH_MODE": "entra_proxy"}) as running:
+        yield running

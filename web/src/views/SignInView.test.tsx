@@ -22,6 +22,7 @@ const SIGN_IN_CODES = [
   'access_disabled',
   'signups_paused',
   'token_store_unavailable',
+  'authorization_invalid',
 ] as const
 
 const enErrors = resources.en.errors as Record<string, string>

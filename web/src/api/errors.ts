@@ -50,6 +50,7 @@ const CODE_SET: Record<ApiErrorCode, true> = {
   bad_roles: true,
   access_denied: true,
   signups_paused: true,
+  authorization_invalid: true,
 }
 
 export const API_ERROR_CODES = Object.keys(CODE_SET) as ApiErrorCode[]

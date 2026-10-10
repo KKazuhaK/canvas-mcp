@@ -62,6 +62,9 @@ export type SignInErrorCode =
   | 'access_disabled'
   | 'signups_paused'
   | 'token_store_unavailable'
+  // An app (MCP client) was waiting for this sign-in, but its request is gone: it
+  // expired, was started in another browser, or was already used.
+  | 'authorization_invalid'
 
 export type ApiErrorCode = ApiOnlyErrorCode | SignInErrorCode
 

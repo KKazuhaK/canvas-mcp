@@ -66,6 +66,15 @@ the ``enroll_token``, ``recheck_own_token``, ``apply_write_tools``, ``change_acc
 (:mod:`.account_ops`) and the pages only render them. In the react mode only the two
 server-side halves of the sign-in (``/account/login`` and ``/account/callback``) remain
 here; the callback then returns to the app and reports a failure as a fixed code.
+
+With ``SELFHOST_AUTH_MODE=local`` this module is also the sign-in and the consent screen of the
+server's own authorization server: ``/authorize`` sends the browser to ``/account/login?txn=...``,
+the sign-in is the one above (the transaction id rides inside the sealed login cookie), and the
+user then lands on ``/account/consent``, where they approve or decline the app by name. The
+transaction is bound to the browser that made the ``/authorize`` request (see
+``authz.transactions``); every step needs that browser's cookie. Which app, which redirect
+host and which account are shown comes from :mod:`.authz.consent`, so this UI and the
+single-page one decide the same way.
 """
 
 from __future__ import annotations
@@ -175,6 +184,9 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 
     from canvas_mcp.core.selfhost.account_spa import SpaBundle
+    from canvas_mcp.core.selfhost.authz.consent import ConsentView
+    from canvas_mcp.core.selfhost.authz.models import GrantRecord
+    from canvas_mcp.core.selfhost.authz.runtime import AuthzRuntime
 
 logger = logging.getLogger("canvas_mcp.selfhost.account")
 
@@ -195,6 +207,8 @@ _ADMIN_DENY_PATH = "/account/admin/deny"
 _ADMIN_AUDIT_PATH = "/account/admin/audit"
 _SCHOOLS_PATH = "/account/schools"
 _WRITE_TOOLS_PATH = "/account/write-tools"
+#: The consent screen of the local authorization server (registered only in that mode).
+CONSENT_PATH = "/account/consent"
 
 LOGIN_COOKIE = "__Host-cmcp_login"
 SESSION_COOKIE = "__Host-cmcp_session"
@@ -287,6 +301,8 @@ SIGN_IN_ERROR_CODES = frozenset(
         DENY_ACCESS_DISABLED,
         DENY_SIGNUPS_PAUSED,
         "token_store_unavailable",
+        # An app was waiting for this sign-in, but its request is gone or not this browser's.
+        "authorization_invalid",
     }
 )
 
@@ -300,6 +316,17 @@ _CSP = (
     "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
     "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 )
+# The consent page has NO form-action. Chrome applies a page's form-action to the whole
+# redirect chain that follows its form post, so 'self' would block the 303 to the app's
+# redirect URI (and, on the desktop app, the onward hop from claude.ai to claude://). The
+# page has no script, no remote content and cannot be framed, which is what matters here.
+_CONSENT_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
+    "frame-ancestors 'none'; base-uri 'none'"
+)
+_TXN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+#: Sealed into the login cookie: the authorization transaction waiting for this sign-in.
+_TXN_KEY = "mt"
 _SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Pragma": "no-cache",
@@ -747,10 +774,13 @@ def _header(session: _Session | None = None) -> str:
         if session.owner:
             tools.append(f'<a href="{_ADMIN_PATH}">{_bi("管理", "Admin")}</a>')
     # Same-path link with a fixed value: nothing from the request is reflected.
+    joiner = "&amp;" if "?" in ctx.path else "?"
     if ctx.lang == "zh":
-        tools.append(f'<a href="{_e(ctx.path)}?lang=en" hreflang="en" lang="en">English</a>')
+        tools.append(f'<a href="{_e(ctx.path)}{joiner}lang=en" hreflang="en" lang="en">English</a>')
     else:
-        tools.append(f'<a href="{_e(ctx.path)}?lang=zh" hreflang="zh" lang="zh">{_ZH_ENDONYM}</a>')
+        tools.append(
+            f'<a href="{_e(ctx.path)}{joiner}lang=zh" hreflang="zh" lang="zh">{_ZH_ENDONYM}</a>'
+        )
     if session is not None:
         tools.append(
             f'<form method="post" action="{_LOGOUT_PATH}" class="inline">'
@@ -770,6 +800,9 @@ Handler = Callable[[Request], Awaitable[Response]]
 
 
 class _AccountApp:
+    #: The local authorization server (SELFHOST_AUTH_MODE=local); None in the default mode.
+    authz: AuthzRuntime | None = None
+
     def __init__(
         self,
         cfg: AccountConfig,
@@ -787,12 +820,15 @@ class _AccountApp:
         access: PrincipalAccessCache | None = None,
         rate_limiters: RateLimiters | None = None,
         ui: Literal["legacy", "react"] = "legacy",
+        authz: AuthzRuntime | None = None,
     ) -> None:
         window = (rate_limiters or build_rate_limiters("memory")).sliding_window
         # ``react`` only when the built single-page UI is really served: sign-in then
         # returns to it (see :meth:`login` and :meth:`_callback`) and the HTML pages
         # below are not registered. Otherwise the HTML pages are the account UI.
         self.react = ui == "react"
+        # The local authorization server (SELFHOST_AUTH_MODE=local), or None.
+        self.authz = authz
         self.cfg = cfg
         self.write_tools = write_tools
         self.tool_prefs = tool_prefs
@@ -845,6 +881,12 @@ class _AccountApp:
 
     def route_table(self) -> list[tuple[str, dict[str, Handler]]]:
         """Every (path, {method: handler}) of the HTML UI, whatever mode is active."""
+        table = self._base_route_table()
+        if self.authz is not None:
+            table.append((CONSENT_PATH, {"GET": self.consent_page, "POST": self.consent_submit}))
+        return table
+
+    def _base_route_table(self) -> list[tuple[str, dict[str, Handler]]]:
         return [
             (ACCOUNT_PATH, {"GET": self.page}),
             (_LOGIN_PATH, {"GET": self.login}),
@@ -870,7 +912,12 @@ class _AccountApp:
         if self.react:
             # One UI per mode: the single-page app owns every page, so only the two
             # server-side halves of the sign-in stay.
-            table = [entry for entry in table if entry[0] in (_LOGIN_PATH, ACCOUNT_CALLBACK_PATH)]
+            # (The consent screen stays server-rendered until the single-page UI has its own.)
+            table = [
+                entry
+                for entry in table
+                if entry[0] in (_LOGIN_PATH, ACCOUNT_CALLBACK_PATH, CONSENT_PATH)
+            ]
         return [
             Route(path, self._endpoint(handlers), methods=_ALL_METHODS)
             for path, handlers in table
@@ -930,6 +977,10 @@ class _AccountApp:
         Always one of the fixed route constants, never request input.
         """
         path = request.url.path
+        if path == CONSENT_PATH:
+            # Keep the transaction through a language switch (a validated token, not free text).
+            txn = request.query_params.get("txn", "")
+            return f"{CONSENT_PATH}?txn={txn}" if _TXN_ID_RE.fullmatch(txn) else ACCOUNT_PATH
         return (
             path
             if path in (ACCOUNT_PATH, _ADMIN_PATH, _SCHOOLS_PATH, _ADMIN_AUDIT_PATH)
@@ -956,8 +1007,13 @@ class _AccountApp:
             response.headers[name] = value
         return response
 
-    def html_page(self, status: int, title: str, body: str, *, wide: bool = False) -> Response:
-        return self.finish(Response(_document(title, body, wide=wide), status_code=status))
+    def html_page(
+        self, status: int, title: str, body: str, *, wide: bool = False, csp: str | None = None
+    ) -> Response:
+        response = self.finish(Response(_document(title, body, wide=wide), status_code=status))
+        if csp is not None:
+            response.headers["Content-Security-Policy"] = csp
+        return response
 
     def message_page(self, status: int, message_html: str) -> Response:
         body = (
@@ -968,8 +1024,11 @@ class _AccountApp:
         )
         return self.html_page(status, "Canvas MCP", body)
 
-    def redirect(self, location: str, status: int = 303) -> Response:
-        return self.finish(Response(b"", status_code=status, headers={"Location": location}))
+    def redirect(self, location: str, status: int = 303, *, csp: str | None = None) -> Response:
+        response = self.finish(Response(b"", status_code=status, headers={"Location": location}))
+        if csp is not None:
+            response.headers["Content-Security-Policy"] = csp
+        return response
 
     def _cookie_kwargs(self) -> dict[str, Any]:
         return {"path": "/", "secure": True, "httponly": True, "samesite": "lax"}
@@ -1621,6 +1680,19 @@ class _AccountApp:
         return f"https://{self.cfg.authority_host}/{self.cfg.tenant_id}/{path}"
 
     async def login(self, request: Request) -> Response:
+        txn_id: str | None = None
+        if self.authz is not None and "txn" in request.query_params:
+            # An app is waiting for this sign-in (SELFHOST_AUTH_MODE=local). The request
+            # must exist and belong to this browser before anything else happens.
+            txn_id = request.query_params.get("txn", "")
+            binding = request.cookies.get(self.authz.binding_cookie)
+            if not await self.authz.consent.txn_open(txn_id, binding):
+                return self._authorization_invalid()
+            session = self._session_of(request)
+            reauth = request.query_params.get("reauth") == "1"
+            if session is not None and (session.pending or (session.iat > 0 and not reauth)):
+                # Already signed in (a waiting account only gets to cancel): straight to the app's request.
+                return self.redirect(f"{CONSENT_PATH}?{urllib.parse.urlencode({'txn': txn_id})}", 303)
         state = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(32)
         verifier = secrets.token_urlsafe(48)
@@ -1648,7 +1720,9 @@ class _AccountApp:
             "verifier": verifier,
             "iat": int(self.clock()),
         }
-        if self.react:
+        if txn_id is not None:
+            transaction[_TXN_KEY] = txn_id
+        elif self.react:
             return_to = sanitize_return_to(request.query_params.get("return_to"))
             if return_to is not None:
                 transaction[_RETURN_TO_KEY] = return_to
@@ -1783,6 +1857,7 @@ class _AccountApp:
                 _bi("暂时无法读取令牌库。", "The token store is unavailable."),
             )
         if isinstance(outcome, Denied):
+            await self._admission_lost(outcome)
             return self._sign_in_refused(outcome)
         assert isinstance(outcome, SignIn)
         standing = outcome.status
@@ -1813,6 +1888,10 @@ class _AccountApp:
             return_to = txn.get(_RETURN_TO_KEY)
             if isinstance(return_to, str) and sanitize_return_to(return_to) is not None:
                 landing = return_to
+        waiting = txn.get(_TXN_KEY)
+        if self.authz is not None and isinstance(waiting, str) and _TXN_ID_RE.fullmatch(waiting):
+            # The sign-in was started for an app: continue with its consent.
+            landing = f"{CONSENT_PATH}?{urllib.parse.urlencode({'txn': waiting})}"
         response = self.redirect(landing, 303)
         response.set_cookie(
             SESSION_COOKIE,
@@ -1821,6 +1900,32 @@ class _AccountApp:
             **self._cookie_kwargs(),
         )
         return response
+
+    async def _admission_lost(self, denied: Denied) -> None:
+        """A person who is no longer admitted signed in again: end the apps they had connected.
+
+        This is where a removal at the identity provider reaches existing connections
+        (their access tokens do not carry roles). Best effort: the sign-in is refused
+        either way.
+        """
+        key = getattr(denied, "account_key", None)
+        if self.authz is None or denied.code != DENY_ACCESS_DENIED or not key:
+            return
+        count = await self.authz.admission_lost(key)
+        if count:
+            logger.info("account admission lost: %d connected app(s) ended account=%s", count, key)
+
+    def _authorization_invalid(self) -> Response:
+        """The app's request is gone, expired or belongs to another browser."""
+        return self._sign_in_failure(
+            "authorization_invalid",
+            400,
+            _bi(
+                "这个连接请求已过期，或不是在这个浏览器里发起的。请回到应用，重新连接。",
+                "This connection request has expired or was opened in another browser. "
+                "Go back to your app and connect again.",
+            ),
+        )
 
     def _sign_in_refused(self, denied: Denied) -> Response:
         """The page for a refused sign-in (closed codes, never an upstream message)."""
@@ -1859,6 +1964,246 @@ class _AccountApp:
             assert code in SIGN_IN_ERROR_CODES, code
             return self.redirect(f"{SIGN_IN_PATH}?{urllib.parse.urlencode({'error': code})}", 303)
         return self.message_page(status, message_html)
+
+    # -- consent (SELFHOST_AUTH_MODE=local) --------------------------------------------------
+
+    def _consent_url(self, txn_id: str, *, reauth: bool = False) -> str:
+        return f"{_LOGIN_PATH}?{urllib.parse.urlencode({'txn': txn_id, **({'reauth': '1'} if reauth else {})})}"
+
+    def _consent_refusal(self, code: str) -> Response:
+        """The page for a request that cannot be shown or decided (a closed code)."""
+        if code == "client_unavailable":
+            return self.html_page(
+                409,
+                _bi("无法确认应用", "App could not be confirmed"),
+                _header()
+                + '<section class="card"><p>'
+                + _bi(
+                    "无法确认请求连接的应用，或它的回调地址已不被允许。没有向它授予任何权限。请回到应用，重新连接。",
+                    "The app that asked to connect could not be confirmed, or its return address is no "
+                    "longer allowed. Nothing was granted. Go back to the app and connect again.",
+                )
+                + "</p></section>",
+                csp=_CONSENT_CSP,
+            )
+        if code == "pending_approval":
+            return self.html_page(
+                403,
+                _bi("正在等待批准", "Waiting for approval"),
+                _header()
+                + '<section class="card"><p>'
+                + _bi(
+                    "你的账户正在等待服务器所有者批准，批准之前不能连接应用。",
+                    "Your account is waiting for the server owner's approval. You cannot connect apps yet.",
+                )
+                + "</p></section>",
+                csp=_CONSENT_CSP,
+            )
+        if code == "access_disabled":
+            return self.html_page(
+                403,
+                _bi("访问已停用", "Access disabled"),
+                _header()
+                + '<section class="card"><p>'
+                + _bi(
+                    "你的访问权限已被管理员停用。请联系服务器所有者恢复。",
+                    "Your access to this server was disabled by an administrator. Contact the server owner "
+                    "to have it restored.",
+                )
+                + "</p></section>",
+                csp=_CONSENT_CSP,
+            )
+        return self.html_page(
+            400,
+            _bi("连接请求已失效", "Request expired"),
+            _header()
+            + '<section class="card"><p>'
+            + _bi(
+                "这个连接请求已过期、已被使用，或不是在这个浏览器里发起的。请回到应用，重新连接。",
+                "This connection request has expired, was already used, or was opened in another browser. "
+                "Go back to your app and connect again.",
+            )
+            + "</p></section>",
+            csp=_CONSENT_CSP,
+        )
+
+    def _consent_body(self, session: _Session, txn_id: str, view: ConsentView) -> str:
+        """The consent screen: who asks, where the answer goes, what for, and as whom."""
+        if view.verified:
+            who = (
+                f'<p><strong>{_e(view.label)}</strong> '
+                f'<span class="muted small">({_bi("已验证的域名", "verified domain")})</span></p>'
+            )
+            if view.client_name and view.client_name != view.label:
+                who += (
+                    f'<p class="muted small">{_bi("应用自称：", "The app calls itself:")} '
+                    f"{_e(view.client_name)}</p>"
+                )
+        else:
+            name = _e(view.label) if view.label else _bi("未命名的应用", "Unnamed app")
+            who = (
+                f"<p><strong>{name}</strong></p>"
+                f'<p class="warn small">{_bi("未经验证：这是应用自己注册的名称，任何人都可以起这个名字。", "Unverified: this name was chosen by the app itself, and anyone can pick any name.")}</p>'
+            )
+        where = (
+            f"<p>{_bi('批准后，你会回到：', 'After you decide, you are sent back to:')} "
+            f"<code>{_e(view.redirect_host)}</code></p>"
+        )
+        if view.redirect_is_loopback:
+            where += (
+                f'<p class="warn small">{_bi("批准会交给这台电脑上的一个应用。只有你刚刚在本机（例如 Claude Code）启动了连接，才继续。", "The approval is delivered to an app on this computer. Continue only if you just started this connection here, for example from Claude Code.")}</p>'
+            )
+        scopes = ", ".join(f"<code>{_e(s)}</code>" for s in view.scopes)
+        what = (
+            f"<p>{_bi('它会得到：', 'It will be able to:')} {scopes}</p>"
+            f'<p class="muted small">{_bi("以你的身份使用本服务器的 Canvas 工具，用的是你自己绑定的 Canvas 令牌；你没有开启的写入工具它仍然用不了。Canvas 令牌本身不会交给它。", "Use this server&#39;s Canvas tools as you, with the Canvas token you saved here. Write tools you have not switched on stay off, and the token itself is never handed to the app.")}</p>'
+        )
+        account = (
+            f"<p>{_bi('登录账号：', 'Signed in as:')} <strong>{_e(session.name)}</strong>"
+            + (f' <span class="muted small">({_e(session.upn)})</span>' if session.upn else "")
+            + f' <a class="small" href="{_e(self._consent_url(txn_id, reauth=True))}">'
+            f"{_bi('使用其他账号', 'Use a different account')}</a></p>"
+        )
+        warning = (
+            f'<p class="muted small">{_bi("只有你刚刚才开始连接这个应用时才继续。如果是别人发给你的链接，请选择“拒绝”。", "Continue only if you just started connecting this app. If someone sent you a link to this page, choose Deny.")}</p>'
+        )
+        expires = (
+            f'<p class="muted small">{_bi("此请求在这个时间前有效：", "This request is valid until:")} '
+            f"{_e(_fmt_ts(view.expires_at))}</p>"
+        )
+        hidden = _csrf_field(session.csrf) + f'<input type="hidden" name="txn" value="{_e(txn_id)}">'
+        if view.can_approve:
+            buttons = (
+                f'<button class="btn" type="submit" name="decision" value="approve">{_bi("允许", "Allow")}</button> '
+                f'<button class="btn secondary" type="submit" name="decision" value="deny">{_bi("拒绝", "Deny")}</button>'
+            )
+            pending = ""
+        else:
+            buttons = (
+                f'<button class="btn secondary" type="submit" name="decision" value="deny">{_bi("取消", "Cancel")}</button>'
+            )
+            pending = (
+                f'<p class="notice error">{_bi("你的账户正在等待服务器所有者批准，现在还不能连接应用。你可以取消这次请求。", "Your account is waiting for the server owner to approve it, so you cannot connect apps yet. You can cancel this request.")}</p>'
+            )
+        return (
+            _header(session)
+            + f"<h1>{_bi('要把这个应用连接到你的账户吗？', 'Connect this app to your account?')}</h1>"
+            + f'<section class="card">{who}{where}{what}{account}{warning}{expires}{pending}'
+            + f'<form method="post" action="{CONSENT_PATH}">{hidden}{buttons}</form></section>'
+        )
+
+    async def consent_page(self, request: Request) -> Response:
+        """GET /account/consent?txn=...: show the app and its request to a signed-in person."""
+        assert self.authz is not None
+        txn_id = request.query_params.get("txn", "")
+        if not _TXN_ID_RE.fullmatch(txn_id):
+            return self._consent_refusal("authorization_invalid")
+        session = self._session_of(request)
+        if session is None:
+            return self.redirect(self._consent_url(txn_id), 303)
+        from canvas_mcp.core.selfhost.authz.consent import ConsentRefusal
+
+        binding = request.cookies.get(self.authz.binding_cookie)
+        shown = await self.authz.consent.describe(txn_id, binding, account_pending=session.pending)
+        if isinstance(shown, ConsentRefusal):
+            return self._consent_refusal(shown.code)
+        return self.html_page(
+            200,
+            _bi("连接应用", "Connect an app"),
+            self._consent_body(session, txn_id, shown),
+            csp=_CONSENT_CSP,
+        )
+
+    async def consent_submit(self, request: Request) -> Response:
+        """POST /account/consent: approve or deny. Same pipeline as every other post."""
+        assert self.authz is not None
+        if self._session_of(request) is None:
+            return self.redirect(ACCOUNT_PATH, 303)
+        guarded = await self._guard_post(request)
+        if isinstance(guarded, Response):
+            return guarded
+        session, form = guarded
+        raw_decision = form.get("decision")
+        txn_id = form.get("txn", "")
+        decision: Literal["approve", "deny"]
+        if raw_decision == "approve":
+            decision = "approve"
+        elif raw_decision == "deny":
+            decision = "deny"
+        else:
+            return self.message_page(400, _bi("请求格式不正确。", "Malformed request."))
+        if not _TXN_ID_RE.fullmatch(txn_id):
+            return self.message_page(400, _bi("请求格式不正确。", "Malformed request."))
+        from canvas_mcp.core.selfhost.authz.consent import ConsentRefusal
+
+        outcome = await self.authz.consent.decide(
+            txn_id,
+            request.cookies.get(self.authz.binding_cookie),
+            account_key=session.acct,
+            session_iat=session.iat,
+            account_pending=session.pending,
+            decision=decision,
+        )
+        if isinstance(outcome, ConsentRefusal):
+            return self._consent_refusal(outcome.code)
+        return self.redirect(outcome.url, 303, csp=_CONSENT_CSP)
+
+    # -- connected apps (the operations behind a future page; no UI yet) ----------------------
+
+    async def list_own_grants(self, session: _Session) -> list[GrantRecord] | Refusal:
+        """The apps connected to the signed-in account, newest first."""
+        if self.authz is None:
+            return Refusal("not_found")
+        try:
+            return await self.authz.list_own_grants(session.acct)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("account list grants failed: %s", type(exc).__name__)
+            return Refusal("token_store_unavailable")
+
+    async def revoke_own_grant(self, session: _Session, grant_id: str) -> bool | Refusal:
+        """End one of the signed-in account's connections; True if it was live."""
+        if self.authz is None:
+            return Refusal("not_found")
+        try:
+            return await self.authz.revoke_own_grant(grant_id, session.acct)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("account revoke grant failed: %s", type(exc).__name__)
+            return Refusal("token_store_unavailable")
+
+    async def list_account_grants(self, session: _Session, target: str) -> list[GrantRecord] | Refusal:
+        """An owner reads another account's connections (owner, signed in within ten minutes)."""
+        refusal = self._owner_op_refusal(session)
+        if refusal is not None:
+            return refusal
+        assert self.authz is not None
+        try:
+            return await self.authz.list_own_grants(target)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("account list grants failed: %s", type(exc).__name__)
+            return Refusal("token_store_unavailable")
+
+    async def owner_revoke_grant(self, session: _Session, grant_id: str) -> bool | Refusal:
+        """An owner ends any connection. The store re-checks the owner inside its transaction."""
+        refusal = self._owner_op_refusal(session)
+        if refusal is not None:
+            return refusal
+        assert self.authz is not None
+        try:
+            return await self.authz.owner_revoke_grant(grant_id, session.acct)
+        except AccessActionRefused:
+            return Refusal("forbidden")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("account owner revoke grant failed: %s", type(exc).__name__)
+            return Refusal("token_store_unavailable")
+
+    def _owner_op_refusal(self, session: _Session) -> Refusal | None:
+        if self.authz is None:
+            return Refusal("not_found")
+        if not session.owner:
+            return Refusal("forbidden")
+        if not self._signed_in_recently(session):
+            return Refusal("reauth_required")
+        return None
 
     async def _exchange_code(self, code: str, verifier: str) -> str | None:
         form = {
@@ -3260,6 +3605,8 @@ class _AccountApp:
         """Make this process notice an access change at once (others within the cache TTL)."""
         if self.access is not None:
             self.access.invalidate(key)
+        if self.authz is not None:
+            self.authz.account_changed(key)
 
     async def change_access(
         self,
@@ -3481,6 +3828,7 @@ def build_account_app(
     access: PrincipalAccessCache | None = None,
     rate_limiters: RateLimiters | None = None,
     ui: Literal["legacy", "react"] = "legacy",
+    authz: AuthzRuntime | None = None,
 ) -> _AccountApp:
     """The account application behind the routes (the HTML pages and the JSON API share it)."""
     return _AccountApp(
@@ -3499,6 +3847,7 @@ def build_account_app(
         access,
         rate_limiters,
         ui,
+        authz,
     )
 
 
@@ -3520,6 +3869,7 @@ def build_account_routes(
     rate_limiters: RateLimiters | None = None,
     ui: Literal["legacy", "react"] = "legacy",
     spa: SpaBundle | None = None,
+    authz: AuthzRuntime | None = None,
 ) -> list[Route]:
     """Build the /account Starlette routes.
 
@@ -3558,6 +3908,7 @@ def build_account_routes(
         access=access,
         rate_limiters=rate_limiters,
         ui="react" if serving_spa else "legacy",
+        authz=authz,
     )
     routes = app.routes()
     if ui == "react":
