@@ -56,6 +56,11 @@ def _is_login(value: Any) -> bool:
     return isinstance(value, str) and 0 < len(value) <= _MAX_LOGIN and set(value) <= _LOGIN_OK
 
 
+def _rate_limited(headers: Mapping[str, str]) -> bool:
+    """True for a GitHub 403 that is a rate limit (primary: no calls remaining; secondary: retry-after)."""
+    return headers.get("x-ratelimit-remaining") == "0" or "retry-after" in headers
+
+
 class GitHubLoginProvider:
     """GitHub as a sign-in provider."""
 
@@ -256,6 +261,10 @@ class GitHubLoginProvider:
         if result.status == 404:
             return "none"
         if result.status == 403:
+            if _rate_limited(result.headers):
+                # A rate limit is not an answer about the person: fail the sign-in (a provider
+                # error, like a 429) instead of treating it as a lost membership.
+                raise UpstreamError("http_status", status=403)
             return "unavailable"
         state = result.body.get("state") if isinstance(result.body, dict) else None
         return "active" if state == "active" else "pending" if state == "pending" else "none"

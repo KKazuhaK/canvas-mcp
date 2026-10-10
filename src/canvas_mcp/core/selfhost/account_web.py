@@ -139,6 +139,7 @@ from canvas_mcp.core.selfhost.accounts import (
     DENY_WRONG_TENANT,
     NEUTRAL_ACCESS_DENIED,
     PROVIDER_ENTRA,
+    REASON_MEMBERSHIP_UNAVAILABLE,
     Denied,
     EntraClaimsPolicy,
     entra_external_claims,
@@ -2277,6 +2278,10 @@ class _AccountApp:
         """
         key = getattr(denied, "account_key", None)
         if self.authz is None or denied.code != DENY_ACCESS_DENIED or not key:
+            return
+        if getattr(denied, "reason", None) == REASON_MEMBERSHIP_UNAVAILABLE:
+            # Membership could not be checked (restricted app access, a missing scope): that says
+            # nothing about whether the person is still admitted, so their connections stay.
             return
         count = await self.authz.admission_lost(key)
         if count:

@@ -159,6 +159,35 @@ class TestIdentity:
         assert ext.username == "" and ext.membership_unavailable and ext.teams == frozenset()
 
 
+class TestMembershipRateLimit:
+    @pytest.mark.parametrize(
+        "headers",
+        [{"x-ratelimit-remaining": "0"}, {"retry-after": "60"}],
+        ids=["primary", "secondary"],
+    )
+    async def test_a_rate_limited_403_is_a_provider_error_not_a_lost_membership(
+        self, headers: dict[str, str]
+    ) -> None:
+        provider, gh = make(orgs=("acme",))
+        gh.user = GitHubUser(orgs={"acme": "active"})
+        gh.membership_override = (403, headers)
+        with pytest.raises(SignInRejected) as raised:
+            await sign_in(provider, gh)
+        assert raised.value.code == "provider_error"
+
+    async def test_a_403_with_calls_remaining_is_still_unavailable(self) -> None:
+        provider, gh = make(orgs=("acme",))
+        gh.membership_override = (403, {"x-ratelimit-remaining": "4999"})
+        ext = await sign_in(provider, gh)
+        assert ext.membership_unavailable is True and ext.orgs == frozenset()
+
+    async def test_a_429_is_a_provider_error(self) -> None:
+        provider, gh = make(orgs=("acme",))
+        gh.membership_override = (429, {})
+        with pytest.raises(SignInRejected):
+            await sign_in(provider, gh)
+
+
 class TestMemberships:
     async def test_no_lookup_without_org_or_team_rules(self) -> None:
         provider, gh = make()

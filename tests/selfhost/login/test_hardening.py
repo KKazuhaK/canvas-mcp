@@ -5,6 +5,9 @@ from __future__ import annotations
 import pathlib
 
 import pytest
+from dbbackend import raw_sql
+
+from .fake_idp import GitHubUser
 
 from .stack_providers import provider_stack
 from .test_entra_only_golden import account_app
@@ -63,3 +66,55 @@ def test_a_correct_iss_after_a_restart_still_signs_in(
         app.logins.providers["oidc:school"].discovery._snapshot = None
         assert person.get(person.callback_url("school", start)).status_code == 303
         assert person.signed_in()
+
+
+# -- an unknown membership does not end the connected apps ---------------------------------------
+
+
+def _connected(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):  # noqa: ANN202
+    policy = {"ACCESS_POLICY": "rules", "ACCESS_RULES": "github:org:acme"}
+    return provider_stack(tmp_path, monkeypatch, policy=policy, providers="github")
+
+
+def _revocations(ps) -> list[tuple[str | None, str | None]]:  # noqa: ANN001
+    return [tuple(r) for r in raw_sql(ps.store, "SELECT revoked_reason, revoked_by FROM oauth_grants")]
+
+
+def test_a_restricted_membership_lookup_refuses_the_sign_in_but_keeps_the_grants(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _connected(tmp_path, monkeypatch) as ps:
+        ps.github.user = GitHubUser(orgs={"acme": "active"})
+        landed, client_id, verifier = (person := ps.person()).connect("github")
+        access = person.tokens(landed, client_id, verifier)["access_token"]
+        assert ps.stack.mcp_status(access) == 200
+        ps.github.user = GitHubUser(orgs={"acme": 403})  # OAuth App access restrictions
+        assert ps.person().sign_in("github").status_code == 403
+        assert _revocations(ps) == [(None, None)]
+        assert ps.stack.mcp_status(access) == 200
+
+
+def test_a_rate_limited_membership_lookup_is_a_provider_error_and_keeps_the_grants(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _connected(tmp_path, monkeypatch) as ps:
+        ps.github.user = GitHubUser(orgs={"acme": "active"})
+        landed, client_id, verifier = (person := ps.person()).connect("github")
+        access = person.tokens(landed, client_id, verifier)["access_token"]
+        ps.github.membership_override = (403, {"x-ratelimit-remaining": "0"})
+        assert ps.person().sign_in("github").status_code == 502
+        assert _revocations(ps) == [(None, None)]
+        assert ps.stack.mcp_status(access) == 200
+
+
+def test_a_real_loss_of_membership_still_ends_the_connected_apps(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _connected(tmp_path, monkeypatch) as ps:
+        ps.github.user = GitHubUser(orgs={"acme": "active"})
+        landed, client_id, verifier = (person := ps.person()).connect("github")
+        access = person.tokens(landed, client_id, verifier)["access_token"]
+        ps.github.user = GitHubUser(orgs={})  # 404: no longer a member
+        assert ps.person().sign_in("github").status_code == 403
+        assert _revocations(ps) == [("admission_lost", "system")]
+        assert ps.stack.mcp_status(access) == 401

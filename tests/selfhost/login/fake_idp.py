@@ -417,6 +417,8 @@ class FakeGitHub:
         self.api_requests: list[tuple[str, str, dict[str, str]]] = []
         self.token_requests: list[dict[str, str]] = []
         self.emails_status = 200
+        #: (status, headers) the membership endpoints answer with instead of the user's data
+        self.membership_override: tuple[int, dict[str, str]] | None = None
         net.add("github.com", self._web)
         net.add("api.github.com", self._api)
         self.last_authorize: dict[str, str] = {}
@@ -490,6 +492,11 @@ class FakeGitHub:
             if self.emails_status != 200:
                 return json_response(self.emails_status, {"message": "x"})
             return json_response(200, user.emails if user.emails is not None else [])
+        if self.membership_override is not None and (
+            path.startswith("/user/memberships/orgs/") or "/memberships/" in path
+        ):
+            status, extra = self.membership_override
+            return json_response(status, {"message": "x"}, **extra)
         if path.startswith("/user/memberships/orgs/"):
             return self._membership(user.orgs.get(path.rsplit("/", 1)[1].lower()))
         if path.startswith("/orgs/") and "/teams/" in path and "/memberships/" in path:

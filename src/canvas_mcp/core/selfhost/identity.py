@@ -175,6 +175,8 @@ class SignInDenied(Denied):
     """A refused sign-in; ``account_key`` is the account it concerned, if there is one."""
 
     account_key: str | None = None
+    #: Why the rules said no (a ``REASON_*`` of ``accounts``), when the decision recorded one.
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -361,7 +363,9 @@ class IdentityService:
             message = resolution.denied.message
             if ext.provider_id != acc.PROVIDER_ENTRA and resolution.denied.code == acc.DENY_ACCESS_DENIED:
                 message = acc.NEUTRAL_ACCESS_DENIED
-            return SignInDenied(resolution.denied.code, message, account_key=key)
+            return SignInDenied(
+                resolution.denied.code, message, account_key=key, reason=resolution.reason
+            )
         return SignIn(
             status=resolution.status,
             ext=ext,
