@@ -1101,8 +1101,14 @@ def test_the_redirect_uri_table_is_the_one_the_registry_serves(readme):
         ENTRA_CALLBACK_PATH,
         ENTRA_START_PATH,
     )
-    from canvas_mcp.core.selfhost.login.github import GITHUB_CALLBACK_PATH, GITHUB_START_PATH
-    from canvas_mcp.core.selfhost.login.google import GOOGLE_CALLBACK_PATH, GOOGLE_START_PATH
+    from canvas_mcp.core.selfhost.login.github import (
+        GITHUB_CALLBACK_PATH,
+        GITHUB_START_PATH,
+    )
+    from canvas_mcp.core.selfhost.login.google import (
+        GOOGLE_CALLBACK_PATH,
+        GOOGLE_START_PATH,
+    )
 
     section = _providers_section(readme)
     table = section[section.index("### Redirect URIs to register") :].split("\n### ", 1)[0]

@@ -15,6 +15,11 @@ ADMIN = "/account/admin"
 AUDIT = "/account/admin/audit"
 
 
+def cjk(*parts: int | str) -> str:
+    """Chinese text from code points (ints) and plain pieces (strings): this file stays English."""
+    return "".join(chr(part) if isinstance(part, int) else part for part in parts)
+
+
 @pytest.fixture
 def ps(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
     with provider_stack(tmp_path, monkeypatch) as stack:
@@ -71,8 +76,8 @@ class TestChooser:
 
     def test_the_chooser_in_chinese(self, ps: ProviderStack) -> None:
         page = ps.person().get("/account/login", params={"lang": "zh"})
-        # "Sign in with Google" in Chinese (escapes: this file is English).
-        assert "使用 Google 登录" in page.text and "Sign in with Google" not in page.text
+        # "Sign in with Google" in Chinese (built from code points: this file is English).
+        assert cjk(0x4f7f, 0x7528, " Google ", 0x767b, 0x5f55) in page.text and "Sign in with Google" not in page.text
 
 
 class TestAdminPage:
@@ -176,6 +181,6 @@ class TestAccountPage:
             person.client.cookies.set("canvas_mcp_lang", "zh", domain="canvas.example.test")
             chinese = person.sign_in("github")
             assert chinese.status_code == 403
-            # The neutral refusal in Chinese (escapes: this file is English).
-            assert "此账号没有使用此服务器的权限" in chinese.text
+            # The neutral refusal in Chinese (built from code points: this file is English).
+            assert cjk(0x6b64, 0x8d26, 0x53f7, 0x6ca1, 0x6709, 0x4f7f, 0x7528, 0x6b64, 0x670d, 0x52a1, 0x5668, 0x7684, 0x6743, 0x9650) in chinese.text
             assert "Ask the server owner" not in chinese.text
