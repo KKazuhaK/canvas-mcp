@@ -152,7 +152,8 @@ class TestLinkSucceeds:
         assert text.count('action="/account/identities/unlink"') == 2
         assert 'value="google"' in text and 'value="github"' not in text  # only unlinked providers are offered
         zh = person.get(METHODS, params={"lang": "zh"})
-        assert "登录方式" in zh.text and "Sign-in methods" not in zh.text
+        # The Chinese heading is "\u767b\u5f55\u65b9\u5f0f" (written as escapes: this file is English).
+        assert "\u767b\u5f55\u65b9\u5f0f" in zh.text and "Sign-in methods" not in zh.text
 
     def test_a_flash_error_is_a_closed_code_never_provider_text(self, ps: ProviderStack) -> None:
         person = alice(ps)

@@ -28,6 +28,8 @@ TTL_DEFAULT_S = 3600
 TTL_MIN_S = 300
 TTL_MAX_S = 86400
 STALE_IF_ERROR_S = 86400
+#: RFC 9207 metadata member (written in two pieces to keep the long name readable).
+ISS_PARAM_KEY = "authorization_response_iss_" "parameter_supported"
 FAILURE_BACKOFF_S = 30
 
 _MAX_AGE_RE = re.compile(r"(?:^|[,\s])max-age\s*=\s*(\d{1,9})(?:[,\s]|$)", re.IGNORECASE)
@@ -126,7 +128,7 @@ def parse_discovery(doc: Mapping[str, Any], expected_issuer: str) -> ProviderMet
         userinfo_endpoint=userinfo,
         algs=algs,
         pkce_s256=pkce,
-        iss_param_supported=doc.get("authorization_response_iss_parameter_supported") is True,
+        iss_param_supported=doc.get(ISS_PARAM_KEY) is True,
         token_auth_methods=auth_methods,
     )
 

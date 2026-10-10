@@ -26,6 +26,7 @@ refused unless another rule admits them: fail closed).
 from __future__ import annotations
 
 import logging
+import string
 import urllib.parse
 from collections.abc import Mapping
 from typing import Any
@@ -47,7 +48,7 @@ API_VERSION = "2026-03-10"
 
 _ORG_SCOPES = frozenset({"read:org", "write:org", "admin:org"})
 _EMAIL_SCOPES = frozenset({"user:email", "user"})
-_LOGIN_OK = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
+_LOGIN_OK = frozenset(string.ascii_letters + string.digits + "-")
 _MAX_LOGIN = 39
 
 
