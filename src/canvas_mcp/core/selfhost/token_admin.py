@@ -52,15 +52,22 @@ key. ``accounts`` prints one line per account: key, status, role, how it was adm
 display name, sign-in name, provider, created, last sign-in and the legacy
 ``entra:<tid>:<oid>`` key (``-`` if none).
 
+A PRINCIPAL may also name an account by one of its sign-in identities: ``google:<subject>``,
+``github:<numeric user id>`` or ``oidc:<slug>:<subject>``. The issuer of an ``oidc`` identity
+comes from ``OIDC_<SLUG>_ISSUER`` in the environment; without it the provider and subject must
+match exactly one linked identity (otherwise exit 2 with a hint).
+
 ``identities`` prints one tab-separated line per linked sign-in method (every account, or
-one): account key, identity id, provider, issuer, subject, sign-in name, e-mail, ``verified``
-or ``unverified``, linked, last sign-in. ``unlink-identity`` removes one by the id that line
+one): account key, identity id, provider, issuer, subject, sign-in name, linked, last sign-in.
+It never prints an e-mail address. ``unlink-identity`` removes one by the id that line
 shows: an account always keeps at least one (exit 3), every browser session of the account
 ends, connected apps stay, and the audit log records it. ``login-providers`` prints the
 configured sign-in providers with the redirect URI to register at each; ``--check`` also asks
 every OpenID Connect provider for its discovery document and key set (the only command that
-makes network calls) and exits 1 if one of them is unusable. It reads the server's environment,
-so it needs the same variables as the server.
+makes network calls; it never asks for a token) and prints the issuer, the hosts of its
+endpoints, the signature algorithms, whether PKCE S256 and the RFC 9207 ``iss`` parameter are
+advertised, and for GitHub the scopes a sign-in would request. It exits 1 if a provider is
+unusable. It reads the server's environment, so it needs the same variables as the server.
 
 ``list-grants`` (``SELFHOST_AUTH_MODE=local``) prints one tab-separated line per connected
 app: grant id, account key, client kind (``dcr`` or ``cimd``, which answers how a client
@@ -186,7 +193,10 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument(
             "principal",
             nargs=nargs,
-            help="acct:<uuid>, a bare uuid, entra:<tenant id>:<object id>, or TENANT_ID with OBJECT_ID",
+            help=(
+                "acct:<uuid>, a bare uuid, entra:<tenant id>:<object id>, google:<subject>, "
+                "github:<numeric user id>, oidc:<slug>:<subject>, or TENANT_ID with OBJECT_ID"
+            ),
         )
         p.add_argument("object_id", nargs="?", help="the object id when PRINCIPAL is a tenant id")
 
@@ -198,7 +208,13 @@ def _build_parser() -> argparse.ArgumentParser:
     unlink = sub.add_parser(
         "unlink-identity", help="remove one sign-in method from an account (it keeps at least one)"
     )
-    unlink.add_argument("principal", help="acct:<uuid>, a bare uuid or entra:<tenant id>:<object id>")
+    unlink.add_argument(
+        "principal",
+        help=(
+            "acct:<uuid>, a bare uuid, entra:<tenant id>:<object id>, google:<subject>, "
+            "github:<numeric user id> or oidc:<slug>:<subject>"
+        ),
+    )
     unlink.add_argument("identity_id", type=int, help="the identity id printed by 'identities'")
     unlink.set_defaults(object_id=None)
     providers = sub.add_parser(
@@ -426,15 +442,52 @@ class _Target:
 
     account_key: str | None
     entra: tuple[str, str] | None  # (tenant id, object id)
+    #: ``(provider id, subject, issuer or None)`` of a Google, GitHub or generic OIDC identity.
+    external: tuple[str, str, str | None] | None = None
 
 
 class _BadPrincipal(ValueError):
-    pass
+    """The typed principal is not a known form (``detail`` is a fixed text, never user input)."""
+
+    detail: str | None = None
+
+
+class _AmbiguousPrincipal(_BadPrincipal):
+    """An OpenID Connect subject without its issuer matches more than one provider identity."""
+
+    detail = (
+        "error: that subject is linked to more than one account issuer; set "
+        "OIDC_<SLUG>_ISSUER in the environment (the same variables as the server) so the "
+        "identity is looked up by its issuer, or name the account as acct:<uuid>"
+    )
+
+
+_EXTERNAL_GOOGLE_RE = re.compile(r"^google:([A-Za-z0-9_-]{1,255})$")
+_EXTERNAL_GITHUB_RE = re.compile(r"^github:([1-9][0-9]{0,19})$")
+_EXTERNAL_OIDC_RE = re.compile(r"^oidc:([a-z](?:[a-z0-9-]{0,30}[a-z0-9])?):([\x21-\x7e]{1,255})$")
+
+
+def _external_target(text: str) -> _Target | None:
+    """``google:<sub>``, ``github:<numeric id>`` or ``oidc:<slug>:<sub>`` (subjects keep their case)."""
+    if (match := _EXTERNAL_GOOGLE_RE.match(text)) is not None:
+        return _Target(None, None, (acc.PROVIDER_GOOGLE, match.group(1), acc.GOOGLE_ISSUER))
+    if (match := _EXTERNAL_GITHUB_RE.match(text)) is not None:
+        return _Target(None, None, (acc.PROVIDER_GITHUB, match.group(1), acc.GITHUB_ISSUER))
+    if (match := _EXTERNAL_OIDC_RE.match(text)) is not None and "," not in text:
+        from canvas_mcp.core.selfhost.login.config import env_prefix
+
+        provider_id = f"{acc.PROVIDER_OIDC_PREFIX}{match.group(1)}"
+        configured = os.environ.get(env_prefix(match.group(1)) + "ISSUER", "").strip()
+        return _Target(None, None, (provider_id, match.group(2), configured or None))
+    return None
 
 
 def _parse_target(principal: str | None, object_id: str | None) -> _Target:
     if principal is None:
         raise _BadPrincipal
+    external = None if object_id is not None else _external_target(principal.strip())
+    if external is not None:
+        return external
     text = principal.strip().lower()
     if object_id is not None:
         key = entra_principal_key(text, object_id)  # raises ValueError unless both are GUIDs
@@ -455,6 +508,20 @@ def _lookup(store: TokenStore, target: _Target) -> str | None:
     """The account key a typed principal names, or None if there is no such account."""
     if target.account_key is not None:
         return target.account_key if store.get_principal_status(target.account_key).stored else None
+    if target.external is not None:
+        provider_id, subject, issuer = target.external
+        if issuer is not None:
+            return store.lookup_identity(provider_id, issuer, subject)
+        # No issuer in the environment: a provider and subject that match exactly one identity name it.
+        found = {
+            account.principal_key
+            for account in store.list_accounts()
+            for identity in account.identities
+            if identity.provider_id == provider_id and identity.subject == subject
+        }
+        if len(found) > 1:
+            raise _AmbiguousPrincipal
+        return next(iter(found), None)
     assert target.entra is not None
     return store.lookup_identity(
         acc.PROVIDER_ENTRA, acc.entra_issuer(target.entra[0]), target.entra[1]
@@ -462,9 +529,15 @@ def _lookup(store: TokenStore, target: _Target) -> str | None:
 
 
 _BAD_PRINCIPAL = (
-    "error: name the account as acct:<uuid>, entra:<tenant GUID>:<object GUID>, or give "
-    "TENANT_ID and OBJECT_ID (both GUIDs)"
+    "error: name the account as acct:<uuid>, entra:<tenant GUID>:<object GUID>, google:<subject>, "
+    "github:<numeric user id>, oidc:<slug>:<subject>, or give TENANT_ID and OBJECT_ID (both GUIDs)"
 )
+
+
+def _bad_principal(exc: ValueError) -> str:
+    """The message for a principal the operator typed wrongly (fixed text only)."""
+    return (exc.detail if isinstance(exc, _BadPrincipal) else None) or _BAD_PRINCIPAL
+
 
 
 def _identity_columns(account: AccountInfo | None) -> tuple[str, str]:
@@ -510,8 +583,8 @@ def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
         if args.principal is not None:
             try:
                 found = _lookup(store, _parse_target(args.principal, args.object_id))
-            except (ValueError, _BadPrincipal):
-                print(_BAD_PRINCIPAL, file=sys.stderr)
+            except ValueError as exc:
+                print(_bad_principal(exc), file=sys.stderr)
                 return EXIT_CONFIG
             if found is None:
                 print("not found: no such account", file=sys.stderr)
@@ -544,8 +617,8 @@ def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
         if args.account is not None:
             try:
                 key = _lookup(store, _parse_target(args.account, None))
-            except (ValueError, _BadPrincipal):
-                print(_BAD_PRINCIPAL, file=sys.stderr)
+            except ValueError as exc:
+                print(_bad_principal(exc), file=sys.stderr)
                 return EXIT_CONFIG
             ended = 0
             if key is not None:
@@ -653,13 +726,17 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
             if command == "history" and args.principal is None and args.object_id is None
             else _parse_target(args.principal, args.object_id)
         )
-    except (ValueError, _BadPrincipal):
-        print(_BAD_PRINCIPAL, file=sys.stderr)
+    except ValueError as exc:
+        print(_bad_principal(exc), file=sys.stderr)
         return EXIT_CONFIG
     if command == "history":
         return _history(args, store, target)
     assert target is not None
-    key = _lookup(store, target)
+    try:
+        key = _lookup(store, target)
+    except _AmbiguousPrincipal as exc:
+        print(_bad_principal(exc), file=sys.stderr)
+        return EXIT_CONFIG
 
     if command in ("remove", "revoke"):
         removed = store.delete(key, actor=OPERATOR) if key is not None else False
@@ -757,7 +834,11 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
 def _history(args: argparse.Namespace, store: TokenStore, target: _Target | None) -> int:
     key: str | None = None
     if target is not None:
-        key = _lookup(store, target)
+        try:
+            key = _lookup(store, target)
+        except _AmbiguousPrincipal as exc:
+            print(_bad_principal(exc), file=sys.stderr)
+            return EXIT_CONFIG
         if key is None:
             print("not found: no such account", file=sys.stderr)
             return EXIT_NOT_FOUND
@@ -787,10 +868,10 @@ def _identities(args: argparse.Namespace, store: TokenStore) -> int:
     else:
         try:
             target = _parse_target(args.principal, args.object_id)
-        except (ValueError, _BadPrincipal):
-            print(_BAD_PRINCIPAL, file=sys.stderr)
+            found = _lookup(store, target)
+        except ValueError as exc:
+            print(_bad_principal(exc), file=sys.stderr)
             return EXIT_CONFIG
-        found = _lookup(store, target)
         if found is None:
             print("not found: no such account", file=sys.stderr)
             return EXIT_NOT_FOUND
@@ -806,8 +887,6 @@ def _identities(args: argparse.Namespace, store: TokenStore) -> int:
                         _cell(identity.issuer),
                         _cell(identity.subject),
                         _cell(identity.username) or "-",
-                        _cell(identity.email or "") or "-",
-                        "verified" if identity.email_verified else "unverified",
                         _iso(identity.linked_at),
                         _iso(identity.last_login_at),
                     ]
@@ -822,6 +901,18 @@ def _redirect_uri(base: str, provider_id: str) -> str:
     if provider_id in (acc.PROVIDER_GOOGLE, acc.PROVIDER_GITHUB):
         return f"{base}/account/callback/{provider_id}"
     return f"{base}/account/callback/oidc/{provider_id.removeprefix('oidc:')}"
+
+
+def _endpoint_hosts(meta: Any) -> str:
+    """The host names of a provider's endpoints (never a path or a query)."""
+    from urllib.parse import urlsplit
+
+    hosts: list[str] = []
+    for url in (meta.authorization_endpoint, meta.token_endpoint, meta.jwks_uri, meta.userinfo_endpoint):
+        host = urlsplit(url).hostname if url else None
+        if host and host not in hosts:
+            hosts.append(host)
+    return ",".join(hosts)
 
 
 def _run_login_providers(args: argparse.Namespace) -> int:
@@ -858,6 +949,10 @@ def _run_login_providers(args: argparse.Namespace) -> int:
             line = f"{provider_id}	redirect_uri={_redirect_uri(base, provider_id)}"
             provider: Any = runtime.providers.get(provider_id)
             discovery = getattr(provider, "discovery", None)
+            if provider_id == acc.PROVIDER_GITHUB and provider is not None:
+                scopes = "user:email" + (",read:org" if provider.wants_membership else "")
+                print(line + f"	OK	scopes={scopes}	endpoints=github.com,api.github.com	pkce=S256")
+                continue
             if provider is None or discovery is None:
                 print(line + "	OK	(nothing to discover)")
                 continue
@@ -868,7 +963,7 @@ def _run_login_providers(args: argparse.Namespace) -> int:
                 await provider.jwks.ensure(meta.jwks_uri, None)
                 print(
                     line
-                    + f"	OK	issuer={meta.issuer}	algs={','.join(meta.algs)}"
+                    + f"	OK	issuer={meta.issuer}	hosts={_endpoint_hosts(meta)}	algs={','.join(meta.algs)}"
                     + f"	pkce={'listed' if meta.pkce_s256 else 'not listed'}"
                     + f"	iss_param={'yes' if meta.iss_param_supported else 'no'}"
                     + f"	token_auth={','.join(meta.token_auth_methods) or 'not listed'}"
