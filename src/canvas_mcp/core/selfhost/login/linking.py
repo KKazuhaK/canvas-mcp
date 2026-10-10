@@ -125,7 +125,7 @@ class LinkingService:
         url = provider.authorize_url(
             state=state, nonce=nonce, code_challenge=_b64url_sha256(verifier), reauth=True
         )
-        cookie = app.codec.seal(FLOW_COOKIE, new_cookie_payload(state, binding, provider.id, now))
+        cookie = app.codec.seal(FLOW_COOKIE, new_cookie_payload(state, binding, provider.id, now, "link"))
         return LinkStarted(url, provider.id, FLOW_COOKIE, cookie, FLOW_TTL_S)
 
     async def _start_entra(self, session: _Session) -> LinkStarted:

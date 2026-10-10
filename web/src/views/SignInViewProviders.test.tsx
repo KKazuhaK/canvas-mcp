@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { errorBody, scriptAdapter } from '@/test/fixtures'
 import { renderApp } from '@/test/renderWithProviders'
@@ -110,25 +110,19 @@ describe('SignInView with several providers', () => {
     expect(router.state.location.pathname).toBe('/')
   })
 
-  it('takes a signed-in person whose link failed to the Sign-in methods screen with the closed code', async () => {
+  it('keeps a signed-in person whose re-sign-in failed on the sign-in page with the generic error', async () => {
     const { router } = await renderApp('/sign-in?error=provider_error', 'multi')
-    await waitFor(() => expect(router.state.location.pathname).toBe('/sign-in-methods'))
-    expect(router.state.location.search).toBe('?error=provider_error')
     const alert = await screen.findByRole('alert')
-    expect(within(alert).getByText('The sign-in method was not added')).toBeInTheDocument()
+    expect(within(alert).getByText('Sign-in did not complete')).toBeInTheDocument()
+    expect(screen.queryByText('The sign-in method was not added')).toBeNull()
+    expect(router.state.location.pathname).toBe('/sign-in')
+    expect(await screen.findAllByRole('link', { name: /Sign in with/ })).toHaveLength(4)
   })
 
-  it('never shows provider text from a forwarded code', async () => {
-    const { router } = await renderApp('/sign-in?error=%3Cb%3Ex%3C%2Fb%3E', 'multi')
-    await waitFor(() => expect(router.state.location.pathname).toBe('/sign-in-methods'))
+  it('never shows provider text from an error code to a signed-in person', async () => {
+    await renderApp('/sign-in?error=%3Cb%3Ex%3C%2Fb%3E', 'multi')
     await screen.findByRole('alert')
     expect(screen.queryByText('x', { selector: 'b' })).toBeNull()
-  })
-
-  it('without the Sign-in methods screen a signed-in visitor with an error still goes home', async () => {
-    const { router } = await renderApp('/sign-in?error=provider_error', 'enrolled')
-    await screen.findByRole('navigation', { name: 'Main navigation' })
-    expect(router.state.location.pathname).toBe('/')
   })
 
   it('shows the closed message of a provider that failed and keeps the buttons', async () => {

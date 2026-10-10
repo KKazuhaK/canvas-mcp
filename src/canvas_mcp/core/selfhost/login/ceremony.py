@@ -123,9 +123,17 @@ class FlowRecord:
         return record
 
 
-def new_cookie_payload(state: str, binding: str, provider_id: str, now: int) -> dict[str, Any]:
-    """The payload sealed into ``__Host-cmcp_flow``."""
-    return {"v": FLOW_COOKIE_VERSION, "s": state, "b": binding, "p": provider_id, "iat": now}
+def new_cookie_payload(
+    state: str, binding: str, provider_id: str, now: int, purpose: Purpose = "sign_in"
+) -> dict[str, Any]:
+    """The payload sealed into ``__Host-cmcp_flow``.
+
+    ``purpose`` lets a callback that fails before it can pop the stored record (a cancelled
+    consent, an expired state) still send a link ceremony back to the Sign-in methods screen.
+    """
+    return {
+        "v": FLOW_COOKIE_VERSION, "s": state, "b": binding, "p": provider_id, "pp": purpose, "iat": now,
+    }
 
 
 @dataclass(frozen=True)
@@ -134,6 +142,8 @@ class FlowCookie:
     binding: str
     provider_id: str
     iat: int
+    #: What the ceremony is for; a cookie without the field (an older one) is a sign-in.
+    purpose: Purpose = "sign_in"
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any] | None) -> FlowCookie | None:
@@ -153,4 +163,7 @@ class FlowCookie:
             or not binding
         ):
             return None
-        return cls(state, binding, provider, iat)
+        purpose = payload.get("pp", "sign_in")
+        if purpose not in _PURPOSES:
+            return None
+        return cls(state, binding, provider, iat, purpose)

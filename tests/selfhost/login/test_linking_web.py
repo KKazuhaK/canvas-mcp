@@ -219,8 +219,8 @@ class TestLinkRefused:
         callback = ps.github.authorize(url)
         assert outcome(person.get(callback)) == {"linked": "1"}
         person.client.cookies.set("__Host-cmcp_flow", cookie, domain="canvas.example.test")
-        replay = person.get(callback)
-        assert replay.status_code == 400 and "invalid or expired" in replay.text
+        # Like the Entra replay: a closed code on the Sign-in methods screen, nothing linked twice.
+        assert outcome(person.get(callback)) == {"error": "state_invalid"}
         assert len(ps.github.token_requests) == 1
 
     def test_the_rules_decide_what_may_be_attached(self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -249,6 +249,54 @@ class TestLinkRefused:
         refused = person.post_link("school")
         assert refused.status_code == 503 and "idp.example.edu" not in refused.text
         assert "__Host-cmcp_flow" not in person.client.cookies
+
+
+class TestLinkFailsBeforeTheRecordIsPopped:
+    """A link that fails early still ends on the Sign-in methods screen (the cookie says what it is for)."""
+
+    @pytest.mark.parametrize("provider", ["google", "github", "school"])
+    def test_a_cancelled_consent_returns_to_the_sign_in_methods_screen(
+        self, ps: ProviderStack, provider: str
+    ) -> None:
+        person = alice(ps)
+        page = person.post_link(provider)
+        response = person.finish_link(provider, page, error="access_denied")
+        assert outcome(response) == {"error": "provider_error"}
+        assert "secret idp text" not in response.text and "must never be shown" not in response.text
+
+    def test_a_cancelled_entra_link_returns_to_the_sign_in_methods_screen(self, ps: ProviderStack) -> None:
+        person = ps.person()
+        person.sign_in("google")
+        page = person.post_link("entra")
+        state = query_of(person.meta_url(page))["state"]
+        response = person.get("/account/callback", params={"error": "access_denied", "state": state})
+        assert outcome(response) == {"error": "provider_error"}
+
+    def test_an_expired_state_of_a_link_returns_to_the_sign_in_methods_screen(self, ps: ProviderStack) -> None:
+        person = alice(ps)
+        page = person.post_link("github")
+        callback = ps.github.authorize(person.meta_url(page))
+        ps.clock.advance(601)
+        assert outcome(person.get(callback)) == {"error": "state_invalid"}
+
+    def test_a_cancelled_sign_in_of_a_signed_in_person_is_not_reported_as_a_link(self, ps: ProviderStack) -> None:
+        person = alice(ps)
+        start = person.start("google", reauth="1")
+        response = person.get(person.callback_url("google", start, error="access_denied"))
+        assert response.status_code == 403
+        assert "location" not in response.headers
+
+    def test_a_cookie_without_a_purpose_is_a_sign_in(self, ps: ProviderStack) -> None:
+        from canvas_mcp.core.selfhost.login.ceremony import (
+            FlowCookie,
+            new_cookie_payload,
+        )
+
+        payload = new_cookie_payload("S" * 43, "B" * 43, "google", 100, "link")
+        assert FlowCookie.from_payload(payload) == FlowCookie("S" * 43, "B" * 43, "google", 100, "link")
+        del payload["pp"]
+        assert FlowCookie.from_payload(payload) == FlowCookie("S" * 43, "B" * 43, "google", 100, "sign_in")
+        assert FlowCookie.from_payload({**payload, "pp": "root"}) is None
 
 
 class TestEntraLink:

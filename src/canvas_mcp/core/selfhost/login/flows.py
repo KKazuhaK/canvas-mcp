@@ -138,15 +138,19 @@ class ExternalSignIn:
 
     async def _callback_checked(self, request: Request, provider: LoginProvider) -> Response:
         app = self.app
+        cookie = FlowCookie.from_payload(
+            app.codec.unseal(FLOW_COOKIE, request.cookies.get(FLOW_COOKIE))
+        )
+        # The sealed cookie says what the ceremony is for before the stored record can be popped:
+        # a cancelled or expired link still belongs on the Sign-in methods screen, a failed
+        # re-sign-in or app consent does not.
+        link = cookie is not None and cookie.provider_id == provider.id and cookie.purpose == "link"
         error = request.query_params.get("error")
         if error is not None:
             code = error if _ERROR_CODE_RE.fullmatch(error) else None
             logger.info("provider sign-in refused provider=%s error=%s", provider.id, code or "unknown")
-            return self._failure(None, "provider_error", 403, provider)
+            return self._failure(link, "provider_error", 403, provider)
 
-        cookie = FlowCookie.from_payload(
-            app.codec.unseal(FLOW_COOKIE, request.cookies.get(FLOW_COOKIE))
-        )
         state = request.query_params.get("state", "")
         now = app.clock()
         if (
@@ -156,7 +160,7 @@ class ExternalSignIn:
             or now - cookie.iat > FLOW_TTL_S
             or not hmac.compare_digest(state.encode("utf-8"), cookie.state.encode("utf-8"))
         ):
-            return self._failure(None, "state_invalid", 400, provider)
+            return self._failure(link, "state_invalid", 400, provider)
 
         try:
             raw = await self.rt.flow_store.pop(
@@ -164,7 +168,7 @@ class ExternalSignIn:
             )
         except Exception as exc:  # noqa: BLE001 - fail closed
             logger.error("provider sign-in state read failed: %s", type(exc).__name__)
-            return self._failure(None, "token_store_unavailable", 503, provider)
+            return self._failure(link, "token_store_unavailable", 503, provider)
         record: FlowRecord | None = None
         if raw is not None:
             try:
@@ -172,14 +176,15 @@ class ExternalSignIn:
             except ValueError:
                 record = None
         if record is None or record.p != provider.id or record.ru != provider.redirect_uri:
-            return self._failure(None, "state_invalid", 400, provider)
+            return self._failure(link, "state_invalid", 400, provider)
+        link = record.pp == "link"
 
         issuer = request.query_params.get("iss")
         if issuer is not None:
             # A provider without a known issuer (GitHub) has nothing to compare it with.
             if provider.response_issuer is not None and issuer != provider.response_issuer:
                 logger.warning("provider sign-in refused provider=%s reason=iss_mismatch", provider.id)
-                return self._failure(record, "state_invalid", 400, provider)
+                return self._failure(link, "state_invalid", 400, provider)
         else:
             # Whether the provider promises an ``iss`` is known from its metadata, which a restart
             # between the start and the callback leaves unloaded: load it first, and fail closed.
@@ -187,25 +192,25 @@ class ExternalSignIn:
                 await provider.prepare()
             except ProviderUnavailable:
                 logger.warning("provider sign-in unavailable provider=%s step=callback", provider.id)
-                return self._failure(record, "provider_error", 502, provider)
+                return self._failure(link, "provider_error", 502, provider)
         if issuer is None and provider.requires_iss():
             logger.warning("provider sign-in refused provider=%s reason=iss_missing", provider.id)
-            return self._failure(record, "state_invalid", 400, provider)
+            return self._failure(link, "state_invalid", 400, provider)
 
         code_param = request.query_params.get("code", "")
         if not code_param or len(code_param) > _MAX_CODE_CHARS:
-            return self._failure(record, "sign_in_incomplete", 400, provider)
+            return self._failure(link, "sign_in_incomplete", 400, provider)
 
         try:
             ext = await provider.finish(code=code_param, code_verifier=record.cv, nonce=record.n)
         except SignInRejected as exc:
             status = 400 if exc.code != "provider_error" else 502
-            return self._failure(record, exc.code, status, provider)
+            return self._failure(link, exc.code, status, provider)
         except Exception as exc:  # noqa: BLE001 - never let a provider bug become a 500 page with details
             logger.error("provider sign-in failed provider=%s: %s", provider.id, type(exc).__name__)
-            return self._failure(record, "provider_error", 502, provider)
+            return self._failure(link, "provider_error", 502, provider)
 
-        if record.pp == "link":
+        if link:
             outcome = await self.linking.complete(request, record, ext)
             return app._link_redirect(outcome)
 
@@ -217,7 +222,7 @@ class ExternalSignIn:
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("account sign-in status check failed: %s", type(exc).__name__)
-            return self._failure(record, "token_store_unavailable", 503, provider)
+            return self._failure(link, "token_store_unavailable", 503, provider)
         if isinstance(signed, Denied):
             await app._admission_lost(signed)
             return app._sign_in_refused(signed)
@@ -225,9 +230,9 @@ class ExternalSignIn:
         return app._complete_sign_in(signed, now=now, waiting=record.txn, return_to=record.rt)
 
     def _failure(
-        self, record: FlowRecord | None, code: str, status: int, provider: LoginProvider
+        self, link: bool, code: str, status: int, provider: LoginProvider
     ) -> Response:
         """A failed ceremony: a link goes back to the sign-in methods screen, a sign-in to its page."""
-        if record is not None and record.pp == "link":
+        if link:
             return self.app._link_redirect(Refusal(code))
         return self.app._provider_failure(code, status, provider)

@@ -2046,10 +2046,14 @@ class _AccountApp:
     async def _callback(self, request: Request) -> Response:
         txn = self._login_transaction(request)
         state = request.query_params.get("state", "")
+        # A link ceremony that fails goes back to the Sign-in methods screen (the sealed login
+        # cookie says what it is for); a sign-in, a re-sign-in or an app's consent goes to the
+        # sign-in page. Without a valid cookie there is nothing to tell them apart.
+        fail = self._link_failure if txn is not None and txn.get("pp") == "link" else self._sign_in_failure
         if txn is None or not hmac.compare_digest(
             state.encode("utf-8"), txn["state"].encode("utf-8")
         ):
-            return self._sign_in_failure(
+            return fail(
                 "state_invalid",
                 400,
                 _bi(
@@ -2063,7 +2067,7 @@ class _AccountApp:
             code = error if _ERROR_CODE_RE.fullmatch(error) else None
             logger.info("account sign-in refused by Entra: %s", code or "unknown")
             detail = f" (<code>{_e(code)}</code>)" if code else ""
-            return self._sign_in_failure(
+            return fail(
                 "provider_error",
                 403,
                 _bi(
@@ -2075,7 +2079,7 @@ class _AccountApp:
 
         code_param = request.query_params.get("code", "")
         if not code_param or len(code_param) > 4096:
-            return self._sign_in_failure(
+            return fail(
                 "sign_in_incomplete",
                 400,
                 _bi("登录响应不完整。", "The sign-in response is incomplete."),
@@ -2083,7 +2087,7 @@ class _AccountApp:
 
         id_token = await self._exchange_code(code_param, txn["verifier"])
         if id_token is None:
-            return self._sign_in_failure(
+            return fail(
                 "provider_error",
                 502,
                 _bi(
@@ -2093,7 +2097,7 @@ class _AccountApp:
             )
 
         claims = await self._verify_id_token(id_token)
-        bad = self._sign_in_failure(
+        bad = fail(
             "sign_in_unverified",
             400,
             _bi(
@@ -2122,7 +2126,7 @@ class _AccountApp:
             return bad
         tid = claims.get("tid")
         if not isinstance(tid, str) or tid.lower() != self.tenant:
-            return self._sign_in_failure(
+            return fail(
                 DENY_WRONG_TENANT,
                 403,
                 _bi(
@@ -2326,6 +2330,10 @@ class _AccountApp:
         if denied.code == DENY_UNAVAILABLE:
             return "token_store_unavailable"
         return denied.code if denied.code in SIGN_IN_ERROR_CODES else DENY_ACCESS_DENIED
+
+    def _link_failure(self, code: str, status: int, message_html: str) -> Response:
+        """A failed Entra link ceremony: back to the Sign-in methods screen with the closed code."""
+        return self._link_redirect(Refusal(code))
 
     def _sign_in_failure(self, code: str, status: int, message_html: str) -> Response:
         """A failed sign-in: the HTML message page, or (react UI) back to its sign-in page.

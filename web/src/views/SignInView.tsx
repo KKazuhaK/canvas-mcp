@@ -54,14 +54,10 @@ export default function SignInView() {
 
   // Already signed in (for example a stale tab): go where the sign-in was headed. A
   // probe that now answers 401 keeps its last good data, but that person is signed out.
-  if (me.data && !isUnauthenticated(me.error) && !reauth && txn === null) {
-    // A person who is signed in only reaches the provider's callback while linking another
-    // sign-in method: a cancelled or failed link comes back here with the closed code, and
-    // belongs on the Sign-in methods screen, which shows it. (Without that screen, as when
-    // Microsoft is the only provider, nothing could have been linking.)
-    if (errorParam !== null && me.data.features.identities) {
-      return <Navigate to={`/sign-in-methods?error=${encodeURIComponent(errorParam)}`} replace />
-    }
+  // A failed sign-in code keeps the page open: a signed-in person gets here from a failed
+  // re-sign-in or app consent, and needs to see that it failed (a failed link never gets
+  // here; the server sends it to the Sign-in methods screen).
+  if (me.data && !isUnauthenticated(me.error) && !reauth && txn === null && errorParam === null) {
     const inApp = returnTo ? returnTo.slice(SITE_BASE.length) || '/' : '/'
     return <Navigate to={inApp} replace />
   }

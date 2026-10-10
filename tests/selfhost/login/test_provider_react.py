@@ -145,3 +145,15 @@ def test_an_app_waiting_for_the_sign_in_is_carried_to_the_consent_screen(ps: Pro
 def test_entra_still_works_through_its_own_start(ps: ProviderStack) -> None:
     person = ps.person()
     assert person.sign_in_entra(ALICE).status_code == 303
+
+
+@pytest.mark.parametrize("provider", ["google", "github", "school"])
+def test_a_cancelled_re_sign_in_of_a_signed_in_person_goes_to_the_sign_in_page_not_the_methods_screen(
+    ps: ProviderStack, provider: str
+) -> None:
+    person = ps.person()
+    assert person.sign_in("google").status_code == 303
+    start = person.start(provider, reauth="1")
+    response = person.get(person.callback_url(provider, start, error="access_denied"))
+    assert response.status_code == 303
+    assert response.headers["location"] == "/account/sign-in?error=provider_error"
