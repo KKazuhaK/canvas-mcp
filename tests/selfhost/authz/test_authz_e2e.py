@@ -74,11 +74,11 @@ class MemoryStorage:
 def make_oauth(
     served: Served, user: User = ALICE, *, client_metadata_url: str | None = None,
     storage: MemoryStorage | None = None, results: list[dict[str, str]] | None = None,
-    decision: str = "approve",
+    decision: str = "approve", react: bool = False,
 ) -> tuple[OAuthClientProvider, MemoryStorage, list[dict[str, str]]]:
     storage = storage or MemoryStorage()
     results = results if results is not None else []
-    browser = Browser(served.stack)
+    browser = Browser(served.stack, react=react)
 
     async def redirect_handler(url: str) -> None:
         params = dict(parse_qsl(urlsplit(url).query))
@@ -207,6 +207,78 @@ class TestOfficialSdkClient:
             assert await stack.authz.grants.revoke_by_client(grants(served)[0][0])
             assert await whoami(client) == stack.account_of(ALICE)  # a 401, then a fresh authorization
         assert len(results) == 2 and len(grants(served)) == 2
+
+
+@pytest.fixture
+def served_react(tmp_path, monkeypatch, react_env):  # type: ignore[no-untyped-def]
+    """The same app with ``ACCOUNT_UI=react``: the consent screen is the single-page app's."""
+    with served_stack(tmp_path / "react", monkeypatch, env=react_env) as running:
+        running.stack.enroll(ALICE)
+        yield running
+
+
+class TestReactConsent:
+    """The browser decides through the JSON API (read the request, post the decision, follow redirect_to)."""
+
+    async def test_dcr_flow_and_a_tool_call_as_the_account(self, served_react: Served) -> None:
+        stack = served_react.stack
+        oauth, storage, results = make_oauth(served_react, react=True)
+        async with sdk_client(served_react, oauth) as client:
+            assert await whoami(client) == stack.account_of(ALICE)
+        assert results[0]["iss"] == ISSUER and "code" in results[0]
+        assert storage.client_info is not None and storage.client_info.client_secret is None
+        assert grants(served_react)[0][1] == "dcr"
+        # the SDK refreshes through the same family
+        first = storage.tokens
+        async with sdk_client(served_react, oauth) as client:
+            oauth.context.token_expiry_time = time.time() - 10
+            assert await whoami(client) == stack.account_of(ALICE)
+        assert storage.tokens.refresh_token != first.refresh_token  # type: ignore[union-attr]
+
+    async def test_cimd_flow_creates_no_registration(self, served_react: Served) -> None:
+        stack = served_react.stack
+        stack.cimd.serve(CIMD_URL, cimd_document(CIMD_URL, redirect_uris=["http://127.0.0.1/callback"]))
+        oauth, storage, _ = make_oauth(served_react, client_metadata_url=CIMD_URL, react=True)
+        async with sdk_client(served_react, oauth) as client:
+            assert await whoami(client) == stack.account_of(ALICE)
+        assert storage.client_info is not None and storage.client_info.client_id == CIMD_URL
+        assert raw_sql(stack.store, "SELECT COUNT(*) FROM oauth_clients")[0][0] == 0
+        assert grants(served_react)[0][1] == "cimd"
+
+    async def test_a_declined_request_reaches_the_sdk_as_access_denied(self, served_react: Served) -> None:
+        oauth, storage, results = make_oauth(served_react, decision="deny", react=True)
+        with pytest.raises(Exception):  # noqa: B017 - the SDK raises its own error type
+            async with sdk_client(served_react, oauth) as client:
+                await whoami(client)
+        assert results[0]["error"] == "access_denied" and results[0]["iss"] == ISSUER
+        assert storage.tokens is None and grants(served_react) == []
+
+    def test_claude_ai_by_its_published_identity(self, served_react: Served) -> None:
+        stack = served_react.stack
+        stack.cimd.serve(CLAUDE_AI_URL, fixture("claude-ai.json"))
+        verifier, challenge = pkce()
+        landed = Browser(stack, react=True).connect(
+            stack.authorize_params(CLAUDE_AI_URL, challenge, redirect_uri=CLAUDE_REDIRECT), ALICE
+        )
+        assert landed.url.startswith(CLAUDE_REDIRECT + "?") and landed.query["iss"] == ISSUER
+        response = stack.token(
+            grant_type="authorization_code", code=landed.query["code"], client_id=CLAUDE_AI_URL,
+            redirect_uri=CLAUDE_REDIRECT, code_verifier=verifier, resource=AUDIENCE,
+        )
+        assert response.status_code == 200, response.text
+        key = stack.account_of(ALICE)
+        assert stack.whoami(response.json()["access_token"]) == key
+        # the consent screen showed the verified domain, not the self-asserted name
+        browser = Browser(stack, react=True)
+        _, challenge = pkce()
+        started = browser.start(stack.authorize_params(CLAUDE_AI_URL, challenge, redirect_uri=CLAUDE_REDIRECT))
+        txn = started.headers["location"].split("txn=")[1]
+        browser.entra_login(ALICE, browser.get(started.headers["location"]))
+        response = browser.api("GET", f"/consent/{txn}")
+        shown = response.json()
+        assert "client" in shown, (response.status_code, shown)
+        assert shown["client"]["verified"] is True and shown["client"]["host"] == "claude.ai"
+        assert shown["redirect"] == {"host": "claude.ai", "loopback": False}
 
 
 class TestRecordedClients:
