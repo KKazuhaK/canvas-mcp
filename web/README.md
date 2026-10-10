@@ -61,9 +61,15 @@ Pick a scenario with `?mock=<name>` on the first page load:
 | `no-write-tools` | the server has no write-tool catalog (the screen is hidden) |
 | `error-503` | saving the token answers `token_store_unavailable` |
 | `rate-limited` | token save and re-check answer `rate_limited` |
+| `local` | the server's own authorization server (`SELFHOST_AUTH_MODE=local`): consent screen and Connected apps |
+| `local-owner` | the same, as an owner (the per-account apps dialog on the accounts page) |
+| `local-pending` | the same, as an account waiting for approval (the consent screen can only cancel) |
 
 Handy URLs: `/account/?mock=fresh`, `/account/admin?mock=owner`,
-`/account/write-tools?mock=stale-owner`. Token inputs containing `rejected` or
+`/account/write-tools?mock=stale-owner`, `/account/connected-apps?mock=local`. The consent screen is
+`/account/consent?txn=<id>&mock=local` with one of the ids `MOCK_TXN` exports (`mockverified...`,
+`mockunverified...`, `mockloopback...` or `mockunavailable...`, each padded with `x` to 43 characters);
+any other well-formed id answers `authorization_invalid`, like an expired or used request. Token inputs containing `rejected` or
 `offline` trigger `token_rejected` and `canvas_unavailable`; a search containing
 `offline` triggers `directory_unavailable`. The sign-in hand-off (a full-page
 navigation to `/account/login`) is bounced back into the app by a tiny dev-only Vite
@@ -112,15 +118,22 @@ Screens: signed-out landing and sign-in (with the fixed text for a failed sign-i
 pending account, Canvas token enroll / replace / re-check / delete (school list or
 directory search, optional expiry date, identity-change confirmation, invalid-token
 and expiry banners), write tools (with **Turn all off**), recent sign-ins, and
-owner-only accounts, enrollments and audit log. Layout is phone-first (16 px
+owner-only accounts, enrollments and audit log. With the server's own authorization server
+(`SELFHOST_AUTH_MODE=local`, the `consent` and `connected_apps` flags of `GET /me`) there are two more:
+the consent screen (`/consent?txn=...`, outside the signed-in routes: a signed-out visitor goes to the
+server-side sign-in of that request, and the page navigates to the app's return address after checking it,
+never by a form post) and **Connected apps** (a list with a confirmed revoke, plus an owner's per-account
+dialog). Layout is phone-first (16 px
 gutters, stacked cards below 900 px, no horizontal page scroll at 360 px) and
 follows `prefers-color-scheme` with an optional light/dark toggle.
 
-What is **not** here on purpose: linked sign-in methods, connected apps, MCP consent,
-role changes, "sign out everywhere". The server does not have them yet; it says so in
-`features` of `GET /account/api/me`, those routes are not in `contract.ts`, and the
-navigation lists only what `features` allows (`RequireFeature` answers a deep link to
-a missing feature like any unknown page). They come back with the server work.
+What is **not** here on purpose: linked sign-in methods, role changes, "sign out everywhere".
+The server does not have them yet; it says so in `features` of `GET /account/api/me`, those routes
+are not in `contract.ts`, and the navigation lists only what `features` allows (`RequireFeature`
+answers a deep link to a missing feature like any unknown page). Consent and connected apps are in
+`contract.ts` because the server always lists their routes, but it serves them only in
+`SELFHOST_AUTH_MODE=local` (`not_found` otherwise) and sets `features.consent` and
+`features.connected_apps` accordingly.
 
 ## Language
 
@@ -262,7 +275,6 @@ shows what else needs touching.
 - **More sign-in providers.** `GET /providers` already returns a list with a
   `start_url` per provider, and the sign-in page renders one button for each; a new
   provider needs an icon in `components/ProviderIcon.tsx` (unknown ones get a key icon).
-- **Features that are not built yet** (linked sign-in methods, connected apps, consent,
-  role changes, sign out everywhere): add the routes to `contract.ts` and `types.ts`,
+- **Features that are not built yet** (linked sign-in methods, role changes, sign out everywhere): add the routes to `contract.ts` and `types.ts`,
   the screens under `src/views/`, and gate them on the matching `features` flag, which
   is already in `GET /me` (`RequireFeature`, `navFor` in `layouts/AccountLayout.tsx`).
