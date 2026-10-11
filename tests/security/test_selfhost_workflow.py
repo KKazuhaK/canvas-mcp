@@ -366,7 +366,9 @@ def test_actual_version_script_classifies_stable_and_prerelease_tags(
         assert not output.exists()
         return
     assert result.returncode == 0, result.stderr
-    assert dict(line.split("=", 1) for line in output.read_text().splitlines()) == {
+    assert dict(
+        line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines()
+    ) == {
         "version": version,
         "label_version": label,
         "stable": stable,
