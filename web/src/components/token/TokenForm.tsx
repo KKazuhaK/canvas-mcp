@@ -23,9 +23,10 @@ interface IdentityChange {
   confirmation: string
 }
 
-/** Today as YYYY-MM-DD in the browser's own calendar, for the date input's `min`. */
-function todayLocal(): string {
+/** Allow one calendar day for browser/server timezone differences; the server validates expiry. */
+function earliestExpiryLocal(): string {
   const now = new Date()
+  now.setDate(now.getDate() - 1)
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
 }
@@ -193,7 +194,7 @@ export default function TokenForm({
         disabled={pending || change !== null}
         error={expiryRefused}
         helperText={expiryRefused ? t('account:enroll.expiresInvalid') : t('account:enroll.expiresHelper')}
-        slotProps={{ inputLabel: { shrink: true }, htmlInput: { min: todayLocal() } }}
+        slotProps={{ inputLabel: { shrink: true }, htmlInput: { min: earliestExpiryLocal() } }}
         sx={{ maxWidth: 260 }}
       />
       {error && !expiryRefused ? <ErrorNotice error={error} /> : null}

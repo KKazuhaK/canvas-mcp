@@ -194,6 +194,45 @@
         "custody_notice_version": "Custody notice version",
         "old": "Previous version",
         "new": "New version"
+      },
+      "values": {
+        "role": {
+          "user": "User",
+          "owner": "Owner"
+        },
+        "status": {
+          "active": "Active",
+          "pending": "Pending approval",
+          "disabled": "Disabled"
+        },
+        "source": {
+          "rules": "Access rules",
+          "bootstrap": "Initial owner configuration",
+          "operator": "Server operator"
+        },
+        "admitted_via": {
+          "rules": "Access rules",
+          "open": "Open admission",
+          "approval": "Owner approval",
+          "operator": "Server operator",
+          "bootstrap": "Initial owner configuration"
+        },
+        "via": {
+          "sign_in": "Sign-in"
+        },
+        "client_kind": {
+          "dcr": "Registered app",
+          "cimd": "App metadata URL"
+        },
+        "reason": {
+          "admin_disabled": "Disabled by owner",
+          "operator_disabled": "Disabled by operator",
+          "approval_denied": "Approval denied",
+          "canvas_token_rejected": "Canvas rejected the token",
+          "decrypt_failed": "Token could not be decrypted",
+          "revoked_by_admin": "Revoked by owner",
+          "last_owner": "Last usable owner"
+        }
       }
     }
   },

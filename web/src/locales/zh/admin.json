@@ -194,6 +194,45 @@
         "custody_notice_version": "托管告知版本",
         "old": "先前版本",
         "new": "新版本"
+      },
+      "values": {
+        "role": {
+          "user": "用户",
+          "owner": "管理员"
+        },
+        "status": {
+          "active": "正常",
+          "pending": "待审批",
+          "disabled": "已停用"
+        },
+        "source": {
+          "rules": "访问规则",
+          "bootstrap": "初始管理员配置",
+          "operator": "服务器运维人员"
+        },
+        "admitted_via": {
+          "rules": "访问规则",
+          "open": "开放注册",
+          "approval": "管理员审批",
+          "operator": "服务器运维人员",
+          "bootstrap": "初始管理员配置"
+        },
+        "via": {
+          "sign_in": "登录"
+        },
+        "client_kind": {
+          "dcr": "已注册应用",
+          "cimd": "应用元数据地址"
+        },
+        "reason": {
+          "admin_disabled": "管理员停用",
+          "operator_disabled": "运维人员停用",
+          "approval_denied": "审批未通过",
+          "canvas_token_rejected": "Canvas 拒绝了令牌",
+          "decrypt_failed": "令牌无法解密",
+          "revoked_by_admin": "管理员撤销",
+          "last_owner": "最后一位可用管理员"
+        }
       }
     }
   },

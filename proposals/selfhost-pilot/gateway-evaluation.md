@@ -1,6 +1,28 @@
+---
+title: "External OAuth gateway plus per-user credential resolver"
+issue: vishalsachdev/canvas-mcp#484
+status: historical source snapshot; fork decision recorded; not an upstream proposal
+date: 2026-10-11
+source-snapshot-date: 2026-10-10
+---
+
 # External OAuth gateway plus per-user credential resolver: evaluation for #484
 
-Draft, 2026-10-10. Every source was fetched on that date. Items marked UNVERIFIED could not be confirmed from a primary source.
+Sources were fetched on 2026-10-10; product, price and client claims below remain
+that dated snapshot and have not been refreshed. The editorial/status update is
+dated 2026-10-11. Items marked UNVERIFIED remain unverified.
+
+## Status
+
+The upstream pilot is not pursued. The owner keeps the fork's own portal; v1
+uses its built-in authorization server as the only MCP authorization path.
+Entra is the default sign-in provider; Google, GitHub and OIDC remain off unless
+explicitly listed. Canvas OAuth with an institutional Developer Key is rejected
+for now and only reserved. The implementation remains in the fork, with full
+scope and acceptance in [DEVELOPMENT.md](../../deploy/selfhost/DEVELOPMENT.md)
+and [V1-PROGRESS.md](../../deploy/selfhost/V1-PROGRESS.md). Historical G1 and G2
+are unmet and are not claimed; no upstream, institutional or client approval is
+implied. The comparison is retained as context, not a current vendor recommendation.
 
 ## 1. Question and scope
 
@@ -15,7 +37,7 @@ On #484 the maintainer asked for "a short evaluation of a maintained external OA
 - **A2, vaulted personal access tokens (PATs).** These sit in a product that stores user-supplied API keys [31][35].
 - **A3, IdP token vault.** The IdP stores tokens per connected account and canvas-mcp fetches them at call time [30][34]. Auth0's vault documents only OAuth tokens [33][34], so with Auth0 this needs A1's Developer Key. With Descope's API-key connections it is the same as A2 [31].
 
-**B. The fork's own portal and authorization server.** This is how the fork works today. It handles Entra (or, in local mode, Google, GitHub or OIDC) sign-in and PAT enrollment encrypted with AES-256-GCM under operator-held keys. Revocation is disable-first. Authorization runs through either FastMCP's OAuth proxy or the fork's own authorization server [13][14].
+**B. The fork's own portal and authorization server.** The v1 implementation handles configured Entra, Google, GitHub or OIDC sign-in and PAT enrollment encrypted with AES-256-GCM under operator-held keys. Revocation is disable-first. Its own authorization server is the only MCP authorization path; the Entra proxy is removed. This is the owner's fork decision, with live validation still pending [13][14].
 
 **C. Shared header-injecting gateway.** Included only to show why it fails. On a Team or Enterprise plan, an Owner enters the static header once and Claude sends it on every member's calls. Anthropic says to treat it as the organization's credential and not to use it to identify the user [1]. Headers can be sent alongside OAuth, but each connector still has one stored value [2]. On an individual plan, a user who adds their own connector could put their own credential in a header. The feature is in beta for a limited set of organizations, though [2], and the server would then receive a raw Canvas token on every request. Claude Code's `headersHelper` is per-user but runs only on the client [3].
 
@@ -29,7 +51,7 @@ On #484 the maintainer asked for "a short evaluation of a maintained external OA
 | **Revocation: IdP removal** | Pomerium: a cached token outlives upstream revocation until it expires, so remove the session as well [21]. Cloudflare's default access-token lifetime is 15 min [24] | Same as the gateway | Same as the gateway | Bounded by the Entra token lifetime, so disable first [14] | n/a |
 | **Revocation: Canvas side** | Key disable or scope removal [9]. Token deletion API [10] | Token deletion API [10] | As A1 if OAuth | Token deletion API [10] | n/a |
 | **Client support** | Depends on the gateway (section 4) | Same | Same | DCR, CIMD and PKCE are built in. Live L1-L16 acceptance is unverified [14] | Beta, limited organizations [1][2] |
-| **Maintenance** | Upstream: JWT verifier and resolver. Operator: the gateway | Verifier, resolver and vendor SDK | Verifier, resolver and vendor SDK | The whole fork vs origin/main at 71602e6 is 371 files, +94,442/-1,357, including the web UI and tests. `core/selfhost/` alone is 50 files, +23,017. One owner, no backup [14] | Trivial |
+| **Maintenance** | Upstream: JWT verifier and resolver. Operator: the gateway | Verifier, resolver and vendor SDK | Verifier, resolver and vendor SDK | Measured 2026-10-11 at fork `ac5fe4f` against upstream `63f4222`: 475 files, +111,253/-925, including UI/tests. `core/selfhost/` alone: 87 files, +27,880. One owner [14] | Trivial |
 | **Cost for a student** | Needs a Developer Key from a root-account admin [9]. Self-hosted Pomerium Core is Apache-2.0 [23] | Descope Free Forever: 7,500 MAU, 2,000 active tokens [32]. LiteLLM is MIT outside `enterprise/` [43] | Auth0 Free: Token Vault "2", unit not stated [44]. Also needs A1's key | One VM. SQLite or Postgres [13] | Free |
 
 ## 4. Findings
@@ -91,7 +113,7 @@ If an institution provides a Developer Key, option 2 is preferable. If it does n
 11. https://www.instructure.com/policies/api-policy: effective 12 August 2025; clause 3(i) on MCP servers; 2E on generative AI.
 12. `git show origin/main:tools/oauth/README.md`: #236 inventory; P1-P8 not run.
 13. Fork `deploy/selfhost/README.md`: custody, Connected apps revocation, enrollment removal.
-14. Fork `proposals/selfhost-pilot/stage-a-main.md`: gates G1/G2, sections 6-7 (custody, revocation), local stdio default, Q3, owner and backup; diff sizes from `git diff --shortstat origin/main HEAD [-- src/canvas_mcp/core/selfhost/]` at 71602e6.
+14. Fork `proposals/selfhost-pilot/stage-a-main.md`: historical gates G1/G2, custody, revocation and local stdio default. Current fork decisions: `deploy/selfhost/DEVELOPMENT.md` and `V1-PROGRESS.md`. Diff sizes measured locally on 2026-10-11 with `git diff --shortstat 63f4222 ac5fe4f [-- src/canvas_mcp/core/selfhost/]`; these describe that frozen comparison, not a later HEAD.
 15. https://www.pomerium.com/docs/capabilities/mcp: MCP gateway, per-user upstream connections and token refresh.
 16. https://www.pomerium.com/docs/capabilities/mcp/reference: `X-Pomerium-Assertion`, `mcp_allowed_client_id_domains`.
 17. https://www.pomerium.com/docs/capabilities/getting-users-identity: signed per-user JWT in `X-Pomerium-Jwt-Assertion`, JWKS, `sub`/`aud`/`iss` checks.

@@ -75,26 +75,30 @@ function isKnownDetailKey(key: string): boolean {
   return (KNOWN_DETAIL_KEYS as readonly string[]).includes(key)
 }
 
-function detailValue(value: AuditDetailValue): string {
-  return Array.isArray(value) ? value.join(', ') : String(value)
-}
-
 /** /admin/audit: the audit log, newest first, 100 at a time. The action filter narrows the loaded entries. */
 export default function AdminAuditView() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [action, setAction] = useState('')
   const audit = useAdminAudit()
   const loaded = audit.data?.pages.flatMap((page) => page.entries) ?? []
   const rows = loaded.filter((entry) => action === '' || entry.action === action)
+
+  function detailValue(key: string, value: AuditDetailValue): string {
+    if (isKnownDetailKey(key) && typeof value === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(value)) {
+      const translation = `admin:audit.detail.values.${key}.${value}`
+      if (i18n.exists(translation)) return t(translation)
+    }
+    return Array.isArray(value) ? value.join(', ') : String(value)
+  }
 
   /** Detail is a flat map of short scalars (or string lists): plain text, labelled in the viewer's language. */
   function detailText(entry: AuditEntry): string {
     const label = (key: string) => (isKnownDetailKey(key) ? t(`admin:audit.detail.keys.${key}`) : key)
     const separator = t('admin:audit.detail.separator')
     const parts = Object.entries(entry.detail).map(
-      ([key, value]) => `${label(key)}${separator}${detailValue(value)}`,
+      ([key, value]) => `${label(key)}${separator}${detailValue(key, value)}`,
     )
-    if (entry.reason) parts.unshift(`${label('reason')}${separator}${entry.reason}`)
+    if (entry.reason) parts.unshift(`${label('reason')}${separator}${detailValue('reason', entry.reason)}`)
     return parts.length > 0 ? parts.join(', ') : '–'
   }
 

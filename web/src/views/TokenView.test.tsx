@@ -150,12 +150,17 @@ describe('Canvas token form', () => {
     expect(screen.getByText('Expires')).toBeInTheDocument()
   })
 
-  it('points at the expiry date when the server refuses it, and offers today as the earliest', async () => {
+  it('leaves a day for server timezone differences and shows server expiry refusals', async () => {
     const user = userEvent.setup()
     await renderApp('/token', 'featured')
     const token = await tokenInput()
     const expiry = screen.getByLabelText(/Expiry date/)
     expect(expiry).toHaveAttribute('min', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/))
+    // A server whose calendar is still yesterday must remain able to accept its current date.
+    const yesterday = new Date()
+    yesterday.setDate(yesterday.getDate() - 1)
+    const date = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`
+    expect(expiry.getAttribute('min')! <= date).toBe(true)
     await user.type(token, GOOD)
     await user.type(expiry, '2020-01-01')
     await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))

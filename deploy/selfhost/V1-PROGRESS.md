@@ -582,3 +582,23 @@ and the first v1 tag remain outstanding.
 - Corrected hot-read/pool/reserved/maintenance checks: 40 passed on locked
   PostgreSQL, with the scratch server stopped; latest SQLite: 38 passed and
   2 PostgreSQL-only skips. The new exact-head full CI run remains required.
+
+## Historical proposals and UI residuals
+
+- HANDOFF 6.8: the gateway draft is now `gateway-evaluation.md`, indexed with
+  both Stage A records. Their banners state that the upstream pilot is not
+  pursued, G1/G2 remain unmet, and the fork continues independently. The gateway
+  comparison records the native selfhost decision and a frozen local diff at
+  `ac5fe4f` against upstream `63f4222a`; external claims retain their original
+  date and all UNVERIFIED markers. No reply on issue 484 was posted.
+- HANDOFF 6.13: known audit detail enum values now have English and Chinese
+  labels; unknown values and user text remain plain text. The language-switch
+  regression verifies both translation and an unknown-value fallback. Chinese
+  rate-limit wording is consistent. The expiry input leaves one calendar day
+  for browser/server timezone differences, with server validation authoritative.
+- Complete frontend: 468 tests passed; lint, TypeScript/build and distribution
+  checks passed. Documentation, English-only and closing-keyword checks: 95
+  passed. No migration or compatibility code was added outside the isolated
+  `core/selfhost/db/migrations/` package.
+- Remaining implementation review identified HANDOFF 6.6.1's optional pilot
+  profile as still outstanding. Live staging and the first v1 tag remain gated.

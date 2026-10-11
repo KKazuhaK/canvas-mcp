@@ -350,7 +350,7 @@ describe('Admin audit log', () => {
     expect(await screen.findByText('Other')).toBeInTheDocument()
     // Known keys are labelled (here "Reason" and "Count"); an unknown key is shown as it is.
     expect(
-      screen.getByText('Reason: admin_disabled, tools: a_tool, b_tool, Count: 2, flag: true'),
+      screen.getByText('Reason: Disabled by owner, tools: a_tool, b_tool, Count: 2, flag: true'),
     ).toBeInTheDocument()
     expect(screen.getByText('<img src=x onerror=alert(1)>')).toBeInTheDocument()
     expect(document.querySelector('img')).toBeNull()
@@ -371,7 +371,7 @@ describe('Admin audit log', () => {
                 actor: { kind: 'system', key: null, name: null },
                 target: null,
                 reason: 'admin_disabled',
-                detail: { count: 2 },
+                detail: { count: 2, role: 'owner', status: 'disabled', source: 'operator', via: 'future_path' },
               },
             ],
             next_cursor: null,
@@ -379,10 +379,16 @@ describe('Admin audit log', () => {
         }
       })
     })
-    expect(await screen.findByText('Reason: admin_disabled, Count: 2')).toBeInTheDocument()
+    expect(await screen.findByText('Reason: Disabled by owner, Count: 2, Role: Owner, Status: Disabled, Source: Server operator, Via: future_path')).toBeInTheDocument()
     act(() => useLanguage.getState().setLanguage('zh'))
-    const zh = (resources.zh.admin as { audit: { detail: { separator: string; keys: Record<string, string> } } }).audit.detail
-    const text = `${zh.keys.reason}${zh.separator}admin_disabled, ${zh.keys.count}${zh.separator}2`
+    const zh = (resources.zh.admin as { audit: { detail: {
+      separator: string; keys: Record<string, string>; values: Record<string, Record<string, string>>
+    } } }).audit.detail
+    const text = [
+      ['reason', zh.values.reason.admin_disabled], ['count', '2'],
+      ['role', zh.values.role.owner], ['status', zh.values.status.disabled],
+      ['source', zh.values.source.operator], ['via', 'future_path'],
+    ].map(([key, value]) => `${zh.keys[key]}${zh.separator}${value}`).join(', ')
     expect(await screen.findByText(text)).toBeInTheDocument()
     expect(screen.queryByText(/Reason|Count/)).toBeNull()
   })

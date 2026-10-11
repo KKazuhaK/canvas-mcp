@@ -1,6 +1,6 @@
 ---
 title: "Stage A: self-hosted multi-user pilot (MCP_AUTH_MODE=entra-oauth)"
-status: for review on #484. Documentation only; no code is proposed for merge. Kept in the fork under proposals/selfhost-pilot/; a docs-only upstream PR only at the path you choose (Q1).
+status: historical record; upstream pilot not pursued; G1 and G2 unmet
 issue: vishalsachdev/canvas-mcp#484
 implementation: KKazuhaK/canvas-mcp, branch uci-student at f32b9d3 (pushed; merge base with upstream main 8f1b0ae (3170ca6 plus one README commit))
 reviewed-revision: 230788e (your review on #484)
@@ -9,6 +9,14 @@ date: 2026-10-09
 ---
 
 # Stage A: self-hosted multi-user pilot
+
+Historical record of `f32b9d3`, retained with its original evidence. The upstream
+pilot is not pursued; the fork continues independently and multi-school support
+was added by the owner's choice. G1 and G2 are unmet and are not claimed. This
+snapshot describes `MCP_AUTH_MODE=entra-oauth` and the Entra proxy; both are gone
+in v1. The requests and gates below are historical, not a pending upstream
+decision. Read [DEVELOPMENT.md](../../deploy/selfhost/DEVELOPMENT.md) and
+[V1-PROGRESS.md](../../deploy/selfhost/V1-PROGRESS.md) for current scope/status.
 
 Labels: **implemented** (the code does it), **tested** (a cited test exercises it), **documented** (a `deploy/selfhost/README.md` instruction the code cannot enforce), **unverified**.
 
