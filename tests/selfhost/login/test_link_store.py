@@ -880,8 +880,7 @@ class TestStrandedOwnerAndTheBootstrapIdentity:
             again = self.sign(store, google("boot-1"), self.GOOGLE_ONLY, self.OTHER_DOMAIN)
             assert again.outcome == "allow" and again.session_owner
 
-    def test_promoting_a_user_does_not_change_how_it_was_admitted(self, store: TokenStore) -> None:
-        # Only a re-sourced owner becomes a personal admission; a plain promotion is as before.
+    def test_promoting_an_already_personally_admitted_user_keeps_its_admission(self, store: TokenStore) -> None:
         sign_in(store, OID_B)
         before = store.get_principal_status(KEY_B)
         assert before.role == "user"

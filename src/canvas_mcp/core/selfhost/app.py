@@ -234,6 +234,31 @@ def _data_layer_problem(settings: SelfhostSettings) -> str | None:
     return None
 
 
+def _provider_issuer_problems(settings: SelfhostSettings, store: TokenStore) -> list[str]:
+    """A provider id with enrolled identities cannot be rebound to another issuer.
+
+    Owner guards deliberately operate on provider ids. Keep that id bound to its issuer
+    so an old identity cannot count as reachable when the configured IdP cannot emit it.
+    """
+    from .login.config import env_prefix
+
+    configured = settings.login_providers.issuers()
+    if not configured:
+        return []
+    changed = {
+        identity.provider_id
+        for account in store.list_accounts()
+        for identity in account.identities
+        if identity.provider_id in configured
+        and identity.issuer != configured[identity.provider_id]
+    }
+    return [
+        f"{env_prefix(provider.removeprefix('oidc:'))}ISSUER cannot change for a provider "
+        "with stored identities; use a new slug, link it to an owner, and then delist the old one"
+        for provider in sorted(changed)
+    ]
+
+
 def _owner_path_problem(settings: SelfhostSettings, store: TokenStore) -> str | None:
     """Without Entra nobody can become an owner through the identity provider's data.
 
@@ -360,6 +385,9 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
     # and it must judge owners by the list that was refused, not by an older one. An
     # Entra-only server with no earlier record writes nothing.
     try:
+        issuer_problems = _provider_issuer_problems(settings, store)
+        if issuer_problems:
+            raise SelfhostConfigError(issuer_problems)
         store.record_login_providers(settings.login_providers.ids)
         owner_problem = _owner_path_problem(settings, store)
     except BaseException:

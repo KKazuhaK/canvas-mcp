@@ -23,7 +23,7 @@ from canvas_mcp.core.selfhost.settings import (
 
 from ..authz.stack import default_env
 from ..conftest import OID_A, acct_key, sign_in
-from .test_provider_settings import GOOGLE_ID, GOOGLE_SECRET
+from .test_provider_settings import GOOGLE_ID, GOOGLE_SECRET, ISSUER, oidc
 
 GSUB = "1234567890"
 BOTH = {
@@ -46,6 +46,113 @@ def gext() -> ExternalClaims:
         provider_id="google", issuer=acc.GOOGLE_ISSUER, subject=GSUB,
         email="x@example.edu", email_verified=True, hd="example.edu",
     )
+
+
+def test_entra_only_bootstrap_admits_an_existing_rules_user_with_zero_owners() -> None:
+    policy = acc.AccessPolicy(
+        mode="rules", rules=(), owner_rules=(),
+        bootstrap_owner=acc.BootstrapOwner("entra", acc.entra_issuer("tenant"), "subject"),
+    )
+    decision = acc.decide(
+        acc.AccountFacts("active", "user", None, "rules"),
+        acc.Verdict(admitted_by_rule=False, owner_by_rule=False),
+        policy,
+        acc.DecisionFacts(active_owner_count=0, is_bootstrap_identity=True),
+        "sign_in",
+    )
+    assert decision.outcome == "allow" and decision.session_owner
+    assert decision.admitted_via == "bootstrap"
+
+
+def test_pending_bootstrap_owner_keeps_admission_after_rules_change(
+    tmp_path: pathlib.Path,
+) -> None:
+    base = default_env(tmp_path, **{
+        **BOTH, **NO_ENTRA, "ACCESS_POLICY": "approval", "ACCESS_RULES": "",
+        "SELFHOST_BOOTSTRAP_OWNER": "token_admin",
+    })
+    runtime = prepare_selfhost(load_selfhost_settings(base))
+    try:
+        pending = runtime.identity.sign_in_external(gext())
+        assert not isinstance(pending, acc.Denied) and pending.pending
+        key = runtime.store.lookup_identity("google", acc.GOOGLE_ISSUER, GSUB)
+        assert key is not None
+    finally:
+        runtime.store.close()
+    bootstrap = {
+        **base, "ACCESS_POLICY": "rules", "ACCESS_RULES": "google:domain:example.edu",
+        "SELFHOST_BOOTSTRAP_OWNER": f"google:{GSUB}",
+    }
+    runtime = prepare_selfhost(load_selfhost_settings(bootstrap))
+    try:
+        signed = runtime.identity.sign_in_external(gext())
+        assert not isinstance(signed, acc.Denied) and signed.owner
+        assert runtime.store.get_principal_status(key).admitted_via == "bootstrap"
+    finally:
+        runtime.store.close()
+    runtime = prepare_selfhost(load_selfhost_settings({
+        **bootstrap, "ACCESS_RULES": "google:domain:other.edu",
+    }))
+    try:
+        signed = runtime.identity.sign_in_external(gext())
+        assert not isinstance(signed, acc.Denied) and signed.owner
+        assert runtime.store.count_usable_owners({"google"}) == 1
+    finally:
+        runtime.store.close()
+
+
+def test_operator_promoted_owner_keeps_admission_after_rules_change(
+    tmp_path: pathlib.Path,
+) -> None:
+    base = default_env(tmp_path, **{
+        **BOTH, **NO_ENTRA, "ACCESS_POLICY": "rules",
+        "ACCESS_RULES": "google:domain:example.edu",
+        "SELFHOST_BOOTSTRAP_OWNER": "token_admin",
+    })
+    runtime = prepare_selfhost(load_selfhost_settings(base))
+    try:
+        signed = runtime.identity.sign_in_external(gext())
+        assert not isinstance(signed, acc.Denied) and not signed.owner
+        key = runtime.store.lookup_identity("google", acc.GOOGLE_ISSUER, GSUB)
+        assert key is not None
+        assert runtime.store.promote_owner(key, listed_providers={"google"})
+        assert runtime.store.get_principal_status(key).admitted_via == "operator"
+        entry = next(e for e in runtime.store.list_audit(100) if e.action == "role_changed")
+        assert entry.detail["admitted_via"] == "operator"
+    finally:
+        runtime.store.close()
+    runtime = prepare_selfhost(load_selfhost_settings({
+        **base, "ACCESS_RULES": "google:domain:other.edu",
+    }))
+    try:
+        signed = runtime.identity.sign_in_external(gext())
+        assert not isinstance(signed, acc.Denied) and signed.owner
+    finally:
+        runtime.store.close()
+
+
+def test_used_oidc_provider_cannot_change_issuer_under_the_same_slug(
+    tmp_path: pathlib.Path,
+) -> None:
+    base = default_env(tmp_path, **{
+        **NO_ENTRA, **oidc(), "SELFHOST_LOGIN_PROVIDERS": "oidc:school",
+        "ACCESS_POLICY": "open", "ACCESS_OPEN_ACKNOWLEDGE_PUBLIC": "true",
+        "SELFHOST_BOOTSTRAP_OWNER": "oidc:school:owner",
+    })
+    runtime = prepare_selfhost(load_selfhost_settings(base))
+    try:
+        signed = runtime.identity.sign_in_external(ExternalClaims(
+            provider_id="oidc:school", issuer=ISSUER, subject="owner",
+        ))
+        assert not isinstance(signed, acc.Denied) and signed.owner
+    finally:
+        runtime.store.close()
+    replacement = "https://idp.example.edu/realms/replacement"
+    with pytest.raises(SelfhostConfigError) as caught:
+        prepare_selfhost(load_selfhost_settings({**base, "OIDC_SCHOOL_ISSUER": replacement}))
+    message = " ".join(caught.value.problems)
+    assert "OIDC_SCHOOL_ISSUER" in message and "new slug" in message
+    assert ISSUER not in message and replacement not in message
 
 
 def link_google(store, key: str) -> None:  # type: ignore[no-untyped-def]

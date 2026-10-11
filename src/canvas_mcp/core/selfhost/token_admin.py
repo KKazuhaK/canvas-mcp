@@ -775,6 +775,7 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
                 reason=DISABLE_REASON_OPERATOR,
                 allow_last_owner=args.allow_last_owner,
                 listed_providers=_listed_providers(store),
+                additional_provider_lists=_protected_provider_lists(store),
             )
         except AccessActionRefused as exc:
             if exc.code == AccessActionRefused.LAST_OWNER:
@@ -810,7 +811,8 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
             print("not found: no such account", file=sys.stderr)
             return EXIT_NOT_FOUND
         result = store.unlink_identity(
-            key, args.identity_id, actor=OPERATOR, listed_providers=_listed_providers(store)
+            key, args.identity_id, actor=OPERATOR, listed_providers=_listed_providers(store),
+            additional_provider_lists=_protected_provider_lists(store),
         )
         if result.ok:
             print(
@@ -935,6 +937,23 @@ def _endpoint_hosts(meta: Any) -> str:
     return ",".join(hosts)
 
 
+def _protected_provider_lists(store: TokenStore) -> tuple[frozenset[str], ...]:
+    """Preserve an owner under each real list, not only their intersection.
+
+    The recorded and operator lists can have different owners and no owner under their
+    intersection. Each guard runs inside the mutation's writer transaction.
+    """
+    recorded = store.recorded_login_providers()
+    if recorded is None:
+        return ()
+    if not (os.environ.get("SELFHOST_LOGIN_PROVIDERS") or "").strip():
+        return (recorded,)
+    from_env = _environment_providers()
+    if from_env is None or from_env == recorded:
+        return (recorded,)
+    return (recorded, from_env)
+
+
 def _listed_providers(store: TokenStore) -> frozenset[str] | None:
     """The providers of ``SELFHOST_LOGIN_PROVIDERS`` the usable-owner checks use (None: all).
 
@@ -948,9 +967,9 @@ def _listed_providers(store: TokenStore) -> frozenset[str] | None:
 
     When the environment names the list and it differs from the record, the operator is changing
     the providers (or running with another file): a note on stderr says so and the owners must be
-    usable under *both* lists (the intersection of the two: the stricter reading for ``disable``
-    and ``unlink-identity``, and one that lets ``promote-owner`` re-source an owner that is
-    unusable under either); lists with nothing in common leave the record in force.
+    usable under *both* lists for promotion recovery (their intersection); lists with nothing
+    in common leave the record in force. Destructive commands additionally preserve an owner
+    under each complete list independently, inside the mutation transaction.
 
     A note on stderr also says so when the answer had to be assumed: the list is unreadable
     (every provider is then counted as listed, which is more permissive than the server), or
@@ -973,7 +992,7 @@ def _listed_providers(store: TokenStore) -> frozenset[str] | None:
             f"note: {LOGIN_PROVIDERS_ENV} in this environment ({', '.join(sorted(from_env))}) "
             f"differs from the list the server last recorded ({', '.join(sorted(recorded))}); "
             + (
-                "an owner counts as usable only under both lists"
+                "promotion uses both lists; disable and unlink preserve an owner under each list"
                 if both
                 else "they share no provider, so the recorded list is used"
             ),

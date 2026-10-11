@@ -247,6 +247,40 @@ class TestUnlinkIdentity:
 
 
 class TestRecordedLoginProviders:
+    @pytest.mark.parametrize("command", ["disable", "unlink-identity"])
+    def test_overlapping_provider_lists_cannot_erase_the_recorded_owner_path(
+        self, store, monkeypatch, capsys, command: str,
+    ) -> None:
+        policy = acc.AccessPolicy(mode="open")
+        keys = []
+        for ext in (
+            ExternalClaims(provider_id="google", issuer=acc.GOOGLE_ISSUER, subject="1234567890"),
+            github("1001"),
+        ):
+            result = store.resolve_identity(
+                ext, acc.evaluate_admission(ext, policy), policy, purpose="sign_in",
+            )
+            assert result.principal_key is not None
+            keys.append(result.principal_key)
+            assert store.promote_owner(result.principal_key)
+        first, _ = keys
+        # A delisted fallback keeps unlink from hitting the ordinary last-identity guard.
+        fallback = ExternalClaims(
+            provider_id="oidc:backup", issuer="https://backup.example.edu", subject="backup",
+        )
+        link(store, first, fallback)
+        store.record_login_providers({"entra", "google"})
+        monkeypatch.setenv("SELFHOST_LOGIN_PROVIDERS", "entra,github")
+        before = store.get_principal_status(first).session_epoch
+        args = [command, first]
+        if command == "unlink-identity":
+            identity = next(i for i in store.list_identities(first) if i.provider_id == "google")
+            args.append(str(identity.id))
+        assert token_admin.main(args) == token_admin.EXIT_REFUSED
+        assert store.count_usable_owners({"entra", "google"}) == 1
+        assert store.get_principal_status(first).status == "active"
+        assert store.get_principal_status(first).session_epoch == before
+
     """The usable-owner checks use the providers the server recorded, not the shell's variables."""
 
     @pytest.fixture(autouse=True)

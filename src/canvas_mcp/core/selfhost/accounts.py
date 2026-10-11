@@ -1128,8 +1128,11 @@ def decide(
             return _deny(DENY_PENDING_APPROVAL)
         via = (
             ADMITTED_RULES
-            if (owner_match or verdict.admitted_by_rule)
-            else (ADMITTED_BOOTSTRAP if bootstrap else ADMITTED_OPEN)
+            if owner_match
+            else (
+                ADMITTED_BOOTSTRAP if bootstrap
+                else (ADMITTED_RULES if verdict.admitted_by_rule else ADMITTED_OPEN)
+            )
         )
         role, source, event = _raise_role(sign_in, owner_match, bootstrap, ROLE_USER)
         return Decision(

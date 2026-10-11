@@ -1813,6 +1813,7 @@ class TokenStore:
         actor: Actor,
         expected_epoch: int | None = None,
         listed_providers: Collection[str] | None = None,
+        additional_provider_lists: Sequence[Collection[str]] = (),
     ) -> UnlinkResult:
         """Remove one identity from an account; every session of the account ends.
 
@@ -1860,23 +1861,24 @@ class TokenStore:
                 return UnlinkResult(UNLINK_LAST, ident[1])
             if row[1] == STATUS_ACTIVE and row[2] == ROLE_OWNER:
                 rows = repos.identities.list_with_ids(conn, account_id)
-                listed = _listed(listed_providers)
-                usable_before = acc.owner_is_usable(
-                    role=row[2], status=row[1], role_source=row[3],
-                    identity_providers=[r[1] for r in rows], listed=listed,
-                )
-                usable_after = acc.owner_is_usable(
-                    role=row[2], status=row[1], role_source=row[3],
-                    identity_providers=[r[1] for r in rows if int(r[0]) != identity_id],
-                    listed=listed,
-                )
-                if usable_before and not usable_after:
-                    others = repos.accounts.usable_owner_ids(
-                        conn, listed, exclude=account_id, for_update=True
+                for provider_list in (listed_providers, *additional_provider_lists):
+                    listed = _listed(provider_list)
+                    usable_before = acc.owner_is_usable(
+                        role=row[2], status=row[1], role_source=row[3],
+                        identity_providers=[r[1] for r in rows], listed=listed,
                     )
-                    self._pause("after_owner_count")
-                    if not others:
-                        return UnlinkResult(UNLINK_LAST_OWNER, ident[1])
+                    usable_after = acc.owner_is_usable(
+                        role=row[2], status=row[1], role_source=row[3],
+                        identity_providers=[r[1] for r in rows if int(r[0]) != identity_id],
+                        listed=listed,
+                    )
+                    if usable_before and not usable_after:
+                        others = repos.accounts.usable_owner_ids(
+                            conn, listed, exclude=account_id, for_update=True
+                        )
+                        self._pause("after_owner_count")
+                        if not others:
+                            return UnlinkResult(UNLINK_LAST_OWNER, ident[1])
             if not repos.identities.delete_one(conn, identity_id, account_id):
                 return UnlinkResult(UNLINK_NOT_FOUND)
             epoch = repos.accounts.end_sessions(conn, account_id, now)
@@ -2177,6 +2179,7 @@ class TokenStore:
         reason: str,
         allow_last_owner: bool = False,
         listed_providers: Collection[str] | None = None,
+        additional_provider_lists: Sequence[Collection[str]] = (),
     ) -> bool:
         """Administratively disable an account; True if this call changed it.
 
@@ -2212,21 +2215,20 @@ class TokenStore:
             if row is None or row[1] == STATUS_DISABLED:
                 return False
             if row[1] == STATUS_ACTIVE and row[2] == ROLE_OWNER and not allow_last_owner:
-                listed = _listed(listed_providers)
-                usable_others = repos.accounts.usable_owner_ids(
-                    conn, listed, exclude=account_id, for_update=True
-                )
-                self._pause("after_owner_count")
-                if not usable_others:
-                    # The target matters to the server when it is usable itself, or when it is
-                    # the only active owner at all (the guard before usable owners existed).
-                    identities = repos.identities.list_with_ids(conn, account_id)
-                    target_usable = acc.owner_is_usable(
-                        role=row[2], status=row[1], role_source=row[3],
-                        identity_providers=[r[1] for r in identities], listed=listed,
+                for provider_list in (listed_providers, *additional_provider_lists):
+                    listed = _listed(provider_list)
+                    usable_others = repos.accounts.usable_owner_ids(
+                        conn, listed, exclude=account_id, for_update=True
                     )
-                    if target_usable or repos.accounts.count_active_owners(conn, exclude=account_id) == 0:
-                        raise AccessActionRefused(AccessActionRefused.LAST_OWNER)
+                    self._pause("after_owner_count")
+                    if not usable_others:
+                        identities = repos.identities.list_with_ids(conn, account_id)
+                        target_usable = acc.owner_is_usable(
+                            role=row[2], status=row[1], role_source=row[3],
+                            identity_providers=[r[1] for r in identities], listed=listed,
+                        )
+                        if target_usable or repos.accounts.count_active_owners(conn, exclude=account_id) == 0:
+                            raise AccessActionRefused(AccessActionRefused.LAST_OWNER)
             epoch = repos.accounts.disable(conn, account_id, reason=reason, by=by, now=now)
             self._record_event(conn, key, EVENT_DISABLED, by, reason, epoch, now)
             generation = repos.generations.bump(conn, key, GENERATION_DISABLED, now)
@@ -2344,6 +2346,7 @@ class TokenStore:
         (``admitted_via`` ``operator``) so that the rules cannot refuse it at its next sign-in.
         Returns False when the account is not active, or is already an owner that needs no
         change (a usable owner, or one that no change of source could make usable).
+        An ordinary user promotion also records personal admission when needed.
         """
         if not isinstance(actor, _Operator):
             raise AccessActionRefused(AccessActionRefused.NOT_OWNER)
@@ -2370,11 +2373,10 @@ class TokenStore:
                 if usable_now or not usable_as_operator:
                     return False
                 previous_source = row[3] or ""
-                # A re-sourced owner is the operator's personal admission: the rules, which
-                # may no longer admit this account, must not lock the owner out of its next
-                # sign-in. (A plain promotion of a user changes nothing else, as before.)
-                if row[5] not in acc.PERSONAL_ADMISSION:
-                    admitted = acc.ADMITTED_OPERATOR
+            # Every operator promotion is a personal admission. The rules must not lock
+            # out the resulting owner, including a user promoted for the first time.
+            if row[5] not in acc.PERSONAL_ADMISSION:
+                admitted = acc.ADMITTED_OPERATOR
             self._repos.accounts.set_role(
                 conn, account_id, role=ROLE_OWNER, source=acc.ROLE_SOURCE_OPERATOR,
                 seen_at=now, now=now,
