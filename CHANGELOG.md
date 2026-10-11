@@ -57,6 +57,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider; Google, GitHub and OIDC are optional. The old Entra proxy, legacy
   HTML account pages and authentication/UI switches are removed. Legacy stdio
   and caller-supplied `X-Canvas-Token` HTTP modes retain their separate behavior.
+- **Renamed/removed environment settings.** `MCP_AUTH_MODE=entra-oauth` becomes
+  `MCP_AUTH_MODE=selfhost`; `ENTRA_API_SCOPE` becomes `MCP_SCOPE` (default
+  `Canvas.Access`). Remove `SELFHOST_AUTH_MODE`, `ACCOUNT_UI`,
+  `OAUTH_JWT_SIGNING_KEY` and `GRANT_STATUS_CACHE_S`; their former proxy/UI/key/
+  cache choices no longer exist. JWT keys derive from `CANVAS_TOKEN_KEYS`.
 - **Fresh v1 database required.** Accounts, identities, credentials and app grants
   use native UUID identifiers and a frozen 19-table schema. Pre-v1 databases are
   refused, with no lossy conversion. Re-enroll credentials and reconnect clients.
