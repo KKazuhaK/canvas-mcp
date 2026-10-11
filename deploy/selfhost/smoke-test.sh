@@ -2,6 +2,7 @@
 # Validate a built v1 image using throwaway credentials and fresh volumes.
 # Usage: bash deploy/selfhost/smoke-test.sh IMAGE
 # Optional SMOKE_EXPECT_PROVIDERS=google,github checks start redirects and needs outbound HTTPS.
+# Optional SMOKE_ENTRA_TENANT_ID checks discovery/start for an existing public tenant.
 # This does not authenticate real IdP users or prove a client's multiday refresh.
 set -euo pipefail
 { set +x; } 2>/dev/null
@@ -35,7 +36,7 @@ SESSION_SECRET="$(openssl rand -base64 32 | tr -d '\r\n')"
 TOKEN_KEYS="k1:$(openssl rand -base64 32 | tr -d '\r\n')"
 ENV=(
   -e MCP_AUTH_MODE=selfhost -e PUBLIC_BASE_URL="$PUBLIC"
-  -e ENTRA_TENANT_ID=11111111-2222-3333-4444-555555555555
+  -e ENTRA_TENANT_ID="${SMOKE_ENTRA_TENANT_ID:-11111111-2222-3333-4444-555555555555}"
   -e ENTRA_CLIENT_ID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
   -e ENTRA_CLIENT_SECRET=smoke-not-a-real-secret-0123456789
   -e ACCOUNT_SESSION_SECRET="$SESSION_SECRET" -e CANVAS_TOKEN_KEYS="$TOKEN_KEYS"
@@ -123,9 +124,17 @@ for path in /account/api/me /account/login /account/callback; do
 done
 status 303 /auth/login?txn=bogus
 grep -qi '^location:.*account/sign-in?error=authorization_invalid' "$WORKDIR/headers" || fail "invalid transaction redirect"
-status 302 /auth/login/entra
-grep -qi '^location: https://login.microsoftonline.com/' "$WORKDIR/headers" || fail "Entra start redirect"
-grep -qi '^set-cookie:.*httponly' "$WORKDIR/headers" || fail "sealed sign-in cookie missing"
+if [ -n "${SMOKE_ENTRA_TENANT_ID:-}" ]; then
+  status 302 /auth/login/entra
+  grep -qi '^location: https://login.microsoftonline.com/' "$WORKDIR/headers" || fail "Entra start redirect"
+  grep -qi '^set-cookie:.*httponly' "$WORKDIR/headers" || fail "sealed sign-in cookie missing"
+else
+  # The throwaway tenant deliberately does not exist. Discovery must fail closed,
+  # rather than manufacture a flow from unverified metadata.
+  status 303 /auth/login/entra
+  grep -qi '^location:.*account/sign-in?error=provider_error' "$WORKDIR/headers" || fail "invalid tenant did not fail closed"
+  if grep -qi '^set-cookie:.*cmcp_flow=' "$WORKDIR/headers"; then fail "failed discovery created a ceremony"; fi
+fi
 ok "React, account API and distinct sign-in paths"
 
 # (d) registration and protocol refusal contract
