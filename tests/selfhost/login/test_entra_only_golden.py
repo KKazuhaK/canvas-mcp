@@ -113,7 +113,9 @@ def test_authorize_request_shape(entra_local: Stack):
     assert location.path.endswith("/protocol/openid-connect/auth")
     query = {k: v[0] for k, v in parse_qs(location.query).items()}
     assert query["redirect_uri"] == "https://canvas.example.test/auth/callback/entra"
-    assert query["scope"] == "openid profile email" and query["prompt"] == "select_account"
+    assert (
+        query["scope"] == "openid profile email" and query["prompt"] == "select_account"
+    )
     assert (
         query["response_mode"] == "query" and query["code_challenge_method"] == "S256"
     )
