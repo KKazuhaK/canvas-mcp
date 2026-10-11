@@ -251,6 +251,10 @@ jobs:
   test-postgres:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        dependencies: [latest, locked]
     permissions:
       contents: read
     env:
@@ -292,11 +296,27 @@ jobs:
         enable-cache: false
 
     - name: Install from uv.lock
+      if: matrix.dependencies == 'locked'
       run: uv sync --locked --extra documents --extra selfhost --extra postgres --group dev
 
-    - name: Run the self-hosted tests on PostgreSQL
+    - name: Install latest allowed dependencies
+      if: matrix.dependencies == 'latest'
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install -e ".[documents,selfhost,postgres]"
+        python -m pip install pytest pytest-asyncio pyyaml respx
+
+    - name: Run the lock-pinned self-hosted tests on PostgreSQL
+      if: matrix.dependencies == 'locked'
       run: >-
         uv run --locked pytest
+        tests/selfhost tests/test_multiuser_e2e.py tests/test_fastmcp_compat.py
+        -q -p no:cacheprovider
+
+    - name: Run the latest-dependency self-hosted tests on PostgreSQL
+      if: matrix.dependencies == 'latest'
+      run: >-
+        python -m pytest
         tests/selfhost tests/test_multiuser_e2e.py tests/test_fastmcp_compat.py
         -q -p no:cacheprovider
 
@@ -326,4 +346,4 @@ jobs:
         fi
         echo "## Canvas MCP test results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "Full suite passed on Ubuntu with Python 3.11, 3.12, 3.13 and 3.14, on Windows with Python 3.14, on Ubuntu with Python 3.14 against the exact dependency versions in uv.lock, and the self-hosted tests also passed against PostgreSQL 18 (the test-postgres job). The web UI (web/) passed lint, typecheck, tests, build and the dist checks." >> $GITHUB_STEP_SUMMARY
+        echo "Full suite passed on Ubuntu with Python 3.11, 3.12, 3.13 and 3.14, on Windows with Python 3.14, on Ubuntu with Python 3.14 against the exact dependency versions in uv.lock, and the self-hosted tests also passed against PostgreSQL 18 with both latest allowed and lock-pinned dependencies (the test-postgres matrix). The web UI (web/) passed lint, typecheck, tests, build and the dist checks." >> $GITHUB_STEP_SUMMARY
