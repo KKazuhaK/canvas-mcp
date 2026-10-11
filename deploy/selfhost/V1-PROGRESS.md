@@ -7,16 +7,55 @@ This is a working checkpoint, not a deployment or release approval. Follow
 
 The native runtime, required React UI, database-owned configuration, custody,
 maintenance, pagination, reserved contracts, operator/Docker guides, historical
-proposals and optional pilot profile are implemented on `feature/v1-consolidation`
-in fork PR #5. Upgrade, transfer, backup and compatibility code lives only in
-`core/selfhost/db/migrations/`, with four structural boundary tests.
+proposals and optional pilot profile are merged into `uci-student` through
+[fork PR #5](https://github.com/KKazuhaK/canvas-mcp/pull/5), at
+`b739665ef0fc8e146e0c4d13aead964efb322d66` (2026-10-11).
+Upgrade, transfer, backup and compatibility code lives only in
+`core/selfhost/db/migrations/`, with four structural boundary tests and three
+lazy startup/CLI bridges. Its README explains how to remove the package later.
 
-The complete CI matrix at `ac5fe4f` passed. The UI/proposal/pilot/release-note
-completion requires a final exact-head matrix before the fork PR merges.
-After merge, verify the `uci-student` image and record its deployable digest.
+Both complete CI matrices at the final reviewed head `0dc62bb` passed:
+[push](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38171071968) and
+[PR](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38171075305).
+The squash merge has the identical file tree. The separate post-merge matrix is
+tracked in [run 38172509352](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38172509352).
+The [image publication](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38172509368)
+passed both native-architecture container smoke tests and published the index
+below. GHCR index annotations and each architecture's image labels independently
+confirm the merge commit. The stable `latest` digest remains unchanged.
+
 The owner supplies staging and reverse-proxy deployment; real IdP/B2B/client,
 proxy and multiday refresh acceptance still gate the first v1 beta tag. Upstream
-PRs #491 and #494 await maintainer review. No v1 release has been published.
+PRs #490, #491 and #494 await maintainer review. No v1 release has been published,
+and no real-client compatibility row is marked passed.
+
+## Deployable staging image
+
+Use [OPERATOR.md](OPERATOR.md) with a fresh v1 database. This is the reviewed
+development image for staging, not a v1 release tag. Pin the immutable index in
+`.env`; do not use the moving `edge` channel for the acceptance record:
+
+```dotenv
+CANVAS_MCP_IMAGE=ghcr.io/kkazuhak/canvas-mcp@sha256:2c777d4f957bda7bb0e4f4b5718e23bdb48754a613eed689427ad6c5ff4f1d84
+```
+
+- Source: `b739665ef0fc8e146e0c4d13aead964efb322d66`.
+- Registry version: `edge-b739665`; platforms: `linux/amd64`, `linux/arm64`.
+- Stable image left in place: `1.13.0-uci.1`, digest
+  `sha256:9eeeaea8365ecad39ea02704b867f2dfae03521c229938ce78e8937fcbf1cdfb`.
+- Final reviewed CI: locked SQLite 8,026 passed / 64 skipped; Windows
+  8,024 passed / 66 skipped; each PostgreSQL dependency set 4,211 passed /
+  11 skipped. Both complete matrices include Python 3.11-3.14, frontend, lint,
+  code API, formal confirmation checks and amd64/arm64 Docker smoke tests.
+
+Deployment and live acceptance are pending. Record the staging origin, exact
+client versions, timestamps and secret-free evidence in the README's tested-client
+table. Follow its complete staging checklist, including Entra B2B guests,
+separate users/schools, configured providers, custody, revocation and rotation,
+both persistence backends, proxy failure/log redaction and consecutive-day
+refresh. Keep the first v1 tag gated until these observations are complete.
+
+## Historical checkpoints
 
 The sections below retain dated development checkpoints. Their earlier
 unfinished-work descriptions and test failures are historical, superseded by

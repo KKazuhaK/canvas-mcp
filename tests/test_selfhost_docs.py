@@ -131,6 +131,7 @@ def test_deployment_examples_are_neutral_and_english():
         "canvas.instructure.com",
         "claude.ai",
         "claude.com",
+        "ghcr.io",  # Published image references, not deployment-origin examples.
         "github.com",
         "learn.microsoft.com",
         "login.microsoftonline.com",

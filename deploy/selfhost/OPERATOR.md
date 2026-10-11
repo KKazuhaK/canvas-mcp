@@ -4,6 +4,8 @@ Use this checklist for the independent fork's v1 deployment. The complete
 configuration reference is [README.md](README.md); source acceptance and pending
 live gates are recorded in [V1-PROGRESS.md](V1-PROGRESS.md). The owner supplies the
 host and reverse proxy. This walkthrough does not record a deployment as tested.
+The reviewed multi-architecture staging image and its immutable digest are in
+[V1-PROGRESS.md](V1-PROGRESS.md#deployable-staging-image).
 
 1. Choose the reviewed commit or image digest and a staging origin, for example
    `https://mcp.example.com`. Keep that origin consistent across `.env`, the

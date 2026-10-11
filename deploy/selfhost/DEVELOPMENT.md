@@ -2,9 +2,12 @@
 
 This document records the original handoff inventory. For implementation and
 validation completed since that snapshot, read [V1-PROGRESS.md](V1-PROGRESS.md)
-and [B0-REVIEW.md](B0-REVIEW.md). The v1 work is still in progress. Both Docker
-architectures pass SQLite and PostgreSQL container smoke; the complete runtime
-matrix and live staging validation remain outstanding. All schema upgrades, backups and
+and [B0-REVIEW.md](B0-REVIEW.md). P7 and v1 are merged into `uci-student`.
+Both complete final-head CI matrices passed, and the native amd64/arm64 Docker
+image passed SQLite and PostgreSQL container smoke and is published for staging.
+V1-PROGRESS records its immutable digest and the separate post-merge CI run.
+Real staging/client/IdP/proxy and multiday refresh acceptance remain outstanding
+and gate the first v1 tag. All schema upgrades, backups and
 database transfer tooling are isolated under
 `src/canvas_mcp/core/selfhost/db/migrations/`. Its README describes the removal
 boundary, contract backups and concurrent-index recovery. See
@@ -12,7 +15,7 @@ boundary, contract backups and concurrent-index recovery. See
 
 Snapshot date: 2026-10-11. Audience: a developer who has never seen this project and must continue it alone. The document is written in English so it can be committed. Location: `deploy/selfhost/DEVELOPMENT.md`. Its companion, the v1 consolidation design, is `deploy/selfhost/V1-DESIGN.md`; this document calls it "V1-DESIGN" and cites its sections as "V1-DESIGN 4.6".
 
-Conventions in this document:
+Conventions in this original snapshot (use V1-PROGRESS for current status):
 - Paths are relative to the repository root unless they say otherwise.
 - "P7 branch" means code that exists only on `feature/p7-login-providers`.
 - "v1" means the consolidation the owner decided on 2026-10-11 (decisions D1-D14, section 5). It is designed (V1-DESIGN) but not started. Sections 3 and 4 describe the code as it is today and mark what v1 removes or renames.
