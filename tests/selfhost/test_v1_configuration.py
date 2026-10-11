@@ -570,7 +570,12 @@ def test_school_api_keeps_private_exceptions_readonly_and_settings_body_bounded(
 def test_other_instance_school_policy_is_applied_before_decrypt_and_restores_access(
     stack, monkeypatch
 ):
+    from canvas_mcp.core.selfhost.maintenance import MaintenanceScheduler
+
     from .authz.test_mcp_hot_read import payload, statements
+
+    # This observer measures foreground SQL only; housekeeping has its own runner tests.
+    monkeypatch.setattr(MaintenanceScheduler, "schedule", lambda *args, **kwargs: None)
 
     account = stack.enroll(ALICE)
     _, tokens = stack.tokens_for(ALICE)
@@ -618,3 +623,109 @@ def test_other_instance_school_policy_is_applied_before_decrypt_and_restores_acc
     with statements(stack) as seen:
         assert stack.mcp_status(tokens["access_token"]) == 200
     assert len(seen) == 1
+
+
+def test_pilot_config_writes_are_atomic_and_out_of_process_changes_fail_closed(config):
+    from canvas_mcp.core.selfhost.profile import PilotProfileViolation
+
+    snapshots, store = config
+    revision = snapshots.current.revision
+    school = School(CANVAS_HOST, f"https://{CANVAS_HOST}/api/v1", "")
+    revision, _ = store.schools([school], revision=revision, actor=None, now=110)
+    revision = store.setting(
+        "schools.directory_search", False, revision=revision, actor=None, now=120
+    )
+    snapshots.enable_pilot()
+    for reset in (False, True):
+        with pytest.raises(PilotProfileViolation):
+            store.setting(
+                "schools.directory_search",
+                True,
+                revision=revision,
+                actor=None,
+                now=130,
+                reset=reset,
+            )
+        assert snapshots.revision() == revision
+    for schools in (
+        [],
+        [school, School("other.example.edu", "https://other.example.edu/api/v1", "")],
+    ):
+        with pytest.raises(PilotProfileViolation):
+            store.schools(schools, revision=revision, actor=None, now=130)
+        assert snapshots.revision() == revision
+    other = ConfigSnapshots(
+        snapshots.database, snapshots.providers, resolve_host=public
+    )
+    changed = ConfigStore(other).setting(
+        "schools.directory_search", True, revision=revision, actor=None, now=140
+    )
+    with pytest.raises(StoreUnavailable):
+        snapshots.get(changed)
+    assert snapshots.current.revision == revision
+
+
+def test_pilot_settings_api_returns_a_specific_refusal(stack, browser):
+    browser.sign_in(OWNER)
+    snapshots = stack.runtime.snapshots
+    store = ConfigStore(snapshots)
+    revision = snapshots.current.revision
+    snapshots.resolve_host = public
+    revision, _ = store.schools(
+        [School(CANVAS_HOST, f"https://{CANVAS_HOST}/api/v1", "")],
+        revision=revision,
+        actor=None,
+        now=int(stack.clock()),
+    )
+    revision = store.setting(
+        "schools.directory_search",
+        False,
+        revision=revision,
+        actor=None,
+        now=int(stack.clock()),
+    )
+    snapshots.enable_pilot()
+    response = browser.api(
+        "PUT",
+        "/admin/settings/directory-search",
+        body={"revision": revision, "enabled": True},
+        csrf=browser.csrf_token(),
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "pilot_profile_restricted"
+    assert snapshots.revision() == revision
+
+
+def test_pilot_cli_refuses_enabling_search_reset_and_second_school(
+    config, monkeypatch, capsys
+):
+    import base64
+
+    from canvas_mcp.core.selfhost import config_cli, token_admin
+    from canvas_mcp.core.selfhost.token_store import Keyring, TokenStore
+
+    snapshots, config_store = config
+    revision, _ = config_store.schools(
+        [School(CANVAS_HOST, f"https://{CANVAS_HOST}/api/v1", "")],
+        revision=snapshots.current.revision,
+        actor=None,
+        now=110,
+    )
+    revision = config_store.setting(
+        "schools.directory_search", False, revision=revision, actor=None, now=120
+    )
+    store = TokenStore(
+        snapshots.database, Keyring.parse("k1:" + base64.b64encode(bytes(32)).decode())
+    )
+    monkeypatch.setattr(token_admin, "_open_store", lambda: store)
+    monkeypatch.setattr(config_cli, "snapshots_for", lambda store: snapshots)
+    monkeypatch.setenv("SELFHOST_PROFILE", "pilot")
+    for arguments in (
+        ["settings", "set", "schools.directory_search", "true"],
+        ["settings", "reset", "schools.directory_search"],
+        ["schools", "add", "other.example.edu", "--name", "Other School"],
+        ["schools", "remove", CANVAS_HOST],
+    ):
+        assert token_admin.main(arguments) == token_admin.EXIT_CONFIG
+        assert snapshots.revision() == revision
+        assert "SELFHOST_PROFILE" in capsys.readouterr().err

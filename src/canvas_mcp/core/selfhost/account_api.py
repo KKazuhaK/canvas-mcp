@@ -89,6 +89,7 @@ from .config_store import ConfigStore, SchoolRemovalConfirmation
 from .db.settings_repo import SettingsAccessDenied, SettingsConflict
 from .db.workers import run_store
 from .pagination import DEFAULT_LIMIT, decode_cursor, page_limit
+from .profile import PilotProfileViolation
 from .routes import API_PREFIX
 
 if TYPE_CHECKING:
@@ -142,6 +143,7 @@ ERROR_STATUS: Mapping[str, int] = {
     # admin
     "last_owner": 409,
     "settings_conflict": 409,
+    "pilot_profile_restricted": 409,
     "confirmation_required": 409,
     "cannot_disable_self": 409,
     # linked sign-in methods
@@ -1319,6 +1321,8 @@ class ApiApp:
             raise _Fail("settings_conflict") from None
         except SettingsAccessDenied:
             raise _Fail("forbidden") from None
+        except PilotProfileViolation:
+            raise _Fail("pilot_profile_restricted") from None
         except SchoolRemovalConfirmation as exc:
             raise _Fail(
                 "confirmation_required", {"affected": dict(exc.affected)}

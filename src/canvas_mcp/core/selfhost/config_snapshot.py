@@ -131,8 +131,15 @@ class ConfigSnapshots:
         self.database = database
         self.providers = providers
         self.resolve_host = resolve_host
+        self.pilot = False
         self._lock = threading.Lock()
         self._current = self._build()
+
+    def enable_pilot(self) -> None:
+        from .profile import validate_pilot_schools
+
+        validate_pilot_schools(self._current.schools)
+        self.pilot = True
 
     @property
     def current(self) -> ConfigSnapshot:
@@ -164,6 +171,10 @@ class ConfigSnapshots:
             for _ in range(3):
                 snapshot = self._read()
                 if snapshot is not None:
+                    if self.pilot:
+                        from .profile import validate_pilot_schools
+
+                        validate_pilot_schools(snapshot.schools)
                     _validate_addresses_sync(snapshot.schools, self.resolve_host)
                     if snapshot.warnings:
                         logger.warning(

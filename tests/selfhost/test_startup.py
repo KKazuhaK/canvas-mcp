@@ -478,3 +478,25 @@ class TestSchoolStartup:
         assert _run_main(entra_env["monkeypatch"], *HTTP, "--config").code == 0
         out = capsys.readouterr().err
         assert "Canvas schools and public sign-in names: database-managed" in out
+
+
+@pytest.mark.parametrize(
+    "setting,value",
+    [("ALLOWED_WRITE_TOOLS", "all"), ("SELFHOST_COURSE_STATE", "per_principal")],
+)
+def test_pilot_startup_refuses_scope_expansion(entra_env, setting, value, caplog):
+    monkeypatch = entra_env["monkeypatch"]
+    monkeypatch.setenv("SELFHOST_PROFILE", "pilot")
+    monkeypatch.setenv(setting, value)
+    assert _run_main(monkeypatch, *HTTP).code == 1
+    assert "SELFHOST_PROFILE" in caplog.text and setting in caplog.text
+
+
+def test_pilot_startup_refuses_unconfigured_school_database(entra_env, caplog):
+    from canvas_mcp.core.selfhost.app import prepare_selfhost
+    from canvas_mcp.core.selfhost.settings import SelfhostConfigError
+
+    monkeypatch = entra_env["monkeypatch"]
+    monkeypatch.setenv("SELFHOST_PROFILE", "pilot")
+    with pytest.raises(SelfhostConfigError, match="exactly one featured school"):
+        prepare_selfhost(load_selfhost_settings())

@@ -50,6 +50,7 @@ describe('closed error code set', () => {
         'write_tools_unavailable',
         // admin
         'settings_conflict',
+        'pilot_profile_restricted',
         'confirmation_required',
         'last_owner',
         'cannot_disable_self',

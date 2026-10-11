@@ -59,5 +59,6 @@
   "custody_notice_outdated": "托管告知已更新。请阅读当前告知并重新确认。",
   "not_enrolled": "尚未登记 Canvas 令牌。",
   "settings_conflict": "设置已被其他人修改，请重新加载后再保存。",
-  "confirmation_required": "删除会影响已有 Canvas 绑定，请确认受影响的学校后继续。"
+  "confirmation_required": "删除会影响已有 Canvas 绑定，请确认受影响的学校后继续。",
+  "pilot_profile_restricted": "试点配置要求仅提供一所学校，并关闭学校搜索。"
 }

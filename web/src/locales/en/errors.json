@@ -59,5 +59,6 @@
   "custody_notice_outdated": "The custody notice has changed. Read the current notice and acknowledge it again.",
   "not_enrolled": "No Canvas token is enrolled.",
   "settings_conflict": "Settings changed elsewhere. Reload before saving.",
-  "confirmation_required": "This removal affects existing Canvas bindings. Confirm the affected schools to continue."
+  "confirmation_required": "This removal affects existing Canvas bindings. Confirm the affected schools to continue.",
+  "pilot_profile_restricted": "The pilot profile requires exactly one school with directory search turned off."
 }

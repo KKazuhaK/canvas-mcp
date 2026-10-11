@@ -28,6 +28,7 @@ from .db.url import (
     sqlite_target,
 )
 from .login.config import LoginProvidersConfig, parse_login_providers
+from .profile import PILOT_DISABLED_TOOLS, read_profile
 
 AUTH_MODE_ENV = "MCP_AUTH_MODE"
 AUTH_MODE_SELFHOST = "selfhost"
@@ -164,6 +165,7 @@ class SelfhostSettings:
     # It can only remove tools: it never registers one and never widens what
     # ``ALLOWED_WRITE_TOOLS`` or a user's own switches allow.
     disabled_tools: tuple[str, ...] = ()
+    profile: str = ""
     # Who is admitted and who is an owner (see :mod:`.accounts`). The default is the
     # first release's behaviour: the two Entra app roles, nothing else.
     # ``None`` (a settings object built by hand) means that default.
@@ -694,6 +696,13 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
 
     course_state = _parse_course_state(get(COURSE_STATE_ENV), problems)
     disabled_tools = _parse_disabled_tools(get(DISABLED_TOOLS_ENV), problems)
+    try:
+        profile = read_profile(source)
+    except ValueError as exc:
+        problems.append(str(exc))
+        profile = ""
+    if profile == "pilot":
+        disabled_tools = tuple(sorted(set(disabled_tools) | PILOT_DISABLED_TOOLS))
     access_policy = parse_access_settings(
         source,
         tenant_id=tenant_id,
@@ -726,6 +735,7 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
         auto_migrate=auto_migrate,
         state_backend=state_backend,
         disabled_tools=disabled_tools,
+        profile=profile,
         access_policy=access_policy,
         account_web_dist=Path(web_dist_raw),
         authz=authz,

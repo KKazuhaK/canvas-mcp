@@ -82,6 +82,30 @@ def body(content: bytes, **headers):
 
 
 class TestDownloadTokenBoundary:
+    @pytest.mark.parametrize("start", [DOWNLOAD_URL, STORAGE_URL])
+    async def test_pilot_refuses_storage_before_any_off_canvas_request(
+        self, transport_env, monkeypatch, start
+    ):
+        recorder = transport_env(
+            {DOWNLOAD_URL: redirect(STORAGE_URL), STORAGE_URL: body(b"secret")}
+        )
+        monkeypatch.setattr(cf, "ALLOW_OFF_CANVAS_DOWNLOADS", False)
+        result = await cf.download_file_bytes(start, 1024)
+        assert result == {
+            "error": "Downloads that leave Canvas are disabled on this server"
+        }
+        assert [str(r.url) for r in recorder.requests] == (
+            [DOWNLOAD_URL] if start == DOWNLOAD_URL else []
+        )
+
+    async def test_pilot_can_read_a_file_that_stays_on_canvas(
+        self, transport_env, monkeypatch
+    ):
+        recorder = transport_env({DOWNLOAD_URL: body(b"content")})
+        monkeypatch.setattr(cf, "ALLOW_OFF_CANVAS_DOWNLOADS", False)
+        assert await cf.download_file_bytes(DOWNLOAD_URL, 1024) == b"content"
+        assert recorder.auth_by_host() == [("canvas.example.edu", f"Bearer {TOKEN}")]
+
     @pytest.mark.asyncio
     async def test_token_goes_to_canvas_but_not_to_storage(self, transport_env):
         recorder = transport_env({

@@ -188,6 +188,23 @@ to the client's approval controls. Code execution is disabled in self-host mode.
 and invalidates it when the credential changes. It retains more per-user data.
 `SELFHOST_DISABLED_TOOLS` removes named tools entirely and cannot enable a write.
 
+**Optional pilot profile.** `SELFHOST_PROFILE=pilot` removes `read_course_file`,
+`read_course_file_text` and `download_course_file`, and refuses every download
+hop that leaves the configured Canvas origin before sending that request.
+Canvas files usually redirect to storage, so the pilot cannot read those files.
+The ordinary deployment keeps its existing HTTPS download behavior and strips
+Canvas credentials from off-Canvas requests.
+
+Before enabling the profile, configure exactly one featured school and turn
+`schools.directory_search` off with `token_admin schools/settings` (see
+[CONFIGURATION.md](CONFIGURATION.md)). Startup refuses a different school
+configuration, any `ALLOWED_WRITE_TOOLS`, enabled code execution, or
+`SELFHOST_COURSE_STATE=per_principal`. While active, the panel and operator
+commands refuse enabling directory search or changing the featured list to
+zero or multiple schools. Run operator commands with the same profile environment;
+a running pilot also refuses a changed snapshot that violates these constraints.
+The owner's multi-school deployment leaves this optional profile unset.
+
 ## Custody and privacy boundary
 
 The enrolled Canvas PAT is encrypted with AES-256-GCM and bound to its account,

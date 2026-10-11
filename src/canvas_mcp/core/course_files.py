@@ -48,6 +48,9 @@ ACCESS_DENIED_STATUSES = frozenset({401, 403})
 #: (Canvas -> storage).
 MAX_DOWNLOAD_REDIRECTS = 5
 
+# Set once by selfhost installation; upstream and ordinary selfhost keep downloads.
+ALLOW_OFF_CANVAS_DOWNLOADS = True
+
 _HTTP_STATUS = re.compile(r"^HTTP error: (\d{3})\b")
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
@@ -247,6 +250,8 @@ async def stream_file_download(
             and _origin(current) == canvas_origin
         )
         left_canvas = not on_canvas
+        if not on_canvas and not ALLOW_OFF_CANVAS_DOWNLOADS:
+            return {"error": "Downloads that leave Canvas are disabled on this server"}
         if not on_canvas and current.scheme != "https":
             return {"error": "Refusing a non-HTTPS download from a non-Canvas host"}
 

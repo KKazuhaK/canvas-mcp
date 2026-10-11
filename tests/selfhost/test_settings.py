@@ -442,3 +442,23 @@ class TestAccountUi:
             assert _problems(ACCOUNT_WEB_DIST=value) == [
                 "ACCOUNT_WEB_DIST must be an absolute path"
             ]
+
+
+@pytest.mark.parametrize("raw", ["pilot", " PILOT "])
+def test_pilot_profile_disables_all_file_download_tools(raw):
+    settings = load_selfhost_settings(
+        _env(SELFHOST_PROFILE=raw, SELFHOST_DISABLED_TOOLS="list_courses")
+    )
+    assert settings.profile == "pilot"
+    assert set(settings.disabled_tools) == {
+        "list_courses",
+        "read_course_file",
+        "read_course_file_text",
+        "download_course_file",
+    }
+
+
+def test_unknown_profile_is_refused_without_echoing_its_value():
+    problems = _problems(SELFHOST_PROFILE="secret-profile-value")
+    assert any("SELFHOST_PROFILE" in p for p in problems)
+    assert all("secret-profile-value" not in p for p in problems)

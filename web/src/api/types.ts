@@ -49,6 +49,7 @@ export type ApiOnlyErrorCode =
   | 'write_tools_unavailable' // 503
   // admin
   | 'settings_conflict' // 409
+  | 'pilot_profile_restricted' // 409
   | 'confirmation_required' // 409, params: { affected: { host: count } }
   | 'last_owner' // 409
   | 'cannot_disable_self' // 409

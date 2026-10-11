@@ -12,6 +12,9 @@ runtime and Docker acceptance gates are tracked in [V1-PROGRESS.md](V1-PROGRESS.
 ## Defaults and ownership
 
 - A new database has no featured school. Directory search is enabled.
+- The optional `SELFHOST_PROFILE=pilot` requires exactly one featured school
+  and directory search disabled before startup. Enable the profile after initial
+  configuration; panel and CLI changes cannot widen it while active.
 - There is no implicit default school. A picker starts without a choice unless
   the account already has an offered school. One featured school with search
   disabled is selected automatically.

@@ -42,6 +42,7 @@ const CODE_SET: Record<ApiErrorCode, true> = {
   write_tool_not_allowed: true,
   write_tools_unavailable: true,
   settings_conflict: true,
+  pilot_profile_restricted: true,
   confirmation_required: true,
   last_owner: true,
   cannot_disable_self: true,

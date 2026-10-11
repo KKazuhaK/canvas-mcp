@@ -131,6 +131,16 @@ def validate_selfhost_startup(config: Config, settings: SelfhostSettings) -> lis
             "tokens on the shared host"
         )
 
+    if settings.profile == "pilot":
+        if config.allowed_write_tools:
+            problems.append(
+                "SELFHOST_PROFILE=pilot requires ALLOWED_WRITE_TOOLS to be unset"
+            )
+        if settings.course_state != "request_local":
+            problems.append(
+                "SELFHOST_PROFILE=pilot requires SELFHOST_COURSE_STATE=request_local"
+            )
+
     problem = _writable_directory_problem("SELFHOST_DATA_DIR", settings.data_dir)
     if problem:
         problems.append(problem)
@@ -322,6 +332,13 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         from .config_snapshot import ConfigSnapshots
 
         snapshots = ConfigSnapshots(store.database, settings.login_providers)
+        if settings.profile == "pilot":
+            from .profile import PilotProfileViolation
+
+            try:
+                snapshots.enable_pilot()
+            except PilotProfileViolation as exc:
+                raise SelfhostConfigError([str(exc)]) from None
         owner_problem = _owner_path_problem(settings, store)
     except StoreUnavailable:
         store.close()
@@ -412,6 +429,9 @@ def install_selfhost(
 
     settings = runtime.settings
     spa = load_account_spa(settings)
+    from .. import course_files
+
+    course_files.ALLOW_OFF_CANVAS_DOWNLOADS = settings.profile != "pilot"
     from .login.registry import build_login_runtime
 
     login_transport = account_options.pop("login_transport", None)

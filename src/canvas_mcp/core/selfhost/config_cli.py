@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from typing import TYPE_CHECKING
 
@@ -89,7 +90,9 @@ def run(args: argparse.Namespace, store: TokenStore) -> int:
     from .config_store import ConfigStore
 
     snapshots = snapshots_for(store)
-    config = ConfigStore(snapshots)
+    from .profile import read_profile
+
+    config = ConfigStore(snapshots, pilot=read_profile(os.environ) == "pilot")
     current = snapshots.current
     revision, now = current.revision, int(time.time())
     if args.command == "providers":
@@ -191,6 +194,10 @@ def run(args: argparse.Namespace, store: TokenStore) -> int:
 def refusal(exc: Exception) -> str:
     from .config_store import SchoolRemovalConfirmation
     from .db.settings_repo import SettingsConflict
+    from .profile import PilotProfileViolation
+
+    if isinstance(exc, PilotProfileViolation):
+        return "SELFHOST_PROFILE=pilot requires one featured school and directory search off"
 
     if isinstance(exc, SettingsConflict):
         return (

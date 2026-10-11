@@ -21,6 +21,7 @@ from .db.settings_repo import (
     read_settings,
     save_setting,
 )
+from .profile import PilotProfileViolation
 from .schools import (
     MAX_FEATURED,
     School,
@@ -38,9 +39,14 @@ class SchoolRemovalConfirmation(Exception):
 
 
 class ConfigStore:
-    def __init__(self, snapshots: ConfigSnapshots) -> None:
+    def __init__(self, snapshots: ConfigSnapshots, *, pilot: bool = False) -> None:
         self.snapshots = snapshots
         self.database = snapshots.database
+        self._pilot = pilot
+
+    @property
+    def pilot(self) -> bool:
+        return self._pilot or self.snapshots.pilot
 
     @staticmethod
     def _authorize(conn: Connection, actor: str | None, revision: int, now: int) -> int:
@@ -158,6 +164,14 @@ class ConfigStore:
                 now=now,
                 reset=reset,
             )
+            if (
+                self.pilot
+                and key == "schools.directory_search"
+                and read_settings(conn)[key]
+            ):
+                raise PilotProfileViolation(
+                    "Directory search is disabled by SELFHOST_PROFILE=pilot"
+                )
         self.snapshots.get(new_revision)
         return new_revision
 
@@ -197,6 +211,10 @@ class ConfigStore:
         confirmed: Sequence[str] = (),
         grant_private: bool = False,
     ) -> tuple[int, dict[str, int]]:
+        if self.pilot and len(schools) != 1:
+            raise PilotProfileViolation(
+                "SELFHOST_PROFILE=pilot requires exactly one featured school"
+            )
         if grant_private and actor is not None:
             raise SettingsAccessDenied
         if any(

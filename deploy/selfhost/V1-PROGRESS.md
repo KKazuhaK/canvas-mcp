@@ -3,6 +3,25 @@
 This is a working checkpoint, not a deployment or release approval. Follow
 `V1-DESIGN.md` for the target and `DEVELOPMENT.md` for the complete handoff.
 
+## Current status
+
+The native runtime, required React UI, database-owned configuration, custody,
+maintenance, pagination, reserved contracts, operator/Docker guides, historical
+proposals and optional pilot profile are implemented on `feature/v1-consolidation`
+in fork PR #5. Upgrade, transfer, backup and compatibility code lives only in
+`core/selfhost/db/migrations/`, with four structural boundary tests.
+
+The complete CI matrix at `ac5fe4f` passed. The UI/proposal/pilot/release-note
+completion requires a final exact-head matrix before the fork PR merges.
+After merge, verify the `uci-student` image and record its deployable digest.
+The owner supplies staging and reverse-proxy deployment; real IdP/B2B/client,
+proxy and multiday refresh acceptance still gate the first v1 beta tag. Upstream
+PRs #491 and #494 await maintainer review. No v1 release has been published.
+
+The sections below retain dated development checkpoints. Their earlier
+unfinished-work descriptions and test failures are historical, superseded by
+later checkpoints; they are not the current status.
+
 ## Completed prerequisite
 
 P7 was independently reviewed, corrected and merged through fork PR #4. The
@@ -602,3 +621,33 @@ and the first v1 tag remain outstanding.
   `core/selfhost/db/migrations/` package.
 - Remaining implementation review identified HANDOFF 6.6.1's optional pilot
   profile as still outstanding. Live staging and the first v1 tag remain gated.
+
+## Optional pilot and final release notes checkpoint
+
+- HANDOFF 6.6.1 is implemented as an opt-in profile, never the owner's default.
+  It removes all three file-download tools, refuses off-Canvas download hops
+  before requesting them, requires request-local course state and refuses write
+  tools/code execution. Startup requires exactly one featured school and search
+  disabled. Database-backed panel and CLI changes cannot widen those settings;
+  incompatible out-of-process revisions refuse runtime snapshot refresh.
+- A specific `pilot_profile_restricted` API error is included in the backend,
+  typed frontend, mock status table and both languages. Operator failures name
+  the profile without exposing input values. Documentation describes initial
+  school configuration before enabling the optional profile.
+- `[Unreleased]` now describes the final v1 behavior and breaking configuration,
+  fresh-database, API, custody and Docker changes. Superseded pre-v1 development
+  entries were removed from this pending release; published release history stays.
+- Focused latest SQLite checks: 352 passed, 2 platform skips. Locked SQLite:
+  356 passed, 2 skips, including the four migration-isolation checks. Frontend
+  error/route/locale contracts: 30 passed; lint, build and dist passed. Ruff and
+  Linux mypy passed all 150 source files. Docs/English/closing/migration checks:
+  99 passed.
+- The first local PostgreSQL configuration run passed 30 tests and failed one
+  foreground SQL assertion because the engine observer included housekeeping.
+  That single observer now disables scheduling before the login ceremony;
+  independent housekeeping tests remain active. The corrected locked PostgreSQL
+  configuration suite passed all 31 tests; the scratch server was stopped.
+- Complete CI at `ac5fe4f` passed all jobs in run `38160020585`, including Windows,
+  both PostgreSQL dependency sets and both Docker architectures. A new complete
+  exact-head CI is required after these pilot/release-note changes. Live staging
+  and first v1 tag gates remain outstanding; no v1 release has been published.
