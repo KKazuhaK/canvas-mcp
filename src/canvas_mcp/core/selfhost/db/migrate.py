@@ -319,7 +319,7 @@ def _ensure_sqlite(
 ) -> None:
     backup: pathlib.Path | None = None
     try:
-        with db.write() as conn:
+        with db.sqlite_migration() as conn:
             status = read_status(conn)
             _refuse_unusable(status)
             if not auto:

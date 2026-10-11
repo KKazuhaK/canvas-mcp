@@ -44,9 +44,9 @@ from typing import Any, Literal
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import URL, Connection, Engine, make_url
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import NullPool, QueuePool
 
-from .errors import StoreUnavailable
+from .errors import StoreUnavailable, TokenStoreError
 from .url import DatabaseTarget, sqlite_target
 
 
@@ -63,11 +63,15 @@ MIGRATION_LOCK_KEY = _advisory_key("canvas-mcp/token-store/migrations")
 _ADVISORY_XACT_SQL = f"SELECT pg_advisory_xact_lock({WRITER_LOCK_KEY})"
 
 SQLITE_BUSY_TIMEOUT_SECONDS = 5.0
+SQLITE_MIN_VERSION = (3, 37, 0)
+SQLITE_APPLICATION_ID = 0x434D4350
+SQLITE_POOL_SIZE = 4
+SQLITE_MAX_OVERFLOW = 4
 PG_STATEMENT_TIMEOUT_MS = 15_000
 PG_LOCK_TIMEOUT_MS = 5_000
 PG_IDLE_IN_TRANSACTION_TIMEOUT_MS = 30_000
-PG_POOL_SIZE = 5
-PG_MAX_OVERFLOW = 5
+PG_POOL_SIZE = 10
+PG_MAX_OVERFLOW = 0
 PG_POOL_TIMEOUT_SECONDS = 10
 PG_POOL_RECYCLE_SECONDS = 1800
 PG_CONNECT_TIMEOUT_SECONDS = 5
@@ -98,10 +102,15 @@ class Database:
     def _build_engine(target: DatabaseTarget) -> Engine:
         if target.kind == "sqlite":
             assert target.sqlite_path is not None
+            if sqlite3.sqlite_version_info < SQLITE_MIN_VERSION:
+                raise TokenStoreError("SQLite 3.37 or newer is required for self-hosted state")
             engine = create_engine(
                 URL.create("sqlite+pysqlite", database=str(target.sqlite_path)),
-                poolclass=NullPool,
-                connect_args={"timeout": SQLITE_BUSY_TIMEOUT_SECONDS},
+                poolclass=QueuePool,
+                pool_size=SQLITE_POOL_SIZE,
+                max_overflow=SQLITE_MAX_OVERFLOW,
+                pool_pre_ping=False,
+                connect_args={"timeout": SQLITE_BUSY_TIMEOUT_SECONDS, "check_same_thread": False},
                 hide_parameters=True,
             )
             event.listen(engine, "connect", _sqlite_on_connect)
@@ -177,6 +186,15 @@ class Database:
         if os.name == "posix":
             os.chmod(parent, 0o700)
             os.close(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
+        # Bootstrap before the pooled connect enters WAL. Setting auto_vacuum after
+        # WAL leaves a new file at NONE, so use this dedicated connection first.
+        raw = sqlite3.connect(path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS, isolation_level=None)
+        try:
+            if raw.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone() is None:
+                raw.execute("PRAGMA auto_vacuum=INCREMENTAL")
+                raw.execute(f"PRAGMA application_id={SQLITE_APPLICATION_ID}")
+        finally:
+            raw.close()
 
     def tighten_storage(self) -> None:
         """SQLite on POSIX: make sure the database file itself is 0600."""
@@ -204,7 +222,9 @@ class Database:
             with self.guard(), self._write_lock:
                 yield from self._sqlite_tx("IMMEDIATE")
         else:
-            with self.guard():
+            # Queue governance calls before pool checkout. A process can hold only
+            # one connection while waiting for the cross-instance advisory lock.
+            with self.guard(), self._write_lock:
                 yield from self._pg_tx(lock=True, lock_timeout=None)
 
     @contextmanager
@@ -242,6 +262,41 @@ class Database:
         else:
             with self.guard():
                 yield from self._pg_tx(lock=False, lock_timeout=None)
+
+    @contextmanager
+    def sqlite_migration(self) -> Iterator[Connection]:
+        """Keep foreign-key-disabled DDL connections outside the request pool."""
+        if self.kind != "sqlite":
+            raise TokenStoreError("SQLite migration connection requires a SQLite database")
+        dedicated = create_engine(
+            self._engine.url, poolclass=NullPool, hide_parameters=True,
+            connect_args={"timeout": SQLITE_BUSY_TIMEOUT_SECONDS, "check_same_thread": False},
+        )
+
+        def setup(raw: Any, record: Any) -> None:
+            _sqlite_on_connect(raw, record)
+            raw.execute("PRAGMA foreign_keys=OFF")
+
+        event.listen(dedicated, "connect", setup)
+        event.listen(dedicated, "begin", _sqlite_on_begin)
+        try:
+            with self.guard(), self._write_lock:
+                conn = dedicated.connect().execution_options(**{BEGIN_OPTION: "IMMEDIATE"})
+                try:
+                    trans = conn.begin()
+                    try:
+                        yield conn
+                        if conn.exec_driver_sql("PRAGMA foreign_key_check").first() is not None:
+                            raise TokenStoreError("migration failed foreign key validation")
+                    except BaseException:
+                        with suppress(SQLAlchemyError):
+                            trans.rollback()
+                        raise
+                    trans.commit()
+                finally:
+                    conn.close()
+        finally:
+            dedicated.dispose()
 
     @contextmanager
     def read(self) -> Iterator[Connection]:
@@ -322,7 +377,13 @@ def _sqlite_on_connect(dbapi_connection: Any, record: Any) -> None:
     try:
         cursor.execute("PRAGMA busy_timeout=5000")
         _enter_wal_mode(cursor)
+        cursor.execute("PRAGMA foreign_keys=ON")
+        if cursor.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+            raise sqlite3.OperationalError("foreign key enforcement unavailable")
         cursor.execute("PRAGMA synchronous=FULL")
+        cursor.execute("PRAGMA trusted_schema=OFF")
+        cursor.execute("PRAGMA journal_size_limit=67108864")
+        cursor.execute("PRAGMA secure_delete=FAST")
     finally:
         cursor.close()
 

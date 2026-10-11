@@ -30,6 +30,42 @@ class Epoch:
         return self.value
 
 
+@pytest.mark.parametrize("overrides", [
+    {"iss": "https://other.example.test/"},
+    {"aud": "https://other.example.test/mcp"},
+    {"exp": NOW - 1},
+    {"sub": "invalid"},
+    {"scope": "ungranted"},
+])
+def test_invalid_claims_never_read_server_state(keyring, overrides):
+    def forbidden_read():
+        pytest.fail("invalid token read authoritative server state")
+    codec = tk.AccessTokenCodec(keyring, forbidden_read, issuer=ISSUER,
+                                audience=AUDIENCE, scopes=[SCOPE], clock=lambda: NOW)
+    with pytest.raises(tk.AccessTokenInvalid):
+        codec.decode(forge(keyring, claims=good_claims(**overrides)))
+
+
+def test_bad_signature_never_reads_server_state(keyring):
+    def forbidden_read():
+        pytest.fail("bad signature read authoritative server state")
+    codec = tk.AccessTokenCodec(keyring, forbidden_read, issuer=ISSUER,
+                                audience=AUDIENCE, scopes=[SCOPE], clock=lambda: NOW)
+    with pytest.raises(tk.AccessTokenInvalid):
+        codec.decode(forge(keyring, key=OctKey.import_key(bytes(32))))
+
+
+def test_overlong_epoch_is_refused_before_key_derivation_or_database(keyring, monkeypatch):
+    def forbidden(*args):
+        pytest.fail("overlong epoch reached key derivation or server state")
+    token = forge(keyring, header={"kid": "k1." + "1" * 11})
+    codec = tk.AccessTokenCodec(keyring, forbidden, issuer=ISSUER,
+                                audience=AUDIENCE, scopes=[SCOPE], clock=lambda: NOW)
+    monkeypatch.setattr(codec, '_key', forbidden)
+    with pytest.raises(tk.AccessTokenInvalid):
+        codec.decode(token)
+
+
 def codec_for(keyring: Keyring, epoch: Epoch, now: float = NOW) -> tk.AccessTokenCodec:
     return tk.AccessTokenCodec(
         keyring, epoch, issuer=ISSUER, audience=AUDIENCE, scopes=[SCOPE], clock=lambda: now

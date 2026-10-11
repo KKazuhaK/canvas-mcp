@@ -221,14 +221,22 @@ class AccessTokenCodec:
         if not isinstance(raw_kid, str):
             raise AccessTokenInvalid
         kid, _, epoch_text = raw_kid.rpartition(".")
-        if not kid or not epoch_text.isdigit() or kid not in self._keyring.key_ids:
+        if (
+            not kid
+            or not 1 <= len(epoch_text) <= 10
+            or not epoch_text.isascii()
+            or not epoch_text.isdigit()
+            or kid not in self._keyring.key_ids
+        ):
             raise AccessTokenInvalid
         epoch = int(epoch_text)
-        if epoch != self._epoch():
-            raise AccessTokenInvalid
         decoded = jwt.decode(token, self._key(kid, epoch), algorithms=[ALGORITHM])
         claims = dict(decoded.claims)
         self._check_claims(claims)
+        # Unauthenticated input must never cause a database checkout. Check the
+        # bounded header, signature and all claims before consulting server state.
+        if epoch != self._epoch():
+            raise AccessTokenInvalid
         return claims
 
     def _check_claims(self, claims: dict[str, Any]) -> None:
