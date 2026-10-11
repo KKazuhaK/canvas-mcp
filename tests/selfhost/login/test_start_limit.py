@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -42,7 +43,11 @@ def test_the_backstop_still_refuses_once_the_pending_ceremonies_reach_it(
         # The bucket runs on the shared test clock (real time plus an offset); drain it in one go.
         while bucket.take() == 0:
             pass
-        assert ps.person().get("/auth/login/github").status_code == 429
+        refused = ps.person().get("/auth/login/github")
+        assert refused.status_code == 303
+        assert parse_qs(urlsplit(refused.headers["location"]).query)["error"] == [
+            "rate_limited"
+        ]
         # the other providers have their own bucket
         assert ps.person().get("/auth/login/google").status_code == 302
         ps.clock.advance(1)

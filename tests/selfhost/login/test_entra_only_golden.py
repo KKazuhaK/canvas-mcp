@@ -1,9 +1,4 @@
-"""An Entra-only deployment behaves exactly as it did before the other providers existed.
-
-Frozen facts about routes, the provider list, the redirect to Entra, the cookies, the callback's
-order of checks, the pages and the modules that are (not) loaded. They hold in ``entra_proxy`` mode
-and in ``local`` mode, with the server-rendered pages and with the single-page app.
-"""
+"""Entra-only v1 uses native ceremonies and mandatory React/API composition."""
 
 from __future__ import annotations
 
@@ -11,179 +6,168 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from canvas_mcp.core.selfhost import account_web as web
+from canvas_mcp.core.selfhost import account_core as web
+from canvas_mcp.core.selfhost.login.ceremony import FLOW_COOKIE
+from canvas_mcp.core.selfhost.login.routes import build_login_routes
 
 from ..authz.stack import ALICE, Browser, Stack
 
-LEGACY_PATHS = frozenset(
-    {
-        "/account",
-        "/auth/login",
-        "/auth/callback/entra",
-        "/account/token",
-        "/account/token/delete",
-        "/account/token/recheck",
-        "/account/logout",
-        "/account/admin",
-        "/account/admin/remove",
-        "/account/admin/disable",
-        "/account/admin/enable",
-        "/account/admin/invalidate",
-        "/account/admin/approve",
-        "/account/admin/deny",
-        "/account/admin/audit",
-        "/account/schools",
-        "/account/write-tools",
-    }
-)
-LOCAL_EXTRA = frozenset(
-    {"/account/consent", "/account/grants/revoke", "/account/admin/grants/revoke"}
-)
-TODAYS_PROVIDERS = {
-    "providers": [
-        {"id": "entra", "kind": "oidc", "name": "Microsoft", "icon": "microsoft", "start_url": "/auth/login"}
-    ],
-    "mcp_url": "https://canvas.example.test/mcp",
-}
 SESSION_KEYS = {"v", "acct", "pid", "name", "upn", "owner", "iat", "exp", "csrf", "ep"}
+LOGIN_PATHS = {
+    "/auth/login",
+    "/auth/login/{provider}",
+    "/auth/login/oidc/{slug}",
+    "/auth/callback/{provider}",
+    "/auth/callback/oidc/{slug}",
+}
 
 
 def account_app(stack: Stack) -> web.AccountCore:
-    """The account application behind the routes of a running stack (found on a route's endpoint)."""
-    for route in stack.mcp._additional_http_routes:
-        if getattr(route, "path", "") == "/auth/login":
-            endpoint = route.endpoint  # type: ignore[attr-defined]
-            names = endpoint.__code__.co_freevars
-            return endpoint.__closure__[names.index("self")].cell_contents  # type: ignore[no-any-return]
-    raise AssertionError("no /auth/login route")
+    """Find the registered core, preserving actual runtime configuration."""
+    route = next(
+        r for r in stack.mcp._additional_http_routes if r.path == "/auth/login"
+    )
+    handler = route.app.handler
+    cells = dict(zip(handler.__code__.co_freevars, handler.__closure__, strict=True))
+    app = cells["app"].cell_contents
+    assert isinstance(app, web.AccountCore)
+    return app
 
 
-def server_paths(stack: Stack) -> set[str]:
-    return {getattr(r, "path", "") for r in stack.mcp._additional_http_routes}
+def test_native_login_route_contract(entra_local: Stack):
+    app = account_app(entra_local)
+    assert {r.path for r in build_login_routes(app)} == LOGIN_PATHS
+    assert app.external.app is app and app.logins.providers.keys() == {"entra"}
 
 
-@pytest.fixture(params=["entra_proxy", "entra_local"])
-def either(request: pytest.FixtureRequest) -> Stack:
-    stack: Stack = request.getfixturevalue(request.param)
-    return stack
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/auth/login/google",
+        "/auth/login/github",
+        "/auth/login/oidc/unknown",
+        "/auth/callback/google",
+        "/auth/callback/oidc/unknown",
+    ],
+)
+def test_unknown_provider_creates_no_ceremony(entra_local: Stack, path):
+    response = entra_local.client.get(path)
+    assert response.status_code == 404
+    cookie = response.headers.get("set-cookie", "")
+    assert FLOW_COOKIE not in cookie or "Max-Age=0" in cookie
 
 
-class TestRoutes:
-    def test_the_legacy_route_table_is_exactly_todays(self, either: Stack) -> None:
-        app = account_app(either)
-        paths = {path for path, _ in app.route_table()}
-        expected = LEGACY_PATHS | (LOCAL_EXTRA if either.settings.authz_mode == "local" else frozenset())
-        assert paths == expected
-        for new in ("/auth/login/entra", "/auth/login/google", "/account/sign-in-methods"):
-            assert new not in server_paths(either)
-
-    def test_no_provider_route_exists(self, either: Stack) -> None:
-        for path in (
-            "/auth/login/entra", "/auth/login/google", "/auth/login/github",
-            "/auth/login/oidc/x", "/auth/callback/google", "/account/identities/link",
-            "/account/sign-in-methods",
-        ):
-            assert path not in server_paths(either)
-            assert either.client.get(path).status_code in (404, 405, 401), path
-
-    def test_react_keeps_exactly_the_two_sign_in_halves(self, entra_react: Stack) -> None:
-        app = account_app(entra_react)
-        assert {r.path for r in app.routes()} == {"/auth/login", "/auth/callback/entra"}  # type: ignore[attr-defined]
+def test_bare_login_selects_the_only_provider(entra_local: Stack):
+    response = entra_local.client.get("/auth/login")
+    assert (
+        response.status_code == 303
+        and response.headers["location"] == "/auth/login/entra"
+    )
 
 
-class TestProvidersAndFeatures:
-    def test_the_provider_list_is_todays_payload(self, entra_react: Stack) -> None:
-        assert entra_react.client.get("/api/v1/providers").json() == TODAYS_PROVIDERS
-
-    def test_identities_are_not_a_feature_and_the_api_has_no_identity_route(self, entra_react: Stack) -> None:
-        browser = Browser(entra_react, react=True)
-        browser.sign_in(ALICE)
-        me = browser.api("GET", "/me").json()
-        assert me["features"]["identities"] is False
-        assert browser.api("GET", "/me/identities").status_code == 404
+@pytest.mark.parametrize(
+    "path", ["/auth/login", "/auth/login/entra", "/auth/callback/entra"]
+)
+def test_browser_ceremonies_are_get_only(entra_local: Stack, path):
+    response = entra_local.client.post(path)
+    assert response.status_code == 405 and response.headers["allow"] == "GET"
+    assert response.headers["cache-control"] == "no-store"
 
 
-class TestTheEntraRedirectAndCookies:
-    def test_the_authorize_redirect(self, either: Stack) -> None:
-        response = either.new_client().get("/auth/login")
-        assert response.status_code == 302
-        location = urlsplit(response.headers["location"])
-        assert location.netloc == "login.microsoftonline.com"
-        assert location.path.endswith("/oauth2/v2.0/authorize")
-        query = {k: v[0] for k, v in parse_qs(location.query).items()}
-        assert set(query) == {
-            "client_id", "response_type", "redirect_uri", "response_mode", "scope", "state", "nonce",
-            "code_challenge", "code_challenge_method", "prompt",
+def test_provider_payload(entra_react: Stack):
+    body = entra_react.client.get("/api/v1/providers").json()
+    assert body["mcp_url"] == "https://canvas.example.test/mcp"
+    assert body["providers"] == [
+        {
+            "id": "entra",
+            "kind": "oidc",
+            "name": "Microsoft",
+            "icon": "microsoft",
+            "start_url": "/auth/login/entra",
         }
-        assert query["redirect_uri"] == "https://canvas.example.test/auth/callback/entra"
-        assert query["scope"] == "openid profile" and query["prompt"] == "select_account"
-        assert query["response_mode"] == "query" and query["code_challenge_method"] == "S256"
-        assert list(parse_qs(location.query)) == [
-            "client_id", "response_type", "redirect_uri", "response_mode", "scope", "state", "nonce",
-            "code_challenge", "code_challenge_method", "prompt",
-        ]
-
-    def test_the_login_cookie_payload_keys(self, either: Stack) -> None:
-        client = either.new_client()
-        response = client.get("/auth/login")
-        cookie = next(
-            h for h in response.headers.get_list("set-cookie") if h.startswith("__Host-cmcp_login=")
-        )
-        value = cookie.split(";", 1)[0].split("=", 1)[1]
-        codec = web._CookieCodec(either.settings.account_session_secret)
-        payload = codec.unseal("__Host-cmcp_login", value)
-        assert payload is not None and set(payload) == {"state", "nonce", "verifier", "iat"}
-        assert "__Host-cmcp_flow" not in str(response.headers)
-
-    def test_the_session_payload_keys(self, either: Stack) -> None:
-        browser = Browser(either)
-        browser.sign_in(ALICE)
-        value = browser.client.cookies.get("__Host-cmcp_session")
-        codec = web._CookieCodec(either.settings.account_session_secret)
-        payload = codec.unseal("__Host-cmcp_session", value)
-        assert payload is not None and set(payload) == SESSION_KEYS
-        assert payload["pid"] == "entra" and payload["v"] == 3
+    ]
 
 
-class TestCallbackOrder:
-    def test_state_is_checked_before_the_providers_error(self, either: Stack) -> None:
-        client = either.new_client()
-        client.get("/auth/login")
-        wrong = client.get("/auth/callback/entra", params={"error": "access_denied", "state": "forged"})
-        assert wrong.status_code == 400 and "invalid or expired" in wrong.text
-        client = either.new_client()
-        login = client.get("/auth/login")
-        state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
-        right = client.get("/auth/callback/entra", params={"error": "access_denied", "state": state})
-        assert right.status_code == 403 and "not completed" in right.text and "access_denied" in right.text
-
-    def test_the_callback_still_clears_the_login_cookie(self, either: Stack) -> None:
-        client = either.new_client()
-        client.get("/auth/login")
-        response = client.get("/auth/callback/entra", params={"state": "x"})
-        assert any(
-            h.startswith("__Host-cmcp_login=") and "Max-Age=0" in h
-            for h in response.headers.get_list("set-cookie")
-        )
+def test_identities_refuse_without_linking(entra_react: Stack):
+    browser = Browser(entra_react)
+    browser.sign_in(ALICE)
+    assert browser.api("GET", "/me").json()["features"]["identities"] is False
+    assert browser.api("GET", "/me/identities").status_code == 404
 
 
-class TestPages:
-    def test_the_signed_out_page_offers_microsoft_only(self, either: Stack) -> None:
-        page = either.client.get("/account")
-        assert "Sign in with Microsoft" in page.text and 'href="/auth/login"' in page.text
-        for other in ("Google", "GitHub", "providers", "pico"):
-            assert other not in page.text
-
-    def test_login_does_not_choose_anything(self, either: Stack) -> None:
-        assert either.new_client().get("/auth/login").status_code == 302
-
-    def test_the_identity_line_still_says_microsoft(self, either: Stack) -> None:
-        browser = Browser(either)
-        browser.sign_in(ALICE)
-        assert "Microsoft account: alice@example.test" in browser.get("/account").text
+@pytest.mark.parametrize(
+    "path", ["/account", "/account/", "/account/admin", "/account/sign-in-methods"]
+)
+def test_react_shell(entra_react: Stack, path):
+    response = entra_react.client.get(path)
+    assert response.status_code == 200 and '<div id="root"></div>' in response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
 
 
-def test_no_login_runtime_is_built(either: Stack) -> None:
-    assert account_app(either).logins is None
-    assert account_app(either).external is None
-    assert either.settings.login_providers.single and either.settings.entra_enabled
+def test_authorize_request_shape(entra_local: Stack):
+    response = entra_local.new_client().get("/auth/login/entra")
+    assert response.status_code == 302
+    location = urlsplit(response.headers["location"])
+    assert location.netloc == "login.microsoftonline.com"
+    assert location.path.endswith("/protocol/openid-connect/auth")
+    query = {k: v[0] for k, v in parse_qs(location.query).items()}
+    assert query["redirect_uri"] == "https://canvas.example.test/auth/callback/entra"
+    assert query["scope"] == "openid profile email" and query["prompt"] == "select_account"
+    assert (
+        query["response_mode"] == "query" and query["code_challenge_method"] == "S256"
+    )
+    assert len(query["state"]) >= 40 and len(query["nonce"]) >= 40
+
+
+def test_cookie_contains_binding_and_no_verifier(entra_local: Stack):
+    client = entra_local.new_client()
+    response = client.get("/auth/login/entra")
+    value = client.cookies.get(FLOW_COOKIE)
+    payload = web._CookieCodec(entra_local.settings.account_session_secret).unseal(
+        FLOW_COOKIE, value
+    )
+    assert payload is not None and set(payload) == {"v", "s", "b", "p", "pp", "iat"}
+    assert payload["p"] == "entra" and payload["pp"] == "sign_in"
+    cookie = response.headers["set-cookie"]
+    assert "HttpOnly" in cookie and "Secure" in cookie and "SameSite=lax" in cookie
+
+
+def test_session_names_native_account(entra_local: Stack):
+    browser = Browser(entra_local)
+    browser.sign_in(ALICE)
+    value = browser.client.cookies.get(web.SESSION_COOKIE)
+    payload = web._CookieCodec(entra_local.settings.account_session_secret).unseal(
+        web.SESSION_COOKIE, value
+    )
+    assert payload is not None and set(payload) == SESSION_KEYS
+    assert payload["pid"] == "entra" and payload["v"] == 3
+    assert (
+        payload["acct"] == entra_local.account_of(ALICE) and len(payload["acct"]) == 36
+    )
+    assert ALICE.oid not in value and ALICE.upn not in value
+
+
+@pytest.mark.parametrize(
+    ("state", "error", "expected"),
+    [
+        ("forged", "access_denied", "provider_error"),
+        ("", "access_denied", "provider_error"),
+        ("forged", None, "state_invalid"),
+    ],
+)
+def test_callback_refuses_before_exchange(entra_local: Stack, state, error, expected):
+    client = entra_local.new_client()
+    client.get("/auth/login/entra")
+    params = {"code": "unused", "state": state}
+    if error is not None:
+        params["error"] = error
+    response = client.get("/auth/callback/entra", params=params)
+    assert response.status_code == 303
+    assert parse_qs(urlsplit(response.headers["location"]).query)["error"] == [expected]
+    assert client.cookies.get(web.SESSION_COOKIE) is None
+    assert entra_local.idp.provider.counts["token"] == 0
+    assert any(
+        h.startswith(FLOW_COOKIE + "=") and "Max-Age=0" in h
+        for h in response.headers.get_list("set-cookie")
+    )

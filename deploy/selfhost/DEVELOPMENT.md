@@ -2,8 +2,9 @@
 
 This document records the original handoff inventory. For implementation and
 validation completed since that snapshot, read [V1-PROGRESS.md](V1-PROGRESS.md)
-and [B0-REVIEW.md](B0-REVIEW.md). The v1 work is still in progress; Docker and
-live staging validation are not complete. All schema upgrades, backups and
+and [B0-REVIEW.md](B0-REVIEW.md). The v1 work is still in progress. Both Docker
+architectures pass SQLite and PostgreSQL container smoke; the complete runtime
+matrix and live staging validation remain outstanding. All schema upgrades, backups and
 database transfer tooling are isolated under
 `src/canvas_mcp/core/selfhost/db/migrations/`. Its README describes the removal
 boundary, contract backups and concurrent-index recovery. See

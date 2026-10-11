@@ -10,18 +10,19 @@ sign-in:
   (an MCP payload) to ``http://``. ``PUBLIC_BASE_URL`` must be https and every
   URL is built from it, so the scheme is simply pinned to https here.
 * **Abuse limits.** ``POST /register`` (dynamic client registration) and
-  ``/authorize`` need no sign-in and each call writes files to the data
-  volume. They get a process-wide token bucket (the app cannot tell clients
+  ``/authorize`` need no sign-in and can create rows in the database.
+  They get a process-wide token bucket (the app cannot tell clients
   apart by IP: that is the reverse proxy's job, see the nginx example), a daily
   budget for registrations, and a size cap on the registration body.
-* **Cleanup.** At most once per interval, after such a request, expired OAuth
-  records are deleted from disk (the file store never does it on its own).
+* **Cleanup.** At most once per interval, traffic schedules bounded native
+  housekeeping. Expired ephemeral rows and retained OAuth records are culled
+  according to their individual policies.
 
-With ``authz_local`` (``SELFHOST_AUTH_MODE=local``) two more endpoints reach the
-database without a sign-in and get a bucket as well: ``POST /token`` and
+Two more endpoints reach the database without a sign-in and get a bucket as
+well: ``POST /token`` and
 ``POST /revoke``; and their bodies, like ``POST /authorize``, are capped at 16 KiB. ``HEAD
-/authorize`` is metered and answered with 405 there (the handler would otherwise treat a HEAD
-with a body as a full request). Without it nothing about these paths changes.
+/authorize`` is metered and answered with 405 (the handler would otherwise treat a HEAD
+with a body as a full request).
 """
 
 from __future__ import annotations
@@ -46,8 +47,8 @@ REVOKE_PATH = "/revoke"
 
 # Per-minute allowance for each of the two public endpoints (also the burst).
 PUBLIC_REQUESTS_PER_MINUTE = 30
-# Registrations per rolling day. Each one is a file that lives for
-# DCR_CLIENT_TTL_SECONDS, so this bounds the number of records on the volume.
+# Registrations per rolling day. Each native client has a bounded lifetime,
+# so this also bounds the number of retained database records.
 REGISTRATIONS_PER_DAY = 300
 # Dynamic client registration documents are tiny; anything bigger is abuse.
 MAX_REGISTER_BODY_BYTES = 16 * 1024

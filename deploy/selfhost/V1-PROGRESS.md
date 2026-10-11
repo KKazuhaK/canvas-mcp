@@ -346,3 +346,36 @@ and the first v1 tag remain outstanding.
   finds 3,597 tests with 16 removed-interface imports still failing. These ports
   and the complete runtime matrix remain required before merge/release. Real
   IdP/guest/Claude/multiday gates still follow the owner's deployment.
+
+## Native login and Docker PostgreSQL checkpoint
+
+- Read-only CI at `1fcd39f`,
+  [38148498544](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38148498544),
+  built amd64 and arm64 images and passed both SQLite and Compose-pinned
+  PostgreSQL container smoke on each. The disposable CI database has no
+  published port; the app loopback port is reachable over the CI bridge.
+  Production Compose retains its internal database network. No registry image
+  or tag was published.
+- Ported credential generation, public-edge limits, login-state contracts,
+  Entra-only native ceremonies, provider hardening and identity API tests.
+  Coverage retains delayed health verdicts, generation changes, cache purges,
+  strict Origin/CSRF, last-identity/last-owner protections, binding, callback
+  replay checks and membership lookup failures versus actual admission loss.
+  Browser failures now assert closed error redirects and absence of sessions.
+- Native housekeeping now uses the authorization runtime's wall clock. This
+  keeps expiration decisions consistent with grant/client creation, including
+  the injected clock in real-stack tests; rate limiting still uses monotonic
+  time. Legacy file-store cleanup assertions are replaced by native row limits
+  and the bounded housekeeping suite.
+- Combined SQLite checkpoint: 191 passed, 1 PostgreSQL-only skip. Locked
+  PostgreSQL equivalents: 136 plus 56 passed across two focused runs. Both
+  scratch runs stopped the server; their logs contain no deadlock. Source/tests
+  Ruff and Linux-target mypy pass (83 source files).
+- Whole self-host collection now finds 3,770 tests with 9 remaining imports of
+  removed account interfaces. Continuing beyond those collection errors exposes
+  additional old hash/storage/schema assertions in authorization suites. The
+  full runtime/CI matrix remains incomplete; focused and container results do
+  not satisfy it. Real IdP/guest/Claude/multiday acceptance and the first v1 tag
+  remain gated on the owner's staging deployment.
+- Upgrade, compatibility, backup and database transfer code remains isolated
+  in `db/migrations/`; its structural boundary checks pass on both backends.

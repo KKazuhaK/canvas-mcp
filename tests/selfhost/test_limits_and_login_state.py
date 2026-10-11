@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from canvas_mcp.core.selfhost import account_web, edge_guard, limits
+from canvas_mcp.core.selfhost import edge_guard, limits
 from canvas_mcp.core.selfhost.login_state import (
     InMemoryLoginStateStore,
     LoginStateStore,
@@ -63,12 +63,11 @@ class TestTokenBucketContract:
         assert bucket.take() == float("inf")
 
 
-class TestTheOldNamesStillResolve:
-    def test_account_web_and_edge_guard_keep_their_classes(self) -> None:
-        assert account_web._RateLimiter is limits.InMemorySlidingWindowLimiter
+class TestLimiterComposition:
+    def test_edge_guard_uses_the_shared_bucket(self) -> None:
         assert edge_guard.TokenBucket is limits.InMemoryTokenBucket
 
-    def test_the_guard_and_the_pages_build_their_limiters_from_the_factory(self) -> None:
+    def test_the_guard_builds_its_limiters_from_the_factory(self) -> None:
         built: list[str] = []
         base = limits.build_rate_limiters("memory")
 
@@ -86,7 +85,7 @@ class TestTheOldNamesStillResolve:
         edge_guard.SelfhostEdgeGuard(
             app, rate_limiters=limits.RateLimiters("test", window, bucket)
         )
-        assert built == ["bucket", "bucket", "bucket"]
+        assert built == ["bucket"] * 5
 
 
 @pytest.fixture
@@ -95,11 +94,15 @@ def store() -> InMemoryLoginStateStore:
 
 
 class TestLoginStateContract:
-    def test_the_in_memory_store_satisfies_the_protocol(self, store: InMemoryLoginStateStore) -> None:
+    def test_the_in_memory_store_satisfies_the_protocol(
+        self, store: InMemoryLoginStateStore
+    ) -> None:
         checked: LoginStateStore = store
         assert checked is store
 
-    async def test_a_payload_is_returned_exactly_once(self, store: InMemoryLoginStateStore) -> None:
+    async def test_a_payload_is_returned_exactly_once(
+        self, store: InMemoryLoginStateStore
+    ) -> None:
         state_id = await store.put("oidc", b"nonce+verifier", 60)
         assert await store.pop("oidc", state_id) == b"nonce+verifier"
         assert await store.pop("oidc", state_id) is None
@@ -108,13 +111,17 @@ class TestLoginStateContract:
         clock = Clock()
         store = InMemoryLoginStateStore(clock=clock)
         state_id = await store.put("oidc", b"x", 30)
-        assert await store.pop("other-kind", state_id) is None  # kind is part of the key
+        assert (
+            await store.pop("other-kind", state_id) is None
+        )  # kind is part of the key
         assert await store.pop("oidc", "never-issued") is None
         clock.now += 31
         assert await store.pop("oidc", state_id) is None  # expired
         assert await store.pop("oidc", state_id) is None  # and gone
 
-    async def test_ids_are_unguessable_and_unique(self, store: InMemoryLoginStateStore) -> None:
+    async def test_ids_are_unguessable_and_unique(
+        self, store: InMemoryLoginStateStore
+    ) -> None:
         ids = {await store.put("oidc", b"x", 60) for _ in range(200)}
         assert len(ids) == 200
         assert all(len(i) >= 40 for i in ids)
@@ -124,7 +131,9 @@ class TestLoginStateContract:
     ) -> None:
         for _ in range(20):
             state_id = await store.put("oidc", b"secret", 60)
-            results = await asyncio.gather(*(store.pop("oidc", state_id) for _ in range(16)))
+            results = await asyncio.gather(
+                *(store.pop("oidc", state_id) for _ in range(16))
+            )
             assert results.count(b"secret") == 1
             assert results.count(None) == 15
 
@@ -136,7 +145,13 @@ class TestLoginStateContract:
 
     @pytest.mark.parametrize(
         ("kind", "payload", "ttl"),
-        [("", b"x", 10), ("k", b"x", 0), ("k", b"x", -1), ("k", b"x", 10_000), ("k", b"x" * 5000, 10)],
+        [
+            ("", b"x", 10),
+            ("k", b"x", 0),
+            ("k", b"x", -1),
+            ("k", b"x", 10_000),
+            ("k", b"x" * 5000, 10),
+        ],
     )
     async def test_invalid_input_is_refused(
         self, store: InMemoryLoginStateStore, kind: str, payload: bytes, ttl: float
@@ -148,7 +163,9 @@ class TestLoginStateContract:
 class TestLoginStateBinding:
     """A state can belong to the browser that holds the secret behind ``binding_hash``."""
 
-    async def test_a_bound_state_needs_its_binding(self, store: InMemoryLoginStateStore) -> None:
+    async def test_a_bound_state_needs_its_binding(
+        self, store: InMemoryLoginStateStore
+    ) -> None:
         state_id = await store.put("mcp_txn", b"payload", 60, binding_hash="h1")
         assert await store.pop("mcp_txn", state_id) is None
         assert await store.pop("mcp_txn", state_id, binding_hash="h2") is None
@@ -169,7 +186,9 @@ class TestLoginStateBinding:
     async def test_peek_never_consumes(self, store: InMemoryLoginStateStore) -> None:
         state_id = await store.put("mcp_txn", b"payload", 60, binding_hash="h1")
         for _ in range(3):
-            assert await store.peek("mcp_txn", state_id, binding_hash="h1") == b"payload"
+            assert (
+                await store.peek("mcp_txn", state_id, binding_hash="h1") == b"payload"
+            )
         assert await store.pop("mcp_txn", state_id, binding_hash="h1") == b"payload"
 
     async def test_a_state_put_without_a_binding_is_popped_without_one(

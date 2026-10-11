@@ -19,7 +19,6 @@ from typing import Any
 import httpx
 import pytest
 from dbbackend import make_store as backend_store
-from dbbackend import raw_connection
 from fastmcp import Client, FastMCP
 from fastmcp.server.auth import AccessToken
 
@@ -44,19 +43,18 @@ from canvas_mcp.core.credentials import (
     set_request_token_state,
 )
 from canvas_mcp.core.selfhost import tool_gate
-from canvas_mcp.core.selfhost.principal_access import PrincipalAccessCache
+from canvas_mcp.core.selfhost.db.repos import Repositories
+from canvas_mcp.core.selfhost.mcp_state import MCP_READ, McpRead
 from canvas_mcp.core.selfhost.request_context import SelfhostRequestContextMiddleware
-from canvas_mcp.core.selfhost.schools import SchoolPolicy
+from canvas_mcp.core.selfhost.schools import School, SchoolPolicy
 from canvas_mcp.core.selfhost.token_health import TokenHealth
 from canvas_mcp.core.selfhost.token_store import (
     DISABLE_REASON_OPERATOR,
     OPERATOR,
     REASON_CANVAS_TOKEN_REJECTED,
-    SCHEMA_VERSION,
     STATUS_ACTIVE,
     STATUS_INVALID,
     Keyring,
-    PrincipalStatus,
     TokenStore,
 )
 from canvas_mcp.core.selfhost.tool_gate import SelfhostCredentialGate
@@ -68,24 +66,25 @@ from .conftest import (
     OID_B,
     TENANT,
     acct_key,
-    identity_service,
     make_principal,
     store_put,
 )
 from .test_request_context import (
     ACCOUNT_URL,
-    CANVAS_URL,
+    GRANT,
     Probe,
     _claims,
+    _middleware,
     _run,
     _user,
+    native_snapshot,
 )
 
 KEY_A = acct_key(OID_A)
 KEY_B = acct_key(OID_B)
 TOKEN_1 = "canvas-token-first-0123456789abcdef"
 TOKEN_2 = "canvas-token-second-0123456789abcdef"
-HOST = "canvas.example.test"
+HOST = "canvas.example.edu"
 API_URL = f"https://{HOST}/api/v1"
 
 
@@ -96,11 +95,23 @@ def make_store(tmp_path: pathlib.Path, name: str = "t.sqlite3") -> TokenStore:
     return store
 
 
-def put(store: TokenStore, token: str = TOKEN_1, oid: str = OID_A, *, user: str = "1",
-        host: str = HOST) -> Any:
-    return store_put(store,
-        tenant_id=TENANT, object_id=oid, api_token=token, canvas_user_id=user,
-        canvas_user_name=f"user {user}", entra_display_name="n", entra_upn="n@example.test",
+def put(
+    store: TokenStore,
+    token: str = TOKEN_1,
+    oid: str = OID_A,
+    *,
+    user: str = "1",
+    host: str = HOST,
+) -> Any:
+    return store_put(
+        store,
+        tenant_id=TENANT,
+        object_id=oid,
+        api_token=token,
+        canvas_user_id=user,
+        canvas_user_name=f"user {user}",
+        entra_display_name="n",
+        entra_upn="n@example.test",
         canvas_host=host,
     )
 
@@ -109,7 +120,9 @@ def put(store: TokenStore, token: str = TOKEN_1, oid: str = OID_A, *, user: str 
 
 
 class TestStoreGenerations:
-    def test_a_principal_that_never_changed_is_at_generation_zero(self, tmp_path: pathlib.Path) -> None:
+    def test_a_principal_that_never_changed_is_at_generation_zero(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         store = make_store(tmp_path)
         assert store.credential_generation(KEY_A) == 0
         assert store.get_principal_status(KEY_A).credential_generation == 0
@@ -121,14 +134,18 @@ class TestStoreGenerations:
         store = make_store(tmp_path)
         seen = [put(store).credential_generation]
         seen.append(put(store).credential_generation)  # the very same token again
-        seen.append(put(store, TOKEN_2, user="2").credential_generation)  # another Canvas user
+        seen.append(
+            put(store, TOKEN_2, user="2").credential_generation
+        )  # another Canvas user
         assert store.delete(KEY_A) is True
         seen.append(store.credential_generation(KEY_A))
         seen.append(put(store).credential_generation)  # enrolling again after deleting
         assert seen == [1, 2, 3, 4, 5]
         assert store.credential_generation(KEY_B) == 0  # other principals are untouched
 
-    def test_deleting_nothing_and_a_no_op_do_not_raise_it(self, tmp_path: pathlib.Path) -> None:
+    def test_deleting_nothing_and_a_no_op_do_not_raise_it(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         store = make_store(tmp_path)
         assert store.delete(KEY_A) is False
         assert store.mark_invalid(KEY_A, reason=REASON_CANVAS_TOKEN_REJECTED) is False
@@ -138,7 +155,9 @@ class TestStoreGenerations:
         assert store.restore_active(KEY_A) is False  # already active
         assert store.credential_generation(KEY_A) == 1
 
-    def test_dying_and_coming_back_to_life_are_new_generations(self, tmp_path: pathlib.Path) -> None:
+    def test_dying_and_coming_back_to_life_are_new_generations(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         store = make_store(tmp_path)
         put(store)
         assert store.mark_invalid(KEY_A, reason=REASON_CANVAS_TOKEN_REJECTED) is True
@@ -152,7 +171,9 @@ class TestStoreGenerations:
         put(store)
         store.disable_principal(KEY_A, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)
         assert store.get_principal_status(KEY_A).credential_generation == 2
-        store.disable_principal(KEY_A, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)  # no-op
+        store.disable_principal(
+            KEY_A, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR
+        )  # no-op
         assert store.credential_generation(KEY_A) == 2
         store.enable_principal(KEY_A, actor=OPERATOR)
         assert store.credential_generation(KEY_A) == 3
@@ -160,7 +181,9 @@ class TestStoreGenerations:
         row = store.get(KEY_A)
         assert row is not None and row.credential_generation == 3
 
-    def test_the_token_and_its_generation_are_read_together(self, tmp_path: pathlib.Path) -> None:
+    def test_the_token_and_its_generation_are_read_together(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         store = make_store(tmp_path)
         put(store)
         first = store.get(KEY_A)
@@ -171,9 +194,11 @@ class TestStoreGenerations:
         assert (second.api_token, second.credential_generation) == (TOKEN_2, 2)
         info = store.info(KEY_A)
         assert info is not None and info.credential_generation == 2
-        assert [e.credential_generation for e in store.list_enrollments()] == [2]
+        assert [e.credential_generation for e in store.iter_enrollments()] == [2]
 
-    def test_it_survives_a_restart_and_a_deleted_row(self, tmp_path: pathlib.Path) -> None:
+    def test_it_survives_a_restart_and_a_deleted_row(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         store = make_store(tmp_path)
         put(store)
         store.delete(KEY_A)
@@ -181,7 +206,9 @@ class TestStoreGenerations:
         assert reopened.credential_generation(KEY_A) == 2
         assert put(reopened).credential_generation == 3
 
-    def test_concurrent_enrollments_never_share_a_generation(self, tmp_path: pathlib.Path) -> None:
+    def test_concurrent_enrollments_never_share_a_generation(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         store = make_store(tmp_path)
         results: list[int] = []
         lock = threading.Lock()
@@ -200,24 +227,34 @@ class TestStoreGenerations:
         final = store.get(KEY_A)
         assert final is not None and final.credential_generation == 8
 
-    def test_a_late_verdict_about_a_replaced_token_changes_nothing(self, tmp_path: pathlib.Path) -> None:
+    def test_a_late_verdict_about_a_replaced_token_changes_nothing(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         store = make_store(tmp_path)
         old = put(store)
-        put(store, TOKEN_2, user="2")  # replaced in the same second: updated_at is equal
+        put(
+            store, TOKEN_2, user="2"
+        )  # replaced in the same second: updated_at is equal
         assert old.updated_at == store.info(KEY_A).updated_at  # type: ignore[union-attr]
-        assert store.mark_invalid(
-            KEY_A,
-            reason=REASON_CANVAS_TOKEN_REJECTED,
-            expected_updated_at=old.updated_at,
-            expected_generation=old.credential_generation,
-        ) is False
+        assert (
+            store.mark_invalid(
+                KEY_A,
+                reason=REASON_CANVAS_TOKEN_REJECTED,
+                expected_updated_at=old.updated_at,
+                expected_generation=old.credential_generation,
+            )
+            is False
+        )
         row = store.info(KEY_A)
         assert row is not None and row.status == STATUS_ACTIVE
         assert store.credential_generation(KEY_A) == 2  # and it did not raise it
         # The same call for the current generation does take effect.
-        assert store.mark_invalid(
-            KEY_A, reason=REASON_CANVAS_TOKEN_REJECTED, expected_generation=2
-        ) is True
+        assert (
+            store.mark_invalid(
+                KEY_A, reason=REASON_CANVAS_TOKEN_REJECTED, expected_generation=2
+            )
+            is True
+        )
 
     def test_a_late_restore_or_success_about_a_replaced_token_changes_nothing(
         self, tmp_path: pathlib.Path
@@ -227,46 +264,15 @@ class TestStoreGenerations:
         store.mark_invalid(KEY_A, reason=REASON_CANVAS_TOKEN_REJECTED)
         generation_when_checked = store.credential_generation(KEY_A)
         put(store, TOKEN_2, user="2")  # replaced while the re-check was running
-        assert store.restore_active(KEY_A, expected_generation=generation_when_checked) is False
+        assert (
+            store.restore_active(KEY_A, expected_generation=generation_when_checked)
+            is False
+        )
         before = store.info(KEY_A)
         assert before is not None
         store.mark_verified(KEY_A, min_interval_seconds=0, expected_generation=1)
         after = store.info(KEY_A)
         assert after == before
-
-
-class TestMigration:
-    @pytest.mark.sqlite_only
-    def test_a_version_3_database_gains_the_table_and_starts_at_zero(
-        self, tmp_path: pathlib.Path
-    ) -> None:
-        from . import legacy_schemas as legacy
-
-        path = tmp_path / "t.sqlite3"
-        legacy.build(path, "v3")  # a release before the generation table existed
-        migrated = TokenStore(path, legacy.keyring())
-        migrated.initialize()
-        with raw_connection(migrated) as conn:
-            version = conn.execute(
-                "SELECT value FROM meta WHERE key = 'schema_version'"
-            ).fetchone()[0]
-        assert version == str(SCHEMA_VERSION) == "5"
-        key = migrated.resolve_legacy_key(legacy.KEY_B)
-        assert key is not None
-        row = migrated.get(key)
-        assert row is not None and row.api_token == legacy.TOKEN_B and row.credential_generation == 0
-        # The first change after the upgrade is generation 1, and it only grows.
-        assert migrated.mark_invalid(key, reason=REASON_CANVAS_TOKEN_REJECTED) is True
-        assert migrated.credential_generation(key) == 1
-        assert TokenStore(path, legacy.keyring()).credential_generation(key) == 1
-
-    def test_an_older_server_refuses_the_new_database(self, tmp_path: pathlib.Path) -> None:
-        # A version 3 server would save tokens without raising any generation.
-        with raw_connection(make_store(tmp_path)) as conn:
-            version = int(conn.execute(
-                "SELECT value FROM meta WHERE key = 'schema_version'"
-            ).fetchone()[0])
-        assert version > 3
 
 
 # ---------------------------------------------------------------- the process registry
@@ -275,7 +281,9 @@ class TestMigration:
 class TestRegistry:
     def test_it_only_ever_raises_and_reports_news(self) -> None:
         assert known_credential_generation(KEY_A) is None
-        assert note_credential_generation(KEY_A, 3) is False  # first sighting: nothing older
+        assert (
+            note_credential_generation(KEY_A, 3) is False
+        )  # first sighting: nothing older
         assert note_credential_generation(KEY_A, 3) is False
         assert note_credential_generation(KEY_A, 2) is False
         assert known_credential_generation(KEY_A) == 3
@@ -286,7 +294,9 @@ class TestRegistry:
         calls: list[tuple[str, int]] = []
         listener = lambda key: calls.append((key, threading.get_ident()))  # noqa: E731
         register_credential_purge_listener(listener)
-        register_credential_purge_listener(listener)  # registering twice does not double it
+        register_credential_purge_listener(
+            listener
+        )  # registering twice does not double it
         note_credential_generation(KEY_A, 1)
         note_credential_generation(KEY_A, 2)
         note_credential_generation(KEY_A, 3)
@@ -313,7 +323,9 @@ class TestRegistry:
         run_pending_credential_purges()
         assert KEY_A in calls
 
-    def test_the_store_reports_each_committed_change(self, tmp_path: pathlib.Path) -> None:
+    def test_the_store_reports_each_committed_change(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         store = make_store(tmp_path)
         put(store)
         assert known_credential_generation(KEY_A) == 1
@@ -339,7 +351,9 @@ class TestRegistry:
 # --------------------------------------------------------------------------- the key
 
 
-def as_user(oid: str, generation: int | None, token: str = TOKEN_1, api_url: str = API_URL) -> None:
+def as_user(
+    oid: str, generation: int | None, token: str = TOKEN_1, api_url: str = API_URL
+) -> None:
     set_http_request_active(True)
     set_request_principal(make_principal(oid))
     set_request_credentials(RequestCredentials(api_token=token, api_url=api_url))
@@ -353,7 +367,9 @@ class TestKey:
         assert key == f"{KEY_A}|{API_URL}|g3"
         assert TOKEN_1 not in key
 
-    def test_same_identity_same_school_same_token_text_different_generation(self) -> None:
+    def test_same_identity_same_school_same_token_text_different_generation(
+        self,
+    ) -> None:
         as_user(OID_A, 1)
         first = current_principal_key()
         as_user(OID_A, 2)  # the user re-enrolled the very same token
@@ -376,7 +392,9 @@ COURSES_B = [{"id": 909, "course_code": "BIO 1", "name": "Biology"}]
 
 
 class TestCourseCache:
-    async def test_a_replaced_token_never_sees_the_old_courses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_a_replaced_token_never_sees_the_old_courses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         lists = {TOKEN_1: COURSES_A, TOKEN_2: COURSES_B}
         reads: list[str] = []
 
@@ -443,7 +461,9 @@ class TestCourseCache:
         assert fresh is not old_state
         assert fresh.records == [] and fresh.code_to_id == {}
 
-    async def test_a_request_on_a_replaced_token_cannot_fill_the_new_cache(self) -> None:
+    async def test_a_request_on_a_replaced_token_cannot_fill_the_new_cache(
+        self,
+    ) -> None:
         as_user(OID_A, 1)
         note_credential_generation(KEY_A, 1)
         note_credential_generation(KEY_A, 2)  # replaced while this request runs
@@ -495,12 +515,19 @@ class TestPolicyCache:
     def test_the_purge_listener_drops_the_decisions_of_every_generation(self) -> None:
         for principal, generation in ((OID_A, 1), (OID_A, 2), (OID_B, 1)):
             as_user(principal, generation)
-            course_policy._policy_cache[(current_principal_key(), "7")] = (float("inf"), None)  # type: ignore[assignment]
+            course_policy._policy_cache[(current_principal_key(), "7")] = (
+                float("inf"),
+                None,
+            )  # type: ignore[assignment]
         note_credential_generation(KEY_A, 1)
         note_credential_generation(KEY_A, 5)
         run_pending_credential_purges()
-        assert [k[0] for k in course_policy._policy_cache if k[0].startswith(KEY_A)] == []
-        assert [k[0] for k in course_policy._policy_cache if k[0].startswith(KEY_B)] != []
+        assert [
+            k[0] for k in course_policy._policy_cache if k[0].startswith(KEY_A)
+        ] == []
+        assert [
+            k[0] for k in course_policy._policy_cache if k[0].startswith(KEY_B)
+        ] != []
 
 
 class TestPseudonymsAndHints:
@@ -514,11 +541,17 @@ class TestPseudonymsAndHints:
         note_credential_generation(KEY_A, 1)
         note_credential_generation(KEY_A, 2)
         run_pending_credential_purges()
-        assert [k for k in anonymization._anonymization_cache if k.startswith(KEY_A)] == []
+        assert [
+            k for k in anonymization._anonymization_cache if k.startswith(KEY_A)
+        ] == []
 
-    def test_discussion_hints_learned_under_one_token_are_not_used_under_the_next(self) -> None:
+    def test_discussion_hints_learned_under_one_token_are_not_used_under_the_next(
+        self,
+    ) -> None:
         as_user(OID_A, 1)
-        discussions._unservable_topics[(current_principal_key(), "/courses/1", "5")] = float("inf")
+        discussions._unservable_topics[(current_principal_key(), "/courses/1", "5")] = (
+            float("inf")
+        )
         assert discussions._is_known_unservable("/courses/1", 5)
         as_user(OID_A, 2)
         assert not discussions._is_known_unservable("/courses/1", 5)
@@ -542,7 +575,10 @@ class TestPendingConfirmations:
         as_user(OID_A, 4)
         token, fingerprint = self.preview(guard)
         as_user(OID_A, 4)  # a later request of the same user
-        assert guard.check(token, guard.fingerprint("delete_page", "course-1", "page-9")) is None
+        assert (
+            guard.check(token, guard.fingerprint("delete_page", "course-1", "page-9"))
+            is None
+        )
         assert fingerprint == guard.fingerprint("delete_page", "course-1", "page-9")
 
     @pytest.mark.parametrize(
@@ -565,15 +601,21 @@ class TestPendingConfirmations:
         assert "Canvas connection changed" in refusal
         # The mismatch burned the token: going back does not bring it back.
         as_user(OID_A, 4)
-        again = guard.check(token, guard.fingerprint("delete_page", "course-1", "page-9"))
+        again = guard.check(
+            token, guard.fingerprint("delete_page", "course-1", "page-9")
+        )
         assert again is not None and "already used" in again
 
-    def test_removal_disablement_and_death_also_void_a_preview(self, tmp_path: pathlib.Path) -> None:
+    def test_removal_disablement_and_death_also_void_a_preview(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         store = make_store(tmp_path)
         guard = ConfirmationGuard()
         for change in (
             lambda: store.delete(KEY_A),
-            lambda: store.disable_principal(KEY_A, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR),
+            lambda: store.disable_principal(
+                KEY_A, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR
+            ),
             lambda: store.enable_principal(KEY_A, actor=OPERATOR),
             lambda: store.mark_invalid(KEY_A, reason=REASON_CANVAS_TOKEN_REJECTED),
         ):
@@ -582,7 +624,9 @@ class TestPendingConfirmations:
             token, _ = self.preview(guard)
             change()
             as_user(OID_A, store.credential_generation(KEY_A))
-            assert guard.check(token, guard.fingerprint("delete_page", "course-1", "page-9"))
+            assert guard.check(
+                token, guard.fingerprint("delete_page", "course-1", "page-9")
+            )
 
 
 # ---------------------------------------------------------------------- token health
@@ -592,7 +636,9 @@ def probing_health(store: TokenStore, handler: Any) -> TokenHealth:
     return TokenHealth(
         store,
         account_url=ACCOUNT_URL,
-        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        client_factory=lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ),
     )
 
 
@@ -607,15 +653,24 @@ class TestTokenHealthVerdicts:
         store = make_store(tmp_path)
         info = put(store)
         answers = iter([200, 200])
-        health = probing_health(store, lambda request: httpx.Response(next(answers), json={}))
-        assert await health.confirm_dead_token(KEY_A, creds(), info.updated_at, 1) is None
+        health = probing_health(
+            store, lambda request: httpx.Response(next(answers), json={})
+        )
+        assert (
+            await health.confirm_dead_token(KEY_A, creds(), info.updated_at, 1) is None
+        )
         assert health.probe_count == 1
         # Inside the cooldown, the same generation reuses the verdict ...
-        assert await health.confirm_dead_token(KEY_A, creds(), info.updated_at, 1) is None
+        assert (
+            await health.confirm_dead_token(KEY_A, creds(), info.updated_at, 1) is None
+        )
         assert health.probe_count == 1
         # ... and a replacement within the same second (same updated_at) does not.
         put(store, TOKEN_2, user="2")
-        assert await health.confirm_dead_token(KEY_A, creds(TOKEN_2), info.updated_at, 2) is None
+        assert (
+            await health.confirm_dead_token(KEY_A, creds(TOKEN_2), info.updated_at, 2)
+            is None
+        )
         assert health.probe_count == 2
 
     async def test_a_probe_of_the_old_token_that_finishes_after_replacement_invalidates_nothing(
@@ -682,8 +737,36 @@ class RealStore:
     def __init__(self, inner: TokenStore) -> None:
         self.inner = inner
 
-    def get(self, principal_key: str) -> Any:
-        return self.inner.get(principal_key)
+    def snapshot(self, key):
+        status = self.inner.get_principal_status(key)
+        with self.inner.database.read() as conn:
+            row = Repositories(self.inner.database.kind).credentials.primary(conn, key)
+        values = {
+            "status": status.status,
+            "role": status.role,
+            "credential_generation": status.credential_generation,
+        }
+        if row is None:
+            return native_snapshot(
+                **values, credential_id=None, canvas_host=None, generation=None
+            )
+        return native_snapshot(
+            **values,
+            credential_id=row.id,
+            canvas_host=row.canvas_host,
+            kind=row.kind,
+            generation=row.generation,
+            key_id=row.key_id,
+            nonce=row.nonce,
+            ciphertext=row.ciphertext,
+            credential_status=row.status,
+            invalid_reason=row.invalid_reason,
+            credential_updated_at=row.updated_at,
+            custody_notice_version=row.custody_notice_version,
+        )
+
+    def decrypt_snapshot(self, key, snapshot):
+        return self.inner.decrypt_snapshot(key, snapshot)
 
     def touch(self, principal_key: str, *, min_interval_seconds: int = 300) -> None:
         self.inner.touch(principal_key, min_interval_seconds=min_interval_seconds)
@@ -693,28 +776,30 @@ class GenerationProbe(Probe):
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         state = get_request_token_state()
         self.seen_generation = get_request_credential_generation()
-        self.seen_state_generation = state.credential_generation if state is not None else None
+        self.seen_state_generation = (
+            state.credential_generation if state is not None else None
+        )
         self.seen_stale = request_credential_is_stale()
         self.seen_cache_key = current_principal_key()
         await super().__call__(scope, receive, send)
 
 
 class TestMiddlewarePublishesTheGeneration:
-    def build(self, store: TokenStore, probe: Probe) -> SelfhostRequestContextMiddleware:
-        return SelfhostRequestContextMiddleware(
+    def build(
+        self, store: TokenStore, probe: Probe
+    ) -> SelfhostRequestContextMiddleware:
+        return _middleware(
             probe,
-            mcp_path="/mcp",
-            identity=identity_service(store),
-            store=RealStore(store),
-            schools=SchoolPolicy.pinned(CANVAS_URL),
-            account_url=ACCOUNT_URL,
+            RealStore(store),
+            SchoolPolicy(featured=(School(HOST, API_URL, HOST),), search_enabled=False),
+            course_state="per_principal",
         )
 
     async def test_each_request_carries_the_generation_its_token_was_read_under(
         self, tmp_path: pathlib.Path
     ) -> None:
         store = make_store(tmp_path)
-        put(store, host="canvas.example.test")
+        put(store, host="canvas.example.edu")
         probe = GenerationProbe()
         mw = self.build(store, probe)
         await _run(mw, user=_user(_claims()))
@@ -722,11 +807,13 @@ class TestMiddlewarePublishesTheGeneration:
         assert probe.seen_cache_key.endswith("|g1") and probe.seen_stale is False
         first_key = probe.seen_cache_key
 
-        put(store, TOKEN_2, user="2", host="canvas.example.test")
+        put(store, TOKEN_2, user="2", host="canvas.example.edu")
         await _run(mw, user=_user(_claims()))
         assert probe.seen_generation == 2
         assert probe.seen["creds"].api_token == TOKEN_2
-        assert probe.seen_cache_key != first_key and probe.seen_cache_key.endswith("|g2")
+        assert probe.seen_cache_key != first_key and probe.seen_cache_key.endswith(
+            "|g2"
+        )
         # Nothing of the request outlives it.
         assert get_request_credential_generation() is None
 
@@ -734,7 +821,7 @@ class TestMiddlewarePublishesTheGeneration:
         self, tmp_path: pathlib.Path
     ) -> None:
         store = make_store(tmp_path)
-        put(store, host="canvas.example.test")
+        put(store, host="canvas.example.edu")
         probe = GenerationProbe()
         mw = self.build(store, probe)
         await _run(mw, user=_user(_claims()))
@@ -742,7 +829,7 @@ class TestMiddlewarePublishesTheGeneration:
         cache.current_cache_state().code_to_id["ICS 33"] = "101"
         assert any("g1" in k for k in cache._STATES)
 
-        put(store, TOKEN_2, user="2", host="canvas.example.test")
+        put(store, TOKEN_2, user="2", host="canvas.example.edu")
         await _run(mw, user=_user(_claims()))
         assert not any(k.startswith(KEY_A) for k in cache._STATES)
 
@@ -750,7 +837,7 @@ class TestMiddlewarePublishesTheGeneration:
         self, tmp_path: pathlib.Path
     ) -> None:
         store = make_store(tmp_path)
-        put(store, host="canvas.example.test")
+        put(store, host="canvas.example.edu")
         store.mark_invalid(KEY_A, reason=REASON_CANVAS_TOKEN_REJECTED)
         probe = GenerationProbe()
         await _run(self.build(store, probe), user=_user(_claims()))
@@ -761,7 +848,7 @@ class TestMiddlewarePublishesTheGeneration:
         self, tmp_path: pathlib.Path
     ) -> None:
         store = make_store(tmp_path)
-        put(store, host="canvas.example.test")
+        put(store, host="canvas.example.edu")
         probe = GenerationProbe()
         mw = self.build(store, probe)
         await _run(mw, user=_user(_claims()))
@@ -781,9 +868,6 @@ class SourceAt:
     def __init__(self, generation: int) -> None:
         self.generation = generation
 
-    def get_principal_status(self, principal_key: str) -> PrincipalStatus:
-        return PrincipalStatus(principal_key, credential_generation=self.generation)
-
 
 class Ran:
     count = 0
@@ -792,7 +876,16 @@ class Ran:
 def gate_server(source: SourceAt, monkeypatch: pytest.MonkeyPatch) -> FastMCP:
     Ran.count = 0
     mcp = FastMCP("generation-gate-test")
-    mcp.add_middleware(SelfhostCredentialGate(access=PrincipalAccessCache(source)))
+    mcp.add_middleware(SelfhostCredentialGate())
+    MCP_READ.set(
+        McpRead(
+            KEY_A,
+            GRANT,
+            native_snapshot(
+                credential_generation=source.generation, generation=source.generation
+            ),
+        )
+    )
 
     @mcp.tool()
     def get_my_profile() -> str:
@@ -803,7 +896,12 @@ def gate_server(source: SourceAt, monkeypatch: pytest.MonkeyPatch) -> FastMCP:
     monkeypatch.setattr(
         tool_gate,
         "get_access_token",
-        lambda: AccessToken(token="t", client_id="c", scopes=[], claims={"tid": TENANT, "oid": OID_A}),
+        lambda: AccessToken(
+            token="t",
+            client_id="c",
+            scopes=[],
+            claims=_claims(iss="https://canvas.example.test"),
+        ),
     )
     return mcp
 
@@ -827,7 +925,9 @@ class TestGate:
             mcp = gate_server(SourceAt(store_generation), monkeypatch)
             as_user(OID_A, 2)
             async with Client(mcp) as client:
-                result = await client.call_tool("get_my_profile", {}, raise_on_error=False)
+                result = await client.call_tool(
+                    "get_my_profile", {}, raise_on_error=False
+                )
             assert not result.is_error and Ran.count == 1
 
     async def test_a_request_without_a_generation_is_not_judged_by_it(
@@ -843,5 +943,9 @@ class TestGate:
 @pytest.fixture(autouse=True)
 def fresh_registry() -> Any:
     reset_credential_generations()
-    yield
-    reset_credential_generations()
+    marker = MCP_READ.set(None)
+    try:
+        yield
+    finally:
+        reset_credential_generations()
+        MCP_READ.reset(marker)

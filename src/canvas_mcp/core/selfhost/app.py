@@ -516,7 +516,9 @@ def build_selfhost_asgi_app(
     )
 
     runner = MaintenanceRunner(
-        runtime.store.database, cimd_stale_max=settings.authz.cimd_stale_max
+        runtime.store.database,
+        cimd_stale_max=settings.authz.cimd_stale_max,
+        now=runtime.authz.clock,
     )
 
     async def maintenance() -> None:
