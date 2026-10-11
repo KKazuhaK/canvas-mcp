@@ -29,19 +29,37 @@ Rule grammar (checked at startup; anything else refuses to start)::
                                     overage never matches; Graph is never called)
     entra:tenant:<tenant id>        the token's ``tid`` (must be the configured tenant)
 
-``google:``, ``github:`` and ``oidc:`` rules are recognised and refused until those
-providers are enabled.
+Further providers (``SELFHOST_LOGIN_PROVIDERS``, ``SELFHOST_AUTH_MODE=local`` only) add::
+
+    google:domain:<hd>              the id token's ``hd`` claim, with a verified e-mail
+    google:email:<address>          a verified e-mail address (exact, lower case)
+    github:user:<numeric id>        the immutable GitHub user id
+    github:org:<org>                an active member of the organisation
+    github:team:<org>/<team slug>   an active member of the team (child teams count)
+    oidc:<slug>:claim:<name>=<value>  the claim is that string, or a list holding it
+    oidc:<slug>:email:<address>     a verified e-mail address (exact, lower case)
+    oidc:<slug>:any                 everybody who signs in through that provider
+
+A rule of a provider that ``SELFHOST_LOGIN_PROVIDERS`` does not list refuses to start.
+``OWNER_RULES`` stay Entra-only: Google, GitHub and generic OIDC can never make an owner
+through what the identity provider says (the bootstrap owner and the operator CLI can).
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
 PROVIDER_ENTRA = "entra"
+PROVIDER_GOOGLE = "google"
+PROVIDER_GITHUB = "github"
+#: Generic OpenID Connect providers are ``oidc:<slug>``.
+PROVIDER_OIDC_PREFIX = "oidc:"
 ENTRA_ISSUER_PREFIX = "https://login.microsoftonline.com/"
+GOOGLE_ISSUER = "https://accounts.google.com"
+GITHUB_ISSUER = "https://github.com"
 
 ACCOUNT_KEY_PREFIX = "acct:"
 
@@ -76,7 +94,7 @@ ADMITTED_VIA = (
     ADMITTED_OPERATOR,
     ADMITTED_BOOTSTRAP,
 )
-_PERSONAL_ADMISSION = frozenset({ADMITTED_APPROVAL, ADMITTED_OPERATOR, ADMITTED_BOOTSTRAP})
+PERSONAL_ADMISSION = frozenset({ADMITTED_APPROVAL, ADMITTED_OPERATOR, ADMITTED_BOOTSTRAP})
 
 POLICY_OPEN = "open"
 POLICY_RULES = "rules"
@@ -113,6 +131,10 @@ REASON_STATE_INVALID = "state_invalid"
 REASON_TOKEN_INVALID = "token_invalid"
 REASON_PROVIDER_ERROR = "provider_error"
 REASON_STORE_UNAVAILABLE = "store_unavailable"
+#: An identity was linked to an existing account from /account.
+REASON_IDENTITY_LINKED = "identity_linked"
+#: No rule matched and a GitHub organisation or team lookup was not possible (fail closed).
+REASON_MEMBERSHIP_UNAVAILABLE = "membership_unavailable"
 # Reasons of the ``oauth`` surface (the local authorization server).
 REASON_CONSENT_GRANTED = "consent_granted"
 REASON_CONSENT_DENIED = "consent_denied"
@@ -138,6 +160,8 @@ AUTH_REASONS = frozenset(
         REASON_TOKEN_INVALID,
         REASON_PROVIDER_ERROR,
         REASON_STORE_UNAVAILABLE,
+        REASON_IDENTITY_LINKED,
+        REASON_MEMBERSHIP_UNAVAILABLE,
         DENY_WRONG_TENANT,
         DENY_WRONG_CLIENT,
         DENY_BAD_SUBJECT,
@@ -169,6 +193,9 @@ EVENT_ACTIVATED = "activated"
 EVENT_OWNER_GAINED = "owner_gained"
 EVENT_OWNER_LOST = "owner_lost"
 EVENT_OWNER_LOSS_REFUSED = "owner_loss_refused_last_owner"
+#: An owner whose role no sign-in could use was re-sourced to ``bootstrap`` (it was an owner
+#: already, so this is not ``owner_gained``).
+EVENT_OWNER_RESOURCED = "owner_re_sourced"
 
 DENIAL_MESSAGES: dict[str, str] = {
     DENY_WRONG_TENANT: (
@@ -196,6 +223,11 @@ DENIAL_MESSAGES: dict[str, str] = {
     ),
     DENY_UNAVAILABLE: "Your access could not be verified right now. Try again in a moment.",
 }
+
+#: The refusal for an account of any provider but Entra (whose message names Microsoft).
+NEUTRAL_ACCESS_DENIED = (
+    "This account is not allowed to use this server. Ask the server owner for access."
+)
 
 _GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -245,6 +277,17 @@ class ExternalClaims:
     groups: frozenset[str] = frozenset()
     groups_overage: bool = False
     tenant_id: str = ""
+    #: Google: the ``hd`` claim of the id token (lower case); never the request hint.
+    hd: str = ""
+    #: GitHub: lower-case logins of the organisations (among those a rule names) the
+    #: person is an active member of.
+    orgs: frozenset[str] = frozenset()
+    #: GitHub: ``org/team`` slugs (lower case) the person is an active member of.
+    teams: frozenset[str] = frozenset()
+    #: Generic OIDC: only the claims ``ACCESS_RULES`` reference, as (name, values) pairs.
+    claims: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    #: GitHub: a membership lookup was refused or impossible (fail closed for org/team rules).
+    membership_unavailable: bool = False
 
     @property
     def identity(self) -> tuple[str, str, str]:
@@ -340,6 +383,8 @@ class AccessRule:
     value: str
 
     def __str__(self) -> str:
+        if not self.value:
+            return f"{self.provider}:{self.kind}"
         return f"{self.provider}:{self.kind}:{self.value}"
 
 
@@ -363,9 +408,31 @@ class AccessPolicy:
     bootstrap_owner: BootstrapOwner | None = None
     ack_public: bool = False
     pending_limit: int = DEFAULT_PENDING_LIMIT
+    #: ``SELFHOST_BOOTSTRAP_OWNER=token_admin``: the first owner is made with the operator
+    #: CLI (``promote-owner``), so no identity is named in advance.
+    bootstrap_via_token_admin: bool = False
 
     def has_group_rule(self) -> bool:
         return any(rule.kind == "group" for rule in self.rules)
+
+    def github_orgs(self) -> tuple[str, ...]:
+        """The organisations named by ``github:org`` rules (lower case, in rule order)."""
+        return tuple(r.value for r in self.rules if r.provider == PROVIDER_GITHUB and r.kind == "org")
+
+    def github_teams(self) -> tuple[str, ...]:
+        """The ``org/team`` slugs named by ``github:team`` rules (lower case, in rule order)."""
+        return tuple(r.value for r in self.rules if r.provider == PROVIDER_GITHUB and r.kind == "team")
+
+    def google_domains(self) -> tuple[str, ...]:
+        return tuple(r.value for r in self.rules if r.provider == PROVIDER_GOOGLE and r.kind == "domain")
+
+    def oidc_claim_names(self, provider_id: str) -> frozenset[str]:
+        """The claim names ``oidc:<slug>:claim:`` rules of one provider look at."""
+        return frozenset(
+            r.value.partition("=")[0]
+            for r in self.rules
+            if r.provider == provider_id and r.kind == "claim"
+        )
 
 
 def default_policy(required_role: str, owner_role: str) -> AccessPolicy:
@@ -378,21 +445,86 @@ def default_policy(required_role: str, owner_role: str) -> AccessPolicy:
     )
 
 
-_FUTURE_PROVIDERS = frozenset({"google", "github", "oidc"})
+_KNOWN_PROVIDERS = frozenset({PROVIDER_ENTRA, PROVIDER_GOOGLE, PROVIDER_GITHUB, "oidc"})
 _ENTRA_KINDS = frozenset({"role", "group", "tenant"})
+_GOOGLE_KINDS = frozenset({"domain", "email"})
+_GITHUB_KINDS = frozenset({"user", "org", "team"})
+_OIDC_KINDS = frozenset({"claim", "email", "any"})
+
+#: ``oidc:<slug>`` slugs (see ``login.config``): lower-case letters, digits and hyphens.
+OIDC_SLUG_RE = re.compile(r"^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$")
+_DNS_NAME_RE = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
+_EMAIL_RULE_RE = re.compile(r"^[^@\s,:=]{1,64}@[a-z0-9.-]{1,189}$")
+_GITHUB_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
+_GITHUB_ORG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")
+_GITHUB_TEAM_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,99}$")
+_CLAIM_NAME_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,128}$")
+#: At most this many ``github:org`` and ``github:team`` rules (one API call each per sign-in).
+MAX_GITHUB_MEMBERSHIP_RULES = 10
+_MAX_RULE_VALUE = 256
+_MAX_EMAIL = 254
+
+_OWNER_ONLY_ENTRA = (
+    "owners come only from Entra app roles or groups, SELFHOST_BOOTSTRAP_OWNER or token_admin"
+)
 
 
-def parse_rule(text: str, *, tenant_id: str = "", owner: bool = False) -> AccessRule | str:
-    """Parse one rule, or return a problem description (never echoing the value)."""
+def _enabled_providers(providers: Collection[str] | None) -> frozenset[str]:
+    """The provider ids a rule may name; ``None`` means the first release's Entra only."""
+    return frozenset({PROVIDER_ENTRA}) if providers is None else frozenset(providers)
+
+
+def _not_enabled(provider_id: str) -> str:
+    return (
+        f"names the provider '{provider_id}', which is not enabled in this release's "
+        "configuration (add it to SELFHOST_LOGIN_PROVIDERS)"
+    )
+
+
+def parse_rule(
+    text: str,
+    *,
+    tenant_id: str = "",
+    owner: bool = False,
+    providers: Collection[str] | None = None,
+) -> AccessRule | str:
+    """Parse one rule, or return a problem description (never echoing the value).
+
+    ``providers`` are the provider ids ``SELFHOST_LOGIN_PROVIDERS`` lists (default: only
+    Entra, the first release). A rule that names another provider is refused.
+    """
+    enabled = _enabled_providers(providers)
     entry = text.strip()
     provider, sep, rest = entry.partition(":")
     if not sep or not provider:
         return "is not '<provider>:<kind>:<value>'"
-    if provider in _FUTURE_PROVIDERS:
-        return f"names the provider '{provider}', which is not enabled in this release"
-    if provider != PROVIDER_ENTRA:
+    if provider not in _KNOWN_PROVIDERS:
         return "has an unknown provider prefix"
+    provider_id = provider
+    if provider == "oidc":
+        slug, sep, rest = rest.partition(":")
+        if not sep or not OIDC_SLUG_RE.match(slug):
+            return "needs oidc:<slug>:<kind>:<value> with a valid provider slug"
+        provider_id = f"oidc:{slug}"
+    if provider_id not in enabled:
+        return _not_enabled(provider_id)
+    if owner and provider_id != PROVIDER_ENTRA:
+        return f"names {provider_id}: {_OWNER_ONLY_ENTRA}"
     kind, sep, value = rest.partition(":")
+    if provider_id == PROVIDER_ENTRA:
+        return _parse_entra_rule(kind, sep, value, tenant_id=tenant_id, owner=owner)
+    if provider_id == PROVIDER_GOOGLE:
+        return _parse_google_rule(kind, sep, value)
+    if provider_id == PROVIDER_GITHUB:
+        return _parse_github_rule(kind, sep, value)
+    return _parse_oidc_rule(provider_id, kind, sep, value)
+
+
+def _parse_entra_rule(
+    kind: str, sep: str, value: str, *, tenant_id: str, owner: bool
+) -> AccessRule | str:
     if not sep or kind not in _ENTRA_KINDS:
         return "has an unknown rule kind (use entra:role, entra:group or entra:tenant)"
     if kind == "role":
@@ -409,6 +541,73 @@ def parse_rule(text: str, *, tenant_id: str = "", owner: bool = False) -> Access
     return AccessRule(PROVIDER_ENTRA, kind, value.lower())
 
 
+def _email_value(value: str) -> str | None:
+    lowered = value.lower()
+    if len(lowered) > _MAX_EMAIL or not _EMAIL_RULE_RE.match(lowered):
+        return None
+    return lowered
+
+
+def _parse_google_rule(kind: str, sep: str, value: str) -> AccessRule | str:
+    if not sep or kind not in _GOOGLE_KINDS:
+        return "has an unknown rule kind (use google:domain or google:email)"
+    if kind == "domain":
+        lowered = value.lower()
+        if not _DNS_NAME_RE.match(lowered):
+            return "needs a domain name after 'google:domain:'"
+        return AccessRule(PROVIDER_GOOGLE, "domain", lowered)
+    address = _email_value(value)
+    if address is None:
+        return "needs an e-mail address after 'google:email:'"
+    return AccessRule(PROVIDER_GOOGLE, "email", address)
+
+
+def _parse_github_rule(kind: str, sep: str, value: str) -> AccessRule | str:
+    if not sep or kind not in _GITHUB_KINDS:
+        return "has an unknown rule kind (use github:user, github:org or github:team)"
+    if kind == "user":
+        if not _GITHUB_ID_RE.match(value):
+            return "needs the numeric GitHub user id after 'github:user:' (not the login)"
+        return AccessRule(PROVIDER_GITHUB, "user", value)
+    if kind == "org":
+        if not _GITHUB_ORG_RE.match(value):
+            return "needs an organisation login after 'github:org:'"
+        return AccessRule(PROVIDER_GITHUB, "org", value.lower())
+    org, slash, team = value.partition("/")
+    if not slash or not _GITHUB_ORG_RE.match(org) or not _GITHUB_TEAM_RE.match(team.lower()):
+        return "needs <organisation>/<team slug> after 'github:team:'"
+    return AccessRule(PROVIDER_GITHUB, "team", f"{org.lower()}/{team.lower()}")
+
+
+def _printable_ascii(text: str) -> bool:
+    return text.isascii() and all(0x20 <= ord(ch) <= 0x7E for ch in text)
+
+
+def _parse_oidc_rule(provider_id: str, kind: str, sep: str, value: str) -> AccessRule | str:
+    if kind == "any" and (not sep or not value):
+        return AccessRule(provider_id, "any", "")
+    if not sep or kind not in _OIDC_KINDS or kind == "any":
+        return "has an unknown rule kind (use claim, email or any after the provider slug)"
+    if kind == "email":
+        address = _email_value(value)
+        if address is None:
+            return "needs an e-mail address after the 'email:' kind"
+        return AccessRule(provider_id, "email", address)
+    name, eq, expected = value.partition("=")
+    if not eq or not _CLAIM_NAME_RE.match(name):
+        return "needs claim:<name>=<value> with a plain claim name"
+    if name.lower() in ("email", "email_verified"):
+        return "may not match the 'email' claim as a claim (use the email: kind)"
+    if (
+        not expected
+        or len(expected) > _MAX_RULE_VALUE
+        or not _printable_ascii(expected)
+        or expected != expected.strip()
+    ):
+        return "has a claim value that is empty, too long, not printable ASCII or padded with spaces"
+    return AccessRule(provider_id, "claim", f"{name}={expected}")
+
+
 def _parse_rules(
     name: str,
     raw: str,
@@ -416,6 +615,7 @@ def _parse_rules(
     *,
     tenant_id: str,
     owner: bool,
+    providers: Collection[str] | None = None,
 ) -> tuple[AccessRule, ...]:
     rules: list[AccessRule] = []
     entries = [part for part in (p.strip() for p in raw.split(",")) if part]
@@ -423,7 +623,7 @@ def _parse_rules(
         problems.append(f"{name} lists more than {_MAX_RULES} rules")
         return ()
     for index, entry in enumerate(entries, start=1):
-        parsed = parse_rule(entry, tenant_id=tenant_id, owner=owner)
+        parsed = parse_rule(entry, tenant_id=tenant_id, owner=owner, providers=providers)
         if isinstance(parsed, str):
             problems.append(f"{name} entry {index} {parsed}")
             continue
@@ -452,11 +652,66 @@ OWNER_RULES_ENV = "OWNER_RULES"
 OPEN_ACK_ENV = "ACCESS_OPEN_ACKNOWLEDGE_PUBLIC"
 BOOTSTRAP_OWNER_ENV = "SELFHOST_BOOTSTRAP_OWNER"
 TRUSTED_PROXY_ENV = "TRUSTED_PROXY_CIDRS"
+LINK_BY_EMAIL_ENV = "ACCOUNT_LINK_BY_VERIFIED_EMAIL"
+
+#: ``SELFHOST_BOOTSTRAP_OWNER=token_admin``: no identity is named; the operator makes the first
+#: owner with ``token_admin promote-owner`` after that person has signed in once.
+BOOTSTRAP_TOKEN_ADMIN = "token_admin"
 
 _BOOTSTRAP_RE = re.compile(
     r"^entra:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
     r":([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
 )
+_BOOTSTRAP_GOOGLE_RE = re.compile(r"^google:([A-Za-z0-9_-]{1,255})$")
+_BOOTSTRAP_GITHUB_RE = re.compile(r"^github:([1-9][0-9]{0,19})$")
+_BOOTSTRAP_OIDC_RE = re.compile(r"^oidc:([a-z][a-z0-9-]{0,30}[a-z0-9]|[a-z]):([\x21-\x7e]{1,255})$")
+
+
+def _parse_bootstrap(
+    raw: str,
+    *,
+    tenant_id: str,
+    enabled: frozenset[str],
+    issuers: Mapping[str, str],
+    problems: list[str],
+) -> tuple[BootstrapOwner | None, bool]:
+    """``(identity, via_token_admin)`` for ``SELFHOST_BOOTSTRAP_OWNER``; problems never echo the value."""
+    if raw == BOOTSTRAP_TOKEN_ADMIN:
+        return None, True
+    only_entra = enabled <= {PROVIDER_ENTRA}
+    shape = (
+        f"{BOOTSTRAP_OWNER_ENV} must look like entra:<tenant id>:<object id> or {BOOTSTRAP_TOKEN_ADMIN}"
+        if only_entra
+        else f"{BOOTSTRAP_OWNER_ENV} must look like entra:<tenant id>:<object id>, "
+        "google:<subject>, github:<numeric user id>, oidc:<slug>:<subject> or "
+        f"{BOOTSTRAP_TOKEN_ADMIN}"
+    )
+    provider_id: str
+    issuer: str
+    subject: str
+    if (match := _BOOTSTRAP_RE.match(raw)) is not None:
+        provider_id = PROVIDER_ENTRA
+        if provider_id in enabled and tenant_id and match.group(1).lower() != tenant_id.lower():
+            problems.append(f"{BOOTSTRAP_OWNER_ENV} must name a user of ENTRA_TENANT_ID")
+            return None, False
+        issuer, subject = entra_issuer(match.group(1)), match.group(2).lower()
+    elif (match := _BOOTSTRAP_GOOGLE_RE.match(raw)) is not None:
+        provider_id, issuer, subject = PROVIDER_GOOGLE, GOOGLE_ISSUER, match.group(1)
+    elif (match := _BOOTSTRAP_GITHUB_RE.match(raw)) is not None:
+        provider_id, issuer, subject = PROVIDER_GITHUB, GITHUB_ISSUER, match.group(1)
+    elif (match := _BOOTSTRAP_OIDC_RE.match(raw)) is not None and "," not in raw:
+        provider_id = f"{PROVIDER_OIDC_PREFIX}{match.group(1)}"
+        issuer, subject = issuers.get(provider_id, ""), match.group(2)
+    else:
+        problems.append(shape)
+        return None, False
+    if provider_id not in enabled:
+        shown = provider_id if provider_id in _KNOWN_PROVIDERS or provider_id.startswith("oidc:") else "a provider"
+        problems.append(
+            f"{BOOTSTRAP_OWNER_ENV} names {shown}, which is not in SELFHOST_LOGIN_PROVIDERS"
+        )
+        return None, False
+    return BootstrapOwner(provider_id, issuer, subject), False
 
 
 def parse_access_settings(
@@ -466,15 +721,26 @@ def parse_access_settings(
     required_role: str,
     owner_role: str,
     problems: list[str],
+    providers: Collection[str] | None = None,
+    issuers: Mapping[str, str] | None = None,
 ) -> AccessPolicy:
     """Parse the admission variables; every problem is appended to ``problems``.
 
     Unset variables give the first release's behaviour: ``rules`` with the required
     app role, fallback ``deny`` and the owner app role as the owner rule.
+
+    ``providers`` are the provider ids ``SELFHOST_LOGIN_PROVIDERS`` lists (``None``: only
+    Entra, as in the first release) and ``issuers`` maps ``oidc:<slug>`` to the configured
+    issuer (the bootstrap owner needs it). Without Entra there is no default rule and no
+    default owner rule: ``ACCESS_RULES`` is required with ``ACCESS_POLICY=rules``.
     """
 
     def get(name: str) -> str:
         return (env.get(name) or "").strip()
+
+    enabled = _enabled_providers(providers)
+    entra = PROVIDER_ENTRA in enabled
+    public_provider = bool(enabled - {PROVIDER_ENTRA})
 
     mode_raw = get(ACCESS_POLICY_ENV).lower() or POLICY_RULES
     if mode_raw not in POLICIES:
@@ -490,12 +756,24 @@ def parse_access_settings(
     if mode_raw == POLICY_RULES:
         if rules_set:
             rules = _parse_rules(
-                ACCESS_RULES_ENV, rules_raw or "", problems, tenant_id=tenant_id, owner=False
+                ACCESS_RULES_ENV, rules_raw or "", problems,
+                tenant_id=tenant_id, owner=False, providers=enabled,
             )
             if not rules and not any(p.startswith(ACCESS_RULES_ENV) for p in problems):
                 problems.append(f"{ACCESS_RULES_ENV} is set but lists no rule")
-        else:
+            membership = sum(1 for r in rules if r.provider == PROVIDER_GITHUB and r.kind in ("org", "team"))
+            if membership > MAX_GITHUB_MEMBERSHIP_RULES:
+                problems.append(
+                    f"{ACCESS_RULES_ENV} lists more than {MAX_GITHUB_MEMBERSHIP_RULES} "
+                    "github:org and github:team rules"
+                )
+        elif entra:
             rules = (AccessRule(PROVIDER_ENTRA, "role", required_role),)
+        else:
+            problems.append(
+                f"{ACCESS_RULES_ENV} is required with {ACCESS_POLICY_ENV}=rules when "
+                "SELFHOST_LOGIN_PROVIDERS does not list entra"
+            )
         if fallback_raw:
             if fallback_raw in FALLBACKS:
                 fallback = fallback_raw
@@ -516,35 +794,46 @@ def parse_access_settings(
     owner_rules: tuple[AccessRule, ...]
     owner_raw = get(OWNER_RULES_ENV)
     if not owner_raw:
-        owner_rules = (AccessRule(PROVIDER_ENTRA, "role", owner_role),)
+        owner_rules = (AccessRule(PROVIDER_ENTRA, "role", owner_role),) if entra else ()
     elif owner_raw.lower() == "none":
         owner_rules = ()
     else:
         owner_rules = _parse_rules(
-            OWNER_RULES_ENV, owner_raw, problems, tenant_id=tenant_id, owner=True
+            OWNER_RULES_ENV, owner_raw, problems,
+            tenant_id=tenant_id, owner=True, providers=enabled,
         )
         if not owner_rules and not any(p.startswith(OWNER_RULES_ENV) for p in problems):
             problems.append(f"{OWNER_RULES_ENV} is set but lists no rule (use 'none' for none)")
 
     ack = _flag(OPEN_ACK_ENV, get(OPEN_ACK_ENV), problems)
+    if mode_raw == POLICY_OPEN and public_provider and not ack:
+        problems.append(
+            f"{ACCESS_POLICY_ENV}=open with google, github or oidc sign-in admits anyone who has "
+            f"such an account: set {OPEN_ACK_ENV}=true to confirm"
+        )
 
     bootstrap: BootstrapOwner | None = None
+    via_token_admin = False
     bootstrap_raw = get(BOOTSTRAP_OWNER_ENV)
     if bootstrap_raw:
-        match = _BOOTSTRAP_RE.match(bootstrap_raw)
-        if match is None:
-            problems.append(f"{BOOTSTRAP_OWNER_ENV} must look like entra:<tenant id>:<object id>")
-        elif tenant_id and match.group(1).lower() != tenant_id.lower():
-            problems.append(f"{BOOTSTRAP_OWNER_ENV} must name a user of ENTRA_TENANT_ID")
-        else:
-            bootstrap = BootstrapOwner(
-                PROVIDER_ENTRA, entra_issuer(match.group(1)), match.group(2).lower()
-            )
+        bootstrap, via_token_admin = _parse_bootstrap(
+            bootstrap_raw,
+            tenant_id=tenant_id,
+            enabled=enabled,
+            issuers=issuers or {},
+            problems=problems,
+        )
 
     if get(TRUSTED_PROXY_ENV):
         problems.append(
             f"{TRUSTED_PROXY_ENV} is reserved and not implemented yet; leave it unset "
             "(sign-in history records the client address as 'unknown')"
+        )
+    if get(LINK_BY_EMAIL_ENV) and get(LINK_BY_EMAIL_ENV).lower() not in ("false", "0", "no", "off"):
+        # Only a value that asks for it is refused: an explicit "false" says what the server does.
+        problems.append(
+            f"{LINK_BY_EMAIL_ENV} is reserved and not implemented; leave it unset "
+            "(accounts are linked only from /account)"
         )
 
     return AccessPolicy(
@@ -554,6 +843,7 @@ def parse_access_settings(
         owner_rules=owner_rules,
         bootstrap_owner=bootstrap,
         ack_public=ack,
+        bootstrap_via_token_admin=via_token_admin,
     )
 
 
@@ -562,23 +852,67 @@ def parse_access_settings(
 
 @dataclass(frozen=True)
 class Verdict:
-    """What the rules say about one identity (before any stored state is consulted)."""
+    """What the rules say about one identity (before any stored state is consulted).
+
+    ``owner_evidence`` says whether this sign-in could have shown an owner role at all:
+    only Entra can (its app roles and groups are owner rules). A sign-in through another
+    provider says nothing about an owner role, so it neither grants nor takes one away.
+    """
 
     admitted_by_rule: bool
     owner_by_rule: bool
     reason: str = REASON_OK
+    owner_evidence: bool = True
+
+
+def _claim_values(ext: ExternalClaims, name: str) -> tuple[str, ...]:
+    for claim, values in ext.claims:
+        if claim == name:
+            return values
+    return ()
 
 
 def rule_matches(rule: AccessRule, ext: ExternalClaims) -> bool:
     if rule.provider != ext.provider_id:
         return False
-    if rule.kind == "role":
-        return rule.value in ext.roles
-    if rule.kind == "group":
-        return (not ext.groups_overage) and rule.value in ext.groups
-    if rule.kind == "tenant":
-        return bool(ext.tenant_id) and ext.tenant_id.lower() == rule.value
+    kind = rule.kind
+    if ext.provider_id == PROVIDER_ENTRA:
+        if kind == "role":
+            return rule.value in ext.roles
+        if kind == "group":
+            return (not ext.groups_overage) and rule.value in ext.groups
+        if kind == "tenant":
+            return bool(ext.tenant_id) and ext.tenant_id.lower() == rule.value
+        return False
+    if ext.provider_id == PROVIDER_GOOGLE:
+        # ``hd`` is read from the id token only, and an address counts only when Google
+        # says it is verified. The request's ``hd`` hint is never an input.
+        if kind == "domain":
+            return ext.email_verified and bool(ext.hd) and ext.hd.lower() == rule.value
+        if kind == "email":
+            return _verified_email_is(ext, rule.value)
+        return False
+    if ext.provider_id == PROVIDER_GITHUB:
+        if kind == "user":
+            return ext.subject == rule.value
+        if kind == "org":
+            return rule.value in ext.orgs
+        if kind == "team":
+            return rule.value in ext.teams
+        return False
+    # A generic OIDC provider (``oidc:<slug>``).
+    if kind == "any":
+        return True
+    if kind == "email":
+        return _verified_email_is(ext, rule.value)
+    if kind == "claim":
+        name, _, expected = rule.value.partition("=")
+        return expected in _claim_values(ext, name)
     return False
+
+
+def _verified_email_is(ext: ExternalClaims, expected: str) -> bool:
+    return ext.email_verified and ext.email is not None and ext.email.lower() == expected
 
 
 def evaluate_admission(ext: ExternalClaims, policy: AccessPolicy) -> Verdict:
@@ -586,9 +920,21 @@ def evaluate_admission(ext: ExternalClaims, policy: AccessPolicy) -> Verdict:
     owner = any(rule_matches(rule, ext) for rule in policy.owner_rules)
     admitted = any(rule_matches(rule, ext) for rule in policy.rules)
     reason = REASON_OK
-    if not admitted and not owner and ext.groups_overage and policy.has_group_rule():
-        reason = REASON_GROUPS_OVERAGE
-    return Verdict(admitted_by_rule=admitted, owner_by_rule=owner, reason=reason)
+    if not admitted and not owner:
+        if ext.groups_overage and policy.has_group_rule():
+            reason = REASON_GROUPS_OVERAGE
+        elif (
+            ext.provider_id == PROVIDER_GITHUB
+            and ext.membership_unavailable
+            and (policy.github_orgs() or policy.github_teams())
+        ):
+            reason = REASON_MEMBERSHIP_UNAVAILABLE
+    return Verdict(
+        admitted_by_rule=admitted,
+        owner_by_rule=owner,
+        reason=reason,
+        owner_evidence=ext.provider_id == PROVIDER_ENTRA,
+    )
 
 
 def is_bootstrap_identity(ext: ExternalClaims, policy: AccessPolicy) -> bool:
@@ -610,14 +956,50 @@ class AccountFacts:
         return self.status == STATUS_ACTIVE and self.role == ROLE_OWNER
 
 
+def owner_is_usable(
+    *,
+    role: str,
+    status: str,
+    role_source: str | None,
+    identity_providers: Iterable[str],
+    listed: Collection[str] | None,
+) -> bool:
+    """Whether an account is a *usable owner*: it can still get an owner session (pure).
+
+    An active owner is usable when a sign-in under the current ``SELFHOST_LOGIN_PROVIDERS`` (the
+    ``listed`` provider ids; None means every provider is listed) can show the role:
+
+    * a role the Entra owner rules granted (``role_source`` ``rules``) needs the evidence of an
+      Entra sign-in (:attr:`Verdict.owner_evidence`: Google, GitHub and OIDC data never shows an
+      owner role), so it is usable only while Entra is listed and the account still holds an
+      Entra identity;
+    * any other owner (bootstrap, operator) needs one identity at a listed provider.
+
+    ``repos.usable_owner_ids`` is the same rule as a statement; ``unlink_identity``, the startup
+    owner-path check and the bootstrap owner all use this one notion.
+    """
+    if role != ROLE_OWNER or status != STATUS_ACTIVE:
+        return False
+    held = set(identity_providers)
+    if role_source == ROLE_SOURCE_RULES:
+        return PROVIDER_ENTRA in held and (listed is None or PROVIDER_ENTRA in listed)
+    return bool(held) if listed is None else bool(held & set(listed))
+
+
 @dataclass(frozen=True)
 class DecisionFacts:
     """Counts read in the same transaction as the decision."""
 
     #: Active owners, including the account being decided when it is one.
     active_owner_count: int = 0
+    #: Usable owners (:func:`owner_is_usable`). None: not counted, ``active_owner_count`` stands in.
+    usable_owner_count: int | None = None
     pending_count: int = 0
     is_bootstrap_identity: bool = False
+    #: Whether the account being decided, when it is an active owner, is a usable owner. Read
+    #: only for the bootstrap identity (the one sign-in that may re-source an owner); True
+    #: means "no reason to change its role".
+    existing_owner_usable: bool = True
 
 
 Purpose = Literal["sign_in", "request"]
@@ -703,15 +1085,28 @@ def decide(
     active                  open / approval / a rule matches / owner  allow
                             rule / personally admitted
     active                  rules, no match, admitted by rules/open   deny ``access_denied``
+                            (not for the bootstrap identity while no
+                            owner is usable: it is admitted)
     ======================  ========================================  ==========================
 
     Roles are recomputed at a sign-in only: an owner rule raises ``user`` to
     ``owner``; losing the rule lowers a rules-sourced owner unless that is the last
     active owner; a bootstrap or operator owner is never changed by rules. The MCP
     path (``purpose='request'``) never raises a role.
+
+    The bootstrap identity becomes an owner while the server has no *usable* owner
+    (:func:`owner_is_usable`), not only while it has no owner row: owners that no sign-in under
+    the listed providers can use (an Entra-rule owner after Entra was delisted, an owner whose
+    identities are all at delisted providers) do not block it. The operator named that identity
+    in ``SELFHOST_BOOTSTRAP_OWNER``; provider data from Google, GitHub or OIDC still never makes
+    an owner on its own. While it applies it also overrides what would refuse the identity's own
+    account: an active account the rules no longer admit is admitted (as a new or pending one is),
+    and an owner that is not usable, such as one whose role the Entra owner rules granted after
+    Entra was delisted, is re-sourced to ``bootstrap`` so that this sign-in is an owner session.
     """
     owner_match = verdict.owner_by_rule
-    bootstrap = facts.is_bootstrap_identity and facts.active_owner_count == 0
+    usable = facts.active_owner_count if facts.usable_owner_count is None else facts.usable_owner_count
+    bootstrap = facts.is_bootstrap_identity and usable == 0
     sign_in = purpose == "sign_in"
 
     if existing is None:
@@ -733,8 +1128,11 @@ def decide(
             return _deny(DENY_PENDING_APPROVAL)
         via = (
             ADMITTED_RULES
-            if (owner_match or verdict.admitted_by_rule)
-            else (ADMITTED_BOOTSTRAP if bootstrap else ADMITTED_OPEN)
+            if owner_match
+            else (
+                ADMITTED_BOOTSTRAP if bootstrap
+                else (ADMITTED_RULES if verdict.admitted_by_rule else ADMITTED_OPEN)
+            )
         )
         role, source, event = _raise_role(sign_in, owner_match, bootstrap, ROLE_USER)
         return Decision(
@@ -748,30 +1146,41 @@ def decide(
             session_owner=role == ROLE_OWNER,
         )
 
-    # An active account.
-    admitted = (
-        policy.mode in (POLICY_OPEN, POLICY_APPROVAL)
-        or owner_match
-        or (policy.mode == POLICY_RULES and verdict.admitted_by_rule)
-        or existing.admitted_via in _PERSONAL_ADMISSION
-    )
-    if not admitted:
+    # An active account. The bootstrap identity (while no owner is usable) is admitted whatever
+    # the rules say, like a new or pending account of the same identity.
+    if not (bootstrap or link_admissible(existing, verdict, policy)):
         return _deny(
             DENY_ACCESS_DENIED,
-            reason=REASON_GROUPS_OVERAGE
-            if verdict.reason == REASON_GROUPS_OVERAGE
+            reason=verdict.reason
+            if verdict.reason in (REASON_GROUPS_OVERAGE, REASON_MEMBERSHIP_UNAVAILABLE)
             else DENY_ACCESS_DENIED,
         )
     new_role: str | None = None
     new_source: str | None = None
     new_event: str | None = None
     if sign_in:
-        new_role, new_source, new_event = _recompute_role(existing, owner_match, bootstrap, facts)
+        new_role, new_source, new_event = _recompute_role(
+            existing, owner_match, bootstrap, facts, verdict.owner_evidence
+        )
     effective_role = new_role if new_role is not None else existing.role
     effective_source = new_source if new_role is not None else existing.role_source
+    # The bootstrap owner is a personal admission, as for a new or pending account of the same
+    # identity: if it stayed "rules" (or "open") the very rules that were overridden here would
+    # refuse the owner at its next sign-in, and the server would be left with an owner who can
+    # sign in once.
+    admitted_via = (
+        ADMITTED_BOOTSTRAP
+        if (
+            new_role == ROLE_OWNER
+            and new_source == ROLE_SOURCE_BOOTSTRAP
+            and existing.admitted_via not in PERSONAL_ADMISSION
+        )
+        else None
+    )
     return Decision(
         outcome="allow",
         reason=REASON_OK,
+        admitted_via=admitted_via,
         role=new_role,
         role_source=new_source,
         role_event=new_event,
@@ -796,23 +1205,86 @@ def _raise_role(
     return None, None, None
 
 
+def link_admissible(existing: AccountFacts, verdict: Verdict, policy: AccessPolicy) -> bool:
+    """Whether an identity may use an account that already exists (pure).
+
+    This is exactly the admission of an active account in :func:`decide`, so linking cannot
+    attach an identity that the same rules would refuse at sign-in.
+    """
+    return (
+        policy.mode in (POLICY_OPEN, POLICY_APPROVAL)
+        or verdict.owner_by_rule
+        or (policy.mode == POLICY_RULES and verdict.admitted_by_rule)
+        or existing.admitted_via in PERSONAL_ADMISSION
+    )
+
+
 def _recompute_role(
-    existing: AccountFacts, owner_match: bool, bootstrap: bool, facts: DecisionFacts
+    existing: AccountFacts,
+    owner_match: bool,
+    bootstrap: bool,
+    facts: DecisionFacts,
+    owner_evidence: bool = True,
 ) -> tuple[str | None, str | None, str | None]:
-    """``(new role, source, event)`` for an active account at a sign-in; role None = unchanged."""
+    """``(new role, source, event)`` for an active account at a sign-in; role None = unchanged.
+
+    A role that rules granted is taken back only on ``owner_evidence``: a sign-in through a
+    provider whose data cannot show an owner role must not demote an Entra-granted owner.
+    """
     if existing.role == ROLE_USER:
         if owner_match:
             return ROLE_OWNER, ROLE_SOURCE_RULES, EVENT_OWNER_GAINED
         if bootstrap:
             return ROLE_OWNER, ROLE_SOURCE_BOOTSTRAP, EVENT_OWNER_GAINED
         return None, None, None
-    # An owner. Only a role that rules granted is taken back by rules.
-    if existing.role_source == ROLE_SOURCE_RULES and not owner_match:
-        others = facts.active_owner_count - (1 if existing.is_active_owner else 0)
+    # An owner. The bootstrap identity, while no owner is usable, takes over an owner that no
+    # sign-in could use (a rules owner without a listed Entra identity): the operator named this
+    # identity, so its own account becomes the owner the server needs. An owner that is usable
+    # is left alone (then the bootstrap does not apply at all).
+    if (
+        bootstrap
+        and existing.is_active_owner
+        and not facts.existing_owner_usable
+        and existing.role_source != ROLE_SOURCE_BOOTSTRAP
+    ):
+        return ROLE_OWNER, ROLE_SOURCE_BOOTSTRAP, EVENT_OWNER_RESOURCED
+    # Only a role that rules granted is taken back by rules.
+    if existing.role_source == ROLE_SOURCE_RULES and not owner_match and owner_evidence:
+        # Stranded owners (no sign-in can show their role) do not count as a replacement: the
+        # account being decided signs in with owner evidence, so it is itself usable.
+        owners = facts.active_owner_count if facts.usable_owner_count is None else facts.usable_owner_count
+        others = owners - (1 if existing.is_active_owner else 0)
         if others <= 0:
             return None, None, EVENT_OWNER_LOSS_REFUSED
         return ROLE_USER, None, EVENT_OWNER_LOST
     return None, None, None
+
+
+def bootstrap_sign_in_gives_owner(
+    existing: AccountFacts | None, policy: AccessPolicy, *, active_owner_count: int = 0
+) -> bool:
+    """Whether the bootstrap identity's next sign-in would be an owner session (pure).
+
+    The startup check asks it while the server has no usable owner: it runs :func:`decide` for
+    the bootstrap identity with no rule matching, so it answers from the same table as the
+    sign-in. ``existing`` is the identity's account (None: not known yet). An account that is
+    disabled is refused, and any other state the table does not turn into an owner session says
+    False too.
+    """
+    boot = policy.bootstrap_owner
+    if boot is None:
+        return False
+    verdict = Verdict(
+        admitted_by_rule=False, owner_by_rule=False, owner_evidence=boot.provider_id == PROVIDER_ENTRA
+    )
+    facts = DecisionFacts(
+        active_owner_count=active_owner_count,
+        usable_owner_count=0,
+        is_bootstrap_identity=True,
+        existing_owner_usable=False,
+    )
+    decision = decide(existing, verdict, policy, facts, "sign_in")
+    return decision.outcome == "allow" and decision.session_owner
 
 
 def _decide_new(
@@ -857,8 +1329,8 @@ def _decide_new(
         if policy.fallback == FALLBACK_DENY:
             return _deny(
                 DENY_ACCESS_DENIED,
-                reason=REASON_GROUPS_OVERAGE
-                if verdict.reason == REASON_GROUPS_OVERAGE
+                reason=verdict.reason
+                if verdict.reason in (REASON_GROUPS_OVERAGE, REASON_MEMBERSHIP_UNAVAILABLE)
                 else DENY_ACCESS_DENIED,
             )
     return _pending_or_denied(policy, facts, purpose)

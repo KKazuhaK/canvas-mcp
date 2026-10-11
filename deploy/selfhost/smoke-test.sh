@@ -8,6 +8,12 @@
 #
 # CI runs it against the image built for each architecture BEFORE anything is
 # pushed to the registry. Exit 0 means every check passed.
+#
+# Optional: SMOKE_EXPECT_PROVIDERS=google,github (any of those two, comma-separated) also boots local
+# mode with those sign-in providers, dummy client ids and secrets, and checks that
+# /account/api/providers lists them and that each start link answers 302 with an https Location on the
+# provider's own authorize host. Nothing signs in and no code is exchanged; a Google start fetches
+# Google's public discovery document, so that check needs outbound HTTPS.
 set -euo pipefail
 
 IMAGE="${1:?usage: smoke-test.sh IMAGE}"
@@ -24,11 +30,12 @@ REACT="canvas-mcp-smoke-react-${SUFFIX}"
 REACT_BAD="canvas-mcp-smoke-reactbad-${SUFFIX}"
 LOCAL="canvas-mcp-smoke-local-${SUFFIX}"
 LOCAL_REACT="canvas-mcp-smoke-localreact-${SUFFIX}"
+PROVIDERS_C="canvas-mcp-smoke-providers-${SUFFIX}"
 VOLUMES=()
 WORKDIR="$(mktemp -d)"
 
 cleanup() {
-  docker rm -f "$MAIN" "$LEGACY" "$FAILCLOSED" "$GENERATED" "$REACT" "$REACT_BAD" "$LOCAL" "$LOCAL_REACT" >/dev/null 2>&1 || true
+  docker rm -f "$MAIN" "$LEGACY" "$FAILCLOSED" "$GENERATED" "$REACT" "$REACT_BAD" "$LOCAL" "$LOCAL_REACT" "$PROVIDERS_C" >/dev/null 2>&1 || true
   local v
   for v in "${VOLUMES[@]:-}"; do
     [ -n "$v" ] && docker volume rm -f "$v" >/dev/null 2>&1 || true
@@ -39,7 +46,7 @@ trap cleanup EXIT
 
 dump_logs() {
   local c
-  for c in "$MAIN" "$LEGACY" "$FAILCLOSED" "$GENERATED" "$REACT" "$REACT_BAD" "$LOCAL" "$LOCAL_REACT"; do
+  for c in "$MAIN" "$LEGACY" "$FAILCLOSED" "$GENERATED" "$REACT" "$REACT_BAD" "$LOCAL" "$LOCAL_REACT" "$PROVIDERS_C"; do
     if docker inspect "$c" >/dev/null 2>&1; then
       echo "----- docker logs ${c} -----" >&2
       docker logs "$c" 2>&1 | tail -n 80 >&2 || true
@@ -556,5 +563,82 @@ FC_VOL4="$NEW_VOLUME"
 expect_refusal "SELFHOST_AUTH_MODE=local with ACCESS_TOKEN_TTL=1" \
   docker run --name "$FAILCLOSED" --read-only --tmpfs /tmp -v "${FC_VOL4}:/data" \
   "${ENTRA_ENV[@]}" -e CANVAS_TOKEN_KEYS="$TOKEN_KEYS" -e SELFHOST_AUTH_MODE=local -e ACCESS_TOKEN_TTL=1 "$IMAGE"
+
+# ------------------- (o) optional: sign-in providers (SMOKE_EXPECT_PROVIDERS=google,github)
+# Local mode with the listed providers and made-up client credentials. The start link of each must
+# redirect to the provider's own https authorize host with PKCE and a state; the client secret must
+# not appear in it. There is no real login: nothing here has an account at any provider.
+if [ -n "${SMOKE_EXPECT_PROVIDERS:-}" ]; then
+  PROVIDER_SECRET="smoke-not-a-real-secret-$(openssl rand -hex 6)"
+  PROVIDER_ENV=()
+  PROVIDER_LIST=""
+  IFS=',' read -r -a WANTED <<<"${SMOKE_EXPECT_PROVIDERS}"
+  for provider in "${WANTED[@]}"; do
+    case "$provider" in
+      google)
+        PROVIDER_ENV+=(-e GOOGLE_CLIENT_ID=smoke-not-real.apps.googleusercontent.com -e "GOOGLE_CLIENT_SECRET=${PROVIDER_SECRET}")
+        ;;
+      github)
+        PROVIDER_ENV+=(-e GITHUB_CLIENT_ID=smokeclient0123456789 -e "GITHUB_CLIENT_SECRET=${PROVIDER_SECRET}")
+        ;;
+      *)
+        fail "SMOKE_EXPECT_PROVIDERS: unsupported provider '${provider}' (use google and/or github)"
+        ;;
+    esac
+    PROVIDER_LIST="${PROVIDER_LIST},${provider}"
+  done
+  new_volume providers
+  PROVIDERS_VOL="$NEW_VOLUME"
+  docker run -d --name "$PROVIDERS_C" \
+    --read-only --tmpfs /tmp \
+    -v "${PROVIDERS_VOL}:/data" \
+    "${ENTRA_ENV[@]}" \
+    -e CANVAS_TOKEN_KEYS="$TOKEN_KEYS" \
+    -e SELFHOST_AUTH_MODE=local \
+    -e ACCOUNT_UI=react \
+    -e "SELFHOST_LOGIN_PROVIDERS=entra${PROVIDER_LIST}" \
+    "${PROVIDER_ENV[@]}" \
+    -p "127.0.0.1:${PORT}:8819" \
+    "$IMAGE" >/dev/null
+  wait_for "$PROVIDERS_C" 60 "${BASE}/healthz"
+  curl -fsS "${BASE}/account/api/providers" -o "$WORKDIR/providers.json" \
+    || fail "providers: /account/api/providers not served"
+  python3 - "$WORKDIR/providers.json" "entra${PROVIDER_LIST}" <<'PY' || fail "providers: /account/api/providers does not list the expected providers"
+import json
+import sys
+
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+expected = sys.argv[2].split(",")
+assert [p["id"] for p in doc["providers"]] == expected, doc["providers"]
+for entry in doc["providers"]:
+    assert entry["start_url"].startswith("/account/login"), entry
+    assert set(entry) == {"id", "kind", "name", "icon", "start_url"}, entry
+PY
+  ok "providers: /account/api/providers lists entra${PROVIDER_LIST}"
+  for provider in "${WANTED[@]}"; do
+    case "$provider" in
+      google) host="accounts.google.com" ;;
+      github) host="github.com" ;;
+    esac
+    code="$(curl -s -o /dev/null -D "$WORKDIR/provider-start.headers" -w '%{http_code}' "${BASE}/account/login/${provider}")"
+    [ "$code" = "302" ] || fail "providers: GET /account/login/${provider} returned ${code}, expected 302"
+    location="$(tr -d '\r' <"$WORKDIR/provider-start.headers" | grep -i '^location:' | head -n 1 | cut -d' ' -f2-)"
+    case "$location" in
+      "https://${host}/"*) ;;
+      *) fail "providers: the ${provider} start link does not redirect to https://${host}/" ;;
+    esac
+    for needle in "client_id=" "state=" "code_challenge_method=S256" "redirect_uri="; do
+      case "$location" in
+        *"$needle"*) ;;
+        *) fail "providers: the ${provider} authorize URL lacks ${needle}" ;;
+      esac
+    done
+    case "$location" in
+      *"$PROVIDER_SECRET"*) fail "providers: the ${provider} authorize URL contains the client secret" ;;
+    esac
+    ok "providers: ${provider} start link redirects to https://${host}/ with PKCE and a state"
+  done
+  docker rm -f "$PROVIDERS_C" >/dev/null
+fi
 
 echo "SMOKE TEST PASSED"

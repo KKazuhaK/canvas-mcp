@@ -27,6 +27,7 @@ import type {
   AdminAccount,
   AdminAction,
   AdminActionResponse,
+  AdminIdentity,
   ApiErrorBody,
   ApiErrorCode,
   AuditEntry,
@@ -35,7 +36,9 @@ import type {
   ErrorParams,
   Features,
   Grant,
+  Identity,
   InvalidReason,
+  Provider,
   LoginEvent,
   MeResponse,
   SchoolsResponse,
@@ -66,6 +69,10 @@ export const MOCK_SCENARIOS = [
   'local',
   'local-owner',
   'local-pending',
+  // Two or more sign-in providers: the chooser, Sign-in methods and the owner's per-account list.
+  'multi',
+  'multi-owner',
+  'multi-stale',
 ] as const
 export type MockScenario = (typeof MOCK_SCENARIOS)[number]
 
@@ -87,6 +94,14 @@ export const MOCK_TXN = {
   loopback: padTxn('mockloopback'),
   unavailable: padTxn('mockunavailable'),
 } as const
+
+const MULTI_PROVIDERS: Provider[] = [
+  { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/account/login/entra' },
+  { id: 'google', kind: 'oidc', name: 'Google', icon: 'google', start_url: '/account/login/google' },
+  { id: 'github', kind: 'oauth2', name: 'GitHub', icon: 'github', start_url: '/account/login/github' },
+  { id: 'oidc:school', kind: 'oidc', name: 'School SSO', icon: 'key', start_url: '/account/login/oidc/school' },
+]
+const IDENTITY_ID = /^[1-9][0-9]{0,17}$/
 
 const SCHOOL = { host: 'canvas.example.edu', name: 'Example University', offered: true }
 const SEARCHABLE = [
@@ -187,6 +202,11 @@ interface MockState {
   grants: Map<string, Grant[]>
   /** Consent requests not decided yet. */
   txns: Set<string>
+  /** Two or more sign-in providers are configured. */
+  multi: boolean
+  providers: Provider[]
+  /** This account's linked sign-in methods (multi scenarios). */
+  identities: Identity[]
 }
 
 function accountRow(
@@ -214,6 +234,20 @@ function accountRow(
     actions: [],
     ...extra,
   }
+}
+
+/** The owner's view of an account's sign-in methods (ids are decimal strings, unique per mock). */
+function adminIdentities(account: number, providerIds: string[]): AdminIdentity[] {
+  return providerIds.map((providerId, index) => ({
+    id: String(account * 10 + index + 1),
+    provider_id: providerId,
+    username: providerId === 'github' ? `account${account}` : `account${account}@example.edu`,
+    subject: providerId === 'github' ? `${5800 + account}` : `subject-${account}-${providerId}`,
+    issuer: providerId === 'oidc:school' ? 'https://idp.example.edu/realms/school' : 'https://issuer.example.test',
+    linked_at: ago(60 * 24 * (9 - index)),
+    last_login_at: ago(60 * (account + index)),
+    can_unlink: providerIds.length > 1,
+  }))
 }
 
 function enrollmentOf(
@@ -296,9 +330,14 @@ function seedGrants(selfId: string): Map<string, Grant[]> {
 
 function buildState(scenario: MockScenario): MockState {
   const local = scenario.startsWith('local')
-  const owner = scenario === 'owner' || scenario === 'stale-owner' || scenario === 'local-owner'
+  const owner =
+    scenario === 'owner' ||
+    scenario === 'stale-owner' ||
+    scenario === 'local-owner' ||
+    scenario === 'multi-owner'
   const pending = scenario === 'pending' || scenario === 'local-pending'
   const picker = scenario === 'picker'
+  const multi = scenario.startsWith('multi')
 
   const canvas =
     scenario === 'fresh' || scenario === 'picker' || scenario === 'error-503' || scenario === 'rate-limited'
@@ -318,7 +357,7 @@ function buildState(scenario: MockScenario): MockState {
     school_search: picker,
     write_tools: !pending && scenario !== 'no-write-tools',
     admin: owner,
-    identities: false,
+    identities: multi && !pending,
     connected_apps: local,
     consent: local,
     logout_everywhere: false,
@@ -331,7 +370,7 @@ function buildState(scenario: MockScenario): MockState {
     enabled,
     local: local === true,
   }))
-  const fresh = scenario !== 'stale-owner'
+  const fresh = scenario !== 'stale-owner' && scenario !== 'multi-stale'
   const me: MeResponse = {
     account: {
       id: SELF_ID,
@@ -394,6 +433,12 @@ function buildState(scenario: MockScenario): MockState {
       disabled_at: ago(60 * 24 * 2),
     }),
   ]
+  if (multi) {
+    accounts[0].identities = adminIdentities(1, ['entra', 'github'])
+    accounts[1].identities = adminIdentities(2, ['google'])
+    accounts[2].identities = adminIdentities(3, ['entra'])
+    accounts[3].identities = adminIdentities(4, ['oidc:school', 'entra'])
+  }
   for (const row of accounts) row.actions = actionsFor(row)
 
   const self = { kind: 'account' as const, key: selfRow.key, name: 'Ada Example' }
@@ -426,6 +471,32 @@ function buildState(scenario: MockScenario): MockState {
     audit,
     grants: local ? seedGrants(SELF_ID) : new Map(),
     txns: new Set(local ? Object.values(MOCK_TXN) : []),
+    multi,
+    providers: multi ? MULTI_PROVIDERS : [MULTI_PROVIDERS[0]],
+    identities: [
+      {
+        id: '11',
+        provider_id: 'entra',
+        username: 'ada@example.edu',
+        email: 'ada@example.edu',
+        email_verified: true,
+        linked_at: ago(60 * 24 * 9),
+        last_login_at: ago(3),
+        current: true,
+        can_unlink: false,
+      },
+      {
+        id: '12',
+        provider_id: 'github',
+        username: 'ada-example',
+        email: 'ada@example.org',
+        email_verified: false,
+        linked_at: ago(60 * 24 * 2),
+        last_login_at: null,
+        current: false,
+        can_unlink: false,
+      },
+    ],
   }
 }
 
@@ -519,6 +590,11 @@ const STATUS: Partial<Record<ApiErrorCode, number>> = {
   write_tools_unavailable: 503,
   last_owner: 409,
   cannot_disable_self: 409,
+  identity_in_use: 409,
+  provider_already_linked: 409,
+  last_identity: 409,
+  link_session_ended: 409,
+  provider_unavailable: 503,
   authorization_invalid: 400,
   client_unavailable: 409,
 }
@@ -598,9 +674,9 @@ function syncSelf(state: MockState): void {
 
 route('GET /providers', 'public', (_c, s) =>
   ok({
-    providers: [
-      { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/account/login' },
-    ],
+    providers: s.multi
+      ? s.providers
+      : [{ id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/account/login' }],
     mcp_url: s.me.server.mcp_url,
   }),
 )
@@ -751,6 +827,45 @@ route('DELETE /me/write-tools', 'active', (_c, s) => {
 
 route('GET /me/login-history', 'session', (_c, s) => ok({ events: s.history }))
 
+// ---- sign-in methods (multi scenarios only; not_found otherwise, like the server) -------------
+
+function identitiesView(s: MockState) {
+  const linked = new Set(s.identities.map((i) => i.provider_id))
+  return {
+    identities: s.identities.map((i) => ({ ...i, can_unlink: s.identities.length > 1 })),
+    linkable: s.providers.filter((p) => !linked.has(p.id)).map((p) => p.id),
+    fresh: s.fresh,
+    fresh_window_s: 600,
+  }
+}
+
+route('GET /me/identities', 'active', (_c, s) => (s.multi ? ok(identitiesView(s)) : fail('not_found')))
+
+route('POST /me/identities/link', 'active', (c, s) => {
+  if (!s.multi) return fail('not_found')
+  const bad = onlyFields(c.body, ['provider'])
+  if (bad) return bad
+  const provider = c.body.provider
+  if (typeof provider !== 'string' || !s.providers.some((p) => p.id === provider)) {
+    return fail('validation_failed', { field: 'provider' })
+  }
+  if (!s.fresh) return fail('reauth_required', { max_age_s: 600 })
+  if (s.identities.some((i) => i.provider_id === provider)) return fail('provider_already_linked')
+  return ok({ redirect_to: `https://idp.example.invalid/authorize?provider=${encodeURIComponent(provider)}` })
+})
+
+route('DELETE /me/identities/{id}', 'active', (c, s) => {
+  if (!s.multi) return fail('not_found')
+  const id = decodeURIComponent(c.match[1])
+  if (!IDENTITY_ID.test(id)) return fail('validation_failed', { field: 'id' })
+  const found = s.identities.find((i) => i.id === id)
+  if (!found) return fail('not_found')
+  if (!s.fresh) return fail('reauth_required', { max_age_s: 600 })
+  if (s.identities.length <= 1) return fail('last_identity')
+  s.identities = s.identities.filter((i) => i.id !== id)
+  return ok({ signed_out: found.current })
+})
+
 route('PUT /me/ui-locale', 'session', (c, s) => {
   const bad = onlyFields(c.body, ['locale'])
   if (bad) return bad
@@ -856,6 +971,18 @@ function accessAction(action: 'approve' | 'deny' | 'disable' | 'enable') {
     return ok({ changed, account: { ...row } })
   }
 }
+
+route('DELETE /admin/identities/{id}', 'owner', (c, s) => {
+  if (!s.multi) return fail('not_found')
+  const id = decodeURIComponent(c.match[1])
+  if (!IDENTITY_ID.test(id)) return fail('validation_failed', { field: 'id' })
+  const row = s.accounts.find((a) => a.identities?.some((i) => i.id === id))
+  if (!row || !row.identities) return fail('not_found')
+  if (row.identities.length <= 1) return fail('last_identity')
+  row.identities = row.identities.filter((i) => i.id !== id)
+  for (const i of row.identities) i.can_unlink = row.identities.length > 1
+  return ok({ changed: true, account: { ...row } })
+})
 
 route('POST /admin/accounts/{id}/approve', 'owner', accessAction('approve'))
 route('POST /admin/accounts/{id}/deny', 'owner', accessAction('deny'))

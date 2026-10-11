@@ -284,14 +284,14 @@ class TestTransport:
                 )
                 if endpoint.access == "public":
                     assert response.status_code == 200
-                elif endpoint.local_authz:
-                    # The local authorization server's routes: absent in this mode.
+                elif endpoint.local_authz or endpoint.linking:
+                    # The local authorization server's and the sign-in methods' routes: absent here.
                     error_of(response, 404, "not_found")
                 else:
                     error_of(response, 401, "not_authenticated")
                 assert_api_headers(response)
                 seen += 1
-        assert seen == 29
+        assert seen == 33
 
     def test_a_known_path_with_the_wrong_method_is_405_with_allow(self, user: Api) -> None:
         response = user.call("PATCH", "/me/canvas-token")
@@ -1806,8 +1806,8 @@ class TestIsolation:
             if "/admin/" not in path:
                 continue
             for method, endpoint in endpoints.items():
-                if endpoint.local_authz:
-                    continue  # absent without the local authorization server (its own tests)
+                if endpoint.local_authz or endpoint.linking:
+                    continue  # absent in this mode (their own tests)
                 for target in (bob, me):
                     url = path.replace("{id}", target)
                     response = api.call(method, url[len(P):])
@@ -2315,6 +2315,9 @@ class TestEveryAnswer:
             "directory_unavailable", "write_tool_not_allowed", "write_tools_unavailable",
             "last_owner", "cannot_disable_self",
             "authorization_invalid", "client_unavailable",
+            # linked sign-in methods
+            "identity_in_use", "provider_already_linked", "last_identity", "link_session_ended",
+            "provider_unavailable",
         }
         for status in account_api.ERROR_STATUS.values():
             assert 400 <= status < 600

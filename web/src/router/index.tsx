@@ -5,6 +5,7 @@ import ActivityView from '@/views/ActivityView'
 import ConnectedAppsView from '@/views/ConnectedAppsView'
 import ConsentView from '@/views/ConsentView'
 import HomeView from '@/views/HomeView'
+import SignInMethodsView from '@/views/SignInMethodsView'
 import SignInView from '@/views/SignInView'
 import { NotFoundView, RouteError } from '@/views/StateViews'
 import TokenView from '@/views/TokenView'
@@ -55,6 +56,16 @@ export const routes: RouteObject[] = [
                 path: 'connected-apps',
                 element: <ConnectedAppsView />,
                 handle: { titleKey: 'common:nav.connectedApps' },
+              },
+            ],
+          },
+          {
+            element: <RequireFeature feature="identities" />,
+            children: [
+              {
+                path: 'sign-in-methods',
+                element: <SignInMethodsView />,
+                handle: { titleKey: 'common:nav.signInMethods' },
               },
             ],
           },

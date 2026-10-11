@@ -206,7 +206,8 @@
       "activated": "账户已获批准",
       "access_disabled": "访问已被关闭",
       "signups_paused": "暂停注册",
-      "pending_approval": "等待审批"
+      "pending_approval": "等待审批",
+      "identity_linked": "已添加登录方式"
     },
     "empty": "还没有登录记录。",
     "sessionsTitle": "会话",
@@ -253,5 +254,32 @@
     "pendingBody": "你的账户正在等待服务器所有者批准，现在还不能连接应用。你可以取消这次请求。",
     "errorTitle": "这个请求无法使用",
     "decisionFailed": "无法把你的答复发给应用，没有授予任何权限。"
+  },
+  "methods": {
+    "title": "登录方式",
+    "intro": "可用来登录这个 Canvas 账户的账号。只有证明你掌控它之后才会添加；账户绝不会按邮箱地址自动合并。",
+    "columns": {
+      "provider": "提供方",
+      "account": "账号",
+      "linked": "关联时间",
+      "lastSignIn": "最近登录",
+      "actions": "操作"
+    },
+    "current": "当前登录",
+    "verified": "已验证邮箱",
+    "never": "从未",
+    "unlink": "移除",
+    "unlinkLabel": "移除：{{name}}",
+    "unlinkTitle": "移除 {{name}}？",
+    "unlinkBody": "这种登录方式将不能再用于你的账户，并且你账户的所有浏览器会话都会结束，其他设备需要重新登录。已连接的应用不受影响；如有需要，请在“已连接的应用”中结束它们。",
+    "unlinkCurrent": "你正在使用这种方式登录，所以你会被退出登录。",
+    "unlinked": "已移除登录方式。",
+    "link": "关联 {{name}}",
+    "addTitle": "添加登录方式",
+    "addBody": "你会被带到对方网站确认身份，然后回到这里。已经属于本服务器另一位用户的账号不能添加。",
+    "linkedDone": "已添加登录方式。",
+    "linkFailed": "登录方式没有添加",
+    "lastOne": "账户至少要保留一种登录方式。",
+    "effects": "移除登录方式会结束你所有浏览器的登录状态；已连接的应用不会断开，可在“已连接的应用”中结束。"
   }
 }

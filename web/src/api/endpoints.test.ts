@@ -29,6 +29,10 @@ import {
   revokeGrant,
   searchSchools,
   signInUrl,
+  startLink,
+  unlinkIdentity,
+  adminUnlinkIdentity,
+  getIdentities,
 } from './endpoints'
 import { meFixture, scriptAdapter } from '@/test/fixtures'
 
@@ -179,5 +183,43 @@ describe('signInUrl', () => {
     expect(signInUrl('/account/login', '/account/write-tools?x=1')).toBe(
       '/account/login?return_to=%2Faccount%2Fwrite-tools%3Fx%3D1',
     )
+  })
+
+  it('carries a waiting app and the request for another account to a provider start', () => {
+    expect(signInUrl('/account/login/google', { txn: TXN, reauth: true })).toBe(
+      `/account/login/google?txn=${TXN}&reauth=1`,
+    )
+    expect(signInUrl('/account/login/github', { returnTo: '/account/activity', reauth: true })).toBe(
+      '/account/login/github?reauth=1&return_to=%2Faccount%2Factivity',
+    )
+    expect(signInUrl('/account/login/github', { txn: null, reauth: false, returnTo: null })).toBe(
+      '/account/login/github',
+    )
+    expect(signInUrl('/account/login/github', {})).toBe('/account/login/github')
+  })
+})
+
+describe('sign-in methods', () => {
+  it('reads, links and unlinks through the contract', async () => {
+    const seen = scriptAdapter((request) => {
+      if (request.url === '/me/identities') return { status: 200, data: { identities: [], linkable: [], fresh: true, fresh_window_s: 600 } }
+      if (request.url === '/me/identities/link') return { status: 200, data: { redirect_to: 'https://idp.example.test/a' } }
+      return { status: 200, data: { signed_out: false } }
+    })
+    await getIdentities()
+    expect(seen.at(-1)).toMatchObject({ method: 'GET', url: '/me/identities' })
+    expect(await startLink('google')).toEqual({ redirect_to: 'https://idp.example.test/a' })
+    expect(seen.at(-1)).toMatchObject({ method: 'POST', url: '/me/identities/link' })
+    expect(JSON.parse(String(seen.at(-1)?.data))).toEqual({ provider: 'google' })
+    await unlinkIdentity('12')
+    expect(seen.at(-1)).toMatchObject({ method: 'DELETE', url: '/me/identities/12' })
+    await adminUnlinkIdentity('34')
+    expect(seen.at(-1)).toMatchObject({ method: 'DELETE', url: '/admin/identities/34' })
+  })
+
+  it('percent-encodes the id it puts in the path', async () => {
+    const seen = scriptAdapter(() => ({ status: 200, data: { signed_out: false } }))
+    await unlinkIdentity('1/../2')
+    expect(seen.at(-1)?.url).toBe('/me/identities/1%2F..%2F2')
   })
 })

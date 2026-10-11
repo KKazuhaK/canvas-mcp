@@ -1053,3 +1053,228 @@ def test_the_changelog_announces_the_local_authorization_server():
         assert needle in added, f"the changelog entry is missing {needle!r}"
     security = unreleased.split("### Security", 1)[1].split("\n### ", 1)[0]
     assert "form-action" in security and "grace window" in security
+
+
+# --- the extra sign-in providers (SELFHOST_LOGIN_PROVIDERS) ---
+
+PROVIDERS_HEADING = "## Sign-in providers (Google, GitHub, OIDC)"
+
+
+def _providers_section(readme: str) -> str:
+    return readme.split(PROVIDERS_HEADING, 1)[1].split("\n## ", 1)[0]
+
+
+def test_the_providers_section_is_linked_from_the_contents_and_the_root_readme(readme):
+    assert "(#sign-in-providers-google-github-oidc)" in readme
+    assert PROVIDERS_HEADING in readme
+    root = (REPO / "README.md").read_text(encoding="utf-8")
+    assert "deploy/selfhost/README.md#sign-in-providers-google-github-oidc" in root
+
+
+def test_every_variable_login_config_reads_is_documented(env_text, readme):
+    source = (SRC / "core" / "selfhost" / "login" / "config.py").read_text(encoding="utf-8")
+    names = set(re.findall(r'^[A-Z_]+_ENV = "([A-Z][A-Z0-9_]+)"$', source, re.MULTILINE))
+    assert {
+        "SELFHOST_LOGIN_PROVIDERS", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GITHUB_CLIENT_ID",
+        "GITHUB_CLIENT_SECRET",
+    } <= names
+    section = _providers_section(readme)
+    for name in sorted(names):
+        assert re.search(rf"^#? ?{name}=", env_text, re.MULTILINE), f"{name} is not in env.example"
+        assert f"`{name}`" in section, f"{name} is not documented in the providers section"
+    # The generic provider's variables are documented by suffix, with their <SLUG> prefix.
+    block = source[source.index("_OIDC_SUFFIXES = (") :].split(")", 1)[0]
+    suffixes = re.findall(r'"([A-Z_]+)"', block)
+    assert set(suffixes) == {
+        "ISSUER", "CLIENT_ID", "CLIENT_SECRET", "DISPLAY_NAME", "SCOPES", "TOKEN_AUTH_METHOD", "USERINFO",
+    }
+    for suffix in suffixes:
+        assert f"OIDC_<SLUG>_{suffix}" in section, suffix
+        assert re.search(rf"^#? ?OIDC_SCHOOL_{suffix}=", env_text, re.MULTILINE), suffix
+    assert "ACCOUNT_LINK_BY_VERIFIED_EMAIL" in section and "reserved" in section
+
+
+def test_the_redirect_uri_table_is_the_one_the_registry_serves(readme):
+    from canvas_mcp.core.selfhost import token_admin
+    from canvas_mcp.core.selfhost.login.entra import (
+        ENTRA_ALIAS_START_PATH,
+        ENTRA_CALLBACK_PATH,
+        ENTRA_START_PATH,
+    )
+    from canvas_mcp.core.selfhost.login.github import (
+        GITHUB_CALLBACK_PATH,
+        GITHUB_START_PATH,
+    )
+    from canvas_mcp.core.selfhost.login.google import (
+        GOOGLE_CALLBACK_PATH,
+        GOOGLE_START_PATH,
+    )
+
+    section = _providers_section(readme)
+    table = section[section.index("### Redirect URIs to register") :].split("\n### ", 1)[0]
+    rows = {}
+    for line in table.splitlines():
+        if line.startswith("|") and not line.startswith("|---"):
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            rows[cells[0]] = cells
+    assert f"`{ENTRA_START_PATH}`" in rows["Entra"][1] and ENTRA_ALIAS_START_PATH in rows["Entra"][1]
+    assert rows["Entra"][2] == f"`https://<host>{ENTRA_CALLBACK_PATH}`"
+    assert rows["Google"][1] == f"`{GOOGLE_START_PATH}`"
+    assert rows["Google"][2] == f"`https://<host>{GOOGLE_CALLBACK_PATH}`"
+    assert rows["GitHub"][1] == f"`{GITHUB_START_PATH}`"
+    assert rows["GitHub"][2] == f"`https://<host>{GITHUB_CALLBACK_PATH}`"
+    oidc = rows["Generic OIDC"]
+    assert oidc[1] == "`/account/login/oidc/<slug>`"
+    assert oidc[2] == "`https://<host>/account/callback/oidc/<slug>`"
+    # The token_admin listing prints the same URIs.
+    assert token_admin._redirect_uri("https://h", "entra") == "https://h" + ENTRA_CALLBACK_PATH
+    assert token_admin._redirect_uri("https://h", "google") == "https://h" + GOOGLE_CALLBACK_PATH
+    assert token_admin._redirect_uri("https://h", "github") == "https://h" + GITHUB_CALLBACK_PATH
+    assert token_admin._redirect_uri("https://h", "oidc:school") == "https://h/account/callback/oidc/school"
+    # The Entra redirect URI registered in an existing app is, and stays, /account/callback.
+    assert ENTRA_CALLBACK_PATH == "/account/callback"
+
+
+def test_the_documented_provider_rule_kinds_are_the_ones_the_parser_accepts(readme):
+    from canvas_mcp.core.selfhost import accounts
+
+    section = _providers_section(readme)
+    table = section[section.index("### Who is admitted with these providers") :].split("\n### ", 1)[0]
+    documented = re.findall(r"^\| `((?:google|github|oidc)[^`]*)` \|", table, re.MULTILINE)
+    examples = {
+        "google:domain:<hd>": "google:domain:example.edu",
+        "google:email:<address>": "google:email:ada@example.edu",
+        "github:user:<numeric id>": "github:user:583231",
+        "github:org:<org>": "github:org:acme",
+        "github:team:<org>/<team slug>": "github:team:acme/core",
+        "oidc:<slug>:claim:<name>=<value>": "oidc:school:claim:groups=canvas-users",
+        "oidc:<slug>:email:<address>": "oidc:school:email:ada@example.edu",
+        "oidc:<slug>:any": "oidc:school:any",
+    }
+    assert set(documented) == set(examples), set(documented) ^ set(examples)
+    providers = ("entra", "google", "github", "oidc:school")
+    for example in examples.values():
+        parsed = accounts.parse_rule(example, providers=providers)
+        assert not isinstance(parsed, str), (example, parsed)
+    # Every kind the parser knows is documented (one row each), and nothing else is accepted.
+    assert accounts._GOOGLE_KINDS == {"domain", "email"}
+    assert accounts._GITHUB_KINDS == {"user", "org", "team"}
+    assert accounts._OIDC_KINDS == {"claim", "email", "any"}
+    for refused in (
+        "google:role:x", "github:email:a@b.test", "oidc:school:role:x", "google:domain:",
+        "github:user:octocat", "oidc:school:claim:email=a",
+    ):
+        assert isinstance(accounts.parse_rule(refused, providers=providers), str), refused
+    # OWNER_RULES stay Entra-only, as documented.
+    for rule in ("google:email:ada@example.edu", "github:user:1", "oidc:school:any"):
+        assert isinstance(accounts.parse_rule(rule, owner=True, providers=providers), str), rule
+    assert "`OWNER_RULES` stay Entra-only" in section
+    assert "At most 10 `github:org` and `github:team` rules" in section
+    assert accounts.MAX_GITHUB_MEMBERSHIP_RULES == 10
+
+
+def test_the_documented_bootstrap_owner_forms_are_in_the_template_too(readme, env_text):
+    section = _providers_section(readme)
+    for form in ("google:<subject>", "github:<numeric user id>", "oidc:<slug>:<subject>", "token_admin"):
+        assert form in section, form
+        assert form in env_text, form
+
+
+def test_the_new_token_admin_commands_are_documented_and_exist(readme):
+    source = (SRC / "core" / "selfhost" / "token_admin.py").read_text(encoding="utf-8")
+    usage = source.split('"""', 2)[1]
+    for command in ("identities", "unlink-identity", "login-providers"):
+        assert re.search(rf'add_parser\(\s*"{command}"', source), command
+        assert f"token_admin {command}" in readme, command
+        assert f"token_admin {command}" in usage, f"{command} is missing from the usage text"
+    assert "--check" in readme and "google:<subject>" in readme
+
+
+def test_the_proxy_examples_limit_the_sign_in_paths():
+    nginx = (SELFHOST / "nginx.conf.example").read_text(encoding="utf-8")
+    assert "limit_req_zone $binary_remote_addr zone=canvas_signin:10m rate=30r/m;" in nginx
+    for prefix in ("/account/login", "/account/callback"):
+        block = nginx[nginx.index(f"location ^~ {prefix} {{") :]
+        block = block[: block.index("}")]
+        assert "limit_req zone=canvas_signin burst=20 nodelay;" in block
+        assert "proxy_set_header Host $host;" in block
+    assert "campus NAT" in nginx
+    caddy = (SELFHOST / "Caddyfile.example").read_text(encoding="utf-8")
+    assert "path /account/login* /account/callback*" in caddy and "events 30" in caddy
+    active = "\n".join(line for line in caddy.splitlines() if not line.lstrip().startswith("#"))
+    assert "rate_limit" not in active  # like the other limits, it needs the optional module
+    readme_text = (SELFHOST / "README.md").read_text(encoding="utf-8")
+    assert "canvas_signin" in readme_text and "/account/login*" in readme_text
+
+
+def test_the_readme_updates_the_places_the_providers_change(readme):
+    # Accounts and admission no longer claims Entra is the only provider.
+    assert "Entra is the only login provider" not in readme
+    assert "those providers are not enabled" not in readme
+    assert "accepted and reserved for login providers" not in readme
+    # The inventory names the new secrets, the proxy-log section the new callbacks, revoking the new advice.
+    assert "Sign-in provider client secrets" in readme and "OIDC_<SLUG>_CLIENT_SECRET" in readme
+    assert "/account/callback/<provider>" in readme
+    assert "**disable first**" in readme and "Unlink a sign-in method" in readme
+    section = _providers_section(readme)
+    for needle in (
+        "SMOKE_EXPECT_PROVIDERS",
+        "Authorization callback URL",
+        "OAuth app access restrictions",
+        "signing key",
+        "https://authentik.example/application/o/<application slug>/",
+        "https://<keycloak host>/realms/<realm>",
+        "oidc:authentik:claim:groups=canvas-users",
+        "`ACCOUNT_LINK_BY_VERIFIED_EMAIL`",
+        "identity_in_use",
+        "Connected apps stay connected",
+        "setup-env.sh",
+    ):
+        assert needle in section, needle
+
+
+def test_the_changelog_announces_the_extra_sign_in_providers():
+    changelog = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    unreleased = changelog[changelog.index("## [Unreleased]") :].split("\n## [")[0]
+    added = unreleased.split("### Added", 1)[1].split("\n### ", 1)[0]
+    for needle in (
+        "SELFHOST_LOGIN_PROVIDERS",
+        "/account/callback/google",
+        "/account/callback/oidc/<slug>",
+        "`OWNER_RULES` stay Entra-only",
+        "never linked by e-mail",
+        "No schema change",
+    ):
+        assert needle in added, f"the changelog entry is missing {needle!r}"
+
+
+def test_local_mode_text_does_not_say_the_sign_in_is_always_microsoft(readme):
+    env_text = (SELFHOST / "env.example").read_text(encoding="utf-8")
+    for stale in (
+        "last Microsoft sign-in is older",
+        "You are sent to the Microsoft sign-in",
+        "The sign-in is the `/account` Microsoft sign-in",
+        "a fresh Microsoft sign-in otherwise",
+    ):
+        assert stale not in readme, stale
+    for stale in ("the sign-in is the /account Microsoft sign-in", "their last Microsoft sign-in"):
+        assert stale not in env_text, stale
+
+
+def test_the_google_notes_match_what_the_server_asks_for(readme):
+    # Google exempts an app that asks only for basic identity scopes from the Testing limits.
+    assert "publish it (**In production**)" not in readme
+    assert "https://support.google.com/cloud/answer/15549945" in readme
+    assert "scopes the server asks for are only `openid`, `email` and `profile`" in readme
+
+
+def test_the_proxy_example_keeps_the_per_ip_rate_below_the_service_backstop():
+    from canvas_mcp.core.selfhost.login.registry import (
+        START_BURST,
+        START_REFILL_PER_SECOND,
+    )
+
+    nginx = (SELFHOST / "nginx.conf.example").read_text(encoding="utf-8")
+    per_ip = int(re.search(r"zone=canvas_signin:\w+ rate=(\d+)r/m", nginx).group(1))
+    assert START_BURST >= 10 * per_ip and START_REFILL_PER_SECOND * 60 >= 10 * per_ip
+    assert f"a burst of {START_BURST}" in nginx

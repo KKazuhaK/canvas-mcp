@@ -47,7 +47,7 @@ from __future__ import annotations
 import functools
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Any, Protocol
 
 import anyio.to_thread
@@ -197,7 +197,13 @@ class AccessChecker(Protocol):
 class OwnerLedger(Protocol):
     """The slice of the token store that records an owner role seen to be gone."""
 
-    def demote_owner(self, principal_key: str, *, evidence_issued_at: int) -> bool: ...
+    def demote_owner(
+        self,
+        principal_key: str,
+        *,
+        evidence_issued_at: int,
+        listed_providers: Collection[str] | None = None,
+    ) -> bool: ...
 
 
 class CanvasTokenReader(Protocol):
@@ -284,6 +290,7 @@ class SelfhostRequestContextMiddleware:
         tool_prefs: ToolPrefsReader | None = None,
         access: AccessChecker | None = None,
         owners: OwnerLedger | None = None,
+        login_providers: Collection[str] | None = None,
         course_state: str = COURSE_STATE_REQUEST_LOCAL,
         identity_mode: str = "entra",
     ) -> None:
@@ -302,6 +309,8 @@ class SelfhostRequestContextMiddleware:
         self.tool_prefs = tool_prefs
         self.access = access
         self.owners = owners
+        # SELFHOST_LOGIN_PROVIDERS: which owners count as usable when a role is taken back.
+        self.login_providers = login_providers
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -388,7 +397,10 @@ class SelfhostRequestContextMiddleware:
                 return
             changed = await anyio.to_thread.run_sync(
                 functools.partial(
-                    self.owners.demote_owner, principal.key, evidence_issued_at=int(issued)
+                    self.owners.demote_owner,
+                    principal.key,
+                    evidence_issued_at=int(issued),
+                    listed_providers=self.login_providers,
                 )
             )
             if changed:

@@ -48,6 +48,12 @@ describe('closed error code set', () => {
         // admin
         'last_owner',
         'cannot_disable_self',
+        // linked sign-in methods
+        'identity_in_use',
+        'provider_already_linked',
+        'last_identity',
+        'link_session_ended',
+        'provider_unavailable',
         // an app's authorization request
         'client_unavailable',
         // only on the sign-in page
@@ -67,7 +73,7 @@ describe('closed error code set', () => {
   })
 
   it('no longer knows the codes of features that are not built (identities, grants, consent)', () => {
-    for (const gone of ['not_provisioned', 'identity_in_use', 'last_identity', 'link_requires_recent_login', 'consent_expired', 'grant_revoked']) {
+    for (const gone of ['not_provisioned', 'link_requires_recent_login', 'consent_expired', 'grant_revoked']) {
       expect(isApiErrorCode(gone), gone).toBe(false)
     }
   })

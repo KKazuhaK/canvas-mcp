@@ -64,6 +64,18 @@ canvas.mcp.kazuhahub.com {
 	# 	}
 	# }
 
+	# The sign-in paths of every provider (the Microsoft sign-in too): /account/login, /account/login/<provider>,
+	# /account/callback and /account/callback/<provider>. 30 a minute per IP; people behind one address
+	# (a campus NAT) share it, so raise it for them.
+	# @signin path /account/login* /account/callback*
+	# rate_limit @signin {
+	# 	zone signin {
+	# 		key    {remote_host}
+	# 		events 30
+	# 		window 1m
+	# 	}
+	# }
+
 	reverse_proxy 127.0.0.1:8819 {
 		# MCP uses streaming responses (SSE): flush immediately, do not buffer.
 		flush_interval -1

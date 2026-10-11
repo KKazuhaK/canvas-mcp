@@ -75,7 +75,18 @@
     "noUsername": "No username",
     "neverLoggedIn": "Never",
     "disabledSince": "Disabled since",
-    "empty": "No accounts match."
+    "empty": "No accounts match.",
+    "identities": {
+      "title": "Sign-in methods",
+      "unlink": "Unlink",
+      "unlinkLabel": "Unlink {{provider}} from {{name}}",
+      "confirmTitle": "Unlink {{provider}} from {{name}}?",
+      "confirmBody": "They keep their other sign-in methods, but every browser session of this person ends. Connected apps stay connected; end them separately if the account may be compromised.",
+      "done": "Sign-in method unlinked.",
+      "issuer": "Issuer",
+      "linked": "Linked",
+      "lastSignIn": "Last sign-in"
+    }
   },
   "enrollments": {
     "title": "Canvas enrollments",

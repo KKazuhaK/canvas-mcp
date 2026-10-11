@@ -27,6 +27,7 @@ from .db.url import (
     parse_database_url,
     sqlite_target,
 )
+from .login.config import LoginProvidersConfig, parse_login_providers
 from .schools import MAX_FEATURED, FeaturedSchool, parse_hostname
 
 AUTH_MODE_ENV = "MCP_AUTH_MODE"
@@ -186,6 +187,10 @@ class SelfhostSettings:
     # authorization server. ``authz`` only matters in ``local`` mode.
     authz_mode: Literal["entra_proxy", "local"] = "entra_proxy"
     authz: AuthzSettings = field(default_factory=AuthzSettings)
+    # The sign-in providers (``SELFHOST_LOGIN_PROVIDERS``). The default is Entra alone, which
+    # is the first release's behaviour; the others need ``authz_mode == "local"``. Without
+    # Entra, ``tenant_id``, ``client_id`` and ``client_secret`` are empty strings.
+    login_providers: LoginProvidersConfig = field(default_factory=LoginProvidersConfig)
 
     mcp_path: ClassVar[str] = "/mcp"
 
@@ -200,6 +205,10 @@ class SelfhostSettings:
     @property
     def mcp_url(self) -> str:
         return self.public_base_url + self.mcp_path
+
+    @property
+    def entra_enabled(self) -> bool:
+        return self.login_providers.entra_enabled
 
     @property
     def account_url(self) -> str:
@@ -604,23 +613,32 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
             "PUBLIC_BASE_URL must not include the default port when SELFHOST_AUTH_MODE=local"
         )
 
-    tenant_raw = get("ENTRA_TENANT_ID")
-    if tenant_raw.lower() in _RESERVED_TENANTS:
-        problems.append(
-            "ENTRA_TENANT_ID must be the directory (tenant) GUID, not "
-            "common, organizations or consumers"
-        )
-        tenant_id = ""
-    else:
-        tenant_id = _guid("ENTRA_TENANT_ID", tenant_raw, problems)
-    client_id = _guid("ENTRA_CLIENT_ID", get("ENTRA_CLIENT_ID"), problems)
+    login = parse_login_providers(source, problems, authz_mode=authz_mode)
 
-    client_secret = get("ENTRA_CLIENT_SECRET")
-    if not client_secret:
-        problems.append("ENTRA_CLIENT_SECRET is required")
-    elif len(client_secret) < MIN_CLIENT_SECRET_CHARS:
-        problems.append(f"ENTRA_CLIENT_SECRET must be at least {MIN_CLIENT_SECRET_CHARS} characters")
+    tenant_id = ""
+    client_id = ""
+    client_secret = ""
+    if login.entra_enabled:
+        tenant_raw = get("ENTRA_TENANT_ID")
+        if tenant_raw.lower() in _RESERVED_TENANTS:
+            problems.append(
+                "ENTRA_TENANT_ID must be the directory (tenant) GUID, not "
+                "common, organizations or consumers"
+            )
+        else:
+            tenant_id = _guid("ENTRA_TENANT_ID", tenant_raw, problems)
+        client_id = _guid("ENTRA_CLIENT_ID", get("ENTRA_CLIENT_ID"), problems)
 
+        client_secret = get("ENTRA_CLIENT_SECRET")
+        if not client_secret:
+            problems.append("ENTRA_CLIENT_SECRET is required")
+        elif len(client_secret) < MIN_CLIENT_SECRET_CHARS:
+            problems.append(
+                f"ENTRA_CLIENT_SECRET must be at least {MIN_CLIENT_SECRET_CHARS} characters"
+            )
+
+    # With Entra in the list this is the Entra scope; without it, the name of the scope the
+    # local authorization server advertises to MCP clients.
     api_scope = get("ENTRA_API_SCOPE") or DEFAULT_API_SCOPE
     if not _SCOPE_RE.match(api_scope):
         problems.append("ENTRA_API_SCOPE must match [A-Za-z0-9._-] and be 1 to 64 characters")
@@ -632,12 +650,17 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
 
     required_role = get("ENTRA_REQUIRED_ROLE") or DEFAULT_REQUIRED_ROLE
     owner_role = get("ENTRA_OWNER_ROLE") or DEFAULT_OWNER_ROLE
-    if not _ROLE_RE.match(required_role):
-        problems.append("ENTRA_REQUIRED_ROLE must match [A-Za-z0-9._-] and be 1 to 120 characters")
-    if not _ROLE_RE.match(owner_role):
-        problems.append("ENTRA_OWNER_ROLE must match [A-Za-z0-9._-] and be 1 to 120 characters")
-    if required_role == owner_role:
-        problems.append("ENTRA_REQUIRED_ROLE and ENTRA_OWNER_ROLE must be different roles")
+    if login.entra_enabled:
+        if not _ROLE_RE.match(required_role):
+            problems.append(
+                "ENTRA_REQUIRED_ROLE must match [A-Za-z0-9._-] and be 1 to 120 characters"
+            )
+        if not _ROLE_RE.match(owner_role):
+            problems.append(
+                "ENTRA_OWNER_ROLE must match [A-Za-z0-9._-] and be 1 to 120 characters"
+            )
+        if required_role == owner_role:
+            problems.append("ENTRA_REQUIRED_ROLE and ENTRA_OWNER_ROLE must be different roles")
 
     signing_key = get("OAUTH_JWT_SIGNING_KEY")
     if not signing_key:
@@ -708,6 +731,8 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
         required_role=required_role,
         owner_role=owner_role,
         problems=problems,
+        providers=login.ids,
+        issuers=login.issuers(),
     )
 
     if problems or base is None:
@@ -741,4 +766,5 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
         account_web_dist=Path(web_dist_raw),
         authz_mode=authz_mode,
         authz=authz,
+        login_providers=login,
     )

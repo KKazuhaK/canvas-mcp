@@ -14,11 +14,13 @@ import {
   adminMarkInvalid,
   adminRemoveEnrollment,
   adminRevokeGrant,
+  adminUnlinkIdentity,
   decideConsent,
   deleteCanvasToken,
   deleteWriteTools,
   getConsent,
   getGrants,
+  getIdentities,
   getLoginHistory,
   getMe,
   getProviders,
@@ -28,6 +30,8 @@ import {
   putWriteTools,
   recheckCanvasToken,
   revokeGrant,
+  startLink,
+  unlinkIdentity,
   type AdminAccessAction,
 } from '@/api/endpoints'
 import { clearCsrfToken } from '@/api/client'
@@ -61,6 +65,32 @@ export function useWriteTools(enabled = true) {
 
 export function useLoginHistory() {
   return useQuery({ queryKey: keys.loginHistory, queryFn: getLoginHistory })
+}
+
+// ---- sign-in methods (two or more providers) -------------------------------------------
+
+export function useIdentities(enabled = true) {
+  return useQuery({ queryKey: keys.identities, queryFn: getIdentities, enabled })
+}
+
+/** The answer carries the provider's address; the screen checks it before navigating. */
+export function useStartLink() {
+  return useMutation({ mutationFn: (provider: string) => startLink(provider) })
+}
+
+/** An unlink ends every session of the account, so this one's own state is refetched too. */
+export function useUnlinkIdentity() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => unlinkIdentity(id),
+    // Also after a failure: the list may already have changed (another tab, an owner).
+    onSettled: () =>
+      Promise.all([
+        client.invalidateQueries({ queryKey: keys.identities }),
+        client.invalidateQueries({ queryKey: keys.me }),
+        client.invalidateQueries({ queryKey: keys.loginHistory }),
+      ]),
+  })
 }
 
 // ---- Canvas token (the token itself is NOT handled by a mutation) -----------
@@ -182,6 +212,14 @@ export function useAdminRemoveEnrollment() {
   return useMutation({
     mutationFn: (id: string) => adminRemoveEnrollment(id),
     onSuccess: () => refreshAdmin(client),
+  })
+}
+
+export function useAdminUnlinkIdentity() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => adminUnlinkIdentity(id),
+    onSettled: () => refreshAdmin(client),
   })
 }
 

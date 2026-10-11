@@ -20,7 +20,7 @@ from starlette.types import ASGIApp
 from ..config import Config, validate_canvas_url_scheme
 from ..logging import log_info, log_warning
 from ..token_health import set_token_health_monitor
-from .accounts import EntraClaimsPolicy
+from .accounts import STATUS_DISABLED, EntraClaimsPolicy, bootstrap_sign_in_gives_owner
 from .edge_guard import SelfhostEdgeGuard
 from .identity import IdentityService
 from .limits import RateLimiters, build_rate_limiters
@@ -234,6 +234,97 @@ def _data_layer_problem(settings: SelfhostSettings) -> str | None:
     return None
 
 
+def _provider_issuer_problems(settings: SelfhostSettings, store: TokenStore) -> list[str]:
+    """A provider id with enrolled identities cannot be rebound to another issuer.
+
+    Owner guards deliberately operate on provider ids. Keep that id bound to its issuer
+    so an old identity cannot count as reachable when the configured IdP cannot emit it.
+    """
+    from .login.config import env_prefix
+
+    configured = settings.login_providers.issuers()
+    if not configured:
+        return []
+    changed = {
+        identity.provider_id
+        for account in store.list_accounts()
+        for identity in account.identities
+        if identity.provider_id in configured
+        and identity.issuer != configured[identity.provider_id]
+    }
+    return [
+        f"{env_prefix(provider.removeprefix('oidc:'))}ISSUER cannot change for a provider "
+        "with stored identities; use a new slug, link it to an owner, and then delist the old one"
+        for provider in sorted(changed)
+    ]
+
+
+def _owner_path_problem(settings: SelfhostSettings, store: TokenStore) -> str | None:
+    """Without Entra nobody can become an owner through the identity provider's data.
+
+    An owner then needs ``SELFHOST_BOOTSTRAP_OWNER`` (a provider identity, or ``token_admin`` to
+    promote the first owner with the operator command) or a *usable owner* the database already
+    holds: an active owner with an identity at a listed provider whose role the rules did not
+    grant (a role from ``OWNER_RULES`` needs the Entra sign-in that carried it, so it is not
+    usable while Entra is not listed). The bootstrap owner applies while there is no usable
+    owner, so it also covers a database whose owners are all unusable. Otherwise the server
+    would start and nobody could ever open ``/account/admin``.
+    """
+    if settings.entra_enabled:
+        return None
+    policy = settings.access_policy
+    if policy.bootstrap_via_token_admin:
+        return None
+    if store.count_usable_owners(settings.login_providers.ids) > 0:
+        return None
+    boot = policy.bootstrap_owner
+    if boot is not None:
+        # The bootstrap identity makes an owner at its next sign-in, and that sign-in is asked
+        # the same table the server uses (accounts.decide): a new or pending account becomes
+        # the owner, an active one is admitted whatever the rules say and, when it is an owner
+        # no sign-in could use, re-sourced to bootstrap. Only an account the table refuses
+        # (a disabled one) leaves the server without an owner path.
+        key = store.lookup_identity(boot.provider_id, boot.issuer, boot.subject)
+        if key is None:
+            return None
+        status = store.get_principal_status(key)
+        if bootstrap_sign_in_gives_owner(
+            status.facts, policy, active_owner_count=store.count_active_owners()
+        ):
+            return None
+        if status.status == STATUS_DISABLED:
+            return (
+                "no owner can sign in: the account of SELFHOST_BOOTSTRAP_OWNER is disabled and "
+                "no other usable owner exists; enable it with: "
+                "python -m canvas_mcp.core.selfhost.token_admin enable ACCOUNT, or make another "
+                "account an owner with: python -m canvas_mcp.core.selfhost.token_admin "
+                "promote-owner ACCOUNT"
+            )
+        return (
+            "no owner can sign in: signing in as SELFHOST_BOOTSTRAP_OWNER would not give an owner "
+            f"session (its account is {status.status}) and no other usable owner exists; make "
+            "another account an owner with: python -m canvas_mcp.core.selfhost.token_admin "
+            "promote-owner ACCOUNT"
+        )
+    stranded = store.count_active_owners()
+    if stranded > 0:
+        return (
+            "no owner can sign in: SELFHOST_LOGIN_PROVIDERS does not list entra and every active "
+            f"owner in the database ({stranded}) either has no identity at a listed provider or "
+            "holds a role the Entra owner rule granted, which only an Entra sign-in can use; "
+            "list entra again, set SELFHOST_BOOTSTRAP_OWNER to a listed provider's identity "
+            "(it applies while no owner can sign in), or make another account an owner with: "
+            "python -m canvas_mcp.core.selfhost.token_admin promote-owner ACCOUNT"
+        )
+    return (
+        "no owner can be made: SELFHOST_LOGIN_PROVIDERS does not list entra, "
+        "SELFHOST_BOOTSTRAP_OWNER is unset and the database has no active owner; set "
+        "SELFHOST_BOOTSTRAP_OWNER to the first owner's identity (google:<subject>, "
+        "github:<numeric user id> or oidc:<slug>:<subject>), or to token_admin and then run: "
+        "python -m canvas_mcp.core.selfhost.token_admin promote-owner ACCOUNT"
+    )
+
+
 def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
     """Open the encrypted token store and build the identity service.
 
@@ -288,12 +379,31 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
     except OSError:
         raise SelfhostConfigError(["the Canvas token database cannot be opened"]) from None
 
+    # token_admin reads this to know which owners are usable (it often runs without the
+    # server's variables). It is the configured list, so it is written before the owner-path
+    # check: when that refuses the start, the operator's next step is a token_admin command,
+    # and it must judge owners by the list that was refused, not by an older one. An
+    # Entra-only server with no earlier record writes nothing.
+    try:
+        issuer_problems = _provider_issuer_problems(settings, store)
+        if issuer_problems:
+            raise SelfhostConfigError(issuer_problems)
+        store.record_login_providers(settings.login_providers.ids)
+        owner_problem = _owner_path_problem(settings, store)
+    except BaseException:
+        store.close()
+        raise
+    if owner_problem is not None:
+        store.close()
+        raise SelfhostConfigError([owner_problem])
+
     access = PrincipalAccessCache(store)
     identity = IdentityService(
         store,
         EntraClaimsPolicy(tenant_id=settings.tenant_id, client_id=settings.client_id),
         settings.access_policy,
         access=access,
+        login_providers=settings.login_providers.ids,
     )
     health = TokenHealth(store, account_url=settings.account_url)
     authz: AuthzRuntime | None = None
@@ -375,6 +485,20 @@ def install_selfhost(
 
     settings = runtime.settings
     spa = load_account_spa(settings) if settings.account_ui == "react" else None
+    logins = None
+    login_transport = account_options.pop("login_transport", None)
+    if settings.login_providers.public:
+        # Imported here: an Entra-only deployment never loads the relying-party modules.
+        from .login.registry import build_login_runtime
+
+        assert runtime.authz is not None, "other sign-in providers need SELFHOST_AUTH_MODE=local"
+        logins = build_login_runtime(
+            settings,
+            flow_store=runtime.authz.txns,
+            clock=account_options.get("clock") or time.time,
+            rate_limiters=runtime.limiters,
+            transport=login_transport,
+        )
     ceiling = tool_policy.allowed if tool_policy is not None and tool_policy.enforced else None
 
     async def registered_tool_names() -> list[str]:
@@ -413,6 +537,7 @@ def install_selfhost(
             "ui": settings.account_ui,
             "spa": spa,
             "authz": runtime.authz,
+            "logins": logins,
             **account_options,
         },
     )
@@ -470,6 +595,7 @@ def build_selfhost_asgi_app(
                 tool_prefs=runtime.tool_prefs,
                 access=runtime.access,
                 owners=None if local else runtime.store,
+                login_providers=settings.login_providers.ids,
                 course_state=settings.course_state,
                 identity_mode="local" if local else "entra",
             )

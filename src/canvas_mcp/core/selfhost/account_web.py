@@ -46,7 +46,7 @@ Security notes:
   a sign-in from the last ten minutes *and* the stored owner role, and the store
   re-checks that the acting owner is still an active owner inside the transaction
   that disables, enables, approves or denies someone. An owner cannot disable
-  themselves or the last active owner.
+  themselves or the last usable owner.
 * With ``ACCESS_POLICY=approval`` (or the ``approval`` fallback) a new user lands in
   a ``pending`` state: they can sign in and see that they are waiting, but the token
   form and the write-tool switches are hidden and refused, and the store refuses a
@@ -55,6 +55,15 @@ Security notes:
 * Every sign-in is written to ``auth_events`` (the page shows the last twenty); the
   client address is ``unknown`` (no proxy is trusted) and the user agent is only a
   keyed hash. Owners can read the audit log at ``/account/admin/audit``.
+
+More sign-in providers (``SELFHOST_LOGIN_PROVIDERS``, ``SELFHOST_AUTH_MODE=local`` only). Entra keeps its
+sign-in exactly as described above, and a deployment with Entra alone behaves as it always did: no
+extra route, page or style. With others, ``/account/login`` chooses (or goes straight to the only
+provider), each of Google, GitHub and the generic OpenID Connect providers has a start and a
+callback of its own (:mod:`.login.flows`; the ceremony state is stored server side and the
+browser holds only a sealed ``__Host-cmcp_flow`` cookie), and a signed-in person can link and
+unlink sign-in methods (:mod:`.login.linking`; a link needs a sign-in from the last ten minutes
+and is bound to the session that started it). The session cookie names the provider that issued it.
 
 Two UIs, one set of rules. With ``ACCOUNT_UI=react`` the built single-page app is served
 instead of the pages above and talks to the JSON API in :mod:`.account_api`; that API is
@@ -109,8 +118,13 @@ from starlette.types import Receive, Scope, Send
 from canvas_mcp.core import audit
 from canvas_mcp.core.dates import output_timezone
 from canvas_mcp.core.selfhost.account_ops import (
+    LINK_ERROR_CODES,
+    IdentityView,
+    Linked,
+    LinkStarted,
     Rechecked,
     Refusal,
+    Unlinked,
     WriteSaved,
     WriteToolsSnapshot,
 )
@@ -123,8 +137,12 @@ from canvas_mcp.core.selfhost.accounts import (
     DENY_UNAVAILABLE,
     DENY_WRONG_CLIENT,
     DENY_WRONG_TENANT,
+    NEUTRAL_ACCESS_DENIED,
     PROVIDER_ENTRA,
+    REASON_MEMBERSHIP_UNAVAILABLE,
     Denied,
+    EntraClaimsPolicy,
+    entra_external_claims,
     valid_account_key,
 )
 from canvas_mcp.core.selfhost.identity import IdentityService, SignIn
@@ -187,6 +205,8 @@ if TYPE_CHECKING:
     from canvas_mcp.core.selfhost.authz.consent import ConsentView
     from canvas_mcp.core.selfhost.authz.models import GrantRecord
     from canvas_mcp.core.selfhost.authz.runtime import AuthzRuntime
+    from canvas_mcp.core.selfhost.login.flows import ExternalSignIn
+    from canvas_mcp.core.selfhost.login.registry import LoginRuntime
 
 logger = logging.getLogger("canvas_mcp.selfhost.account")
 
@@ -210,6 +230,14 @@ _GRANTS_REVOKE_PATH = "/account/grants/revoke"
 _ADMIN_GRANTS_REVOKE_PATH = "/account/admin/grants/revoke"
 _SCHOOLS_PATH = "/account/schools"
 _WRITE_TOOLS_PATH = "/account/write-tools"
+#: With more than one sign-in provider Entra's own start moves here (``/account/login`` then
+#: chooses); its callback, ``/account/callback``, never moves (it is registered in the Entra app).
+ENTRA_LOGIN_PATH = "/account/login/entra"
+#: The sign-in methods screen and its actions (only with two or more providers).
+SIGN_IN_METHODS_PATH = "/account/sign-in-methods"
+_LINK_PATH = "/account/identities/link"
+_UNLINK_PATH = "/account/identities/unlink"
+_ADMIN_UNLINK_PATH = "/account/admin/identities/unlink"
 #: The consent screen of the local authorization server (registered only in that mode).
 CONSENT_PATH = "/account/consent"
 
@@ -306,6 +334,8 @@ SIGN_IN_ERROR_CODES = frozenset(
         "token_store_unavailable",
         # An app was waiting for this sign-in, but its request is gone or not this browser's.
         "authorization_invalid",
+        # Too many sign-in starts for one provider in a short time.
+        "rate_limited",
     }
 )
 
@@ -503,6 +533,15 @@ class _RenderContext:
     lang: str = _DEFAULT_LANG
     path: str = ACCOUNT_PATH
     session: _Session | None = None
+    #: Display names of the configured sign-in providers (id -> name).
+    labels: Mapping[str, str] = field(default_factory=dict)
+
+
+def _provider_label(provider_id: str) -> str:
+    """The name shown for a sign-in provider (Microsoft for Entra; a configured name for the rest)."""
+    if provider_id == PROVIDER_ENTRA:
+        return "Microsoft"
+    return _render_context().labels.get(provider_id) or provider_id
 
 
 # A ContextVar (not a module global): each request runs in its own task, so
@@ -629,6 +668,19 @@ font-size:.8rem}
 """.strip()
 
 
+# Extra rules for the sign-in chooser and the sign-in methods page. They are added to a page only
+# when several sign-in providers are configured, so an Entra-only deployment serves the very same
+# styles as before.
+_CSS_PROVIDERS = (
+    ".providers{display:grid;gap:.6rem;margin:0 0 .9rem}"
+    ".btn.provider{display:flex;align-items:center;justify-content:center;white-space:normal}"
+    ".btn.provider.secondary{justify-content:flex-start}"
+    ".pico{width:1.15rem;height:1.15rem;flex:none;margin-right:.55rem}"
+    ".badge{display:inline-block;border:1px solid var(--line);border-radius:6px;padding:0 .4rem;"
+    "font-size:.8rem;color:var(--muted);margin-left:.3rem}"
+)
+
+
 def _e(value: object) -> str:
     return html.escape(str(value), quote=True)
 
@@ -680,6 +732,14 @@ _ZH_ENDONYM = "中文"
 
 def _denial_html(message: str) -> str:
     """The identity layer's refusal text; Chinese gets a translation or a generic line."""
+    if message == NEUTRAL_ACCESS_DENIED:
+        # The refusal of every provider but Entra (it names no provider).
+        return _e(
+            _bi(
+                "此账号没有使用此服务器的权限，请联系服务器所有者申请访问。",
+                "This account is not allowed to use this server. Ask the server owner for access.",
+            )
+        )
     if _current_lang() == "zh":
         return _e(_DENIAL_ZH.get(message, _DENIAL_ZH_FALLBACK))
     return _e(message)
@@ -743,14 +803,60 @@ def _parse_expiry(raw: str, now: float) -> int | None | Literal["invalid"]:
     return int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp())
 
 
-def _document(title: str, body: str, *, wide: bool = False) -> str:
+# Built-in icons of the sign-in providers: inline SVG markup, never a remote image. The Google "G"
+# follows Google's sign-in branding guidelines; the GitHub mark is Primer Octicons "mark-github"
+# (MIT); the key is drawn here.
+_PROVIDER_ICONS: dict[str, str] = {
+    "microsoft": (
+        '<svg class="pico" viewBox="0 0 21 21" aria-hidden="true" focusable="false">'
+        '<rect x="1" y="1" width="9" height="9" fill="#f25022"/>'
+        '<rect x="11" y="1" width="9" height="9" fill="#7fba00"/>'
+        '<rect x="1" y="11" width="9" height="9" fill="#00a4ef"/>'
+        '<rect x="11" y="11" width="9" height="9" fill="#ffb900"/></svg>'
+    ),
+    "google": (
+        '<svg class="pico" viewBox="0 0 48 48" aria-hidden="true" focusable="false">'
+        '<path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 '
+        '14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>'
+        '<path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 '
+        '5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>'
+        '<path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19'
+        'C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>'
+        '<path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 '
+        '2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>'
+    ),
+    "github": (
+        '<svg class="pico" viewBox="0 0 16 16" aria-hidden="true" focusable="false">'
+        '<path fill="currentColor" d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17'
+        '-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59'
+        '-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27'
+        '-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 '
+        '3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01'
+        '.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 '
+        '7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>'
+    ),
+    "key": (
+        '<svg class="pico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
+        '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round" d="M15 7a4 4 0 1 1-3.4 6.1L4 20.7V23h2.3v-2.3H8.6V18.4h2.3l1.3-1.3A4 '
+        '4 0 0 1 15 7Zm1.5 2.5h.01"/></svg>'
+    ),
+}
+
+
+def _provider_icon(name: str) -> str:
+    return _PROVIDER_ICONS.get(name, _PROVIDER_ICONS["key"])
+
+
+def _document(title: str, body: str, *, wide: bool = False, head_extra: str = "") -> str:
     lang = "zh-CN" if _current_lang() == "zh" else "en"
     main_class = ' class="wide"' if wide else ""
     return (
         f'<!doctype html><html lang="{lang}"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         '<meta name="robots" content="noindex, nofollow">'
-        f"<title>{_e(title)}</title><style>{_CSS}</style></head>"
+        f"{head_extra}"
+        f"<title>{_e(title)}</title><style>{_CSS}{_CSS_PROVIDERS if _render_context().labels else ''}</style></head>"
         f"<body><main{main_class}>{body}</main></body></html>"
     )
 
@@ -760,10 +866,14 @@ def _csrf_field(csrf: str) -> str:
 
 
 def _identity_line(session: _Session) -> str:
-    """The signed-in Microsoft account as visible muted text (no hover needed)."""
+    """The signed-in account of the provider that issued this session (no hover needed)."""
     if not session.upn:
         return ""
-    return f'<p class="muted small acct">{_bi("Microsoft 账号", "Microsoft account")}: {_e(session.upn)}</p>'
+    if session.pid == PROVIDER_ENTRA:
+        label = _bi("Microsoft 账号", "Microsoft account")
+    else:
+        label = _e(_provider_label(session.pid)) + _bi(" 账号", " account")
+    return f'<p class="muted small acct">{label}: {_e(session.upn)}</p>'
 
 
 def _header(session: _Session | None = None) -> str:
@@ -805,6 +915,9 @@ Handler = Callable[[Request], Awaitable[Response]]
 class _AccountApp:
     #: The local authorization server (SELFHOST_AUTH_MODE=local); None in the default mode.
     authz: AuthzRuntime | None = None
+    #: The sign-in providers beyond Entra alone (``SELFHOST_LOGIN_PROVIDERS``), or None.
+    logins: LoginRuntime | None = None
+    external: ExternalSignIn | None = None
 
     def __init__(
         self,
@@ -824,6 +937,7 @@ class _AccountApp:
         rate_limiters: RateLimiters | None = None,
         ui: Literal["legacy", "react"] = "legacy",
         authz: AuthzRuntime | None = None,
+        logins: LoginRuntime | None = None,
     ) -> None:
         window = (rate_limiters or build_rate_limiters("memory")).sliding_window
         # ``react`` only when the built single-page UI is really served: sign-in then
@@ -832,6 +946,20 @@ class _AccountApp:
         self.react = ui == "react"
         # The local authorization server (SELFHOST_AUTH_MODE=local), or None.
         self.authz = authz
+        # The sign-in providers beyond Entra alone, or None (an Entra-only deployment keeps the
+        # sign-in exactly as it was). The provider ceremonies live in ``login.flows``.
+        self.logins = logins
+        self.external: ExternalSignIn | None = None
+        self.session_pids: frozenset[str] = (
+            logins.accepted_pids if logins is not None else frozenset({PROVIDER_ENTRA})
+        )
+        self._labels: dict[str, str] = (
+            {entry.id: entry.name for entry in logins.entries()} if logins is not None else {}
+        )
+        if logins is not None:
+            from canvas_mcp.core.selfhost.login.flows import ExternalSignIn
+
+            self.external = ExternalSignIn(self, logins)
         self.cfg = cfg
         self.write_tools = write_tools
         self.tool_prefs = tool_prefs
@@ -870,6 +998,9 @@ class _AccountApp:
             _RATE_LIMIT_MAX_KEYS,
             clock,
         )
+        # Per account: starting a link (5) and unlinking (10) in ten minutes.
+        self.link_limiter = window(5, 600, _RATE_LIMIT_MAX_KEYS, clock)
+        self.unlink_limiter = window(10, 600, _RATE_LIMIT_MAX_KEYS, clock)
         self._client_factory = http_client_factory or (
             lambda: httpx.AsyncClient(timeout=10, follow_redirects=False)
         )
@@ -885,6 +1016,19 @@ class _AccountApp:
     def route_table(self) -> list[tuple[str, dict[str, Handler]]]:
         """Every (path, {method: handler}) of the HTML UI, whatever mode is active."""
         table = self._base_route_table()
+        if self.external is not None:
+            # Entra keeps its own routes; every other provider has a start and a callback.
+            if self.logins is not None and self.logins.entra is not None:
+                table.append((ENTRA_LOGIN_PATH, {"GET": self.entra_login}))
+            else:
+                # Without Entra there is no Entra callback to answer.
+                table = [entry for entry in table if entry[0] != ACCOUNT_CALLBACK_PATH]
+            table.extend(self.external.route_table())
+            if self.logins is not None and self.logins.linking_enabled:
+                table.append((SIGN_IN_METHODS_PATH, {"GET": self.sign_in_methods_page}))
+                table.append((_LINK_PATH, {"POST": self.link_form}))
+                table.append((_UNLINK_PATH, {"POST": self.unlink_form}))
+                table.append((_ADMIN_UNLINK_PATH, {"POST": self.admin_unlink_form}))
         if self.authz is not None:
             table.append((CONSENT_PATH, {"GET": self.consent_page, "POST": self.consent_submit}))
             table.append((_GRANTS_REVOKE_PATH, {"POST": self.revoke_grant_form}))
@@ -916,11 +1060,14 @@ class _AccountApp:
         table = self.route_table()
         if self.react:
             # One UI per mode: the single-page app owns every page (the consent screen
-            # and the connected apps too), so only the two server-side halves of the
-            # sign-in stay.
-            table = [
-                entry for entry in table if entry[0] in (_LOGIN_PATH, ACCOUNT_CALLBACK_PATH)
-            ]
+            # and the connected apps too), so only the server-side halves of the sign-in
+            # stay: Entra's two, and a start and a callback for each other provider.
+            keep = {_LOGIN_PATH, ACCOUNT_CALLBACK_PATH}
+            if self.logins is not None:
+                keep.update(self.logins.provider_paths())
+                if self.logins.entra is not None:
+                    keep.add(ENTRA_LOGIN_PATH)
+            table = [entry for entry in table if entry[0] in keep]
         return [
             Route(path, self._endpoint(handlers), methods=_ALL_METHODS)
             for path, handlers in table
@@ -939,6 +1086,7 @@ class _AccountApp:
                 lang=_choose_lang(request),
                 path=self._toggle_path(request),
                 session=session,
+                labels=self._labels,
             )
             token = _RENDER.set(ctx)
             try:
@@ -973,20 +1121,28 @@ class _AccountApp:
                 500, _bi("服务器出错了，请稍后再试。", "Something went wrong.")
             )
 
-    @staticmethod
-    def _toggle_path(request: Request) -> str:
+    def _toggle_path(self, request: Request) -> str:
         """Target of the language toggle: this page if it is a GET page, else /account.
 
-        Always one of the fixed route constants, never request input.
+        Always one of the fixed route constants plus, for the consent page and the provider
+        chooser, a request id that matches its exact shape (never other request input).
         """
         path = request.url.path
+        if path == _LOGIN_PATH and self.logins is not None and not self.react:
+            # The chooser of the server-rendered UI keeps the waiting app through a language switch.
+            txn = request.query_params.get("txn", "")
+            if _TXN_ID_RE.fullmatch(txn):
+                again = "&reauth=1" if request.query_params.get("reauth") == "1" else ""
+                return f"{_LOGIN_PATH}?txn={txn}{again}"
+            return _LOGIN_PATH
         if path == CONSENT_PATH:
             # Keep the transaction through a language switch (a validated token, not free text).
             txn = request.query_params.get("txn", "")
             return f"{CONSENT_PATH}?txn={txn}" if _TXN_ID_RE.fullmatch(txn) else ACCOUNT_PATH
         return (
             path
-            if path in (ACCOUNT_PATH, _ADMIN_PATH, _SCHOOLS_PATH, _ADMIN_AUDIT_PATH)
+            if path
+            in (ACCOUNT_PATH, _ADMIN_PATH, _SCHOOLS_PATH, _ADMIN_AUDIT_PATH, SIGN_IN_METHODS_PATH)
             else ACCOUNT_PATH
         )
 
@@ -1011,9 +1167,18 @@ class _AccountApp:
         return response
 
     def html_page(
-        self, status: int, title: str, body: str, *, wide: bool = False, csp: str | None = None
+        self,
+        status: int,
+        title: str,
+        body: str,
+        *,
+        wide: bool = False,
+        csp: str | None = None,
+        head_extra: str = "",
     ) -> Response:
-        response = self.finish(Response(_document(title, body, wide=wide), status_code=status))
+        response = self.finish(
+            Response(_document(title, body, wide=wide, head_extra=head_extra), status_code=status)
+        )
         if csp is not None:
             response.headers["Content-Security-Policy"] = csp
         return response
@@ -1065,7 +1230,12 @@ class _AccountApp:
             and epoch >= 0
         ):
             return None
-        if exp <= self.clock() or not valid_account_key(acct) or pid != PROVIDER_ENTRA or not csrf:
+        if (
+            exp <= self.clock()
+            or not valid_account_key(acct)
+            or pid not in self.session_pids
+            or not csrf
+        ):
             return None
         raw_iat = payload.get("iat")
         iat = raw_iat if isinstance(raw_iat, int) and not isinstance(raw_iat, bool) else 0
@@ -1191,6 +1361,8 @@ class _AccountApp:
         )
 
     def signed_out_page(self) -> Response:
+        if self.logins is not None:
+            return self._chooser_page({})
         body = (
             _header()
             + f"<h1>{_bi('Canvas 账户', 'Canvas account')}</h1>"
@@ -1509,6 +1681,7 @@ class _AccountApp:
         parts.append(self._mcp_url_section())
         parts.append(await self._write_tools_section(session, write_notice))
         parts.append(await self._connected_apps_section(session))
+        parts.append(await self._sign_in_methods_card(session))
         parts.append(await self._sign_in_history(session))
         return self.html_page(status, _bi("Canvas 账户", "Canvas account"), "".join(parts))
 
@@ -1520,6 +1693,8 @@ class _AccountApp:
                 return _bi("登录成功（账户已创建）", "Signed in (account created)")
             if event.reason == "activated":
                 return _bi("登录成功（已自动批准）", "Signed in (approved automatically)")
+            if event.reason == "identity_linked":
+                return _bi("已关联登录方式", "Linked a sign-in method")
             return _bi("登录成功", "Signed in")
         if event.outcome == "pending":
             return _bi("等待批准", "Waiting for approval")
@@ -1533,7 +1708,7 @@ class _AccountApp:
 
     @staticmethod
     def _auth_provider(provider_id: str) -> str:
-        return "Microsoft" if provider_id == PROVIDER_ENTRA else provider_id
+        return _provider_label(provider_id)
 
     async def _sign_in_history(self, session: _Session) -> str:
         """The "Recent sign-ins" card: the last twenty sign-ins of this account."""
@@ -1684,25 +1859,35 @@ class _AccountApp:
         return f"https://{self.cfg.authority_host}/{self.cfg.tenant_id}/{path}"
 
     async def login(self, request: Request) -> Response:
-        txn_id: str | None = None
-        if self.authz is not None and "txn" in request.query_params:
-            # An app is waiting for this sign-in (SELFHOST_AUTH_MODE=local). The request
-            # must exist and belong to this browser before anything else happens.
-            txn_id = request.query_params.get("txn", "")
-            binding = request.cookies.get(self.authz.binding_cookie)
-            if not await self.authz.consent.txn_open(txn_id, binding):
-                return self._authorization_invalid()
-            session = self._session_of(request)
-            reauth = request.query_params.get("reauth") == "1"
-            if session is not None and not reauth and (session.pending or session.iat > 0):
-                # Already signed in (a waiting account only gets to cancel): straight to the app's
-                # request. "Use a different account" (reauth) always goes to the identity provider,
-                # a waiting account included.
-                return self.redirect(f"{CONSENT_PATH}?{urllib.parse.urlencode({'txn': txn_id})}", 303)
-        state = secrets.token_urlsafe(32)
-        nonce = secrets.token_urlsafe(32)
-        verifier = secrets.token_urlsafe(48)
-        challenge = _b64url(hashlib.sha256(verifier.encode("ascii")).digest())
+        """GET /account/login: Entra alone starts the Entra sign-in; with more providers it chooses."""
+        if self.logins is None:
+            return await self.entra_login(request)
+        return await self._choose_provider(request)
+
+    async def _login_txn(self, request: Request) -> tuple[str | None, Response | None]:
+        """The authorization transaction waiting for this sign-in, and an early answer if there is one.
+
+        With the local authorization server an app can be waiting (``?txn=``): the request must
+        exist and belong to this browser before anything else happens; a person who is already
+        signed in goes straight to the consent page unless they asked for another account
+        (``reauth=1``).
+        """
+        if self.authz is None or "txn" not in request.query_params:
+            return None, None
+        txn_id = request.query_params.get("txn", "")
+        binding = request.cookies.get(self.authz.binding_cookie)
+        if not await self.authz.consent.txn_open(txn_id, binding):
+            return None, self._authorization_invalid()
+        session = self._session_of(request)
+        reauth = request.query_params.get("reauth") == "1"
+        if session is not None and not reauth and (session.pending or session.iat > 0):
+            # Already signed in (a waiting account only gets to cancel): straight to the app's
+            # request. "Use a different account" (reauth) always goes to the identity provider,
+            # a waiting account included.
+            return txn_id, self.redirect(f"{CONSENT_PATH}?{urllib.parse.urlencode({'txn': txn_id})}", 303)
+        return txn_id, None
+
+    def _entra_authorize_url(self, state: str, nonce: str, challenge: str) -> str:
         query = urllib.parse.urlencode(
             {
                 "client_id": self.cfg.client_id,
@@ -1717,9 +1902,18 @@ class _AccountApp:
                 "prompt": "select_account",
             }
         )
-        response = self.redirect(
-            self._authority_url("oauth2/v2.0/authorize") + "?" + query, status=302
-        )
+        return self._authority_url("oauth2/v2.0/authorize") + "?" + query
+
+    async def entra_login(self, request: Request) -> Response:
+        """The Entra sign-in start (``/account/login`` when Entra is alone, ``/account/login/entra`` otherwise)."""
+        txn_id, early = await self._login_txn(request)
+        if early is not None:
+            return early
+        state = secrets.token_urlsafe(32)
+        nonce = secrets.token_urlsafe(32)
+        verifier = secrets.token_urlsafe(48)
+        challenge = _b64url(hashlib.sha256(verifier.encode("ascii")).digest())
+        response = self.redirect(self._entra_authorize_url(state, nonce, challenge), status=302)
         transaction: dict[str, Any] = {
             "state": state,
             "nonce": nonce,
@@ -1737,6 +1931,97 @@ class _AccountApp:
             LOGIN_COOKIE, sealed, max_age=_LOGIN_TTL_SECONDS, **self._cookie_kwargs()
         )
         return response
+
+    # -- choosing a provider (two or more, or one that is not Entra) ---------------------------
+
+    @staticmethod
+    def _carry(txn_id: str | None, reauth: bool, return_to: str | None) -> dict[str, str]:
+        """The validated values a provider start needs to know about (nothing else is passed on)."""
+        carried: dict[str, str] = {}
+        if txn_id is not None:
+            carried["txn"] = txn_id
+        if reauth:
+            carried["reauth"] = "1"
+        if return_to is not None:
+            carried["return_to"] = return_to
+        return carried
+
+    async def _choose_provider(self, request: Request) -> Response:
+        assert self.logins is not None
+        txn_id, early = await self._login_txn(request)
+        if early is not None:
+            return early
+        reauth = request.query_params.get("reauth") == "1"
+        return_to = None
+        if self.react and txn_id is None:
+            return_to = sanitize_return_to(request.query_params.get("return_to"))
+        carried = self._carry(txn_id, reauth, return_to)
+        entries = self.logins.entries()
+        if len(entries) == 1:
+            suffix = "?" + urllib.parse.urlencode(carried) if carried else ""
+            return self.redirect(entries[0].start_path + suffix, 303)
+        if self.react:
+            suffix = "?" + urllib.parse.urlencode(carried) if carried else ""
+            return self.redirect(SIGN_IN_PATH + suffix, 303)
+        return self._chooser_page(carried)
+
+    def _chooser_page(self, carried: Mapping[str, str]) -> Response:
+        """The sign-in page of the server-rendered UI: one button per configured provider."""
+        assert self.logins is not None
+        suffix = "?" + urllib.parse.urlencode(carried) if carried else ""
+        buttons = "".join(
+            f'<a class="btn provider" href="{_e(entry.start_path + suffix)}">'
+            f"{_provider_icon(entry.icon)}"
+            f'<span>{_bi("使用 {name} 登录", "Sign in with {name}").replace("{name}", _e(entry.name))}</span></a>'
+            for entry in self.logins.entries()
+        )
+        body = (
+            _header()
+            + f"<h1>{_bi('Canvas 账户', 'Canvas account')}</h1>"
+            '<section class="card">'
+            f"<p>{_bi('先登录，再绑定你自己的 Canvas 令牌。', 'Sign in, then add your own Canvas access token.')}</p>"
+            f'<div class="providers">{buttons}</div></section>'
+        )
+        if not carried:
+            body += self._mcp_url_section()
+        return self.html_page(200, _bi("登录", "Sign in"), body)
+
+    def _provider_failure(self, code: str, status: int, provider: Any) -> Response:
+        """A failed ceremony of a provider other than Entra, as a closed code (never provider text)."""
+        name = _e(provider.display.name)
+        if code == "state_invalid":
+            message = _bi(
+                "登录请求已失效，请重新登录。",
+                "The sign-in request is invalid or expired. Please sign in again.",
+            )
+        elif code == "sign_in_incomplete":
+            message = _bi("登录响应不完整。", "The sign-in response is incomplete.")
+        elif code == "sign_in_unverified":
+            message = _bi(
+                "无法验证登录凭证。", "The sign-in credential could not be verified."
+            )
+        elif code == "rate_limited":
+            message = _bi(
+                "登录请求过于频繁，请稍后再试。", "Too many sign-in attempts. Try again shortly."
+            )
+        elif code == "token_store_unavailable":
+            message = _bi("暂时无法读取令牌库。", "The token store is unavailable.")
+        elif status == 403:
+            message = _bi("{name} 登录没有完成。", "{name} sign-in was not completed.").replace("{name}", name)
+        else:
+            message = _bi(
+                "无法与 {name} 完成登录，请稍后再试。",
+                "Could not complete sign-in with {name}. Try again later.",
+            ).replace("{name}", name)
+        return self._sign_in_failure(code, status, message)
+
+    def _link_redirect(self, outcome: Linked | Refusal) -> Response:
+        """Back to the sign-in methods screen after a link ceremony: ``?linked=1`` or ``?error=<code>``."""
+        if isinstance(outcome, Linked):
+            query = {"linked": "1"}
+        else:
+            query = {"error": outcome.code if outcome.code in LINK_ERROR_CODES else "provider_error"}
+        return self.redirect(f"{SIGN_IN_METHODS_PATH}?{urllib.parse.urlencode(query)}", 303)
 
     async def callback(self, request: Request) -> Response:
         response = await self._callback(request)
@@ -1761,10 +2046,14 @@ class _AccountApp:
     async def _callback(self, request: Request) -> Response:
         txn = self._login_transaction(request)
         state = request.query_params.get("state", "")
+        # A link ceremony that fails goes back to the Sign-in methods screen (the sealed login
+        # cookie says what it is for); a sign-in, a re-sign-in or an app's consent goes to the
+        # sign-in page. Without a valid cookie there is nothing to tell them apart.
+        fail = self._link_failure if txn is not None and txn.get("pp") == "link" else self._sign_in_failure
         if txn is None or not hmac.compare_digest(
             state.encode("utf-8"), txn["state"].encode("utf-8")
         ):
-            return self._sign_in_failure(
+            return fail(
                 "state_invalid",
                 400,
                 _bi(
@@ -1778,7 +2067,7 @@ class _AccountApp:
             code = error if _ERROR_CODE_RE.fullmatch(error) else None
             logger.info("account sign-in refused by Entra: %s", code or "unknown")
             detail = f" (<code>{_e(code)}</code>)" if code else ""
-            return self._sign_in_failure(
+            return fail(
                 "provider_error",
                 403,
                 _bi(
@@ -1790,7 +2079,7 @@ class _AccountApp:
 
         code_param = request.query_params.get("code", "")
         if not code_param or len(code_param) > 4096:
-            return self._sign_in_failure(
+            return fail(
                 "sign_in_incomplete",
                 400,
                 _bi("登录响应不完整。", "The sign-in response is incomplete."),
@@ -1798,7 +2087,7 @@ class _AccountApp:
 
         id_token = await self._exchange_code(code_param, txn["verifier"])
         if id_token is None:
-            return self._sign_in_failure(
+            return fail(
                 "provider_error",
                 502,
                 _bi(
@@ -1808,7 +2097,7 @@ class _AccountApp:
             )
 
         claims = await self._verify_id_token(id_token)
-        bad = self._sign_in_failure(
+        bad = fail(
             "sign_in_unverified",
             400,
             _bi(
@@ -1837,7 +2126,7 @@ class _AccountApp:
             return bad
         tid = claims.get("tid")
         if not isinstance(tid, str) or tid.lower() != self.tenant:
-            return self._sign_in_failure(
+            return fail(
                 DENY_WRONG_TENANT,
                 403,
                 _bi(
@@ -1845,6 +2134,9 @@ class _AccountApp:
                     "This account is not in the allowed directory.",
                 ),
             )
+
+        if txn.get("pp") == "link":
+            return await self._entra_link(request, txn, claims)
 
         try:
             outcome = await anyio.to_thread.run_sync(
@@ -1866,35 +2158,65 @@ class _AccountApp:
             await self._admission_lost(outcome)
             return self._sign_in_refused(outcome)
         assert isinstance(outcome, SignIn)
+        return self._complete_sign_in(
+            outcome, now=now, waiting=txn.get(_TXN_KEY), return_to=txn.get(_RETURN_TO_KEY)
+        )
+
+    def _session_payload(
+        self, *, acct: str, pid: str, name: str, upn: str, owner: bool, iat: int, exp: int,
+        csrf: str, epoch: int,
+    ) -> str:
+        """The sealed session cookie (version 3) for an account."""
+        return self.codec.seal(
+            SESSION_COOKIE,
+            {
+                "v": _SESSION_VERSION,
+                "acct": acct,
+                "pid": pid,
+                "name": name[:200],
+                "upn": upn[:254],
+                "owner": owner,
+                "iat": iat,
+                "exp": exp,
+                "csrf": csrf,
+                "ep": epoch,
+            },
+        )
+
+    def _reissue_session(self, session: _Session, epoch: int) -> str:
+        """The same session under a new session epoch (an unlink kept the caller signed in)."""
+        return self._session_payload(
+            acct=session.acct, pid=session.pid, name=session.name, upn=session.upn,
+            owner=session.owner, iat=session.iat, exp=session.exp, csrf=session.csrf, epoch=epoch,
+        )
+
+    def _complete_sign_in(
+        self, outcome: SignIn, *, now: float, waiting: Any, return_to: Any
+    ) -> Response:
+        """The session cookie and the landing page of a successful sign-in (every provider)."""
         standing = outcome.status
         sign_in_key = standing.principal_key
         if standing.owner_change is not None:
             audit.log_principal_event(standing.owner_change, sign_in_key, reason="sign_in")
 
         issued = int(now)
-        sealed = self.codec.seal(
-            SESSION_COOKIE,
-            {
-                "v": _SESSION_VERSION,
-                "acct": sign_in_key,
-                "pid": outcome.ext.provider_id,
-                "name": outcome.ext.display_name[:200],
-                "upn": outcome.ext.username[:254],
-                "owner": bool(outcome.owner),
-                "iat": issued,
-                "exp": issued + self.cfg.session_ttl_seconds,
-                "csrf": secrets.token_urlsafe(32),
-                "ep": standing.session_epoch,
-            },
+        sealed = self._session_payload(
+            acct=sign_in_key,
+            pid=outcome.ext.provider_id,
+            name=outcome.ext.display_name,
+            upn=outcome.ext.username,
+            owner=bool(outcome.owner),
+            iat=issued,
+            exp=issued + self.cfg.session_ttl_seconds,
+            csrf=secrets.token_urlsafe(32),
+            epoch=standing.session_epoch,
         )
         logger.info("account sign-in ok account=%s pending=%s", sign_in_key, outcome.pending)
         landing = ACCOUNT_PATH
         if self.react:
             landing = ACCOUNT_PATH + "/"
-            return_to = txn.get(_RETURN_TO_KEY)
             if isinstance(return_to, str) and sanitize_return_to(return_to) is not None:
                 landing = return_to
-        waiting = txn.get(_TXN_KEY)
         if self.authz is not None and isinstance(waiting, str) and _TXN_ID_RE.fullmatch(waiting):
             # The sign-in was started for an app: continue with its consent.
             landing = f"{CONSENT_PATH}?{urllib.parse.urlencode({'txn': waiting})}"
@@ -1907,6 +2229,50 @@ class _AccountApp:
         )
         return response
 
+    async def _entra_link(
+        self, request: Request, txn: Mapping[str, Any], claims: Mapping[str, Any]
+    ) -> Response:
+        """The Entra half of a link: the verified id token is the identity to attach.
+
+        The link was started by a signed-in person (see ``LinkingService``): its server-side
+        record, bound to this browser, is popped exactly once here.
+        """
+        from canvas_mcp.core.selfhost.login.ceremony import (
+            LINK_KIND,
+            FlowRecord,
+            binding_digest,
+        )
+
+        if self.logins is None or self.external is None:
+            return self._link_redirect(Refusal("state_invalid"))
+        link_id, binding = txn.get("lf"), txn.get("lb")
+        if not isinstance(link_id, str) or not isinstance(binding, str):
+            return self._link_redirect(Refusal("state_invalid"))
+        try:
+            raw = await self.logins.flow_store.pop(
+                LINK_KIND, link_id, binding_hash=binding_digest(binding)
+            )
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            logger.error("account link state read failed: %s", type(exc).__name__)
+            return self._link_redirect(Refusal("token_store_unavailable"))
+        record = None
+        if raw is not None:
+            try:
+                record = FlowRecord.from_json(raw)
+            except ValueError:
+                record = None
+        if record is None or record.pp != "link" or record.p != PROVIDER_ENTRA:
+            return self._link_redirect(Refusal("state_invalid"))
+        ext = entra_external_claims(
+            claims,
+            EntraClaimsPolicy(self.cfg.tenant_id, self.cfg.client_id),
+            token_kind="id",
+            parse_groups=self.identity.access_policy.has_group_rule(),
+        )
+        if isinstance(ext, Denied):
+            return self._link_redirect(Refusal("access_denied"))
+        return self._link_redirect(await self.external.linking.complete(request, record, ext))
+
     async def _admission_lost(self, denied: Denied) -> None:
         """A person who is no longer admitted signed in again: end the apps they had connected.
 
@@ -1916,6 +2282,10 @@ class _AccountApp:
         """
         key = getattr(denied, "account_key", None)
         if self.authz is None or denied.code != DENY_ACCESS_DENIED or not key:
+            return
+        if getattr(denied, "reason", None) == REASON_MEMBERSHIP_UNAVAILABLE:
+            # Membership could not be checked (restricted app access, a missing scope): that says
+            # nothing about whether the person is still admitted, so their connections stay.
             return
         count = await self.authz.admission_lost(key)
         if count:
@@ -1960,6 +2330,10 @@ class _AccountApp:
         if denied.code == DENY_UNAVAILABLE:
             return "token_store_unavailable"
         return denied.code if denied.code in SIGN_IN_ERROR_CODES else DENY_ACCESS_DENIED
+
+    def _link_failure(self, code: str, status: int, message_html: str) -> Response:
+        """A failed Entra link ceremony: back to the Sign-in methods screen with the closed code."""
+        return self._link_redirect(Refusal(code))
 
     def _sign_in_failure(self, code: str, status: int, message_html: str) -> Response:
         """A failed sign-in: the HTML message page, or (react UI) back to its sign-in page.
@@ -2263,6 +2637,25 @@ class _AccountApp:
             f"<code>{_e(grant.redirect_host or '-')}</code><br>"
             f"{_bi('连接于', 'Connected')} {_e(_fmt_ts(grant.created_at))} · "
             f"{_bi('最近使用', 'Last used')} {_e(_fmt_ts(grant.last_used_at))}</span>"
+        )
+
+    async def _sign_in_methods_card(self, session: _Session) -> str:
+        """The "Sign-in methods" card of ``GET /account`` (two or more providers; "" otherwise).
+
+        It names the ways this account can sign in and links to the page that adds and removes
+        them; the forms live there so the account page stays short.
+        """
+        if self.logins is None or not self.logins.linking_enabled or session.pending:
+            return ""
+        views = await self.list_own_identities(session)
+        if isinstance(views, Refusal):
+            return ""
+        names = ", ".join(_e(_provider_label(view.provider_id)) for view in views)
+        return (
+            f'<section class="card" id="sign-in-methods"><h2>{_bi("登录方式", "Sign-in methods")}</h2>'
+            f'<p class="muted small">{_bi("你可以用这些方式登录这个账户：", "You can sign in to this account with:")} {names}.</p>'
+            f'<p><a href="{SIGN_IN_METHODS_PATH}">{_bi("添加或移除登录方式", "Add or remove a sign-in method")}</a></p>'
+            "</section>"
         )
 
     async def _connected_apps_section(self, session: _Session) -> str:
@@ -3383,6 +3776,317 @@ class _AccountApp:
         self.clear_cookie(response, SESSION_COOKIE)
         return response
 
+    # -- sign-in methods (two or more providers) ------------------------------------------------
+
+    async def list_own_identities(self, session: _Session) -> list[IdentityView] | Refusal:
+        """The caller's linked identities (see ``login.linking``)."""
+        if self.external is None:
+            return Refusal("not_found")
+        return await self.external.linking.list_own(session)
+
+    async def start_link(self, session: _Session, provider_id: str) -> LinkStarted | Refusal:
+        """Prepare a link ceremony for the caller; nothing changes until the callback completes it."""
+        if self.external is None:
+            return Refusal("not_found")
+        return await self.external.linking.start(session, provider_id)
+
+    async def unlink_own_identity(self, session: _Session, identity_id: int) -> Unlinked | Refusal:
+        """Remove one of the caller's identities (they keep at least one)."""
+        if self.external is None:
+            return Refusal("not_found")
+        return await self.external.linking.unlink_own(session, identity_id)
+
+    async def owner_unlink_identity(
+        self, session: _Session, target: str, identity_id: int
+    ) -> Unlinked | Refusal:
+        """An owner removes an identity from any account."""
+        if self.external is None:
+            return Refusal("not_found")
+        return await self.external.linking.owner_unlink(session, target, identity_id)
+
+    @staticmethod
+    def _link_error_text(code: str) -> str:
+        if code == "identity_in_use":
+            return _bi(
+                "这个账号已经关联到本服务器的另一位用户，没有做任何更改。",
+                "That account is already linked to another user of this server. Nothing was changed.",
+            )
+        if code == "provider_already_linked":
+            return _bi(
+                "你已经关联了这个提供方的登录方式。",
+                "You already have a sign-in method from that provider.",
+            )
+        if code == "access_denied":
+            return _bi(
+                "这个账号没有使用本服务器的权限，因此不能关联。",
+                "That account is not allowed to use this server, so it cannot be linked.",
+            )
+        if code == "link_session_ended":
+            return _bi(
+                "关联过程中你的登录状态发生了变化，请重新开始。",
+                "Your sign-in changed while you were linking. Start again.",
+            )
+        if code == "reauth_required":
+            return _bi(
+                "请先重新登录，再试一次。", "Sign in again, then try once more."
+            )
+        if code == "state_invalid":
+            return _bi("请求已失效，请重试。", "The request expired. Try again.")
+        if code in ("sign_in_unverified", "sign_in_incomplete"):
+            return _bi(
+                "无法验证对方返回的信息，请重试。", "The provider's answer could not be verified. Try again."
+            )
+        if code == "token_store_unavailable":
+            return _bi("暂时无法读取令牌库。", "The token store is unavailable.")
+        if code == "rate_limited":
+            return _bi("尝试次数过多，请稍后再试。", "Too many attempts. Try again later.")
+        return _bi(
+            "无法连接到登录提供方，或对方没有完成登录，请稍后再试。",
+            "The provider could not be reached or did not complete the sign-in. Try again later.",
+        )
+
+    def _link_refusal_page(self, code: str) -> Response:
+        """The page for a link or unlink the server refused (a closed code)."""
+        if code == "reauth_required":
+            return self.message_page(
+                403,
+                _bi(
+                    "为了安全，更改登录方式需要最近 10 分钟内的登录。请退出后重新登录，再试一次。",
+                    "For your security, changing sign-in methods needs a sign-in from the last 10 minutes. "
+                    "Sign out, sign in again and retry.",
+                ),
+            )
+        if code == "last_identity":
+            return self.message_page(
+                409,
+                _bi(
+                    "账号至少要保留一种登录方式。要让某人无法登录，请停用该账号。",
+                    "An account must keep at least one sign-in method. To cut someone off, disable the account.",
+                ),
+            )
+        if code == "last_owner":
+            return self.message_page(
+                409,
+                _bi(
+                    "这会让服务器没有可用的所有者：来自 Microsoft 登录的所有者需要保留 Microsoft 身份，"
+                    "其他所有者需要保留一个已启用提供方的身份。请先让另一位所有者就位。",
+                    "That would leave the server without a usable owner: an owner whose role comes from "
+                    "the Microsoft sign-in has to keep a Microsoft identity, and any other owner an "
+                    "identity at a listed provider. Add another usable owner first.",
+                ),
+            )
+        if code == "pending_approval":
+            return self.message_page(403, self._pending_message())
+        if code == "provider_already_linked":
+            return self.message_page(409, self._link_error_text(code))
+        if code == "rate_limited":
+            return self.message_page(429, self._link_error_text(code))
+        if code in ("not_found", "validation_failed"):
+            return self.message_page(404 if code == "not_found" else 400, _bi("找不到该项目。", "Not found."))
+        if code == "link_session_ended":
+            return self.message_page(409, self._link_error_text(code))
+        if code in ("provider_unavailable", "token_store_unavailable"):
+            return self.message_page(503, self._link_error_text(code))
+        return self.message_page(403, _bi("无权访问。", "Forbidden."))
+
+    async def sign_in_methods_page(self, request: Request) -> Response:
+        """GET /account/sign-in-methods: the linked sign-in methods, and a way to add or remove one."""
+        session = self._session_of(request)
+        if session is None:
+            return self.redirect(ACCOUNT_PATH, 303)
+        if session.pending:
+            return self.message_page(403, self._pending_message())
+        views = await self.list_own_identities(session)
+        if isinstance(views, Refusal):
+            return self._link_refusal_page(views.code)
+        assert self.logins is not None
+        params = request.query_params
+        notice = ""
+        if params.get("linked") == "1":
+            notice = (
+                '<p class="notice ok">'
+                + _bi("已添加登录方式。", "Sign-in method added.")
+                + "</p>"
+            )
+        elif params.get("unlinked") == "1":
+            notice = (
+                '<p class="notice ok">'
+                + _bi(
+                    "已移除登录方式。你的其他浏览器会话已结束；已连接的应用不受影响。",
+                    "Sign-in method removed. Your other browser sessions ended; connected apps are not affected.",
+                )
+                + "</p>"
+            )
+        elif params.get("error") in LINK_ERROR_CODES:
+            notice = f'<p class="notice error">{self._link_error_text(str(params.get("error")))}</p>'
+        fresh = self._signed_in_recently(session)
+        stale = (
+            ""
+            if fresh
+            else '<p class="warn">'
+            + _bi(
+                "为了安全，添加或移除登录方式需要最近 10 分钟内的登录。",
+                "For your security, adding or removing a sign-in method needs a sign-in from the last 10 minutes. ",
+            )
+            + f'<a href="{_LOGIN_PATH}">{_bi("重新登录", "Sign in again")}</a></p>'
+        )
+        rows = "".join(self._identity_row(session, view, fresh) for view in views)
+        linked = {view.provider_id for view in views}
+        add = "".join(
+            f'<form method="post" action="{_LINK_PATH}">{_csrf_field(session.csrf)}'
+            f'<input type="hidden" name="provider" value="{_e(entry.id)}">'
+            f'<button class="btn secondary provider" type="submit"{"" if fresh else " disabled"}>'
+            f"{_provider_icon(entry.icon)}<span>{_bi('关联 ', 'Link ')}{_e(entry.name)}</span></button></form>"
+            for entry in self.logins.entries()
+            if entry.id not in linked
+        )
+        add_section = (
+            f'<section class="card"><h2>{_bi("添加登录方式", "Add a sign-in method")}</h2>'
+            f'<p class="muted small">{_bi("你会被带到对方网站确认身份，然后回到这里。账号不会按邮箱自动合并。", "You will be taken to the provider to confirm it is you, then come back here. Accounts are never merged by e-mail address.")}</p>'
+            f'<div class="providers">{add}</div></section>'
+            if add
+            else ""
+        )
+        body = (
+            _header(session)
+            + f"<h1>{_bi('登录方式', 'Sign-in methods')}</h1>"
+            + notice
+            + stale
+            + '<section class="card tablecard"><table><thead><tr>'
+            f"<th>{_bi('提供方', 'Provider')}</th><th>{_bi('账号', 'Account')}</th>"
+            f"<th>{_bi('关联时间', 'Linked')}</th><th>{_bi('最近登录', 'Last sign-in')}</th><th></th>"
+            f"</tr></thead><tbody>{rows}</tbody></table></section>"
+            + add_section
+            + f'<p class="muted small">{_bi("移除登录方式会结束你所有浏览器的登录状态；已连接的应用不会断开，可在“已连接的应用”中结束。", "Removing a sign-in method ends all of your browser sessions. Connected apps stay connected; end them under Connected apps.")}</p>'
+            + f'<p><a href="{ACCOUNT_PATH}">{_bi("返回账户页", "Back to account")}</a></p>'
+        )
+        return self.html_page(200, _bi("登录方式", "Sign-in methods"), body)
+
+    def _identity_row(self, session: _Session, view: IdentityView, fresh: bool) -> str:
+        name = _provider_label(view.provider_id)
+        shown = view.username or view.email or "-"
+        verified = (
+            f'<span class="badge">{_bi("已验证邮箱", "verified e-mail")}</span>'
+            if view.email and view.email_verified
+            else ""
+        )
+        if view.email and view.email != view.username:
+            # The address is shown for recognition only; it is never an identity key.
+            shown_html = (
+                f'{_e(shown)}<br><span class="muted small">{_e(view.email)}</span>{verified}'
+            )
+        else:
+            shown_html = f"{_e(shown)}{verified}"
+        current = f'<span class="badge">{_bi("当前登录", "this sign-in")}</span>' if view.current else ""
+        action = ""
+        if view.can_unlink:
+            action = (
+                f'<form method="post" action="{_UNLINK_PATH}">{_csrf_field(session.csrf)}'
+                f'<input type="hidden" name="identity" value="{view.id}">'
+                f'<button class="btn danger sm" type="submit"{"" if fresh else " disabled"}>'
+                f'{_bi("移除", "Unlink")}</button></form>'
+            )
+        return (
+            "<tr>"
+            f'<td data-label="{_e(_bi("提供方", "Provider"))}">{_e(name)}{current}</td>'
+            f'<td data-label="{_e(_bi("账号", "Account"))}">{shown_html}</td>'
+            f'<td data-label="{_e(_bi("关联时间", "Linked"))}">{_e(_fmt_ts(view.linked_at))}</td>'
+            f'<td data-label="{_e(_bi("最近登录", "Last sign-in"))}">{_e(_fmt_ts(view.last_login_at))}</td>'
+            f'<td class="act">{action}</td></tr>'
+        )
+
+    async def link_form(self, request: Request) -> Response:
+        """POST /account/identities/link: prepare the ceremony and hand the browser over.
+
+        The answer is a small page with a meta refresh and a visible link, not a 303: the account
+        pages' ``form-action 'self'`` would block a form post that is redirected to another site
+        (Chrome checks the whole redirect chain).
+        """
+        guarded = await self._guard_post(request, active_only=True)
+        if isinstance(guarded, Response):
+            return guarded
+        session, form = guarded
+        outcome = await self.start_link(session, form.get("provider", ""))
+        if isinstance(outcome, Refusal):
+            return self._link_refusal_page(outcome.code)
+        name = _provider_label(outcome.provider_id)
+        body = (
+            _header(session)
+            + '<section class="card"><p>'
+            + _bi("正在前往 ", "Continuing to ")
+            + _e(name)
+            + _bi(" 确认你的身份……", " to confirm it is you...")
+            + f'</p><p><a class="btn" href="{_e(outcome.url)}">{_bi("继续", "Continue")}</a></p></section>'
+        )
+        response = self.html_page(
+            200,
+            _bi("关联登录方式", "Link a sign-in method"),
+            body,
+            head_extra=f'<meta http-equiv="refresh" content="0;url={_e(outcome.url)}">',
+        )
+        response.set_cookie(
+            outcome.cookie_name,
+            outcome.cookie_value,
+            max_age=outcome.max_age,
+            **self._cookie_kwargs(),
+        )
+        return response
+
+    @staticmethod
+    def _identity_id(raw: str | None) -> int | None:
+        return int(raw) if raw is not None and raw.isascii() and raw.isdigit() and len(raw) <= 18 else None
+
+    async def unlink_form(self, request: Request) -> Response:
+        """POST /account/identities/unlink: remove one of your sign-in methods."""
+        guarded = await self._guard_post(request, active_only=True)
+        if isinstance(guarded, Response):
+            return guarded
+        session, form = guarded
+        identity_id = self._identity_id(form.get("identity"))
+        if identity_id is None:
+            return self.message_page(400, _bi("请求格式不正确。", "Malformed request."))
+        outcome = await self.unlink_own_identity(session, identity_id)
+        if isinstance(outcome, Refusal):
+            return self._link_refusal_page(outcome.code)
+        if outcome.signed_out:
+            response = self.redirect(ACCOUNT_PATH, 303)
+            self.clear_cookie(response, SESSION_COOKIE)
+            return response
+        response = self.redirect(f"{SIGN_IN_METHODS_PATH}?unlinked=1", 303)
+        if outcome.session_cookie is not None:
+            response.set_cookie(
+                SESSION_COOKIE,
+                outcome.session_cookie,
+                max_age=max(1, int(session.exp - self.clock())),
+                **self._cookie_kwargs(),
+            )
+        return response
+
+    async def admin_unlink_form(self, request: Request) -> Response:
+        """POST /account/admin/identities/unlink: an owner removes a sign-in method from an account."""
+        guarded = await self._guard_post(request, owner_only=True)
+        if isinstance(guarded, Response):
+            return guarded
+        session, form = guarded
+        target = valid_principal_key(form.get("principal_key"))
+        identity_id = self._identity_id(form.get("identity"))
+        if target is None or identity_id is None:
+            return self._bad_target_page()
+        outcome = await self.owner_unlink_identity(session, target, identity_id)
+        if isinstance(outcome, Refusal):
+            return self._link_refusal_page(outcome.code)
+        response = self.redirect(_ADMIN_PATH, 303)
+        if outcome.signed_out:
+            self.clear_cookie(response, SESSION_COOKIE)
+        elif outcome.session_cookie is not None:
+            response.set_cookie(
+                SESSION_COOKIE,
+                outcome.session_cookie,
+                max_age=max(1, int(session.exp - self.clock())),
+                **self._cookie_kwargs(),
+            )
+        return response
+
     # -- admin ---------------------------------------------------------------
 
     @staticmethod
@@ -3501,6 +4205,42 @@ class _AccountApp:
             )
         return "".join(forms)
 
+    def _admin_user_header(self) -> str:
+        """"Entra user" while Entra is the only provider (the first release's wording), else "User"."""
+        if self.logins is None:
+            return _bi("Entra 用户", "Entra user")
+        return _bi("用户", "User")
+
+    def _admin_identities_dl(self, session: _Session, account: AccountInfo) -> str:
+        """The technical-details rows for every sign-in method of an account (two or more providers)."""
+        if not account.identities:
+            return ""
+        many = len(account.identities) > 1
+        linking = self.logins is not None and self.logins.linking_enabled
+        csrf = _csrf_field(session.csrf)
+        out = []
+        for ident in account.identities:
+            who = _e(_provider_label(ident.provider_id))
+            if ident.username:
+                who += f": {_e(ident.username)}"
+            lines = [f"<code>{_e(ident.subject)}</code>"]
+            if ident.provider_id.startswith("oidc:") and ident.issuer:
+                lines.append(f"{_bi('签发方', 'Issuer')}: <code>{_e(ident.issuer)}</code>")
+            lines.append(
+                f"{_bi('关联时间', 'Linked')}: {_e(_fmt_ts(ident.linked_at))}; "
+                f"{_bi('最近登录', 'Last sign-in')}: {_e(_fmt_ts(ident.last_login_at))}"
+            )
+            form = ""
+            if linking and many and ident.id > 0:
+                form = (
+                    f'<form method="post" action="{_ADMIN_UNLINK_PATH}">{csrf}'
+                    f'<input type="hidden" name="principal_key" value="{_e(account.principal_key)}">'
+                    f'<input type="hidden" name="identity" value="{ident.id}">'
+                    f'<button class="btn danger sm" type="submit">{_bi("移除", "Unlink")}</button></form>'
+                )
+            out.append(f"<dt>{who}</dt><dd>{'<br>'.join(lines)}{form}</dd>")
+        return "".join(out)
+
     def _admin_row(
         self,
         session: _Session,
@@ -3520,6 +4260,14 @@ class _AccountApp:
         )
         tenant = identity.tenant_id if identity is not None else ""
         subject = identity.subject if identity is not None else ""
+        if self.logins is None:
+            sign_in_rows = (
+                f"<dt>{_bi('登录方式', 'Sign-in')}</dt><dd>{_e(provider)}</dd>"
+                f"<dt>{_bi('租户', 'Tenant')}</dt><dd><code>{_e(tenant)}</code></dd>"
+                f"<dt>{_bi('对象 ID', 'Object')}</dt><dd><code>{_e(subject)}</code></dd>"
+            )
+        else:
+            sign_in_rows = self._admin_identities_dl(session, account)
         if row is not None:
             canvas = (
                 f'{_e(row.canvas_user_name)}<br><span class="muted">id {_e(row.canvas_user_id)}</span>'
@@ -3542,12 +4290,10 @@ class _AccountApp:
             used = "-"
         return (
             "<tr>"
-            f'<td data-label="{_e(_bi("Entra 用户", "Entra user"))}">{who}'
+            f'<td data-label="{_e(self._admin_user_header())}">{who}'
             '<details class="tech">'
             f"<summary>{_bi('技术信息', 'Technical details')}</summary><dl>"
-            f"<dt>{_bi('登录方式', 'Sign-in')}</dt><dd>{_e(provider)}</dd>"
-            f"<dt>{_bi('租户', 'Tenant')}</dt><dd><code>{_e(tenant)}</code></dd>"
-            f"<dt>{_bi('对象 ID', 'Object')}</dt><dd><code>{_e(subject)}</code></dd>"
+            f"{sign_in_rows}"
             f"<dt>{_bi('账户', 'Account')}</dt><dd><code>{_e(key)}</code></dd>"
             f"{enrolled}"
             "</dl></details>"
@@ -3597,7 +4343,7 @@ class _AccountApp:
         if lines:
             table = (
                 '<section class="card tablecard"><table><thead><tr>'
-                f"<th>{_bi('Entra 用户', 'Entra user')}</th>"
+                f"<th>{self._admin_user_header()}</th>"
                 f"<th>{_bi('Canvas 用户', 'Canvas user')}</th>"
                 f"<th>{_bi('学校', 'School')}</th>"
                 f"<th>{_bi('状态', 'Status')}</th>"
@@ -3642,7 +4388,7 @@ class _AccountApp:
             f"<li><strong>{_bi('移除绑定', 'Remove enrollment')}</strong>: "
             f"{_bi('只删除保存的 Canvas 令牌。对方仍可重新绑定，除非已被停用。', 'deletes the saved Canvas token only. The person can enroll again unless they are disabled.')}</li>"
             "</ul>"
-            f'<p class="muted small">{_bi("用户自己删除令牌只是断开自己的连接，与停用无关。你不能停用自己，也不能停用最后一位仍在启用的所有者。", "A user deleting their own token is only a self-disconnect and is not a disablement. You cannot disable yourself or the last active owner.")}</p></section>'
+            f'<p class="muted small">{_bi("用户自己删除令牌只是断开自己的连接，与停用无关。你不能停用自己，也不能停用最后一位可用的所有者。", "A user deleting their own token is only a self-disconnect and is not a disablement. You cannot disable yourself or the last usable owner.")}</p></section>'
         )
         body = (
             _header(session)
@@ -3770,8 +4516,10 @@ class _AccountApp:
             return self.message_page(
                 409,
                 _bi(
-                    "不能停用最后一位仍在启用的所有者。请先添加或启用另一位所有者。",
-                    "You cannot disable the last active owner. Add or enable another owner first.",
+                    "不能停用最后一位可用的所有者（仍能以所有者身份登录的启用所有者），"
+                    "也不能停用最后一位启用的所有者。请先添加或启用另一位所有者。",
+                    "You cannot disable the last usable owner (an active owner who can still sign in as "
+                    "one) or the last active owner. Add or enable another owner first.",
                 ),
             )
         if code == "cannot_disable_self":
@@ -3800,7 +4548,7 @@ class _AccountApp:
         """Owner action on an account's access; True if it changed anything.
 
         The store re-checks inside the transaction that the acting account is still an
-        active owner, and refuses to disable the actor or the last active owner. The
+        active owner, and refuses to disable the actor or the last usable owner. The
         MCP side's access cache is dropped for the target afterwards.
         """
         actor = self._principal_key(session)
@@ -3812,6 +4560,7 @@ class _AccountApp:
                         target,
                         actor=actor,
                         reason=DISABLE_REASON_ADMIN,
+                        listed_providers=self.identity.login_providers,
                     )
                 )
             else:
@@ -3922,6 +4671,12 @@ class _AccountApp:
             return _bi("断开了账户的全部已连接应用", "Connected apps ended for an account")
         if action == "jwt_key_rotated":
             return _bi("应用访问令牌已全部作废", "App access tokens invalidated")
+        if action == "identity_linked":
+            return _bi("关联了登录方式", "Sign-in method linked")
+        if action == "identity_unlinked":
+            return _bi("移除了登录方式", "Sign-in method unlinked")
+        if action == "identity_link_refused":
+            return _bi("关联登录方式被拒绝", "Sign-in method link refused")
         return action
 
     @staticmethod
@@ -4018,6 +4773,7 @@ def build_account_app(
     rate_limiters: RateLimiters | None = None,
     ui: Literal["legacy", "react"] = "legacy",
     authz: AuthzRuntime | None = None,
+    logins: LoginRuntime | None = None,
 ) -> _AccountApp:
     """The account application behind the routes (the HTML pages and the JSON API share it)."""
     return _AccountApp(
@@ -4037,6 +4793,7 @@ def build_account_app(
         rate_limiters,
         ui,
         authz,
+        logins,
     )
 
 
@@ -4059,6 +4816,7 @@ def build_account_routes(
     ui: Literal["legacy", "react"] = "legacy",
     spa: SpaBundle | None = None,
     authz: AuthzRuntime | None = None,
+    logins: LoginRuntime | None = None,
 ) -> list[Route]:
     """Build the /account Starlette routes.
 
@@ -4098,6 +4856,7 @@ def build_account_routes(
         rate_limiters=rate_limiters,
         ui="react" if serving_spa else "legacy",
         authz=authz,
+        logins=logins,
     )
     routes = app.routes()
     if ui == "react":

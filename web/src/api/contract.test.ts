@@ -13,12 +13,21 @@ const contract = read('api/contract.ts')
 const KEYS = [...contract.matchAll(/^\s*'((?:GET|POST|PUT|PATCH|DELETE) \/[^']*)':/gm)].map((m) => m[1])
 
 describe('api/contract.ts', () => {
-  it('lists the routes of the server (and nothing for identities or the sign-in)', () => {
-    expect(KEYS).toHaveLength(29)
+  it('lists the routes of the server (and nothing for the sign-in itself)', () => {
+    expect(KEYS).toHaveLength(33)
     expect(new Set(KEYS).size).toBe(KEYS.length)
     for (const key of KEYS) {
-      expect(key, key).not.toMatch(/identit|login\//)
+      expect(key, key).not.toMatch(/login\//)
     }
+  })
+
+  it('lists the sign-in methods routes the server serves only with two or more providers', () => {
+    expect(KEYS.filter((key) => /identit/.test(key)).sort()).toEqual([
+      'DELETE /admin/identities/{id}',
+      'DELETE /me/identities/{id}',
+      'GET /me/identities',
+      'POST /me/identities/link',
+    ])
   })
 
   it('lists the consent and connected-apps routes the server serves only in local mode', () => {

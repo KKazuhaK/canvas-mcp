@@ -147,6 +147,18 @@ class AccountRepo(Protocol):
 
     def count_active_owners(self, conn: Connection, *, exclude: str | None = None) -> int: ...
 
+    def usable_owner_ids(
+        self,
+        conn: Connection,
+        provider_ids: Sequence[str] | None,
+        *,
+        exclude: str | None = None,
+        for_update: bool = False,
+    ) -> list[str]:
+        """Active owners that can still get an owner session (see ``accounts.owner_is_usable``)."""
+
+    def count_usable_owners(self, conn: Connection, provider_ids: Sequence[str] | None) -> int: ...
+
     def count_pending(self, conn: Connection) -> int: ...
 
     def insert(
@@ -198,6 +210,11 @@ class AccountRepo(Protocol):
         now: int,
     ) -> None: ...
 
+    def set_admitted_via(
+        self, conn: Connection, account_id: str, admitted_via: str, now: int
+    ) -> None:
+        """Change how the account was admitted (a personal admission replaces the rules)."""
+
     def mark_role_seen(self, conn: Connection, account_id: str, now: int) -> None:
         """Record fresh evidence of the role (a sign-in)."""
 
@@ -238,14 +255,37 @@ class IdentityRepo(Protocol):
         *,
         username: str,
         now: int,
-    ) -> None: ...
+        email: str | None = None,
+        email_verified: bool | None = None,
+    ) -> None:
+        """Record a sign-in. A given ``email`` (with its verified flag) replaces the stored one."""
 
     def for_account(self, conn: Connection, account_id: str) -> list[Row]:
         """``(provider_id, issuer, subject, username, email, email_verified, linked_at,
-        last_login_at)``, oldest first."""
+        last_login_at, id)``, oldest first."""
+
+    def list_with_ids(self, conn: Connection, account_id: str) -> list[Row]:
+        """``(id, provider_id, issuer, subject, username, email, email_verified, linked_at,
+        last_login_at)`` of one account, oldest first."""
+
+    def get_for_account(
+        self, conn: Connection, identity_id: int, account_id: str, *, for_update: bool = False
+    ) -> Row | None:
+        """The same columns as :meth:`list_with_ids` if the identity belongs to the account."""
+
+    def account_of(self, conn: Connection, identity_id: int) -> str | None:
+        """The account id an identity row belongs to, or None."""
+
+    def count_for_account(self, conn: Connection, account_id: str) -> int: ...
+
+    def count_for_provider(self, conn: Connection, account_id: str, provider_id: str) -> int: ...
+
+    def delete_one(self, conn: Connection, identity_id: int, account_id: str) -> bool:
+        """Delete an identity of the account; True if a row was removed."""
 
     def all(self, conn: Connection) -> list[Row]:
-        """``(account_id, provider_id, issuer, subject, username)`` of every identity."""
+        """``(account_id, provider_id, issuer, subject, username, linked_at, last_login_at, id)``
+        of every identity."""
 
     def delete_for_accounts(self, conn: Connection, account_ids: Sequence[str]) -> None: ...
 
@@ -329,11 +369,16 @@ class PrefsRepo(Protocol):
 
 
 class MetaRepo(Protocol):
-    """``meta``: the cross-release compatibility marker."""
+    """``meta``: the cross-release compatibility marker and small server facts."""
 
     def schema_version(self, conn: Connection) -> str | None: ...
 
     def set_schema_version(self, conn: Connection, value: str) -> None: ...
+
+    def get(self, conn: Connection, key: str) -> str | None:
+        """Any other ``meta`` row (for example ``login_providers``)."""
+
+    def put(self, conn: Connection, key: str, value: str) -> None: ...
 
 
 # -- the self-hosted authorization server (revision 0003) ---------------------------------

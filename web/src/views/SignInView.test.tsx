@@ -92,7 +92,7 @@ describe('SignInView', () => {
   })
 
   it('does not show the codes of features that are gone (identity linking, consent)', async () => {
-    await renderApp('/sign-in?error=identity_in_use', 'signed-out')
+    await renderApp('/sign-in?error=not_provisioned', 'signed-out')
     expect(await screen.findByRole('alert')).toHaveTextContent('Something went wrong on our side')
   })
 

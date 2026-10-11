@@ -47,6 +47,12 @@ export type ApiOnlyErrorCode =
   // admin
   | 'last_owner' // 409
   | 'cannot_disable_self' // 409
+  // linked sign-in methods
+  | 'identity_in_use' // 409 (also the result of a link)
+  | 'provider_already_linked' // 409
+  | 'last_identity' // 409
+  | 'link_session_ended' // 409 (also the result of a link)
+  | 'provider_unavailable' // 503 (also the result of a link)
   // an app's authorization request (the server's own authorization server)
   | 'authorization_invalid' // 400 (also a sign-in error)
   | 'client_unavailable' // 409
@@ -65,6 +71,7 @@ export type SignInErrorCode =
   | 'access_disabled'
   | 'signups_paused'
   | 'token_store_unavailable'
+  | 'rate_limited'
   // An app (MCP client) was waiting for this sign-in, but its request is gone: it
   // expired, was started in another browser, or was already used.
   | 'authorization_invalid'
@@ -79,10 +86,10 @@ export interface ApiErrorBody {
 
 // ---- providers ---------------------------------------------------------------
 
-export type ProviderIcon = 'microsoft'
+export type ProviderIcon = 'microsoft' | 'google' | 'github' | 'key'
 export interface Provider {
   id: string
-  kind: 'oidc'
+  kind: 'oidc' | 'oauth2'
   name: string
   icon: ProviderIcon
   /** The server-side redirect that starts the sign-in (a full-page navigation). */
@@ -196,7 +203,7 @@ export interface Features {
   school_search: boolean
   write_tools: boolean
   admin: boolean
-  // Not built yet: always false today.
+  // Two or more sign-in providers: the Sign-in methods screen.
   identities: boolean
   // The server's own authorization server (SELFHOST_AUTH_MODE=local) only.
   connected_apps: boolean
@@ -252,6 +259,7 @@ export type LoginReason =
   | 'access_disabled'
   | 'signups_paused'
   | 'pending_approval'
+  | 'identity_linked'
 export interface LoginEvent {
   at: string | null
   provider_id: string
@@ -260,6 +268,39 @@ export interface LoginEvent {
 }
 export interface LoginHistoryResponse {
   events: LoginEvent[]
+}
+
+// ---- sign-in methods (two or more providers) ----------------------------------------------
+
+/** One linked sign-in method. `id` is a decimal string (an unlink names it). */
+export interface Identity {
+  id: string
+  provider_id: string
+  username: string
+  email: string | null
+  /** True only for an address the provider verified; display only, never a key. */
+  email_verified: boolean
+  linked_at: string | null
+  last_login_at: string | null
+  /** The method this session signed in with. */
+  current: boolean
+  /** False for the only method the account has. */
+  can_unlink: boolean
+}
+export interface IdentitiesResponse {
+  identities: Identity[]
+  /** Provider ids that can still be linked. */
+  linkable: string[]
+  fresh: boolean
+  fresh_window_s: number
+}
+export interface LinkStartResponse {
+  /** The provider's authorization page; navigate to it as it is (https only). */
+  redirect_to: string
+}
+export interface UnlinkResponse {
+  /** True when the method just removed was the one this session used. */
+  signed_out: boolean
 }
 
 // ---- apps: consent and connected apps (SELFHOST_AUTH_MODE=local) ---------------------------
@@ -340,6 +381,18 @@ export interface AdminEnrollment {
   updated_at: string | null
 }
 
+/** One sign-in method of an account, as an owner sees it (present with two or more providers). */
+export interface AdminIdentity {
+  id: string
+  provider_id: string
+  username: string
+  subject: string
+  issuer: string
+  linked_at: string | null
+  last_login_at: string | null
+  can_unlink: boolean
+}
+
 export interface AdminAccount {
   id: string
   key: string
@@ -355,6 +408,8 @@ export interface AdminAccount {
   is_self: boolean
   identity: { provider_id: string; tenant_id: string; subject: string } | null
   enrollment: AdminEnrollment | null
+  /** Every sign-in method; absent when Entra is the only provider. */
+  identities?: AdminIdentity[]
   /** What the caller may do to this row; the UI offers exactly these. */
   actions: AdminAction[]
 }

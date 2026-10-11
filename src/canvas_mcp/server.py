@@ -598,8 +598,49 @@ def _authz_summary(settings: SelfhostSettings) -> str:
     )
 
 
+def _providers_summary(settings: SelfhostSettings) -> list[str]:
+    """The ``Sign-in providers:`` line of --config, only when it is not the Entra-only default.
+
+    Names the provider ids, their (public) client ids and the issuers of generic OIDC
+    providers. Client secrets are never printed.
+    """
+    login = settings.login_providers
+    if login.order == ("entra",):
+        return []
+    parts: list[str] = []
+    for provider_id in login.order:
+        if provider_id == "google" and login.google is not None:
+            parts.append(f"google (client {login.google.client_id})")
+        elif provider_id == "github" and login.github is not None:
+            parts.append(f"github (client {login.github.client_id})")
+        elif provider_id.startswith("oidc:"):
+            cfg = login.oidc_by_id().get(provider_id)
+            parts.append(
+                f"{provider_id} (issuer {cfg.issuer}, client {cfg.client_id})"
+                if cfg is not None
+                else provider_id
+            )
+        else:
+            parts.append(provider_id)
+    return [f"  Sign-in providers: {', '.join(parts)}"]
+
+
 def _selfhost_summary(settings: SelfhostSettings) -> list[str]:
     """Configuration lines for --config. Never includes a secret."""
+    entra_lines = (
+        [
+            f"  Entra tenant: {settings.tenant_id}",
+            f"  Entra client: {settings.client_id}",
+        ]
+        if settings.entra_enabled
+        else []
+    )
+    # The Entra app roles mean something only while Entra signs people in.
+    role_lines = (
+        [f"  Roles: user={settings.required_role}, owner={settings.owner_role}"]
+        if settings.entra_enabled
+        else []
+    )
     return [
         f"  Auth mode: {AUTH_MODE_ENTRA}",
         f"  Public URL: {settings.public_base_url}",
@@ -607,10 +648,10 @@ def _selfhost_summary(settings: SelfhostSettings) -> list[str]:
         f"  Account page: {settings.account_url}",
         f"  Account UI: {settings.account_ui}"
         + (f" (built app from {settings.account_web_dist})" if settings.account_ui == "react" else ""),
-        f"  Entra tenant: {settings.tenant_id}",
-        f"  Entra client: {settings.client_id}",
+        *_providers_summary(settings),
+        *entra_lines,
         f"  API scope: {settings.api_scope}",
-        f"  Roles: user={settings.required_role}, owner={settings.owner_role}",
+        *role_lines,
         f"  Account session lifetime: {settings.account_session_ttl_seconds}s",
         f"  Token store: {settings.database_target.description}",
         "  Database migrations: "
@@ -714,6 +755,11 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
         tenant=settings.tenant_id,
         client=settings.client_id,
         roles=f"{settings.required_role},{settings.owner_role}",
+        **(
+            {"sign_in_providers": ",".join(settings.login_providers.order)}
+            if settings.login_providers.order != ("entra",)
+            else {}
+        ),
         tool_profile=role,
         tool_policy=tool_policy.source,
         removed_tools=len(removed_tools),

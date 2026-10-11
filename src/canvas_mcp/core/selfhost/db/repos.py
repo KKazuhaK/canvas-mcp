@@ -11,7 +11,18 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Literal
 
-from sqlalchemy import Select, delete, func, insert, literal, or_, select, update
+from sqlalchemy import (
+    Select,
+    and_,
+    delete,
+    false,
+    func,
+    insert,
+    literal,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import Connection
 
@@ -58,6 +69,8 @@ STATUS_DISABLED = "disabled"
 STATUS_PENDING = "pending"
 ROLE_OWNER = "owner"
 ROLE_USER = "user"
+ROLE_SOURCE_RULES = "rules"
+PROVIDER_ENTRA = "entra"
 REASON_DECRYPT_FAILED = "decrypt_failed"
 
 _ct = t.canvas_tokens
@@ -413,6 +426,53 @@ class SqlAccountRepo:
             stmt = stmt.where(_a.c.id != exclude)
         return int(conn.execute(stmt).scalar_one())
 
+    def usable_owner_ids(
+        self,
+        conn: Connection,
+        provider_ids: Sequence[str] | None,
+        *,
+        exclude: str | None = None,
+        for_update: bool = False,
+    ) -> list[str]:
+        """The ids of the usable owners: active owners that can still get an owner session.
+
+        ``provider_ids`` are the listed sign-in providers (None: every provider counts as
+        listed). An owner whose role the Entra owner rules granted (``role_source`` ``rules``)
+        needs an Entra sign-in to show owner evidence, so it counts only while Entra is listed
+        and it holds an Entra identity; any other owner needs one identity at a listed provider.
+        This is :func:`accounts.owner_is_usable` as a statement; a test keeps the two equal.
+        ``for_update`` locks the rows (PostgreSQL), ``exclude`` leaves one account out.
+        """
+
+        def holds(*conditions: Any) -> Any:
+            return (
+                select(_ei.c.account_id)
+                .where(_ei.c.account_id == _a.c.id, *conditions)
+                .exists()
+            )
+
+        listed = None if provider_ids is None else list(provider_ids)
+        if listed is None:
+            any_listed = holds()
+            entra = holds(_ei.c.provider_id == PROVIDER_ENTRA)
+        else:
+            any_listed = holds(_ei.c.provider_id.in_(listed))
+            entra = holds(_ei.c.provider_id == PROVIDER_ENTRA) if PROVIDER_ENTRA in listed else false()
+        stmt = select(_a.c.id).where(
+            _a.c.role == ROLE_OWNER,
+            _a.c.status == STATUS_ACTIVE,
+            or_(
+                and_(_a.c.role_source == ROLE_SOURCE_RULES, entra),
+                and_(or_(_a.c.role_source.is_(None), _a.c.role_source != ROLE_SOURCE_RULES), any_listed),
+            ),
+        )
+        if exclude is not None:
+            stmt = stmt.where(_a.c.id != exclude)
+        return [str(r[0]) for r in conn.execute(_for_update(stmt.order_by(_a.c.id), for_update)).all()]
+
+    def count_usable_owners(self, conn: Connection, provider_ids: Sequence[str] | None) -> int:
+        return len(self.usable_owner_ids(conn, provider_ids))
+
     def count_pending(self, conn: Connection) -> int:
         stmt = select(func.count()).select_from(_a).where(_a.c.status == STATUS_PENDING)
         return int(conn.execute(stmt).scalar_one())
@@ -534,6 +594,13 @@ class SqlAccountRepo:
             .values(role=role, role_source=source, role_seen_at=seen_at, updated_at=now)
         )
 
+    def set_admitted_via(
+        self, conn: Connection, account_id: str, admitted_via: str, now: int
+    ) -> None:
+        conn.execute(
+            update(_a).where(_a.c.id == account_id).values(admitted_via=admitted_via, updated_at=now)
+        )
+
     def mark_role_seen(self, conn: Connection, account_id: str, now: int) -> None:
         conn.execute(
             update(_a).where(_a.c.id == account_id).values(role_seen_at=now, updated_at=now)
@@ -606,10 +673,15 @@ class SqlIdentityRepo:
         *,
         username: str,
         now: int,
+        email: str | None = None,
+        email_verified: bool | None = None,
     ) -> None:
         values: dict[str, Any] = {"last_login_at": now}
         if username:
             values["username"] = username
+        if email is not None:
+            values["email"] = email
+            values["email_verified"] = 1 if email_verified else 0
         conn.execute(
             update(_ei)
             .where(
@@ -631,15 +703,76 @@ class SqlIdentityRepo:
                 _ei.c.email_verified,
                 _ei.c.linked_at,
                 _ei.c.last_login_at,
+                _ei.c.id,
             )
             .where(_ei.c.account_id == account_id)
             .order_by(_ei.c.id)
         )
         return list(conn.execute(stmt).all())
 
+    @staticmethod
+    def _with_id_columns() -> list[Any]:
+        return [
+            _ei.c.id,
+            _ei.c.provider_id,
+            _ei.c.issuer,
+            _ei.c.subject,
+            _ei.c.username,
+            _ei.c.email,
+            _ei.c.email_verified,
+            _ei.c.linked_at,
+            _ei.c.last_login_at,
+        ]
+
+    def list_with_ids(self, conn: Connection, account_id: str) -> list[Row]:
+        stmt = (
+            select(*self._with_id_columns())
+            .where(_ei.c.account_id == account_id)
+            .order_by(_ei.c.id)
+        )
+        return list(conn.execute(stmt).all())
+
+    def get_for_account(
+        self, conn: Connection, identity_id: int, account_id: str, *, for_update: bool = False
+    ) -> Row | None:
+        stmt = select(*self._with_id_columns()).where(
+            _ei.c.id == identity_id, _ei.c.account_id == account_id
+        )
+        return conn.execute(_for_update(stmt, for_update)).one_or_none()
+
+    def account_of(self, conn: Connection, identity_id: int) -> str | None:
+        stmt = select(_ei.c.account_id).where(_ei.c.id == identity_id)
+        value = conn.execute(stmt).scalar_one_or_none()
+        return None if value is None else str(value)
+
+    def count_for_account(self, conn: Connection, account_id: str) -> int:
+        stmt = select(func.count()).select_from(_ei).where(_ei.c.account_id == account_id)
+        return int(conn.execute(stmt).scalar_one())
+
+    def count_for_provider(self, conn: Connection, account_id: str, provider_id: str) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(_ei)
+            .where(_ei.c.account_id == account_id, _ei.c.provider_id == provider_id)
+        )
+        return int(conn.execute(stmt).scalar_one())
+
+    def delete_one(self, conn: Connection, identity_id: int, account_id: str) -> bool:
+        result = conn.execute(
+            delete(_ei).where(_ei.c.id == identity_id, _ei.c.account_id == account_id)
+        )
+        return int(result.rowcount) == 1
+
     def all(self, conn: Connection) -> list[Row]:
         stmt = select(
-            _ei.c.account_id, _ei.c.provider_id, _ei.c.issuer, _ei.c.subject, _ei.c.username
+            _ei.c.account_id,
+            _ei.c.provider_id,
+            _ei.c.issuer,
+            _ei.c.subject,
+            _ei.c.username,
+            _ei.c.linked_at,
+            _ei.c.last_login_at,
+            _ei.c.id,
         ).order_by(_ei.c.id)
         return list(conn.execute(stmt).all())
 
@@ -813,6 +946,16 @@ class SqlMetaRepo:
             conn.execute(update(t.meta).where(t.meta.c.key == "schema_version").values(value=value))
         else:
             conn.execute(insert(t.meta).values(key="schema_version", value=value))
+
+    def get(self, conn: Connection, key: str) -> str | None:
+        value = conn.execute(select(t.meta.c.value).where(t.meta.c.key == key)).scalar_one_or_none()
+        return None if value is None else str(value)
+
+    def put(self, conn: Connection, key: str, value: str) -> None:
+        if self.get(conn, key) is None:
+            conn.execute(insert(t.meta).values(key=key, value=value))
+        else:
+            conn.execute(update(t.meta).where(t.meta.c.key == key).values(value=value))
 
 
 class Repositories:

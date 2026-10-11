@@ -107,6 +107,15 @@ LOCAL_LEGACY_TO_API: dict[tuple[str, str], list[tuple[str, str]]] = {
     ],
 }
 
+#: The sign-in methods (two or more sign-in providers): the legacy pages register them only
+#: then, and the API answers ``not_found`` for them otherwise.
+#: ``tests/selfhost/login/test_identities_api.py`` checks this table against a multi-provider app.
+LINKING_LEGACY_TO_API: dict[tuple[str, str], list[tuple[str, str]]] = {
+    ("POST", "/account/identities/link"): [("POST", f"{P}/me/identities/link")],
+    ("POST", "/account/identities/unlink"): [("DELETE", f"{P}/me/identities/{{id}}")],
+    ("POST", "/account/admin/identities/unlink"): [("DELETE", f"{P}/admin/identities/{{id}}")],
+}
+
 #: API routes that read what the pages render inline (no legacy route of their own).
 READ_MODELS = {
     ("GET", f"{P}/me/canvas-token"),
@@ -116,6 +125,7 @@ READ_MODELS = {
     ("PUT", f"{P}/me/ui-locale"),  # the ?lang= toggle of the pages
     ("GET", f"{P}/me/grants"),  # the "Connected apps" card of GET /account (local mode)
     ("GET", f"{P}/admin/accounts/{{id}}/grants"),  # the per-account block of the admin page
+    ("GET", f"{P}/me/identities"),  # the "Sign-in methods" page (two or more providers)
 }
 
 
@@ -148,6 +158,7 @@ class TestRouteMatrix:
         registered = account_api.ApiApp(app).route_keys()
         mapped = {t for targets in LEGACY_TO_API.values() for t in (targets or [])}
         mapped |= {t for targets in LOCAL_LEGACY_TO_API.values() for t in targets}
+        mapped |= {t for targets in LINKING_LEGACY_TO_API.values() for t in targets}
         extra = registered - mapped - READ_MODELS
         assert extra == set(), f"API routes with no legacy counterpart or read-model entry: {extra}"
         assert READ_MODELS <= registered

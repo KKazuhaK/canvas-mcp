@@ -20,6 +20,25 @@ from typing import Literal
 
 from .token_store import ToolPrefs
 
+#: The outcomes of a link ceremony that a browser lands on as ``?error=`` (a closed set; never
+#: provider text).
+LINK_ERROR_CODES = frozenset(
+    {
+        "identity_in_use",
+        "provider_already_linked",
+        "access_denied",
+        "link_session_ended",
+        "provider_error",
+        "provider_unavailable",
+        "state_invalid",
+        "sign_in_unverified",
+        "sign_in_incomplete",
+        "token_store_unavailable",
+        "reauth_required",
+        "rate_limited",
+    }
+)
+
 
 @dataclass(frozen=True)
 class Refusal:
@@ -53,3 +72,56 @@ class WriteSaved:
     """The write-tool switches were saved, or the request changed nothing."""
 
     result: Literal["saved", "unchanged"]
+
+
+@dataclass(frozen=True)
+class LinkStarted:
+    """A link ceremony was prepared: set the cookie, then send the browser to ``url``.
+
+    The cookie (``cookie_name``) holds the sealed ceremony cookie of the provider; ``url`` is the
+    provider's authorization URL. Starting a link never changes the account.
+    """
+
+    url: str
+    provider_id: str
+    cookie_name: str
+    cookie_value: str
+    max_age: int
+
+
+@dataclass(frozen=True)
+class Linked:
+    """An identity of ``provider_id`` is now (or already was) linked to the account."""
+
+    provider_id: str
+
+
+@dataclass(frozen=True)
+class Unlinked:
+    """An identity was removed. Every session of the account ended with the epoch bump.
+
+    ``session_cookie`` is a re-issued session cookie for the caller (the new epoch) when the
+    caller signed in with another provider; otherwise ``signed_out`` is true and the caller's
+    cookie must be cleared.
+    """
+
+    provider_id: str
+    signed_out: bool
+    session_cookie: str | None = None
+
+
+@dataclass(frozen=True)
+class IdentityView:
+    """One linked identity as the sign-in methods screen shows it."""
+
+    id: int
+    provider_id: str
+    username: str
+    email: str | None
+    email_verified: bool
+    linked_at: int
+    last_login_at: int | None
+    #: The identity the caller's current session signed in with.
+    current: bool
+    #: False for the only identity the account has.
+    can_unlink: bool

@@ -79,7 +79,7 @@ import pathlib
 import re
 import time
 import uuid
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
@@ -113,6 +113,10 @@ if TYPE_CHECKING:
     from .db.url import DatabaseTarget
 
 SCHEMA_VERSION = 5
+
+#: ``meta`` key holding the server's listed sign-in providers (see ``record_login_providers``).
+LOGIN_PROVIDERS_META_KEY = "login_providers"
+_PROVIDER_ID_RE = re.compile(r"[a-z0-9][a-z0-9:_.-]{0,63}")
 
 # Health of a stored token (``canvas_tokens.status``).
 STATUS_ACTIVE = "active"
@@ -173,6 +177,7 @@ EVENT_OWNER_LOST = acc.EVENT_OWNER_LOST
 EVENT_ACCOUNT_CREATED = acc.EVENT_ACCOUNT_CREATED
 EVENT_ACTIVATED = acc.EVENT_ACTIVATED
 EVENT_OWNER_LOSS_REFUSED = acc.EVENT_OWNER_LOSS_REFUSED
+EVENT_IDENTITY_UNLINKED = "identity_unlinked"
 
 # The actions of ``audit_log``: a closed set.
 AUDIT_ACCOUNT_CREATED = "account_created"
@@ -190,6 +195,9 @@ AUDIT_TOKEN_MARKED_INVALID = "token_marked_invalid"
 AUDIT_WRITE_TOOLS_CHANGED = "write_tools_changed"
 AUDIT_SCHEMA_MIGRATED = "schema_migrated"
 AUDIT_PENDING_PURGED = "pending_purged"
+AUDIT_IDENTITY_LINKED = "identity_linked"
+AUDIT_IDENTITY_UNLINKED = "identity_unlinked"
+AUDIT_IDENTITY_LINK_REFUSED = "identity_link_refused"
 # The local authorization server (SELFHOST_AUTH_MODE=local).
 AUDIT_GRANT_REVOKED = "grant_revoked"
 AUDIT_GRANTS_REVOKED_FOR_ACCOUNT = "grants_revoked_for_account"
@@ -214,8 +222,24 @@ AUDIT_ACTIONS = frozenset(
         AUDIT_WRITE_TOOLS_CHANGED,
         AUDIT_SCHEMA_MIGRATED,
         AUDIT_PENDING_PURGED,
+        AUDIT_IDENTITY_LINKED,
+        AUDIT_IDENTITY_UNLINKED,
+        AUDIT_IDENTITY_LINK_REFUSED,
     }
 )
+
+# Why a link or an unlink did not happen (``LinkResult.code`` / ``UnlinkResult.code``).
+LINK_OK = "linked"
+LINK_ALREADY = "already_linked"
+LINK_IN_USE = "identity_in_use"
+LINK_PROVIDER_TAKEN = "provider_already_linked"
+LINK_DENIED = "access_denied"
+LINK_SESSION_ENDED = "link_session_ended"
+UNLINK_OK = "unlinked"
+UNLINK_NOT_FOUND = "not_found"
+UNLINK_LAST = "last_identity"
+UNLINK_LAST_OWNER = "last_owner"
+UNLINK_SESSION_ENDED = "link_session_ended"
 
 _KEY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 _GUID_RE = re.compile(
@@ -234,11 +258,17 @@ _NONCE_BYTES = 12
 _MAX_CANVAS_NAME = 200
 _MAX_DISPLAY_NAME = 200
 _MAX_USERNAME = 254
+_MAX_EMAIL = 254
 
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _MAX_PREF_TOOLS = 256
 _MAX_PREF_VIA = 32
 _MAX_EXPIRES_HINT = 4_102_444_800  # 2100-01-01 UTC: a sanity bound, not a policy
+
+
+def _listed(provider_ids: Iterable[str] | None) -> list[str] | None:
+    """The listed provider ids as a sorted list (None stays None: every provider is listed)."""
+    return None if provider_ids is None else sorted(set(provider_ids))
 
 
 class _Unset(Enum):
@@ -425,6 +455,8 @@ class IdentityInfo:
     email_verified: bool
     linked_at: int
     last_login_at: int | None
+    #: The row id an unlink names (0 when the reader did not select it).
+    id: int = 0
 
     @property
     def legacy_key(self) -> str | None:
@@ -441,6 +473,48 @@ class IdentityInfo:
     def tenant_id(self) -> str:
         legacy = self.legacy_key
         return legacy.split(":")[1] if legacy else ""
+
+
+@dataclass(frozen=True)
+class LinkedIdentity:
+    """One external identity of an account, with the id an unlink names."""
+
+    id: int
+    provider_id: str
+    issuer: str
+    subject: str
+    username: str
+    email: str | None
+    email_verified: bool
+    linked_at: int
+    last_login_at: int | None
+
+
+@dataclass(frozen=True)
+class LinkResult:
+    """The outcome of attaching an identity to an account (see :meth:`TokenStore.link_identity`)."""
+
+    code: str
+    provider_id: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.code in (LINK_OK, LINK_ALREADY)
+
+
+@dataclass(frozen=True)
+class UnlinkResult:
+    """The outcome of removing an identity (see :meth:`TokenStore.unlink_identity`)."""
+
+    code: str
+    provider_id: str = ""
+    issuer: str = ""
+    subject: str = ""
+    session_epoch: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return self.code == UNLINK_OK
 
 
 @dataclass(frozen=True)
@@ -548,6 +622,20 @@ def _status_from_row(row: Sequence[Any]) -> PrincipalStatus:
         session_epoch=int(row[16]),
         updated_at=int(row[17]),
         stored=True,
+    )
+
+
+def _linked_from_row(row: Sequence[Any]) -> LinkedIdentity:
+    return LinkedIdentity(
+        id=int(row[0]),
+        provider_id=row[1],
+        issuer=row[2],
+        subject=row[3],
+        username=row[4] or "",
+        email=row[5],
+        email_verified=bool(row[6]),
+        linked_at=int(row[7]),
+        last_login_at=None if row[8] is None else int(row[8]),
     )
 
 
@@ -1400,8 +1488,9 @@ class TokenStore:
                     username=i[4] or "",
                     email=None,
                     email_verified=False,
-                    linked_at=0,
-                    last_login_at=None,
+                    linked_at=int(i[5]),
+                    last_login_at=i[6],
+                    id=int(i[7]),
                 )
                 for i in by_account.get(row[0], [])
             )
@@ -1415,13 +1504,67 @@ class TokenStore:
         with self._db.read() as conn:
             rows = self._repos.identities.for_account(conn, account_id)
         return [
-            IdentityInfo(r[0], r[1], r[2], r[3] or "", r[4], bool(r[5]), int(r[6]), r[7])
+            IdentityInfo(r[0], r[1], r[2], r[3] or "", r[4], bool(r[5]), int(r[6]), r[7], int(r[8]))
             for r in rows
         ]
+
+    def list_identities(self, principal_key: str) -> list[LinkedIdentity]:
+        """The identities of an account with their ids, oldest first (unknown account: none)."""
+        account_id = _account_id(_validate_principal_key(principal_key))
+        if account_id is None:
+            return []
+        with self._db.read() as conn:
+            rows = self._repos.identities.list_with_ids(conn, account_id)
+        return [_linked_from_row(r) for r in rows]
+
+    def identity_account(self, identity_id: int) -> str | None:
+        """The account key an identity row belongs to (None for an unknown id)."""
+        with self._db.read() as conn:
+            account_id = self._repos.identities.account_of(conn, identity_id)
+        return None if account_id is None else acc.account_key_of(account_id)
 
     def count_active_owners(self) -> int:
         with self._db.read() as conn:
             return self._repos.accounts.count_active_owners(conn)
+
+    def count_usable_owners(self, provider_ids: Iterable[str] | None) -> int:
+        """Active owners that can still get an owner session under the listed providers.
+
+        ``provider_ids`` are the providers of ``SELFHOST_LOGIN_PROVIDERS`` (None: all of them).
+        An owner whose role the Entra owner rules granted counts only while Entra is listed and it
+        holds an Entra identity; every other owner needs one identity at a listed provider (see
+        :func:`accounts.owner_is_usable`).
+        """
+        with self._db.read() as conn:
+            return self._repos.accounts.count_usable_owners(conn, _listed(provider_ids))
+
+    def record_login_providers(self, provider_ids: Iterable[str]) -> None:
+        """Remember the providers of ``SELFHOST_LOGIN_PROVIDERS`` this server runs with.
+
+        ``token_admin`` is usually run from a shell that lacks the server's variables, and it
+        needs the list to decide which owners are usable; it reads this record first. The
+        server writes it at startup (``meta['login_providers']``, a comma-separated list; an
+        existing value is replaced only when it differs). A deployment with Entra alone and no
+        earlier record writes nothing, so it keeps the database exactly as it was: no record
+        means "Entra alone".
+        """
+        value = ",".join(sorted(set(provider_ids)))
+        with self._db.write() as conn:
+            current = self._repos.meta.get(conn, LOGIN_PROVIDERS_META_KEY)
+            if current == value or (current is None and value == acc.PROVIDER_ENTRA):
+                return
+            self._repos.meta.put(conn, LOGIN_PROVIDERS_META_KEY, value)
+
+    def recorded_login_providers(self) -> frozenset[str] | None:
+        """The providers the server last recorded (None: none recorded, or unreadable)."""
+        with self._db.read() as conn:
+            raw = self._repos.meta.get(conn, LOGIN_PROVIDERS_META_KEY)
+        if raw is None:
+            return None
+        ids = [part for part in raw.split(",") if part]
+        if not ids or any(not _PROVIDER_ID_RE.fullmatch(part) for part in ids):
+            return None
+        return frozenset(ids)
 
     def lookup_identity(self, provider_id: str, issuer: str, subject: str) -> str | None:
         """The account key of an external identity, or None if it is not known."""
@@ -1447,6 +1590,7 @@ class TokenStore:
         purpose: acc.Purpose,
         ip: str = "unknown",
         ua_hash: str | None = None,
+        listed_providers: Collection[str] | None = None,
     ) -> Resolution:
         """Decide and apply, in one transaction, what an external identity may do.
 
@@ -1457,7 +1601,10 @@ class TokenStore:
         The history, the audit entry and the sign-in event are written in the same
         transaction. ``purpose='sign_in'`` is the ``/account`` login (roles are
         recomputed, an event is always recorded); ``'request'`` is the MCP path (an
-        existing account is not written, a role is never raised).
+        existing account is not written, a role is never raised). ``listed_providers`` (the
+        providers of ``SELFHOST_LOGIN_PROVIDERS``; None: all) decides which owners are usable:
+        the bootstrap identity becomes an owner while there is no usable owner, and the number
+        of owners it overrides is audited.
         """
         now = self._now()
         repos = self._repos
@@ -1466,19 +1613,47 @@ class TokenStore:
             account_id = repos.identities.lookup(conn, *ext.identity)
             row = repos.accounts.get(conn, account_id, for_update=True) if account_id else None
             existing = None if row is None else _status_from_row(row).facts
+            active_owners = repos.accounts.count_active_owners(conn)
+            listed = _listed(listed_providers)
+            usable_owners = repos.accounts.count_usable_owners(conn, listed)
+            is_bootstrap = acc.is_bootstrap_identity(ext, policy)
+            owner_usable = True
+            if (
+                is_bootstrap
+                and row is not None
+                and account_id is not None
+                and row[1] == STATUS_ACTIVE
+                and row[2] == ROLE_OWNER
+            ):
+                # Only the bootstrap identity may re-source an owner: whether this one is usable.
+                held = repos.identities.list_with_ids(conn, account_id)
+                owner_usable = acc.owner_is_usable(
+                    role=row[2], status=row[1], role_source=row[3],
+                    identity_providers=[r[1] for r in held], listed=listed,
+                )
             facts = DecisionFacts(
-                active_owner_count=repos.accounts.count_active_owners(conn),
+                active_owner_count=active_owners,
+                usable_owner_count=usable_owners,
                 pending_count=repos.accounts.count_pending(conn),
-                is_bootstrap_identity=acc.is_bootstrap_identity(ext, policy),
+                is_bootstrap_identity=is_bootstrap,
+                existing_owner_usable=owner_usable,
             )
             decision = acc.decide(existing, verdict, policy, facts, purpose)
             self._pause("after_decision")
             created = activated = False
             owner_change: str | None = None
+            unusable_owners = (
+                # The owners this bootstrap overrides: not the account being re-sourced itself.
+                max(0, active_owners - usable_owners - (0 if owner_usable else 1))
+                if decision.role == ROLE_OWNER and decision.role_source == acc.ROLE_SOURCE_BOOTSTRAP
+                else 0
+            )
             if decision.create:
                 account_id = self._new_account_id(ext)
                 self._create_account(conn, account_id, ext, decision, now)
                 created = True
+                if unusable_owners > 0:
+                    self._audit_bootstrap_override(conn, account_id, unusable_owners, now)
             elif row is not None and account_id is not None:
                 if decision.activate:
                     repos.accounts.activate(
@@ -1499,7 +1674,8 @@ class TokenStore:
                     )
                     activated = True
                 owner_change = self._apply_role(
-                    conn, account_id, row, decision, purpose, verdict, now
+                    conn, account_id, row, decision, purpose, verdict, now,
+                    unusable_owners=unusable_owners,
                 )
             if (
                 purpose == "sign_in"
@@ -1510,7 +1686,12 @@ class TokenStore:
                     conn, account_id, display_name=ext.display_name[:_MAX_DISPLAY_NAME], now=now
                 )
                 repos.identities.touch(
-                    conn, *ext.identity, username=ext.username[:_MAX_USERNAME], now=now
+                    conn,
+                    *ext.identity,
+                    username=ext.username[:_MAX_USERNAME],
+                    now=now,
+                    email=(ext.email or None) and ext.email[:_MAX_EMAIL],
+                    email_verified=ext.email_verified,
                 )
             if created:
                 owner_change = decision.role_event if decision.role == ROLE_OWNER else None
@@ -1545,6 +1726,170 @@ class TokenStore:
             owner_change=owner_change,
         )
 
+    # -- accounts: linking identities --------------------------------------------------
+
+    def link_identity(
+        self,
+        principal_key: str,
+        ext: ExternalClaims,
+        verdict: Verdict,
+        policy: AccessPolicy,
+        *,
+        expected_epoch: int,
+        ua_hash: str | None = None,
+    ) -> LinkResult:
+        """Attach an external identity to an existing, active account in one transaction.
+
+        The writer lock is taken first (SQLite ``BEGIN IMMEDIATE`` plus the process lock;
+        PostgreSQL the advisory lock), then the account row is locked: it must be active and
+        its ``session_epoch`` must still be ``expected_epoch`` (the epoch of the session that
+        started the link), else ``link_session_ended``. An identity that already belongs to
+        another account is ``identity_in_use`` and nothing changes for either account (there
+        is no silent merge); an account holds at most one identity per provider
+        (``provider_already_linked``); and an identity the admission rules would refuse at
+        sign-in cannot be attached (``access_denied``: see :func:`accounts.link_admissible`).
+        A refusal is audited. The unique key on the identity is a second barrier; under the
+        writer lock it cannot fire, and if it ever does the error propagates (fail closed).
+        """
+        key = _require_account_key(principal_key)
+        account_id = acc.account_id_of(key)
+        now = self._now()
+        repos = self._repos
+        provider = ext.provider_id
+        with self._db.write() as conn:
+            row = repos.accounts.get(conn, account_id, for_update=True)
+            if row is None or row[1] != STATUS_ACTIVE or int(row[16]) != expected_epoch:
+                return LinkResult(LINK_SESSION_ENDED, provider)
+            owner = repos.identities.lookup(conn, *ext.identity)
+            self._pause("after_identity_lookup")
+            if owner == account_id:
+                return LinkResult(LINK_ALREADY, provider)
+            refusal: str | None = None
+            if owner is not None:
+                refusal = LINK_IN_USE
+            elif repos.identities.count_for_provider(conn, account_id, provider) > 0:
+                refusal = LINK_PROVIDER_TAKEN
+            elif not acc.link_admissible(_status_from_row(row).facts, verdict, policy):
+                refusal = LINK_DENIED
+            if refusal is not None:
+                self._audit(
+                    conn, key, AUDIT_IDENTITY_LINK_REFUSED, target=key, reason=refusal,
+                    detail={"provider": provider[:64]}, now=now,
+                )
+                return LinkResult(refusal, provider)
+            repos.identities.insert(
+                conn,
+                account_id=account_id,
+                provider_id=provider,
+                issuer=ext.issuer,
+                subject=ext.subject,
+                username=ext.username[:_MAX_USERNAME],
+                email=(ext.email or None) and ext.email[:_MAX_EMAIL],
+                email_verified=bool(ext.email) and ext.email_verified,
+                now=now,
+            )
+            self._audit(
+                conn, key, AUDIT_IDENTITY_LINKED, target=key,
+                detail={"provider": provider[:64]}, now=now,
+            )
+            self._record_auth_event(
+                conn,
+                now=now,
+                account_id=account_id,
+                provider_id=provider,
+                surface=acc.SURFACE_ACCOUNT,
+                outcome=acc.OUTCOME_SUCCESS,
+                reason=acc.REASON_IDENTITY_LINKED,
+                ip="unknown",
+                ua_hash=ua_hash,
+            )
+        return LinkResult(LINK_OK, provider)
+
+    def unlink_identity(
+        self,
+        principal_key: str,
+        identity_id: int,
+        *,
+        actor: Actor,
+        expected_epoch: int | None = None,
+        listed_providers: Collection[str] | None = None,
+        additional_provider_lists: Sequence[Collection[str]] = (),
+    ) -> UnlinkResult:
+        """Remove one identity from an account; every session of the account ends.
+
+        ``actor`` is the account itself (its key), another account that must be an active
+        owner (re-checked in this transaction), or :data:`OPERATOR`. An account always keeps
+        at least one identity (``last_identity``: to cut a person off, disable the account), and
+        the server keeps at least one *usable owner* (``last_owner``): an unlink that would take
+        the last usable owner's last way to an owner session is refused. An active owner is usable
+        while a sign-in under ``listed_providers`` (the providers of ``SELFHOST_LOGIN_PROVIDERS``;
+        None: all) can show its role: one granted by the Entra owner rules needs an Entra identity
+        and Entra listed, any other needs one identity at a listed provider
+        (:func:`accounts.owner_is_usable`). The unlink is refused only when the account is usable
+        before and not after it and no other usable owner exists; the other owners' rows are read
+        ``FOR UPDATE`` inside the writer lock, so two owners cannot unlink their way out together.
+        The count and the delete are one transaction under the writer lock, so two
+        concurrent unlinks of a two-identity account cannot both succeed. A successful unlink
+        bumps ``session_epoch`` (every browser session and every authorization code not yet
+        redeemed dies with the old epoch; connected apps survive) and writes the status
+        history and the audit log. ``expected_epoch`` (an own unlink) ties the call to the
+        session that made it.
+        """
+        key = _require_account_key(principal_key)
+        account_id = acc.account_id_of(key)
+        by = self._actor_name(actor)
+        now = self._now()
+        repos = self._repos
+        with self._db.write() as conn:
+            self_service = not isinstance(actor, _Operator) and by == key
+            if not self_service:
+                self._require_owner_actor(conn, actor)
+            row = repos.accounts.get(conn, account_id, for_update=True)
+            if row is None:
+                return UnlinkResult(UNLINK_NOT_FOUND)
+            if self_service and (
+                row[1] != STATUS_ACTIVE
+                or (expected_epoch is not None and int(row[16]) != expected_epoch)
+            ):
+                return UnlinkResult(UNLINK_SESSION_ENDED)
+            ident = repos.identities.get_for_account(conn, identity_id, account_id, for_update=True)
+            if ident is None:
+                return UnlinkResult(UNLINK_NOT_FOUND)
+            count = repos.identities.count_for_account(conn, account_id)
+            self._pause("after_identity_count")
+            if count <= 1:
+                return UnlinkResult(UNLINK_LAST, ident[1])
+            if row[1] == STATUS_ACTIVE and row[2] == ROLE_OWNER:
+                rows = repos.identities.list_with_ids(conn, account_id)
+                for provider_list in (listed_providers, *additional_provider_lists):
+                    listed = _listed(provider_list)
+                    usable_before = acc.owner_is_usable(
+                        role=row[2], status=row[1], role_source=row[3],
+                        identity_providers=[r[1] for r in rows], listed=listed,
+                    )
+                    usable_after = acc.owner_is_usable(
+                        role=row[2], status=row[1], role_source=row[3],
+                        identity_providers=[r[1] for r in rows if int(r[0]) != identity_id],
+                        listed=listed,
+                    )
+                    if usable_before and not usable_after:
+                        others = repos.accounts.usable_owner_ids(
+                            conn, listed, exclude=account_id, for_update=True
+                        )
+                        self._pause("after_owner_count")
+                        if not others:
+                            return UnlinkResult(UNLINK_LAST_OWNER, ident[1])
+            if not repos.identities.delete_one(conn, identity_id, account_id):
+                return UnlinkResult(UNLINK_NOT_FOUND)
+            epoch = repos.accounts.end_sessions(conn, account_id, now)
+            self._record_event(conn, key, EVENT_IDENTITY_UNLINKED, by, ident[1][:64], epoch, now)
+            who = "operator" if isinstance(actor, _Operator) else ("self" if self_service else "owner")
+            self._audit(
+                conn, by, AUDIT_IDENTITY_UNLINKED, target=key,
+                detail={"provider": ident[1][:64], "by": who}, now=now,
+            )
+        return UnlinkResult(UNLINK_OK, ident[1], ident[2], ident[3], epoch)
+
     def _create_account(
         self,
         conn: Connection,
@@ -1573,8 +1918,8 @@ class TokenStore:
             issuer=ext.issuer,
             subject=ext.subject,
             username=ext.username[:_MAX_USERNAME],
-            email=None,
-            email_verified=False,
+            email=(ext.email or None) and ext.email[:_MAX_EMAIL],
+            email_verified=bool(ext.email) and ext.email_verified,
             now=now,
         )
         self._record_event(
@@ -1595,6 +1940,19 @@ class TokenStore:
             now=now,
         )
 
+    def _audit_bootstrap_override(
+        self, conn: Connection, account_id: str, unusable_owners: int, now: int
+    ) -> None:
+        """Audit a bootstrap owner made while the owners the database holds were all unusable."""
+        self._audit(
+            conn, SYSTEM_ACTOR, AUDIT_ROLE_CHANGED, target=acc.account_key_of(account_id),
+            detail={
+                "role": ROLE_OWNER, "source": acc.ROLE_SOURCE_BOOTSTRAP, "via": "sign_in",
+                "unusable_owners": unusable_owners,
+            },
+            now=now,
+        )
+
     def _apply_role(
         self,
         conn: Connection,
@@ -1604,6 +1962,8 @@ class TokenStore:
         purpose: acc.Purpose,
         verdict: Verdict,
         now: int,
+        *,
+        unusable_owners: int = 0,
     ) -> str | None:
         """Apply the role part of a decision to an existing account; returns the change made."""
         repos = self._repos
@@ -1618,15 +1978,29 @@ class TokenStore:
                 seen_at=now if decision.role == ROLE_OWNER else row[4],
                 now=now,
             )
+            admitted_via = decision.admitted_via
+            if admitted_via is not None and not decision.activate and admitted_via != row[5]:
+                # The bootstrap owner is admitted personally, so the rules it overrode cannot
+                # refuse it at its next sign-in.
+                repos.accounts.set_admitted_via(conn, account_id, admitted_via, now)
+            else:
+                admitted_via = None
             event = decision.role_event or (
                 EVENT_OWNER_GAINED if decision.role == ROLE_OWNER else EVENT_OWNER_LOST
             )
             self._record_event(conn, key, event, None, "sign_in", epoch, now)
-            self._audit(
-                conn, SYSTEM_ACTOR, AUDIT_ROLE_CHANGED, target=key,
-                detail={"role": decision.role, "source": decision.role_source or "", "via": "sign_in"},
-                now=now,
-            )
+            detail: dict[str, Any] = {
+                "role": decision.role, "source": decision.role_source or "", "via": "sign_in",
+            }
+            if unusable_owners > 0:
+                detail["unusable_owners"] = unusable_owners
+            if admitted_via is not None:
+                detail["admitted_via"] = admitted_via
+            if row[2] == ROLE_OWNER and decision.role == ROLE_OWNER:
+                # An owner re-sourced at a sign-in (the bootstrap identity took over a role no
+                # sign-in could use): say where it came from.
+                detail["was"] = (row[3] or "")[:32]
+            self._audit(conn, SYSTEM_ACTOR, AUDIT_ROLE_CHANGED, target=key, detail=detail, now=now)
             return event
         if decision.role_event == EVENT_OWNER_LOSS_REFUSED:
             self._record_event(conn, key, EVENT_OWNER_LOSS_REFUSED, None, "sign_in", epoch, now)
@@ -1745,14 +2119,21 @@ class TokenStore:
 
     # -- accounts: administrative changes ------------------------------------------
 
-    def demote_owner(self, principal_key: str, *, evidence_issued_at: int) -> bool:
+    def demote_owner(
+        self,
+        principal_key: str,
+        *,
+        evidence_issued_at: int,
+        listed_providers: Collection[str] | None = None,
+    ) -> bool:
         """Lower the stored owner role on evidence from a request token; True if lowered.
 
         The evidence is the issue time of a verified access token that carries no
         owner role. It counts only if it is newer than the last sign-in that showed the
         role, so a token issued before a promotion cannot undo it. Only a role that
         rules granted is touched (a bootstrap or operator owner is not), the last
-        active owner is never demoted, and this path can only ever lower the role:
+        *usable* owner is never demoted (an owner no sign-in under ``listed_providers`` can show,
+        see :func:`accounts.owner_is_usable`, is no replacement), and this path can only ever lower the role:
         raising it needs a fresh sign-in.
         """
         key = _require_account_key(principal_key)
@@ -1769,9 +2150,11 @@ class TokenStore:
                 return False
             if evidence_issued_at <= (row[4] or 0):
                 return False
-            others = self._repos.accounts.count_active_owners(conn, exclude=account_id)
+            others = self._repos.accounts.usable_owner_ids(
+                conn, _listed(listed_providers), exclude=account_id, for_update=True
+            )
             self._pause("after_owner_count")
-            if others == 0:
+            if not others:
                 self._record_event(
                     conn, key, EVENT_OWNER_LOSS_REFUSED, None, "access_token_roles", int(row[16]), now
                 )
@@ -1795,6 +2178,8 @@ class TokenStore:
         actor: Actor,
         reason: str,
         allow_last_owner: bool = False,
+        listed_providers: Collection[str] | None = None,
+        additional_provider_lists: Sequence[Collection[str]] = (),
     ) -> bool:
         """Administratively disable an account; True if this call changed it.
 
@@ -1807,9 +2192,12 @@ class TokenStore:
 
         ``actor`` is the acting owner's account key or :data:`OPERATOR`. An owner
         actor is re-checked inside the transaction (still active and an owner) and
-        cannot disable themselves. Disabling the last active owner is refused unless
-        ``allow_last_owner``; the check and the write are one transaction, so two
-        owners cannot disable each other concurrently. Already disabled, or no such
+        cannot disable themselves. Disabling the last *usable* owner (an active owner that can
+        still get an owner session under ``listed_providers``, the providers of
+        ``SELFHOST_LOGIN_PROVIDERS``; None: all; see :func:`accounts.owner_is_usable`) is refused
+        unless ``allow_last_owner``, and so is disabling the last active owner of any kind; the
+        check and the write are one transaction (the other owners' rows are read ``FOR UPDATE``),
+        so two owners cannot disable each other concurrently. Already disabled, or no such
         account: returns False and changes nothing.
         """
         key = _require_account_key(principal_key)
@@ -1827,10 +2215,20 @@ class TokenStore:
             if row is None or row[1] == STATUS_DISABLED:
                 return False
             if row[1] == STATUS_ACTIVE and row[2] == ROLE_OWNER and not allow_last_owner:
-                others = repos.accounts.count_active_owners(conn, exclude=account_id)
-                self._pause("after_owner_count")
-                if others == 0:
-                    raise AccessActionRefused(AccessActionRefused.LAST_OWNER)
+                for provider_list in (listed_providers, *additional_provider_lists):
+                    listed = _listed(provider_list)
+                    usable_others = repos.accounts.usable_owner_ids(
+                        conn, listed, exclude=account_id, for_update=True
+                    )
+                    self._pause("after_owner_count")
+                    if not usable_others:
+                        identities = repos.identities.list_with_ids(conn, account_id)
+                        target_usable = acc.owner_is_usable(
+                            role=row[2], status=row[1], role_source=row[3],
+                            identity_providers=[r[1] for r in identities], listed=listed,
+                        )
+                        if target_usable or repos.accounts.count_active_owners(conn, exclude=account_id) == 0:
+                            raise AccessActionRefused(AccessActionRefused.LAST_OWNER)
             epoch = repos.accounts.disable(conn, account_id, reason=reason, by=by, now=now)
             self._record_event(conn, key, EVENT_DISABLED, by, reason, epoch, now)
             generation = repos.generations.bump(conn, key, GENERATION_DISABLED, now)
@@ -1927,12 +2325,28 @@ class TokenStore:
         self._publish_generation(key, generation)
         return True
 
-    def promote_owner(self, principal_key: str, *, actor: Actor = OPERATOR) -> bool:
+    def promote_owner(
+        self,
+        principal_key: str,
+        *,
+        actor: Actor = OPERATOR,
+        listed_providers: Collection[str] | None = None,
+    ) -> bool:
         """Make an active account an owner (``role_source`` operator); operator only.
 
         The emergency entrance of the CLI: owners otherwise come from ``OWNER_RULES``
-        or the bootstrap owner. Returns False when the account is not active or already
-        an owner. A role the operator granted is not taken back by the rules.
+        or the bootstrap owner. A role the operator granted is not taken back by the rules.
+
+        An account that is already an owner is left alone unless it is not a *usable* owner
+        under ``listed_providers`` (the providers of ``SELFHOST_LOGIN_PROVIDERS``; None: all;
+        see :func:`accounts.owner_is_usable`) and the operator's say-so would make it one: an
+        owner whose role the Entra owner rules granted keeps that source after Entra is
+        delisted, and no sign-in can show it, so it is re-sourced to ``operator`` (audited) and,
+        when the access rules were what admitted it, becomes a personal admission
+        (``admitted_via`` ``operator``) so that the rules cannot refuse it at its next sign-in.
+        Returns False when the account is not active, or is already an owner that needs no
+        change (a usable owner, or one that no change of source could make usable).
+        An ordinary user promotion also records personal admission when needed.
         """
         if not isinstance(actor, _Operator):
             raise AccessActionRefused(AccessActionRefused.NOT_OWNER)
@@ -1941,18 +2355,46 @@ class TokenStore:
         now = self._now()
         with self._db.write() as conn:
             row = self._repos.accounts.get(conn, account_id, for_update=True)
-            if row is None or row[1] != STATUS_ACTIVE or row[2] == ROLE_OWNER:
+            if row is None or row[1] != STATUS_ACTIVE:
                 return False
+            previous_source: str | None = None
+            admitted: str | None = None
+            if row[2] == ROLE_OWNER:
+                held = [r[1] for r in self._repos.identities.list_with_ids(conn, account_id)]
+                listed = _listed(listed_providers)
+                usable_now = acc.owner_is_usable(
+                    role=row[2], status=row[1], role_source=row[3],
+                    identity_providers=held, listed=listed,
+                )
+                usable_as_operator = acc.owner_is_usable(
+                    role=row[2], status=row[1], role_source=acc.ROLE_SOURCE_OPERATOR,
+                    identity_providers=held, listed=listed,
+                )
+                if usable_now or not usable_as_operator:
+                    return False
+                previous_source = row[3] or ""
+            # Every operator promotion is a personal admission. The rules must not lock
+            # out the resulting owner, including a user promoted for the first time.
+            if row[5] not in acc.PERSONAL_ADMISSION:
+                admitted = acc.ADMITTED_OPERATOR
             self._repos.accounts.set_role(
                 conn, account_id, role=ROLE_OWNER, source=acc.ROLE_SOURCE_OPERATOR,
                 seen_at=now, now=now,
             )
+            if admitted is not None:
+                self._repos.accounts.set_admitted_via(conn, account_id, admitted, now)
             self._record_event(
                 conn, key, EVENT_OWNER_GAINED, OPERATOR_ACTOR, "operator", int(row[16]), now
             )
             self._audit(
                 conn, OPERATOR_ACTOR, AUDIT_ROLE_CHANGED, target=key,
-                detail={"role": ROLE_OWNER, "source": acc.ROLE_SOURCE_OPERATOR}, now=now,
+                detail={
+                    "role": ROLE_OWNER,
+                    "source": acc.ROLE_SOURCE_OPERATOR,
+                    **({} if previous_source is None else {"was": previous_source[:32]}),
+                    **({} if admitted is None else {"admitted_via": admitted}),
+                },
+                now=now,
             )
         return True
 

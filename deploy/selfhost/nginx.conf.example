@@ -29,6 +29,15 @@ map $canvas_token_exempt $canvas_token_key {
     1    "";
 }
 limit_req_zone $canvas_token_key zone=canvas_token:10m rate=120r/m;
+
+# The sign-in itself (/account/login, /account/login/<provider>, /account/callback and
+# /account/callback/<provider>): a browser starts one sign-in and gets one callback, so 30 a minute per
+# IP is generous. It also covers the Microsoft sign-in, and people behind one address (a campus NAT, an
+# office) share the budget: raise the rate or the burst for them. The service has its own limit per
+# provider (a burst of 600, refilled at 10 a second, for the whole process) only as a backstop on the
+# number of pending sign-ins: it cannot tell source IPs apart, so keep the per-IP rate here well below
+# it (the backstop must exceed the per-IP rate times the number of addresses you want to tolerate).
+limit_req_zone $binary_remote_addr zone=canvas_signin:10m rate=30r/m;
 limit_req_status 429;
 
 # Logging: the default `combined` format writes the whole request line, and the OAuth
@@ -107,6 +116,27 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         client_max_body_size 16k;
+    }
+
+    # The sign-in paths of every provider (the Microsoft sign-in too). ^~ keeps these prefixes from being
+    # taken by a regular expression location, and the query string (code, state) never reaches the log
+    # (see canvas_safe above).
+    location ^~ /account/login {
+        limit_req zone=canvas_signin burst=20 nodelay;
+        proxy_pass http://127.0.0.1:8819;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location ^~ /account/callback {
+        limit_req zone=canvas_signin burst=20 nodelay;
+        proxy_pass http://127.0.0.1:8819;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     location = /authorize {

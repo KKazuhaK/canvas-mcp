@@ -5,6 +5,9 @@ Usage::
     python -m canvas_mcp.core.selfhost.token_admin check
     python -m canvas_mcp.core.selfhost.token_admin list
     python -m canvas_mcp.core.selfhost.token_admin accounts
+    python -m canvas_mcp.core.selfhost.token_admin identities [PRINCIPAL]
+    python -m canvas_mcp.core.selfhost.token_admin unlink-identity PRINCIPAL IDENTITY_ID
+    python -m canvas_mcp.core.selfhost.token_admin login-providers [--check]
     python -m canvas_mcp.core.selfhost.token_admin approve PRINCIPAL
     python -m canvas_mcp.core.selfhost.token_admin promote-owner PRINCIPAL
     python -m canvas_mcp.core.selfhost.token_admin disable PRINCIPAL [--allow-last-owner]
@@ -48,6 +51,23 @@ for a row that belongs to the default school ``CANVAS_API_URL``) and, last, the 
 key. ``accounts`` prints one line per account: key, status, role, how it was admitted,
 display name, sign-in name, provider, created, last sign-in and the legacy
 ``entra:<tid>:<oid>`` key (``-`` if none).
+
+A PRINCIPAL may also name an account by one of its sign-in identities: ``google:<subject>``,
+``github:<numeric user id>`` or ``oidc:<slug>:<subject>``. The issuer of an ``oidc`` identity
+comes from ``OIDC_<SLUG>_ISSUER`` in the environment; without it the provider and subject must
+match exactly one linked identity (otherwise exit 2 with a hint).
+
+``identities`` prints one tab-separated line per linked sign-in method (every account, or
+one): account key, identity id, provider, issuer, subject, sign-in name, linked, last sign-in.
+It never prints an e-mail address. ``unlink-identity`` removes one by the id that line
+shows: an account always keeps at least one (exit 3), every browser session of the account
+ends, connected apps stay, and the audit log records it. ``login-providers`` prints the
+configured sign-in providers with the redirect URI to register at each; ``--check`` also asks
+every OpenID Connect provider for its discovery document and key set (the only command that
+makes network calls; it never asks for a token) and prints the issuer, the hosts of its
+endpoints, the signature algorithms, whether PKCE S256 and the RFC 9207 ``iss`` parameter are
+advertised, and for GitHub the scopes a sign-in would request. It exits 1 if a provider is
+unusable. It reads the server's environment, so it needs the same variables as the server.
 
 ``list-grants`` (``SELFHOST_AUTH_MODE=local``) prints one tab-separated line per connected
 app: grant id, account key, client kind (``dcr`` or ``cimd``, which answers how a client
@@ -94,20 +114,22 @@ unless ``DATABASE_AUTO_MIGRATE=false``. Never prints a token, a key, a database
 password or any other secret.
 
 Exit codes: 0 ok, 1 not found, 2 configuration, keyring or database error, 3
-refused (for example disabling the last active owner), 4 ``db current`` found the
+refused (for example disabling the last usable owner), 4 ``db current`` found the
 schema behind this build (run ``db upgrade``).
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import pathlib
 import re
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from canvas_mcp.core.selfhost import accounts as acc
 from canvas_mcp.core.selfhost.db.url import (
@@ -173,11 +195,38 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument(
             "principal",
             nargs=nargs,
-            help="acct:<uuid>, a bare uuid, entra:<tenant id>:<object id>, or TENANT_ID with OBJECT_ID",
+            help=(
+                "acct:<uuid>, a bare uuid, entra:<tenant id>:<object id>, google:<subject>, "
+                "github:<numeric user id>, oidc:<slug>:<subject>, or TENANT_ID with OBJECT_ID"
+            ),
         )
         p.add_argument("object_id", nargs="?", help="the object id when PRINCIPAL is a tenant id")
 
     sub.add_parser("check", help="open the store, print the row counts and key ids")
+    identities = sub.add_parser(
+        "identities", help="list linked sign-in methods (tab-separated, no secrets)"
+    )
+    principal(identities, optional=True)
+    unlink = sub.add_parser(
+        "unlink-identity", help="remove one sign-in method from an account (it keeps at least one)"
+    )
+    unlink.add_argument(
+        "principal",
+        help=(
+            "acct:<uuid>, a bare uuid, entra:<tenant id>:<object id>, google:<subject>, "
+            "github:<numeric user id> or oidc:<slug>:<subject>"
+        ),
+    )
+    unlink.add_argument("identity_id", type=int, help="the identity id printed by 'identities'")
+    unlink.set_defaults(object_id=None)
+    providers = sub.add_parser(
+        "login-providers", help="show the configured sign-in providers and the redirect URIs to register"
+    )
+    providers.add_argument(
+        "--check",
+        action="store_true",
+        help="also fetch each OpenID Connect provider's discovery document and keys (network)",
+    )
     sub.add_parser("list", help="list enrollments with their Canvas host (tab-separated, no tokens)")
     sub.add_parser("accounts", help="list every account (tab-separated)")
     approve = sub.add_parser("approve", help="approve an account that waits for approval")
@@ -189,7 +238,7 @@ def _build_parser() -> argparse.ArgumentParser:
     disable.add_argument(
         "--allow-last-owner",
         action="store_true",
-        help="allow disabling the last active owner (break-glass)",
+        help="allow disabling the last usable or last active owner (break-glass)",
     )
     enable = sub.add_parser("enable", help="lift a disablement")
     principal(enable)
@@ -395,15 +444,52 @@ class _Target:
 
     account_key: str | None
     entra: tuple[str, str] | None  # (tenant id, object id)
+    #: ``(provider id, subject, issuer or None)`` of a Google, GitHub or generic OIDC identity.
+    external: tuple[str, str, str | None] | None = None
 
 
 class _BadPrincipal(ValueError):
-    pass
+    """The typed principal is not a known form (``detail`` is a fixed text, never user input)."""
+
+    detail: str | None = None
+
+
+class _AmbiguousPrincipal(_BadPrincipal):
+    """An OpenID Connect subject without its issuer matches more than one provider identity."""
+
+    detail = (
+        "error: that subject is linked to more than one account issuer; set "
+        "OIDC_<SLUG>_ISSUER in the environment (the same variables as the server) so the "
+        "identity is looked up by its issuer, or name the account as acct:<uuid>"
+    )
+
+
+_EXTERNAL_GOOGLE_RE = re.compile(r"^google:([A-Za-z0-9_-]{1,255})$")
+_EXTERNAL_GITHUB_RE = re.compile(r"^github:([1-9][0-9]{0,19})$")
+_EXTERNAL_OIDC_RE = re.compile(r"^oidc:([a-z](?:[a-z0-9-]{0,30}[a-z0-9])?):([\x21-\x7e]{1,255})$")
+
+
+def _external_target(text: str) -> _Target | None:
+    """``google:<sub>``, ``github:<numeric id>`` or ``oidc:<slug>:<sub>`` (subjects keep their case)."""
+    if (match := _EXTERNAL_GOOGLE_RE.match(text)) is not None:
+        return _Target(None, None, (acc.PROVIDER_GOOGLE, match.group(1), acc.GOOGLE_ISSUER))
+    if (match := _EXTERNAL_GITHUB_RE.match(text)) is not None:
+        return _Target(None, None, (acc.PROVIDER_GITHUB, match.group(1), acc.GITHUB_ISSUER))
+    if (match := _EXTERNAL_OIDC_RE.match(text)) is not None and "," not in text:
+        from canvas_mcp.core.selfhost.login.config import env_prefix
+
+        provider_id = f"{acc.PROVIDER_OIDC_PREFIX}{match.group(1)}"
+        configured = os.environ.get(env_prefix(match.group(1)) + "ISSUER", "").strip()
+        return _Target(None, None, (provider_id, match.group(2), configured or None))
+    return None
 
 
 def _parse_target(principal: str | None, object_id: str | None) -> _Target:
     if principal is None:
         raise _BadPrincipal
+    external = None if object_id is not None else _external_target(principal.strip())
+    if external is not None:
+        return external
     text = principal.strip().lower()
     if object_id is not None:
         key = entra_principal_key(text, object_id)  # raises ValueError unless both are GUIDs
@@ -424,6 +510,20 @@ def _lookup(store: TokenStore, target: _Target) -> str | None:
     """The account key a typed principal names, or None if there is no such account."""
     if target.account_key is not None:
         return target.account_key if store.get_principal_status(target.account_key).stored else None
+    if target.external is not None:
+        provider_id, subject, issuer = target.external
+        if issuer is not None:
+            return store.lookup_identity(provider_id, issuer, subject)
+        # No issuer in the environment: a provider and subject that match exactly one identity name it.
+        found = {
+            account.principal_key
+            for account in store.list_accounts()
+            for identity in account.identities
+            if identity.provider_id == provider_id and identity.subject == subject
+        }
+        if len(found) > 1:
+            raise _AmbiguousPrincipal
+        return next(iter(found), None)
     assert target.entra is not None
     return store.lookup_identity(
         acc.PROVIDER_ENTRA, acc.entra_issuer(target.entra[0]), target.entra[1]
@@ -431,9 +531,15 @@ def _lookup(store: TokenStore, target: _Target) -> str | None:
 
 
 _BAD_PRINCIPAL = (
-    "error: name the account as acct:<uuid>, entra:<tenant GUID>:<object GUID>, or give "
-    "TENANT_ID and OBJECT_ID (both GUIDs)"
+    "error: name the account as acct:<uuid>, entra:<tenant GUID>:<object GUID>, google:<subject>, "
+    "github:<numeric user id>, oidc:<slug>:<subject>, or give TENANT_ID and OBJECT_ID (both GUIDs)"
 )
+
+
+def _bad_principal(exc: ValueError) -> str:
+    """The message for a principal the operator typed wrongly (fixed text only)."""
+    return (exc.detail if isinstance(exc, _BadPrincipal) else None) or _BAD_PRINCIPAL
+
 
 
 def _identity_columns(account: AccountInfo | None) -> tuple[str, str]:
@@ -479,8 +585,8 @@ def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
         if args.principal is not None:
             try:
                 found = _lookup(store, _parse_target(args.principal, args.object_id))
-            except (ValueError, _BadPrincipal):
-                print(_BAD_PRINCIPAL, file=sys.stderr)
+            except ValueError as exc:
+                print(_bad_principal(exc), file=sys.stderr)
                 return EXIT_CONFIG
             if found is None:
                 print("not found: no such account", file=sys.stderr)
@@ -513,8 +619,8 @@ def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
         if args.account is not None:
             try:
                 key = _lookup(store, _parse_target(args.account, None))
-            except (ValueError, _BadPrincipal):
-                print(_BAD_PRINCIPAL, file=sys.stderr)
+            except ValueError as exc:
+                print(_bad_principal(exc), file=sys.stderr)
                 return EXIT_CONFIG
             ended = 0
             if key is not None:
@@ -606,6 +712,8 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
                 )
             )
         return EXIT_OK
+    if command == "identities":
+        return _identities(args, store)
     if command == "rotate":
         rotated = store.rotate()
         print(f"re-encrypted {rotated} row(s)")
@@ -620,13 +728,17 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
             if command == "history" and args.principal is None and args.object_id is None
             else _parse_target(args.principal, args.object_id)
         )
-    except (ValueError, _BadPrincipal):
-        print(_BAD_PRINCIPAL, file=sys.stderr)
+    except ValueError as exc:
+        print(_bad_principal(exc), file=sys.stderr)
         return EXIT_CONFIG
     if command == "history":
         return _history(args, store, target)
     assert target is not None
-    key = _lookup(store, target)
+    try:
+        key = _lookup(store, target)
+    except _AmbiguousPrincipal as exc:
+        print(_bad_principal(exc), file=sys.stderr)
+        return EXIT_CONFIG
 
     if command in ("remove", "revoke"):
         removed = store.delete(key, actor=OPERATOR) if key is not None else False
@@ -662,13 +774,16 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
                 actor=OPERATOR,
                 reason=DISABLE_REASON_OPERATOR,
                 allow_last_owner=args.allow_last_owner,
+                listed_providers=_listed_providers(store),
+                additional_provider_lists=_protected_provider_lists(store),
             )
         except AccessActionRefused as exc:
             if exc.code == AccessActionRefused.LAST_OWNER:
                 print(
-                    "refused: that user is the last active owner as far as the stored "
-                    "owner roles show (a former owner who never signed in again still "
-                    "counts; check 'access' for the owner_seen_at column). "
+                    "refused: that user is the last usable owner (an active owner who can still "
+                    "sign in as one under the listed sign-in providers) or the only active owner "
+                    "as far as the stored owner roles show (a former owner who never signed in "
+                    "again still counts; check 'access' for the owner_seen_at column). "
                     "Add another owner first, or pass --allow-last-owner",
                     file=sys.stderr,
                 )
@@ -691,10 +806,47 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
             return EXIT_NOT_FOUND
         print("approved 1 account")
         return EXIT_OK
+    if command == "unlink-identity":
+        if key is None:
+            print("not found: no such account", file=sys.stderr)
+            return EXIT_NOT_FOUND
+        result = store.unlink_identity(
+            key, args.identity_id, actor=OPERATOR, listed_providers=_listed_providers(store),
+            additional_provider_lists=_protected_provider_lists(store),
+        )
+        if result.ok:
+            print(
+                f"unlinked 1 sign-in method ({result.provider_id}); every browser session of the "
+                "account ended, connected apps are unchanged"
+            )
+            return EXIT_OK
+        if result.code == "last_identity":
+            print(
+                "refused: an account keeps at least one sign-in method (use 'disable' to cut "
+                "someone off)",
+                file=sys.stderr,
+            )
+            return EXIT_REFUSED
+        if result.code == "last_owner":
+            print(
+                "refused: that would leave the server without a usable owner (an owner whose role "
+                "comes from the Entra owner rule needs an Entra identity, any other owner an "
+                "identity at a listed provider); promote or link another owner first",
+                file=sys.stderr,
+            )
+            return EXIT_REFUSED
+        print("not found: that account has no sign-in method with that id", file=sys.stderr)
+        return EXIT_NOT_FOUND
     if command == "promote-owner":
-        changed = key is not None and store.promote_owner(key, actor=OPERATOR)
+        changed = key is not None and store.promote_owner(
+            key, actor=OPERATOR, listed_providers=_listed_providers(store)
+        )
         if not changed:
-            print("nothing to do: no such active account, or it is already an owner")
+            print(
+                "nothing to do: no such active account, it is already a usable owner, or it is "
+                "an owner that cannot be made usable (it has no sign-in method at a listed "
+                "provider: link one first, or list the provider it uses)"
+            )
             return EXIT_NOT_FOUND
         print("promoted 1 account to owner")
         return EXIT_OK
@@ -704,7 +856,11 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
 def _history(args: argparse.Namespace, store: TokenStore, target: _Target | None) -> int:
     key: str | None = None
     if target is not None:
-        key = _lookup(store, target)
+        try:
+            key = _lookup(store, target)
+        except _AmbiguousPrincipal as exc:
+            print(_bad_principal(exc), file=sys.stderr)
+            return EXIT_CONFIG
         if key is None:
             print("not found: no such account", file=sys.stderr)
             return EXIT_NOT_FOUND
@@ -725,6 +881,274 @@ def _history(args: argparse.Namespace, store: TokenStore, target: _Target | None
             )
         )
     return EXIT_OK
+
+
+def _identities(args: argparse.Namespace, store: TokenStore) -> int:
+    keys: list[str]
+    if args.principal is None and args.object_id is None:
+        keys = [st.principal_key for st in store.list_principal_statuses()]
+    else:
+        try:
+            target = _parse_target(args.principal, args.object_id)
+            found = _lookup(store, target)
+        except ValueError as exc:
+            print(_bad_principal(exc), file=sys.stderr)
+            return EXIT_CONFIG
+        if found is None:
+            print("not found: no such account", file=sys.stderr)
+            return EXIT_NOT_FOUND
+        keys = [found]
+    for key in keys:
+        for identity in store.list_identities(key):
+            print(
+                "\t".join(
+                    [
+                        key,
+                        str(identity.id),
+                        _cell(identity.provider_id),
+                        _cell(identity.issuer),
+                        _cell(identity.subject),
+                        _cell(identity.username) or "-",
+                        _iso(identity.linked_at),
+                        _iso(identity.last_login_at),
+                    ]
+                )
+            )
+    return EXIT_OK
+
+
+def _redirect_uri(base: str, provider_id: str) -> str:
+    if provider_id == acc.PROVIDER_ENTRA:
+        return f"{base}/account/callback"
+    if provider_id in (acc.PROVIDER_GOOGLE, acc.PROVIDER_GITHUB):
+        return f"{base}/account/callback/{provider_id}"
+    return f"{base}/account/callback/oidc/{provider_id.removeprefix('oidc:')}"
+
+
+def _endpoint_hosts(meta: Any) -> str:
+    """The host names of a provider's endpoints (never a path or a query)."""
+    from urllib.parse import urlsplit
+
+    hosts: list[str] = []
+    for url in (meta.authorization_endpoint, meta.token_endpoint, meta.jwks_uri, meta.userinfo_endpoint):
+        host = urlsplit(url).hostname if url else None
+        if host and host not in hosts:
+            hosts.append(host)
+    return ",".join(hosts)
+
+
+def _protected_provider_lists(store: TokenStore) -> tuple[frozenset[str], ...]:
+    """Preserve an owner under each real list, not only their intersection.
+
+    The recorded and operator lists can have different owners and no owner under their
+    intersection. Each guard runs inside the mutation's writer transaction.
+    """
+    recorded = store.recorded_login_providers()
+    if recorded is None:
+        return ()
+    if not (os.environ.get("SELFHOST_LOGIN_PROVIDERS") or "").strip():
+        return (recorded,)
+    from_env = _environment_providers()
+    if from_env is None or from_env == recorded:
+        return (recorded,)
+    return (recorded, from_env)
+
+
+def _listed_providers(store: TokenStore) -> frozenset[str] | None:
+    """The providers of ``SELFHOST_LOGIN_PROVIDERS`` the usable-owner checks use (None: all).
+
+    They decide which owners are usable, so they must be the server's. In this order:
+
+    1. the list the server recorded in the database at its last startup (``meta``): an operator
+       shell often lacks the server's variables, and this does not depend on them. The server
+       records the configured list before it decides whether it may start, so this is also the
+       list a refused start was refused for;
+    2. this environment: the full settings, else ``SELFHOST_LOGIN_PROVIDERS`` alone.
+
+    When the environment names the list and it differs from the record, the operator is changing
+    the providers (or running with another file): a note on stderr says so and the owners must be
+    usable under *both* lists for promotion recovery (their intersection); lists with nothing
+    in common leave the record in force. Destructive commands additionally preserve an owner
+    under each complete list independently, inside the mutation transaction.
+
+    A note on stderr also says so when the answer had to be assumed: the list is unreadable
+    (every provider is then counted as listed, which is more permissive than the server), or
+    nothing names it (no record, no variable) while the database holds sign-in methods at
+    providers other than Entra (Entra alone is then assumed). A deployment with Entra alone gets
+    no note.
+    """
+    from canvas_mcp.core.selfhost.login.config import LOGIN_PROVIDERS_ENV
+
+    recorded = store.recorded_login_providers()
+    named = bool((os.environ.get(LOGIN_PROVIDERS_ENV) or "").strip())
+    if recorded is not None and not named:
+        return recorded
+    from_env = _environment_providers()
+    if recorded is not None:
+        if from_env is None or from_env == recorded:
+            return recorded
+        both = recorded & from_env
+        print(
+            f"note: {LOGIN_PROVIDERS_ENV} in this environment ({', '.join(sorted(from_env))}) "
+            f"differs from the list the server last recorded ({', '.join(sorted(recorded))}); "
+            + (
+                "promotion uses both lists; disable and unlink preserve an owner under each list"
+                if both
+                else "they share no provider, so the recorded list is used"
+            ),
+            file=sys.stderr,
+        )
+        # No provider in common: an intersection would make every owner unusable and so take
+        # every guard away, so the server's own record stands.
+        return both or recorded
+    if from_env is not None:
+        if not named:
+            _note_assumed_entra_only(store)
+        return from_env
+    print(
+        "note: SELFHOST_LOGIN_PROVIDERS is not readable in this environment; every provider is "
+        "assumed to be listed, so the usable-owner check is more permissive than the server's",
+        file=sys.stderr,
+    )
+    return None
+
+
+def _environment_providers() -> frozenset[str] | None:
+    """The provider ids this environment's settings name; None when they cannot be read."""
+    from canvas_mcp.core.selfhost.login.config import (
+        LOGIN_PROVIDERS_ENV,
+        parse_login_providers,
+    )
+    from canvas_mcp.core.selfhost.settings import (
+        SelfhostConfigError,
+        load_selfhost_settings,
+    )
+
+    try:
+        with _quiet_login_config():
+            return load_selfhost_settings().login_providers.ids
+    except SelfhostConfigError:
+        pass
+    ignored: list[str] = []
+    try:
+        # authz_mode "local": the mode of the other settings is not known here, and this reads
+        # the list alone.
+        with _quiet_login_config():
+            ids = parse_login_providers(os.environ, ignored, authz_mode="local").ids
+    except Exception:  # noqa: BLE001 - an unreadable list is reported by the caller
+        return None
+    if ids and not any(p.startswith(LOGIN_PROVIDERS_ENV) for p in ignored):
+        return ids
+    return None
+
+
+def _note_assumed_entra_only(store: TokenStore) -> None:
+    """Tell the operator when Entra alone is assumed for a database that holds other providers."""
+    others = sorted(
+        {
+            identity.provider_id
+            for account in store.list_accounts()
+            for identity in account.identities
+            if identity.provider_id != acc.PROVIDER_ENTRA
+        }
+    )
+    if others:
+        print(
+            "note: the server has not recorded its SELFHOST_LOGIN_PROVIDERS and this environment "
+            f"does not set it, so only entra is assumed to be listed, but the database holds "
+            f"sign-in methods at {', '.join(others[:5])}; run this command with the server's "
+            "environment (or start the server once) so the usable-owner check matches it",
+            file=sys.stderr,
+        )
+
+
+@contextlib.contextmanager
+def _quiet_login_config() -> Iterator[None]:
+    """Keep the stray-provider-variable warnings of the settings parser out of this command.
+
+    ``GOOGLE_CLIENT_ID`` and the like, set while ``SELFHOST_LOGIN_PROVIDERS`` is not, are ignored
+    and logged as a warning where the server starts; here they would only add noise to a command
+    whose output people and scripts read. Nothing else the logger says is touched.
+    """
+    import logging
+
+    from canvas_mcp.core.selfhost.login import config as login_config
+
+    class _Stray(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return not (
+                record.levelno == logging.WARNING
+                and "is unset: it is ignored" in record.getMessage()
+            )
+
+    stray = _Stray()
+    login_config.logger.addFilter(stray)
+    try:
+        yield
+    finally:
+        login_config.logger.removeFilter(stray)
+
+
+def _run_login_providers(args: argparse.Namespace) -> int:
+    """``login-providers``: what is configured, and with ``--check`` whether the providers answer."""
+    from canvas_mcp.core.selfhost.settings import (
+        SelfhostConfigError,
+        load_selfhost_settings,
+    )
+
+    try:
+        settings = load_selfhost_settings()
+    except SelfhostConfigError as exc:
+        for problem in exc.problems:
+            print(f"error: {problem}", file=sys.stderr)
+        return EXIT_CONFIG
+    login = settings.login_providers
+    base = settings.public_base_url
+    if not (args.check and login.public):
+        for provider_id in login.order:
+            print(f"{provider_id}	redirect_uri={_redirect_uri(base, provider_id)}")
+        return EXIT_OK
+
+    import asyncio
+
+    from canvas_mcp.core.selfhost.login.registry import build_login_runtime
+    from canvas_mcp.core.selfhost.login_state import InMemoryLoginStateStore
+
+    runtime = build_login_runtime(settings, flow_store=InMemoryLoginStateStore())
+    assert runtime is not None
+
+    async def check() -> int:
+        failed = 0
+        for provider_id in login.order:
+            line = f"{provider_id}	redirect_uri={_redirect_uri(base, provider_id)}"
+            provider: Any = runtime.providers.get(provider_id)
+            discovery = getattr(provider, "discovery", None)
+            if provider_id == acc.PROVIDER_GITHUB and provider is not None:
+                scopes = "user:email" + (",read:org" if provider.wants_membership else "")
+                print(line + f"	OK	scopes={scopes}	endpoints=github.com,api.github.com	pkce=S256")
+                continue
+            if provider is None or discovery is None:
+                print(line + "	OK	(nothing to discover)")
+                continue
+            try:
+                await provider.prepare()
+                meta = discovery.current()
+                assert meta is not None
+                await provider.jwks.ensure(meta.jwks_uri, None)
+                print(
+                    line
+                    + f"	OK	issuer={meta.issuer}	hosts={_endpoint_hosts(meta)}	algs={','.join(meta.algs)}"
+                    + f"	pkce={'listed' if meta.pkce_s256 else 'not listed'}"
+                    + f"	iss_param={'yes' if meta.iss_param_supported else 'no'}"
+                    + f"	token_auth={','.join(meta.token_auth_methods) or 'not listed'}"
+                    + f"	jwks_keys={provider.jwks.key_count()}"
+                )
+            except Exception as exc:  # noqa: BLE001 - report the class only, never the response
+                failed += 1
+                print(line + f"	FAILED	{type(exc).__name__}")
+        return failed
+
+    return EXIT_NOT_FOUND if asyncio.run(check()) else EXIT_OK
 
 
 def _access(store: TokenStore) -> int:
@@ -756,6 +1180,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "db":
             return _run_db(args)
+        if args.command == "login-providers":
+            return _run_login_providers(args)
         store = _open_store()
         if args.command == "access":
             return _access(store)

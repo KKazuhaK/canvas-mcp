@@ -38,6 +38,9 @@ def test_the_script_has_the_sections_this_file_replays() -> None:
         assert marker in text, marker
     assert text.index("(l) ACCOUNT_UI=react with no usable build") < text.index("(m) SELFHOST_AUTH_MODE=local")
     assert text.index("(m2)") < text.index("(n) an unknown")
+    # The optional provider section (o) comes after (n); its own checks are in
+    # tests/selfhost/login/test_smoke_providers.py.
+    assert text.index("(n) an unknown") < text.index("(o) optional: sign-in providers (SMOKE_EXPECT_PROVIDERS")
 
 
 @pytest.fixture
