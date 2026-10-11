@@ -2949,6 +2949,7 @@ class TestEveryAnswer:
             "not_enrolled",
             "custody_ack_required",
             "settings_conflict",
+            "pilot_profile_restricted",
             "confirmation_required",
             "custody_notice_outdated",
         }

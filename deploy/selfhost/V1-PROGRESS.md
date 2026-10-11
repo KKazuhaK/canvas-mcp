@@ -651,3 +651,17 @@ and the first v1 tag remain outstanding.
   both PostgreSQL dependency sets and both Docker architectures. A new complete
   exact-head CI is required after these pilot/release-note changes. Live staging
   and first v1 tag gates remain outstanding; no v1 release has been published.
+
+## Final error-code contract correction
+
+- Full exact-head CI at `f5d3109` passed frontend, lint, code API, formal
+  confirmation and both Docker architectures. Locked SQLite ran 8,018 passing
+  checks with 63 skips and one failure: a second backend API error-code contract
+  still expected the pre-pilot set. Linux Python 3.11 showed the same omitted
+  `pilot_profile_restricted` value. Those runs are failing, not complete-green.
+- The independent documented set now includes the intentionally added pilot
+  refusal. Backend/frontend parity and the real pilot API's 409 refusal remain
+  asserted. Complete account API, route/error contract and native configuration
+  checks pass 294 tests on each of latest and locked SQLite. This changes the
+  contract fixture only; all production pilot constraints remain unchanged.
+- The next exact-head full matrix is required before merging the fork PR.
