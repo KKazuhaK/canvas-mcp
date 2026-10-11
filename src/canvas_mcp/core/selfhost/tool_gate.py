@@ -9,14 +9,11 @@ a call to a write tool the user has not switched on at ``/account`` is refused
 here, before the tool runs. That is the security boundary. The tool list hides
 those tools from the model too, which only saves it from trying them.
 
-When given the access cache (see :mod:`.principal_access`), it also refuses every
-call and read of an account that is not active (disabled, waiting for approval, or
-unknown). The request-context
-middleware already refuses such a request up front; this is the second check, made
-at the moment of each tool call, so a request that is already running cannot start a
-further tool call after the change (the cache bounds how late another process's
-change is noticed). A call whose Canvas requests were already sent is not
-cancelled.
+Every call and resource read checks the authoritative snapshot captured for this
+authenticated HTTP request. Disabled, pending and unknown accounts are refused.
+The next request on every instance reads current account standing; the gate does
+not perform another SQL read or cache that decision across requests. Calls already
+authorized within an in-flight request are not cancelled by a remote mutation.
 
 The same check refuses a call from a request whose Canvas credential was replaced,
 removed, found dead or restored after the request began (the credential generation
@@ -94,7 +91,7 @@ async def _check_access(error_type: type[Exception]) -> None:
 
 
 def _check_local_identity(error_type: type[Exception]) -> None:
-    """Like :func:`_check_identity`, for a token issued by this server (built-in authorization).
+    """Match the request principal to a token issued by this server.
 
     The verified token and the request context must agree on the account, the issuer and
     the kind of token, and the principal must be one the local resolver made.

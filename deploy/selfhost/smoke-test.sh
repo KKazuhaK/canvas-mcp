@@ -3,6 +3,7 @@
 # Usage: bash deploy/selfhost/smoke-test.sh IMAGE
 # Optional SMOKE_EXPECT_PROVIDERS=google,github checks start redirects and needs outbound HTTPS.
 # Optional SMOKE_ENTRA_TENANT_ID checks discovery/start for an existing public tenant.
+# Optional SMOKE_DATABASE_URL and SMOKE_NETWORK exercise a fresh private PostgreSQL target.
 # This does not authenticate real IdP users or prove a client's multiday refresh.
 set -euo pipefail
 { set +x; } 2>/dev/null
@@ -42,6 +43,13 @@ ENV=(
   -e ACCOUNT_SESSION_SECRET="$SESSION_SECRET" -e CANVAS_TOKEN_KEYS="$TOKEN_KEYS"
   -e CANVAS_ROLE=student
 )
+NETWORK=()
+if [ -n "${SMOKE_DATABASE_URL:-}" ]; then
+  ENV+=(-e DATABASE_URL="$SMOKE_DATABASE_URL")
+fi
+if [ -n "${SMOKE_NETWORK:-}" ]; then
+  NETWORK=(--network "$SMOKE_NETWORK")
+fi
 wait_for() {
   local name="$1" i
   for ((i=0; i<60; i++)); do
@@ -62,7 +70,7 @@ status() {
 [ "$(docker run --rm --entrypoint id "$IMAGE" -u)" = 10001 ] || fail "unexpected runtime uid"
 docker volume create "$VOLUME" >/dev/null
 docker run -d --name "$MAIN" --read-only --tmpfs /tmp --cap-drop ALL \
-  --security-opt no-new-privileges:true -v "$VOLUME:/data" \
+  --security-opt no-new-privileges:true "${NETWORK[@]}" -v "$VOLUME:/data" \
   -p "127.0.0.1:${PORT}:8819" "${ENV[@]}" "$IMAGE" >/dev/null
 wait_for "$MAIN"
 ok "non-root, read-only image boots with a fresh SQL store"
@@ -158,7 +166,7 @@ expect_refusal() {
   local label="$1" result marker; shift
   set +e
   timeout 30 docker run --rm --name "$REFUSAL" --read-only --tmpfs /tmp \
-    "${ENV[@]}" "$@" "$IMAGE" >"$WORKDIR/refusal" 2>&1
+    "${NETWORK[@]}" "${ENV[@]}" "$@" "$IMAGE" >"$WORKDIR/refusal" 2>&1
   result=$?
   set -e
   docker rm -f "$REFUSAL" >/dev/null 2>&1 || true
@@ -198,7 +206,7 @@ if [ -n "${SMOKE_EXPECT_PROVIDERS:-}" ]; then
   done
   docker volume create "$PROVIDERS_VOLUME" >/dev/null
   docker run -d --name "$PROVIDERS_C" --read-only --tmpfs /tmp --cap-drop ALL \
-    --security-opt no-new-privileges:true -v "$PROVIDERS_VOLUME:/data" \
+    --security-opt no-new-privileges:true "${NETWORK[@]}" -v "$PROVIDERS_VOLUME:/data" \
     -p "127.0.0.1:${PORT}:8819" "${ENV[@]}" "${PROVIDER_ENV[@]}" \
     -e "SELFHOST_LOGIN_PROVIDERS=entra${PROVIDER_LIST}" "$IMAGE" >/dev/null
   wait_for "$PROVIDERS_C"

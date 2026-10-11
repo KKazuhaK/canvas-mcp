@@ -53,6 +53,7 @@ def run_migrations_online() -> None:
         ),
         compare_type=True,
         include_object=_include_object,
+        on_version_apply=config.attributes.get("on_version_apply"),
     )
     with context.begin_transaction():
         context.run_migrations()

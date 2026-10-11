@@ -229,4 +229,10 @@ def test_feature_branch_image_verification_has_no_publishing_permissions():
     assert len(builds) == 1
     assert builds[0]["with"]["load"] is True and builds[0]["with"]["push"] is False
     assert not any("login-action" in step.get("uses", "") for step in job["steps"])
-    assert job["steps"][-1]["run"] == "bash deploy/selfhost/smoke-test.sh canvas-mcp:verify"
+    assert job["steps"][-2]["run"] == "bash deploy/selfhost/smoke-test.sh canvas-mcp:verify"
+    postgres = job["steps"][-1]
+    assert postgres["env"]["SMOKE_DATABASE_URL"].startswith("postgresql+psycopg://")
+    assert "docker-compose.postgres.yml" in postgres["run"]
+    assert 'docker network create --internal "$SMOKE_NETWORK"' in postgres["run"]
+    assert "-p " not in postgres["run"] and "--publish" not in postgres["run"]
+    assert "trap " in postgres["run"] and "smoke-test.sh canvas-mcp:verify" in postgres["run"]

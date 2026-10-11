@@ -381,3 +381,27 @@ jobs:
           tags: canvas-mcp:verify
       - name: Exercise the native v1 image contract
         run: bash deploy/selfhost/smoke-test.sh canvas-mcp:verify
+      - name: Exercise the same image on the pinned PostgreSQL target
+        env:
+          SMOKE_NETWORK: canvas-mcp-verify-db
+          SMOKE_DATABASE_URL: postgresql+psycopg://canvas:smoke-only-database-password@postgres:5432/canvas_mcp
+        run: |
+          set -euo pipefail
+          trap 'docker rm -f canvas-mcp-verify-postgres >/dev/null 2>&1 || true; docker network rm "$SMOKE_NETWORK" >/dev/null 2>&1 || true' EXIT
+          PG_IMAGE="$(sed -n 's/^    image: //p' deploy/selfhost/docker-compose.postgres.yml)"
+          test -n "$PG_IMAGE"
+          docker network create --internal "$SMOKE_NETWORK" >/dev/null
+          docker run --rm -d --name canvas-mcp-verify-postgres --network "$SMOKE_NETWORK" \
+            --network-alias postgres -e POSTGRES_USER=canvas -e POSTGRES_DB=canvas_mcp \
+            -e POSTGRES_PASSWORD=smoke-only-database-password \
+            -e POSTGRES_INITDB_ARGS='--encoding=UTF8 --locale=C' "$PG_IMAGE" >/dev/null
+          ready=false
+          for ((i=0; i<60; i++)); do
+            if docker exec canvas-mcp-verify-postgres pg_isready -U canvas -d canvas_mcp; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = true
+          bash deploy/selfhost/smoke-test.sh canvas-mcp:verify

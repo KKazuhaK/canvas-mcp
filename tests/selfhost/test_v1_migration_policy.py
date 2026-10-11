@@ -167,6 +167,53 @@ def test_expand_does_not_raise_floor_or_create_a_contract_backup(db, revision_gr
         assert list(db.sqlite_path.parent.glob("*.bak")) == []
 
 
+@pytest.mark.parametrize(
+    "contract,floor,pattern",
+    [
+        (True, 1, "contract revision must raise"),
+        (False, 2, "expand revision must preserve"),
+        (True, 3, "unsupported compatibility floor"),
+    ],
+)
+def test_floor_policy_failure_rolls_back_ddl_and_revision(
+    db, revision_graph, monkeypatch, contract, floor, pattern
+):
+    migrate.ensure_ready(db)
+    monkeypatch.setattr(migrate, "SCHEMA_EPOCH", 2)
+    revision_graph(
+        f"op.create_table('temporary_policy', sa.Column('id', sa.Integer(), primary_key=True))\n"
+        f"op.execute('UPDATE server_state SET compat_floor={floor}')",
+        contract=contract,
+    )
+    with pytest.raises(TokenStoreError, match=pattern):
+        migrate.ensure_ready(db)
+    with db.read() as conn:
+        assert "temporary_policy" not in inspect(conn).get_table_names()
+        assert (
+            conn.exec_driver_sql("SELECT compat_floor FROM server_state").scalar_one()
+            == 1
+        )
+        assert (
+            conn.exec_driver_sql(
+                "SELECT version_num FROM canvas_mcp_alembic_version"
+            ).scalar_one()
+            == "0001_v1_baseline"
+        )
+
+
+def test_contract_floor_raise_is_checked_on_each_backend(
+    db, revision_graph, monkeypatch
+):
+    migrate.ensure_ready(db)
+    monkeypatch.setattr(migrate, "SCHEMA_EPOCH", 2)
+    revision_graph(
+        "op.execute('UPDATE server_state SET compat_floor=2')", contract=True
+    )
+    migrate.ensure_ready(db)
+    assert migrate.current(db).compat_floor == 2
+    assert migrate.current(db).state == "current"
+
+
 @pytest.mark.skipif(not IS_POSTGRES, reason="PostgreSQL concurrent DDL")
 def test_nontransactional_failure_leaves_invalid_index_and_retry_repairs_it_under_lock(
     db, revision_graph

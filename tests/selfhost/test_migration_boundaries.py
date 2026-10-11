@@ -9,13 +9,21 @@ ROOT = pathlib.Path(__file__).resolve().parents[2] / "src/canvas_mcp/core/selfho
 
 def test_upgrade_ddl_and_alembic_remain_inside_the_migration_package():
     violations = []
-    ddl = re.compile(r"^\s*(?:CREATE|ALTER|DROP)\s+(?:TABLE|INDEX|SEQUENCE)\b", re.I)
+    ddl = re.compile(
+        r"^\s*(?:CREATE|ALTER|DROP)\s+(?:TABLE|INDEX|SEQUENCE)\b", re.I | re.M
+    )
     for path in ROOT.rglob("*.py"):
         relative = path.relative_to(ROOT)
         if relative.parts[:2] == ("db", "migrations"):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"create_all", "drop_all"}
+            ):
+                violations.append(str(relative) + ": metadata DDL")
             if (
                 isinstance(node, ast.ImportFrom)
                 and (node.module or "").split(".")[0] == "alembic"
@@ -41,6 +49,35 @@ def test_upgrade_ddl_and_alembic_remain_inside_the_migration_package():
     assert violations == []
 
 
+def test_only_documented_startup_and_cli_bridges_import_upgrade_tooling():
+    allowed = {
+        "app.py": {"db.migrations", "db.migrations.transfer"},
+        "token_store.py": {"db.migrations"},
+        "token_admin.py": {
+            "db.migrations.cli",
+            "canvas_mcp.core.selfhost.db.migrations.transfer",
+        },
+    }
+    violations = []
+    for path in ROOT.rglob("*.py"):
+        relative = path.relative_to(ROOT)
+        if relative.parts[:2] == ("db", "migrations"):
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            modules = (
+                [node.module or ""]
+                if isinstance(node, ast.ImportFrom)
+                else [alias.name for alias in node.names]
+                if isinstance(node, ast.Import)
+                else []
+            )
+            for module in modules:
+                if "migrations" in module.split("."):
+                    if module not in allowed.get(relative.as_posix(), set()):
+                        violations.append(str(relative) + ": " + module)
+    assert violations == []
+
+
 def test_old_upgrade_paths_and_pre_v1_runtime_adapters_are_removed():
     for name in (
         "migrate.py",
@@ -60,3 +97,20 @@ def test_old_upgrade_paths_and_pre_v1_runtime_adapters_are_removed():
             "def split_entra_key(",
         )
     )
+
+
+def test_frozen_revisions_do_not_import_runtime_schema_or_reencrypt_secrets():
+    violations = []
+    for path in (ROOT / "db/migrations/versions").glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                imported = set((node.module or "").split(".")) | {
+                    item.name for item in node.names
+                }
+                if imported & {"schema", "repos", "token_store", "sealed"}:
+                    violations.append(path.name + ": runtime persistence import")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr in {"encrypt", "decrypt", "rotate"}:
+                    violations.append(path.name + ": secret re-encryption")
+    assert violations == []

@@ -37,7 +37,7 @@ from .connections import (
     postgres_upgrade_transaction,
     sqlite_migration,
 )
-from .policy import RevisionPolicy, pending
+from .policy import CompatibilityFloorGuard, RevisionPolicy, pending
 
 SCHEMA_EPOCH = 1
 MIGRATION_LOCK_WAIT_SECONDS = 30.0
@@ -168,11 +168,18 @@ def _refuse_unusable(status: MigrationStatus) -> None:
 
 
 def _apply(
-    conn: Connection, revision: str = "head", *, per_migration: bool = False
-) -> None:
+    conn: Connection,
+    revision: str = "head",
+    *,
+    per_migration: bool = False,
+    floor_before: int | None = None,
+) -> int | None:
+    guard = CompatibilityFloorGuard(floor_before, SCHEMA_EPOCH)
     cfg = _config(connection=conn)
     cfg.attributes["transaction_per_migration"] = per_migration
+    cfg.attributes["on_version_apply"] = guard.applied
     command.upgrade(cfg, revision)
+    return guard.floor
 
 
 def ensure_ready(
@@ -242,22 +249,30 @@ def ensure_ready(
                                             + f".pre-{contract.revision}-{time.time_ns()}.bak"
                                         ),
                                     )
-                            _apply(conn)
+                            _apply(conn, floor_before=status.compat_floor)
                             if dry_run:
                                 raise _DryRun
                     if populate is not None and not standalone:
                         populate(conn)
                 if standalone:
+                    floor = status.compat_floor
                     with postgres_upgrade_connection(db) as conn:
                         for step in standalone:
                             if step.non_transactional:
                                 # Alembic owns short transactions; the revision's
                                 # concurrent_index/autocommit_block commits only
                                 # this revision, never an atomic import transaction.
-                                _apply(conn, step.revision, per_migration=True)
+                                floor = _apply(
+                                    conn,
+                                    step.revision,
+                                    per_migration=True,
+                                    floor_before=floor,
+                                )
                             else:
                                 with conn.begin():
-                                    _apply(conn, step.revision)
+                                    floor = _apply(
+                                        conn, step.revision, floor_before=floor
+                                    )
         except _DryRun:
             return
 

@@ -24,6 +24,11 @@ delegations with a schema-state check, then remove this package and its dedicate
 migration tests together. Keep `db/schema.py`, ordinary engines, portable types
 and application repositories: they define current runtime persistence.
 
+The only bridges outside this package are `app.py` (dependency and silent-switch
+checks), `token_store.py` (startup readiness), and `token_admin.py` (CLI
+registration/execution and the operator silent-switch check). Boundary tests
+reject new callers, metadata DDL and direct Alembic use elsewhere.
+
 ## Later revisions
 
 The production graph still has one frozen v1 baseline. Tests build temporary
@@ -32,7 +37,14 @@ revision. Every later revision declares boolean `CONTRACT` and
 `NON_TRANSACTIONAL` flags (both default false).
 
 Expand revisions leave `server_state.compat_floor` unchanged. Contract revisions
-raise it only after a release stopped reading the contracted shape. SQLite
+raise it only after a release stopped reading the contracted shape.
+The runner checks each revision before its version transaction commits:
+expand revisions must preserve the floor, contract revisions must raise it,
+and no revision can set a floor above this build's schema epoch. A failed check
+rolls back ordinary DDL and the revision marker. Already committed concurrent
+DDL still requires the documented retry/recovery procedure.
+
+SQLite
 automatically takes an exclusive-created `*.pre-<revision>-<time>.bak` snapshot
 before a pending contract plan, under the write gate; `--backup PATH` chooses
 the backup name. Sources are opened read-only with SQLite's backup API. A failed

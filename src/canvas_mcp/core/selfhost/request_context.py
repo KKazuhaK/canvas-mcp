@@ -218,8 +218,6 @@ class SelfhostRequestContextMiddleware:
         course_state: str = COURSE_STATE_REQUEST_LOCAL,
     ) -> None:
         self.app = app
-        # What identifies the caller in the log when a request is refused: the Entra
-        # object id (``entra``) or the account key of our own token (``local``).
         # Anything but the explicit opt-in keeps the course state request-local.
         self.request_local_state = course_state != COURSE_STATE_PER_PRINCIPAL
         self.mcp_path = mcp_path
@@ -232,7 +230,6 @@ class SelfhostRequestContextMiddleware:
         self.touch_grant = touch_grant
         self.clock = clock
         self.usage = UsageDeduplicator(clock=clock)
-        # SELFHOST_LOGIN_PROVIDERS: which owners count as usable when a role is taken back.
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":

@@ -10,6 +10,7 @@ from typing import Any
 
 from alembic import op
 from alembic.operations import BatchOperations
+from alembic.runtime.migration import MigrationContext, MigrationInfo
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
 
@@ -21,6 +22,37 @@ class RevisionPolicy:
     revision: str
     contract: bool
     non_transactional: bool
+
+
+class CompatibilityFloorGuard:
+    """Validate each applied revision before Alembic finalizes its transaction."""
+
+    def __init__(self, before: int | None, epoch: int) -> None:
+        self.floor = before
+        self.epoch = epoch
+
+    def applied(
+        self, *, ctx: MigrationContext, step: MigrationInfo, **_kwargs: Any
+    ) -> None:
+        if not step.is_upgrade or step.is_stamp or ctx.connection is None:
+            raise TokenStoreError("only forward schema revisions are supported")
+        after = ctx.connection.execute(
+            text("SELECT compat_floor FROM server_state WHERE id=1")
+        ).scalar_one()
+        if type(after) is not int or after < 1 or after > self.epoch:
+            raise TokenStoreError("revision set an unsupported compatibility floor")
+        revision = step.up_revision
+        contract = getattr(getattr(revision, "module", None), "CONTRACT", False)
+        if self.floor is not None:
+            if contract and after <= self.floor:
+                raise TokenStoreError(
+                    "contract revision must raise compatibility floor"
+                )
+            if not contract and after != self.floor:
+                raise TokenStoreError(
+                    "expand revision must preserve compatibility floor"
+                )
+        self.floor = after
 
 
 def pending(script: ScriptDirectory, before: str | None) -> tuple[RevisionPolicy, ...]:

@@ -310,3 +310,39 @@ and the first v1 tag remain outstanding.
   required; this checkpoint is not a release or a passing full test suite.
   Real IdP, guest, Claude and multiday staging acceptance still follows the
   owner's deployment, and the first v1 tag remains gated by that acceptance.
+
+## Enforced migration boundary and native request security checkpoint
+
+- Every upgrade, backup, transfer, frozen revision and compatibility policy stays
+  in `db/migrations/`. Only the documented `app.py`, `token_store.py` and
+  `token_admin.py` bridges may import it. Boundary tests reject other callers,
+  runtime metadata DDL, direct Alembic imports and revision re-encryption.
+- Compatibility floor policy is now enforced for each revision before Alembic
+  finalizes its transaction. Expand must preserve the floor; contract must raise
+  it; unsupported floors refuse the upgrade. Rejected ordinary DDL and version
+  markers roll back. Concurrent PostgreSQL DDL retains its explicit retry policy.
+- Native request-context, credential-health, write-preference, local-claim and
+  school suites pass 250 checks. The additional real account-disable/re-enable
+  suite passes 10; revocation preserves enrollment, refuses old access/refresh
+  tokens and leaves another user's grant usable. New native AAD tests cover all
+  four binding fields, bit flips, moved seals and wrong-snapshot decryption.
+- The latest SQLite combined checkpoint passes 303 checks with 11 skips. The
+  preceding locked PostgreSQL request/migration/transfer checkpoint passed 285
+  checks with 2 SQLite-only skips, including concurrent-index recovery and floor
+  enforcement. The scratch server was stopped and its log had no deadlock.
+- Retired the old adoption/account-migration suites, schema-4 fixtures/generator
+  and obsolete PostgreSQL DDL snapshot, as required by the v1 design. Native
+  schema, migration, transfer and AAD suites replace their applicable coverage.
+- Read-only CI run
+  [38147469848](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38147469848)
+  built and container-smoked the image on amd64 and arm64 at `2267d82`. The smoke
+  checks hardened fresh startup, React/API routes, OAuth metadata/challenge,
+  public registration and startup refusal semantics. The dummy Entra tenant
+  intentionally fails discovery closed; optional real-tenant start checks do not
+  claim a real sign-in. Added a second smoke pass against the Compose-pinned
+  PostgreSQL image; that additional container pass awaits its new CI run.
+- Docker/Compose/route/smoke replay checks: 72 passed, 1 platform-specific skip.
+  Source/tests Ruff and Linux-target mypy pass. Whole self-host collection now
+  finds 3,597 tests with 16 removed-interface imports still failing. These ports
+  and the complete runtime matrix remain required before merge/release. Real
+  IdP/guest/Claude/multiday gates still follow the owner's deployment.

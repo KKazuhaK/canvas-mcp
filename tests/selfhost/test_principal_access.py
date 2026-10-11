@@ -1,538 +1,140 @@
-"""The MCP side of the access decision: cache, request-context middleware, tool gate.
-
-A disabled principal is refused before any Canvas credential is loaded and before
-any tool runs, whichever token it presents: one issued before the change, a freshly
-refreshed one, or one used after a server restart.
-"""
-
-from __future__ import annotations
-
-import base64
-import json
-import pathlib
-from typing import Any
+"""Native account standing comes from each authenticated database snapshot."""
 
 import pytest
-from dbbackend import make_store as backend_store
-from fastmcp import Client, FastMCP
+from sqlalchemy import select
 
-from canvas_mcp.core.credentials import (
-    RequestCredentials,
-    set_request_credentials,
-    set_request_principal,
-)
-from canvas_mcp.core.selfhost import tool_gate
+from canvas_mcp.core.selfhost.authz.store import AuthzStore
+from canvas_mcp.core.selfhost.db import schema as s
+from canvas_mcp.core.selfhost.mcp_state import McpRead
 from canvas_mcp.core.selfhost.principal_access import (
-    PrincipalAccessCache,
     access_disabled_message,
+    access_not_provisioned_message,
+    access_pending_message,
+    access_refusal_message,
     access_unavailable_message,
+    snapshot_status,
 )
-from canvas_mcp.core.selfhost.request_context import SelfhostRequestContextMiddleware
-from canvas_mcp.core.selfhost.schools import SchoolPolicy
 from canvas_mcp.core.selfhost.token_store import (
     DISABLE_REASON_OPERATOR,
     OPERATOR,
-    Keyring,
     PrincipalStatus,
-    TokenStore,
-)
-from canvas_mcp.core.selfhost.tool_gate import SelfhostCredentialGate
-
-from .conftest import (
-    OID_A,
-    OID_B,
-    TENANT,
-    acct_key,
-    identity_service,
-    make_account,
-    make_principal,
-    sign_in,
-    store_put,
-)
-from .test_request_context import (
-    ACCOUNT_URL,
-    CANVAS_URL,
-    Probe,
-    _claims,
-    _run,
-    _user,
 )
 
-KEY_A = acct_key(OID_A)
-KEY_B = acct_key(OID_B)
-TOKEN_A = "canvas-token-for-user-A-0123456789"
-TOKEN_B = "canvas-token-for-user-B-0123456789"
+from .authz.stack import ALICE, BOB, local_stack
+from .test_request_context import GRANT, native_snapshot
+
+KEY = "019a1234-5678-7000-8000-000000000001"
 
 
-class Tick:
-    def __init__(self) -> None:
-        self.now = 1000.0
+@pytest.mark.parametrize(
+    "state,message",
+    [
+        ("active", None),
+        ("disabled", access_disabled_message()),
+        ("pending", access_pending_message()),
+        ("missing", access_not_provisioned_message()),
+        ("future_state", access_not_provisioned_message()),
+    ],
+)
+def test_account_refusal_is_closed_by_default(state, message):
+    assert access_refusal_message(PrincipalStatus(KEY, status=state)) == message
 
-    def __call__(self) -> float:
-        return self.now
 
-
-class CountingSource:
-    """A status source that counts reads and can be told to fail."""
-
-    def __init__(self) -> None:
-        self.disabled: set[str] = set()
-        self.reads: list[str] = []
-        self.fail: Exception | None = None
-        self.on_read: Any = None
-
-    def get_principal_status(self, principal_key: str) -> PrincipalStatus:
-        self.reads.append(principal_key)
-        if self.fail is not None:
-            raise self.fail
-        answer = PrincipalStatus(
-            principal_key, status="disabled" if principal_key in self.disabled else "active"
+def test_snapshot_status_preserves_native_account_fields():
+    result = snapshot_status(
+        McpRead(
+            KEY,
+            GRANT,
+            native_snapshot(
+                role="owner",
+                display_name="Alice",
+                session_epoch=7,
+                credential_generation=9,
+            ),
         )
-        if self.on_read is not None:
-            self.on_read()  # a change that lands after the answer was read
-        return answer
-
-
-def make_store(tmp_path: pathlib.Path, name: str = "t.sqlite3") -> TokenStore:
-    ring = Keyring.parse("k1:" + base64.b64encode(b"\x01" * 32).decode())
-    store = backend_store(tmp_path / name, ring, clock=lambda: 1_800_000_000)
-    store.initialize()
-    # An account created on first sight gets the key the tests expect.
-    store._new_account_id = lambda ext: acct_key(ext.subject).removeprefix("acct:")
-    return store
-
-
-def enroll_both(store: TokenStore) -> None:
-    for oid, token in ((OID_A, TOKEN_A), (OID_B, TOKEN_B)):
-        store_put(store,
-            tenant_id=TENANT, object_id=oid, api_token=token, canvas_user_id="1",
-            canvas_user_name="n", entra_display_name="n", entra_upn="n@example.test",
-            canvas_host="canvas.example.test",
-        )
-
-
-def disable(store: TokenStore, oid: str = OID_A) -> None:
-    store.disable_principal(acct_key(oid), actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)
-
-
-class SpyStore:
-    """Wraps the real store and records which Canvas credentials were loaded."""
-
-    def __init__(self, inner: TokenStore) -> None:
-        self.inner = inner
-        self.gets: list[str] = []
-
-    def get(self, principal_key: str) -> Any:
-        self.gets.append(principal_key)
-        return self.inner.get(principal_key)
-
-    def touch(self, principal_key: str, *, min_interval_seconds: int = 300) -> None:
-        self.inner.touch(principal_key, min_interval_seconds=min_interval_seconds)
-
-
-def build(
-    probe: Probe, store: TokenStore, cache: PrincipalAccessCache | None, *, spy: SpyStore | None = None
-) -> SelfhostRequestContextMiddleware:
-    return SelfhostRequestContextMiddleware(
-        probe,
-        mcp_path="/mcp",
-        identity=identity_service(store, access=cache),
-        store=spy or SpyStore(store),
-        schools=SchoolPolicy.pinned(CANVAS_URL),
-        account_url=ACCOUNT_URL,
-        access=cache,
-        owners=store,
     )
+    assert result.principal_key == KEY and result.stored and result.active
+    assert result.is_owner and result.display_name == "Alice"
+    assert result.session_epoch == 7 and result.credential_generation == 9
 
 
-class TestAccessCache:
-    def test_one_read_serves_requests_within_the_ttl(self) -> None:
-        source, clock = CountingSource(), Tick()
-        cache = PrincipalAccessCache(source, ttl_seconds=5, clock=clock)
-        for _ in range(4):
-            assert cache.status(KEY_A).disabled is False
-        assert source.reads == [KEY_A]
-        clock.now += 5.1
-        cache.status(KEY_A)
-        assert source.reads == [KEY_A, KEY_A]
-
-    def test_a_change_made_elsewhere_is_noticed_after_the_ttl_not_before(self) -> None:
-        source, clock = CountingSource(), Tick()
-        cache = PrincipalAccessCache(source, ttl_seconds=5, clock=clock)
-        assert not cache.status(KEY_A).disabled
-        source.disabled.add(KEY_A)  # another process (or the CLI) disabled the user
-        clock.now += 4
-        assert not cache.status(KEY_A).disabled  # the documented bounded delay
-        clock.now += 1.5
-        assert cache.status(KEY_A).disabled
-
-    def test_invalidate_makes_the_change_visible_at_once(self) -> None:
-        source = CountingSource()
-        cache = PrincipalAccessCache(source, clock=Tick())
-        assert not cache.status(KEY_A).disabled
-        source.disabled.add(KEY_A)
-        cache.invalidate(KEY_A)
-        assert cache.status(KEY_A).disabled
-
-    def test_invalidating_one_principal_keeps_the_others(self) -> None:
-        source = CountingSource()
-        cache = PrincipalAccessCache(source, clock=Tick())
-        cache.status(KEY_A)
-        cache.status(KEY_B)
-        cache.invalidate(KEY_A)
-        cache.status(KEY_A)
-        cache.status(KEY_B)
-        assert source.reads == [KEY_A, KEY_B, KEY_A]
-        cache.invalidate()
-        cache.status(KEY_B)
-        assert source.reads[-1] == KEY_B and len(source.reads) == 4
-
-    def test_a_read_that_started_before_an_invalidation_is_not_stored(self) -> None:
-        source = CountingSource()
-        cache = PrincipalAccessCache(source, clock=Tick())
-
-        def change_during_read() -> None:
-            source.on_read = None
-            source.disabled.add(KEY_A)
-            cache.invalidate(KEY_A)
-
-        source.on_read = change_during_read
-        first = cache.status(KEY_A)  # read the old answer, then the user was disabled
-        assert not first.disabled
-        assert cache.status(KEY_A).disabled  # the stale answer was not cached
-
-    def test_a_failure_is_not_cached_and_propagates(self) -> None:
-        source = CountingSource()
-        cache = PrincipalAccessCache(source, clock=Tick())
-        source.fail = RuntimeError("database is locked")
-        with pytest.raises(RuntimeError):
-            cache.status(KEY_A)
-        source.fail = None
-        assert not cache.status(KEY_A).disabled
-
-    def test_the_table_is_bounded(self) -> None:
-        source = CountingSource()
-        cache = PrincipalAccessCache(source, clock=Tick(), max_entries=3)
-        for i in range(10):
-            cache.status(f"acct:{i}")
-        cache.status("acct:9")
-        assert source.reads.count("acct:9") == 1
-
-
-class TestMiddlewareRefusesADisabledPrincipal:
-    async def test_a_disabled_user_gets_403_and_no_credential_is_loaded(
-        self, tmp_path: pathlib.Path
-    ) -> None:
-        store = make_store(tmp_path)
-        enroll_both(store)
-        disable(store)
-        probe, spy = Probe(), SpyStore(store)
-        mw = build(probe, store, PrincipalAccessCache(store), spy=spy)
-        call = await _run(mw, user=_user(_claims()))
-        assert call.status == 403
-        assert access_disabled_message() in call.body.decode()
-        assert call.headers[b"cache-control"] == b"no-store"
-        assert probe.calls == 0
-        assert spy.gets == []  # the Canvas token was never even decrypted
-        assert TOKEN_A not in call.body.decode()
-
-    async def test_other_users_are_unaffected(self, tmp_path: pathlib.Path) -> None:
-        store = make_store(tmp_path)
-        enroll_both(store)
-        disable(store, OID_A)
-        probe = Probe()
-        mw = build(probe, store, PrincipalAccessCache(store))
-        call = await _run(mw, user=_user(_claims(oid=OID_B)))
-        assert call.status == 200
-        assert probe.seen["creds"].api_token == TOKEN_B
-
-    async def test_deleting_the_enrollment_does_not_bring_a_disabled_user_back(
-        self, tmp_path: pathlib.Path
-    ) -> None:
-        store = make_store(tmp_path)
-        enroll_both(store)
-        disable(store)
-        store.delete(acct_key(OID_A))
-        probe = Probe()
-        call = await _run(build(probe, store, PrincipalAccessCache(store)), user=_user(_claims()))
-        assert call.status == 403 and probe.calls == 0
-
-    async def test_a_user_who_was_never_enrolled_is_refused_too(self, tmp_path: pathlib.Path) -> None:
-        store = make_store(tmp_path)
-        make_account(store, OID_A)  # an account, but no Canvas token
-        disable(store)
-        probe = Probe()
-        call = await _run(build(probe, store, PrincipalAccessCache(store)), user=_user(_claims()))
-        assert call.status == 403 and probe.calls == 0
-
-    async def test_an_already_issued_and_a_freshly_refreshed_token_are_both_refused(
-        self, tmp_path: pathlib.Path
-    ) -> None:
-        store = make_store(tmp_path)
-        enroll_both(store)
-        probe = Probe()
-        mw = build(probe, store, PrincipalAccessCache(store))
-        old_token = _user(_claims(iat=1_799_990_000, exp=1_800_003_600))
-        assert (await _run(mw, user=old_token)).status == 200
-        disable(store)
-        mw.access.invalidate(KEY_A)  # type: ignore[union-attr]
-        assert (await _run(mw, user=old_token)).status == 403
-        # A refresh at Entra still works for the account, and mints a new token with
-        # valid roles and a later expiry: it changes nothing here.
-        refreshed = _user(_claims(iat=1_800_000_100, exp=1_800_007_700))
-        assert (await _run(mw, user=refreshed)).status == 403
-        assert probe.calls == 1
-
-    async def test_a_change_made_by_another_process_is_noticed_within_the_ttl(
-        self, tmp_path: pathlib.Path
-    ) -> None:
-        store = make_store(tmp_path)
-        enroll_both(store)
-        clock = Tick()
-        cache = PrincipalAccessCache(store, ttl_seconds=5, clock=clock)
-        probe = Probe()
-        mw = build(probe, store, cache)
-        assert (await _run(mw, user=_user(_claims()))).status == 200
-        # The operator CLI is another process: it cannot invalidate our cache.
-        disable(make_store_view(tmp_path))
-        clock.now += 2
-        assert (await _run(mw, user=_user(_claims()))).status == 200  # inside the bound
-        clock.now += 4
-        assert (await _run(mw, user=_user(_claims()))).status == 403
-
-    async def test_the_decision_survives_a_server_restart(self, tmp_path: pathlib.Path) -> None:
-        store = make_store(tmp_path)
-        enroll_both(store)
-        disable(store)
-        # A new process: new store object, new cache, new middleware.
-        restarted = make_store(tmp_path)
-        probe = Probe()
-        call = await _run(build(probe, restarted, PrincipalAccessCache(restarted)), user=_user(_claims()))
-        assert call.status == 403 and probe.calls == 0
-
-    async def test_enabling_again_restores_access_with_the_kept_enrollment(
-        self, tmp_path: pathlib.Path
-    ) -> None:
-        store = make_store(tmp_path)
-        enroll_both(store)
-        cache = PrincipalAccessCache(store)
-        probe = Probe()
-        mw = build(probe, store, cache)
-        disable(store)
-        cache.invalidate(KEY_A)
-        assert (await _run(mw, user=_user(_claims()))).status == 403
-        store.enable_principal(acct_key(OID_A), actor=OPERATOR)
-        cache.invalidate(KEY_A)
-        assert (await _run(mw, user=_user(_claims()))).status == 200
-        assert probe.seen["creds"].api_token == TOKEN_A
-
-    async def test_an_unreadable_status_fails_closed_with_503(self, tmp_path: pathlib.Path) -> None:
-        store = make_store(tmp_path)
-        enroll_both(store)
-        source = CountingSource()
-        source.fail = RuntimeError("database is locked: /secret/path")
-        probe = Probe()
-        call = await _run(build(probe, store, PrincipalAccessCache(source)), user=_user(_claims()))
-        assert call.status == 503
-        assert access_unavailable_message() in call.body.decode()
-        assert "secret" not in call.body.decode()
-        assert probe.calls == 0
-
-    async def test_the_refusal_is_logged_without_the_token_or_the_key(
-        self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        import logging
-
-        caplog.set_level(logging.WARNING)
-        store = make_store(tmp_path)
-        enroll_both(store)
-        disable(store)
-        await _run(build(Probe(), store, PrincipalAccessCache(store)), user=_user(_claims()))
-        assert "access_disabled" in caplog.text
-        assert TOKEN_A not in caplog.text
-
-    async def test_without_an_access_cache_the_identity_service_still_reads_the_status(
-        self, tmp_path: pathlib.Path
-    ) -> None:
-        # The account status is part of the identity decision, so a middleware built
-        # without the cache still refuses a disabled user (it just reads every time).
-        store = make_store(tmp_path)
-        enroll_both(store)
-        disable(store)
-        probe = Probe()
-        call = await _run(build(probe, store, None), user=_user(_claims()))
-        assert call.status == 403 and probe.calls == 0
-
-
-def make_store_view(tmp_path: pathlib.Path) -> TokenStore:
-    """A second store object on the same file: what another process would hold."""
-    return make_store(tmp_path)
-
-
-class TestOwnerDemotionFromRequestTokens:
-    async def test_a_newer_token_without_the_owner_role_lowers_the_stored_flag(
-        self, tmp_path: pathlib.Path
-    ) -> None:
-        store = make_store(tmp_path)
-        sign_in(store, OID_B, owner=True)  # a second owner: the last one is never demoted
-        sign_in(store, OID_A, owner=True)  # at 1_800_000_000
-        cache = PrincipalAccessCache(store)
-        mw = build(Probe(), store, cache)
-        await _run(mw, user=_user(_claims(iat=1_800_000_500)))
-        assert not store.get_principal_status(KEY_A).is_owner
-
-    async def test_the_demotion_is_audited(
-        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from canvas_mcp.core import audit
-
-        lines: list[str] = []
-
-        class Recorder:
-            def info(self, line: str) -> None:
-                lines.append(line)
-
-        monkeypatch.setattr(audit, "_audit_logger", Recorder())
-        monkeypatch.setattr(audit, "_access_events_enabled", True)
-        store = make_store(tmp_path)
-        sign_in(store, OID_B, owner=True)
-        sign_in(store, OID_A, owner=True)
-        mw = build(Probe(), store, PrincipalAccessCache(store))
-        await _run(mw, user=_user(_claims(iat=1_800_000_500)))
-        await _run(mw, user=_user(_claims(iat=1_800_000_600)))  # already lowered: no repeat
-        events = [json.loads(line) for line in lines]
-        assert [(e["event_type"], e["action"], e["principal"], e["reason"]) for e in events] == [
-            ("principal_status", "owner_lost", KEY_A, "access_token_roles")
-        ]
-
-    async def test_a_token_issued_before_the_last_sign_in_does_not(self, tmp_path: pathlib.Path) -> None:
-        store = make_store(tmp_path)
-        sign_in(store, OID_B, owner=True)
-        sign_in(store, OID_A, owner=True)
-        mw = build(Probe(), store, PrincipalAccessCache(store))
-        await _run(mw, user=_user(_claims(iat=1_799_990_000)))
-        assert store.get_principal_status(KEY_A).is_owner
-
-    async def test_a_token_that_still_carries_the_owner_role_changes_nothing(
-        self, tmp_path: pathlib.Path
-    ) -> None:
-        store = make_store(tmp_path)
-        sign_in(store, OID_B, owner=True)
-        sign_in(store, OID_A, owner=True)
-        mw = build(Probe(), store, PrincipalAccessCache(store))
-        await _run(mw, user=_user(_claims(roles=["Canvas.Owner"], iat=1_800_000_500)))
-        assert store.get_principal_status(KEY_A).is_owner
-
-    async def test_a_token_without_an_issue_time_is_no_evidence(self, tmp_path: pathlib.Path) -> None:
-        store = make_store(tmp_path)
-        sign_in(store, OID_B, owner=True)
-        sign_in(store, OID_A, owner=True)
-        mw = build(Probe(), store, PrincipalAccessCache(store))
-        await _run(mw, user=_user(_claims()))
-        assert store.get_principal_status(KEY_A).is_owner
-
-    async def test_request_tokens_can_never_raise_the_flag(self, tmp_path: pathlib.Path) -> None:
-        store = make_store(tmp_path)
-        mw = build(Probe(), store, PrincipalAccessCache(store))
-        await _run(mw, user=_user(_claims(roles=["Canvas.Owner"], iat=1_800_000_500)))
-        assert not store.get_principal_status(KEY_A).is_owner
-
-
-# -- the tool gate ---------------------------------------------------------------
-
-
-class Body:
-    runs = 0
+def test_account_refusal_messages_do_not_ask_to_reenroll_credentials():
+    for message in (
+        access_disabled_message(),
+        access_pending_message(),
+        access_not_provisioned_message(),
+        access_unavailable_message(),
+    ):
+        assert "token" not in message.lower() and message.isascii()
 
 
 @pytest.fixture
-def gated(monkeypatch: pytest.MonkeyPatch) -> Any:
-    Body.runs = 0
-    source = CountingSource()
-    cache = PrincipalAccessCache(source, clock=Tick())
-    mcp = FastMCP("access-gate-test")
-    mcp.add_middleware(SelfhostCredentialGate(access=cache))
+def connection(tmp_path, monkeypatch):
+    with local_stack(tmp_path, monkeypatch) as stack:
+        alice = stack.enroll(ALICE)
+        stack.enroll(BOB)
+        client_a, tokens_a = stack.tokens_for(ALICE)
+        _, tokens_b = stack.tokens_for(BOB)
+        yield stack, alice, client_a, tokens_a, tokens_b
 
-    @mcp.tool()
-    def get_my_profile() -> str:
-        """Dummy tool."""
-        Body.runs += 1
-        return "ran"
 
-    @mcp.resource("data://thing")
-    def thing() -> str:
-        Body.runs += 1
-        return "resource body"
-
-    from fastmcp.server.auth import AccessToken
-
-    monkeypatch.setattr(
-        tool_gate,
-        "get_access_token",
-        lambda: AccessToken(token="t", client_id="c", scopes=[], claims={"tid": TENANT, "oid": OID_A}),
+def test_operator_disable_revokes_access_and_refresh_without_touching_other_user(
+    connection, monkeypatch
+):
+    stack, alice, client, tokens_a, tokens_b = connection
+    before = stack.store.info(alice)
+    assert stack.store.disable_principal(
+        alice, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR
     )
-    set_request_principal(make_principal(OID_A))
-    set_request_credentials(RequestCredentials(api_token=TOKEN_A, api_url=CANVAS_URL))
-    return mcp, source, cache
+    with monkeypatch.context() as check:
+        check.setattr(
+            stack.store,
+            "decrypt_snapshot",
+            lambda *args: pytest.fail("disabled credential decrypted"),
+        )
+        assert stack.mcp_status(tokens_a["access_token"]) == 401
+        refusal = stack.refresh(client, tokens_a["refresh_token"])
+        assert (
+            refusal.status_code in (400, 401)
+            and refusal.json()["error"] == "invalid_grant"
+        )
+    assert stack.mcp_status(tokens_b["access_token"]) == 200
+    after = stack.store.info(alice)
+    assert after.credential_id == before.credential_id
+    assert (
+        after.status == before.status and after.canvas_user_id == before.canvas_user_id
+    )
+    assert stack.store.get_principal_status(alice).disabled
 
 
-def text_of(result: Any) -> str:
-    return "".join(getattr(block, "text", "") for block in result.content)
+def test_reenable_keeps_enrollment_but_does_not_revive_old_grants(connection):
+    stack, alice, client, tokens_a, _ = connection
+    before = stack.store.info(alice)
+    stack.store.disable_principal(alice, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)
+    assert stack.store.enable_principal(alice, actor=OPERATOR)
+    assert stack.store.info(alice).credential_id == before.credential_id
+    assert stack.mcp_status(tokens_a["access_token"]) == 401
+    refusal = stack.refresh(client, tokens_a["refresh_token"])
+    assert (
+        refusal.status_code in (400, 401) and refusal.json()["error"] == "invalid_grant"
+    )
+    _, replacement = stack.tokens_for(ALICE)
+    assert stack.whoami(replacement["access_token"]) == alice
 
 
-class TestGateRefusesADisabledPrincipal:
-    async def test_an_active_principal_runs_the_tool(self, gated: Any) -> None:
-        mcp, _source, _cache = gated
-        async with Client(mcp) as client:
-            result = await client.call_tool("get_my_profile", {}, raise_on_error=False)
-        assert not result.is_error and Body.runs == 1
-
-    async def test_a_disabled_principal_is_refused_before_the_body_runs(self, gated: Any) -> None:
-        mcp, source, _cache = gated
-        source.disabled.add(KEY_A)
-        async with Client(mcp) as client:
-            result = await client.call_tool("get_my_profile", {}, raise_on_error=False)
-        assert result.is_error
-        assert text_of(result) == access_disabled_message()
-        assert Body.runs == 0
-
-    async def test_the_second_call_of_a_running_request_sees_the_change(self, gated: Any) -> None:
-        # In-flight semantics: a call that already started is not interrupted, but
-        # the next call, even in the same request context, is refused.
-        mcp, source, cache = gated
-        async with Client(mcp) as client:
-            first = await client.call_tool("get_my_profile", {}, raise_on_error=False)
-            source.disabled.add(KEY_A)
-            cache.invalidate(KEY_A)
-            second = await client.call_tool("get_my_profile", {}, raise_on_error=False)
-        assert not first.is_error and second.is_error
-        assert Body.runs == 1
-
-    async def test_a_resource_read_is_refused_too(self, gated: Any) -> None:
-        mcp, source, _cache = gated
-        source.disabled.add(KEY_A)
-        async with Client(mcp) as client:
-            with pytest.raises(Exception, match="disabled by an administrator"):
-                await client.read_resource("data://thing")
-        assert Body.runs == 0
-
-    async def test_an_unreadable_status_fails_closed(self, gated: Any) -> None:
-        mcp, source, _cache = gated
-        source.fail = RuntimeError("boom")
-        async with Client(mcp) as client:
-            result = await client.call_tool("get_my_profile", {}, raise_on_error=False)
-        assert result.is_error and text_of(result) == access_unavailable_message()
-        assert Body.runs == 0
-
-    async def test_a_new_connection_does_not_reuse_a_stale_verdict(self, gated: Any) -> None:
-        mcp, source, cache = gated
-        results: list[bool] = []
-        for disable_before in (False, True):
-            if disable_before:
-                source.disabled.add(KEY_A)
-                cache.invalidate(KEY_A)
-            async with Client(mcp) as client:
-                r = await client.call_tool("get_my_profile", {}, raise_on_error=False)
-                results.append(r.is_error)
-        assert results == [False, True]
-
+def test_disable_survives_a_new_authz_store_instance(connection):
+    stack, alice, _, tokens_a, _ = connection
+    claim = stack.authz.codec.decode(tokens_a["access_token"]).claims
+    stack.store.disable_principal(alice, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)
+    restarted = AuthzStore(stack.store.database, clock=stack.clock)
+    snapshot = restarted.read_mcp_snapshot(alice, claim["grant"])
+    assert snapshot.status == "disabled" and snapshot.revoked_at is not None
+    with stack.store.database.read() as conn:
+        actions = (
+            conn.execute(
+                select(s.audit_log.c.action).where(s.audit_log.c.target_id == alice)
+            )
+            .scalars()
+            .all()
+        )
+    assert "account_disabled" in actions
