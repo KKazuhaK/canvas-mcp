@@ -21,9 +21,18 @@ from canvas_mcp.core.selfhost.login.ceremony import (
 
 def record(**kw: Any) -> FlowRecord:
     base: dict[str, Any] = {
-        "p": "google", "cv": "v" * 64, "n": "n" * 43, "pp": "sign_in", "txn": None, "rt": None,
-        "rz": False, "ru": "https://canvas.example.test/auth/callback/google",
-        "la": None, "le": None, "li": None, "iat": 1_800_000_000,
+        "p": "google",
+        "cv": "v" * 64,
+        "n": "n" * 43,
+        "pp": "sign_in",
+        "txn": None,
+        "rt": None,
+        "rz": False,
+        "ru": "https://canvas.example.test/auth/callback/google",
+        "la": None,
+        "le": None,
+        "li": None,
+        "iat": 1_800_000_000,
     }
     base.update(kw)
     return FlowRecord(**base)
@@ -31,12 +40,23 @@ def record(**kw: Any) -> FlowRecord:
 
 def test_the_constants() -> None:
     assert (FLOW_KIND, LINK_KIND, FLOW_TTL_S, FLOW_COOKIE) == (
-        "login_flow", "account_link", 600, "__Host-cmcp_flow",
+        "login_flow",
+        "account_link",
+        600,
+        "__Host-cmcp_flow",
     )
 
 
 def test_a_record_round_trips() -> None:
-    link = record(pp="link", la="acct:x", le=3, li=1_800_000_000, txn="t" * 43, rt="/account/", rz=True)
+    link = record(
+        pp="link",
+        la="acct:x",
+        le=3,
+        li=1_800_000_000,
+        txn="t" * 43,
+        rt="/account/",
+        rz=True,
+    )
     assert FlowRecord.from_json(link.to_json()) == link
     assert FlowRecord.from_json(record().to_json()) == record()
 
@@ -48,8 +68,16 @@ def test_a_record_is_small_json_under_the_limit() -> None:
 
 def test_even_a_record_with_every_field_at_its_limit_fits() -> None:
     biggest = record(
-        p="p" * 64, ru="https://x/" + "a" * 2038, rt="a" * 512, txn="t" * 64, cv="c" * 128, n="n" * 128,
-        pp="link", la="a" * 64, le=2**40, li=2**40,
+        p="p" * 64,
+        ru="https://x/" + "a" * 2038,
+        rt="a" * 512,
+        txn="t" * 64,
+        cv="c" * 128,
+        n="n" * 128,
+        pp="link",
+        la="a" * 64,
+        le=2**40,
+        li=2**40,
     )
     assert len(biggest.to_json()) < 4096
     assert FlowRecord.from_json(biggest.to_json()) == biggest
@@ -58,10 +86,18 @@ def test_even_a_record_with_every_field_at_its_limit_fits() -> None:
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda d: d.update(v=2), lambda d: d.update(pp="other"), lambda d: d.update(rz="yes"),
-        lambda d: d.update(iat=True), lambda d: d.update(iat="now"), lambda d: d.update(p=5),
-        lambda d: d.update(cv="x" * 129), lambda d: d.update(ru="x" * 2049), lambda d: d.pop("ru"),
-        lambda d: d.update(le="3"), lambda d: d.update(txn=5), lambda d: d.update(pp="link"),
+        lambda d: d.update(v=2),
+        lambda d: d.update(pp="other"),
+        lambda d: d.update(rz="yes"),
+        lambda d: d.update(iat=True),
+        lambda d: d.update(iat="now"),
+        lambda d: d.update(p=5),
+        lambda d: d.update(cv="x" * 129),
+        lambda d: d.update(ru="x" * 2049),
+        lambda d: d.pop("ru"),
+        lambda d: d.update(le="3"),
+        lambda d: d.update(txn=5),
+        lambda d: d.update(pp="link"),
         lambda d: d.update(pp="link", la="acct:x", le=1),
     ],
 )
@@ -80,15 +116,25 @@ def test_garbage_is_refused(raw: bytes) -> None:
 
 def test_the_binding_digest_is_a_sha256_hex() -> None:
     digest = binding_digest("secret")
-    assert len(digest) == 64 and digest == binding_digest("secret") and digest != binding_digest("Secret")
+    assert (
+        len(digest) == 64
+        and digest == binding_digest("secret")
+        and digest != binding_digest("Secret")
+    )
 
 
 def test_the_cookie_payload_round_trips_and_rejects_the_rest() -> None:
     payload = new_cookie_payload("S" * 43, "B" * 43, "github", 100)
     cookie = FlowCookie.from_payload(payload)
-    assert cookie == FlowCookie("S" * 43, "B" * 43, "github", 100)
+    assert cookie == FlowCookie("S" * 43, "B" * 43, "github", 100, "sign_in")
     for bad in (
-        None, {}, {**payload, "v": 2}, {**payload, "s": ""}, {**payload, "b": 5}, {**payload, "p": None},
-        {**payload, "iat": True}, {**payload, "iat": "1"},
+        None,
+        {},
+        {**payload, "v": 2},
+        {**payload, "s": ""},
+        {**payload, "b": 5},
+        {**payload, "p": None},
+        {**payload, "iat": True},
+        {**payload, "iat": "1"},
     ):
         assert FlowCookie.from_payload(bad) is None

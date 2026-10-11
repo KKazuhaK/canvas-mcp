@@ -721,27 +721,13 @@ def _protected_provider_lists(store: TokenStore) -> tuple[frozenset[str], ...]:
 
 
 def _listed_providers(store: TokenStore) -> frozenset[str] | None:
-    """The providers of ``SELFHOST_LOGIN_PROVIDERS`` the usable-owner checks use (None: all).
+    """Use the database's configured provider inventory for owner governance.
 
-    They decide which owners are usable, so they must be the server's. In this order:
-
-    1. the list the server recorded in the database at its last startup (``meta``): an operator
-       shell often lacks the server's variables, and this does not depend on them. The server
-       records the configured list before it decides whether it may start, so this is also the
-       list a refused start was refused for;
-    2. this environment: the full settings, else ``SELFHOST_LOGIN_PROVIDERS`` alone.
-
-    When the environment names the list and it differs from the record, the operator is changing
-    the providers (or running with another file): a note on stderr says so and the owners must be
-    usable under *both* lists for promotion recovery (their intersection); lists with nothing
-    in common leave the record in force. Destructive commands additionally preserve an owner
-    under each complete list independently, inside the mutation transaction.
-
-    A note on stderr also says so when the answer had to be assumed: the list is unreadable
-    (every provider is then counted as listed, which is more permissive than the server), or
-    nothing names it (no record, no variable) while the database holds sign-in methods at
-    providers other than Entra (Entra alone is then assumed). A deployment with Entra alone gets
-    no note.
+    An unreadable or absent operator environment cannot invent providers. When
+    an explicit environment differs, promotion recovery uses its intersection
+    with the inventory, or the inventory if they are disjoint. Disable and
+    unlink separately preserve an owner under each real list in their writer
+    transaction. Startup reconciles the inventory before checking owner access.
     """
     from canvas_mcp.core.selfhost.login.config import LOGIN_PROVIDERS_ENV
 

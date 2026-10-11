@@ -1,6 +1,6 @@
 """The state of one sign-in (or link) ceremony, stored server side for ten minutes.
 
-A ceremony starts at ``/account/login/<provider>``: the server stores a :class:`FlowRecord`
+A ceremony starts at ``/auth/login/<provider>``: the server stores a :class:`FlowRecord`
 (PKCE verifier, nonce, what the sign-in is for) in the one-time ``login_states`` table under an
 unguessable id, which becomes the OAuth ``state``, and gives the browser a sealed
 ``__Host-cmcp_flow`` cookie holding the state, a random binding secret and the provider. The
@@ -159,8 +159,8 @@ class FlowCookie:
     binding: str
     provider_id: str
     iat: int
-    #: What the ceremony is for; a cookie without the field (an older one) is a sign-in.
-    purpose: Purpose = "sign_in"
+    #: What this ceremony is for. The native cookie always carries this field.
+    purpose: Purpose
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any] | None) -> FlowCookie | None:
@@ -183,7 +183,7 @@ class FlowCookie:
             or not binding
         ):
             return None
-        purpose = payload.get("pp", "sign_in")
+        purpose = payload.get("pp")
         if purpose not in _PURPOSES:
             return None
         return cls(state, binding, provider, iat, purpose)

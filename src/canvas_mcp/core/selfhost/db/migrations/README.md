@@ -28,6 +28,9 @@ The only bridges outside this package are `app.py` (dependency and silent-switch
 checks), `token_store.py` (startup readiness), and `token_admin.py` (CLI
 registration/execution and the operator silent-switch check). Boundary tests
 reject new callers, metadata DDL and direct Alembic use elsewhere.
+They also reject database backup calls and foreign-key-off SQL outside this
+package. New upgrade or compatibility behavior belongs here; current request
+handlers accept only the native v1 format and do not adopt old data or cookies.
 
 ## Later revisions
 

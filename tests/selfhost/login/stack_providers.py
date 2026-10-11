@@ -183,10 +183,7 @@ class Person:
         if provider == "entra":
             nonce = query_of(url)["nonce"]
             self.ps.stack.idp.set_user(user, nonce)
-            return self.get(
-                "/auth/callback/entra",
-                params={"code": "entra-code", "state": query_of(url)["state"]},
-            )
+            return self.get(self.ps.stack.idp.authorize(url))
         if user is not None:
             self.set_user(provider, user)
         idp = {

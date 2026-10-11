@@ -12,6 +12,7 @@ def test_upgrade_ddl_and_alembic_remain_inside_the_migration_package():
     ddl = re.compile(
         r"^\s*(?:CREATE|ALTER|DROP)\s+(?:TABLE|INDEX|SEQUENCE)\b", re.I | re.M
     )
+    unsafe_fk = re.compile(r"\bPRAGMA\s+foreign_keys\s*=\s*(?:OFF|0)\b", re.I)
     for path in ROOT.rglob("*.py"):
         relative = path.relative_to(ROOT)
         if relative.parts[:2] == ("db", "migrations"):
@@ -21,9 +22,9 @@ def test_upgrade_ddl_and_alembic_remain_inside_the_migration_package():
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
-                and node.func.attr in {"create_all", "drop_all"}
+                and node.func.attr in {"create_all", "drop_all", "backup"}
             ):
-                violations.append(str(relative) + ": metadata DDL")
+                violations.append(str(relative) + ": " + node.func.attr)
             if (
                 isinstance(node, ast.ImportFrom)
                 and (node.module or "").split(".")[0] == "alembic"
@@ -43,7 +44,9 @@ def test_upgrade_ddl_and_alembic_remain_inside_the_migration_package():
                         if (
                             isinstance(value, ast.Constant)
                             and isinstance(value.value, str)
-                            and ddl.search(value.value)
+                            and (
+                                ddl.search(value.value) or unsafe_fk.search(value.value)
+                            )
                         ):
                             violations.append(str(relative) + ": upgrade DDL")
     assert violations == []

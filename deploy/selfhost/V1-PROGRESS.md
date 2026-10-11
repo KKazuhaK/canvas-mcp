@@ -413,3 +413,39 @@ and the first v1 tag remain outstanding.
   and the complete runtime matrix remain required. Focused and container green
   results do not satisfy the full handoff; real IdP/guest/Claude/multiday gates
   still follow the owner's deployment.
+
+## Complete native login regression and removable migration checkpoint
+
+- The entire login package plus the four migration boundary checks passes on
+  SQLite with both latest and locked dependencies: 921 passed, 1 optional
+  external-network smoke skip. Verified Google, GitHub, generic OIDC and Entra
+  sign-ins, approval, consent, MCP tool calls, refresh, admission loss, link
+  conflicts, replay, unlink epochs, retained connected apps, owner governance
+  and the operator identity commands all use the native runtime.
+- Locked PostgreSQL passes the same login/boundary package plus migration policy
+  and SQLite-to-PostgreSQL transfer: 939 passed, 3 skips (one optional external
+  network check and two SQLite-specific backup checks). The scratch database
+  was stopped after the run. The native migration/transfer checks validate
+  compatibility floors, concurrent-index recovery, atomic import, seal failures,
+  native types and sequence restoration.
+- Upgrade, compatibility policy, backup and transfer implementation remains in
+  `db/migrations/`. Boundary checks now also reject backup calls and SQL that
+  disables foreign keys outside that package. Its README names the three
+  removable startup/CLI bridges. The login runtime no longer accepts cookies
+  missing their explicit ceremony purpose; no old-cookie adapter is added.
+- Applicable old browser checks were ported to JSON responses and real provider
+  callbacks. Identity-management CLI targets are canonical bare account UUIDs;
+  old provider/`acct:` aliases are refused. Configured provider inventory is
+  seeded explicitly in fixtures and cannot be invented from a missing or
+  unreadable shell environment. The removed proxy's token-role demotion tests
+  are retired; verified sign-in demotion and last-usable-owner protection remain.
+- Source/tests Ruff, changed-file formatting, Linux-target mypy (83 source files)
+  and whitespace checks pass. Read-only image run at `6faa945`,
+  [38151987699](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38151987699),
+  passed both native architectures and SQLite/PostgreSQL container smoke. The
+  complete workflow is still red because the remaining legacy account suites
+  have not been ported. No image or release was published.
+- Whole self-host collection now finds 3,844 tests with the same 8 legacy
+  account-interface import errors. Port their applicable lifecycle/security
+  coverage to the native API; keep the complete CI matrix and staging gates
+  outstanding. This checkpoint does not complete the full handoff.
