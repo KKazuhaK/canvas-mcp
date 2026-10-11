@@ -390,7 +390,9 @@ jobs:
           trap 'docker rm -f canvas-mcp-verify-postgres >/dev/null 2>&1 || true; docker network rm "$SMOKE_NETWORK" >/dev/null 2>&1 || true' EXIT
           PG_IMAGE="$(sed -n 's/^    image: //p' deploy/selfhost/docker-compose.postgres.yml)"
           test -n "$PG_IMAGE"
-          docker network create --internal "$SMOKE_NETWORK" >/dev/null
+          # A throwaway bridge allows the host-side HTTP smoke client to reach
+          # the published loopback app port. PostgreSQL publishes no host port.
+          docker network create "$SMOKE_NETWORK" >/dev/null
           docker run --rm -d --name canvas-mcp-verify-postgres --network "$SMOKE_NETWORK" \
             --network-alias postgres -e POSTGRES_USER=canvas -e POSTGRES_DB=canvas_mcp \
             -e POSTGRES_PASSWORD=smoke-only-database-password \
