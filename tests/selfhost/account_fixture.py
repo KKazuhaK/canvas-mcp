@@ -101,6 +101,8 @@ def build_harness(
     *,
     cfg: FixtureConfig | None = None,
     policy: AccessPolicy = POLICY,
+    runtime_env: dict[str, str] | None = None,
+    register_tools: Any = None,
     **options: Any,
 ) -> Harness:
     h = Harness()
@@ -130,6 +132,7 @@ def build_harness(
         "ACCESS_RULES_FALLBACK": policy.fallback,
         "OWNER_RULES": ",".join(map(str, policy.owner_rules)),
         "ACCESS_OPEN_ACKNOWLEDGE_PUBLIC": "true",
+        **(runtime_env or {}),
     }
     replacements = {
         k: options.pop(k)
@@ -143,6 +146,7 @@ def build_harness(
             env=env,
             clock=h.clock,
             tools=False,
+            register_tools=register_tools,
             account_options={"canvas_whoami": whoami, **options},
         )
     )

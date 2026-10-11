@@ -16,13 +16,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import fastmcp
 import httpx
 import pytest
 import respx
 from fastmcp import FastMCP
-from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
-from starlette.testclient import TestClient
 
 from canvas_mcp import server as server_module
 from canvas_mcp.core import config as config_module
@@ -30,9 +27,6 @@ from canvas_mcp.core.config import reset_config
 from canvas_mcp.core.course_policy import reset_policy_cache
 from canvas_mcp.core.selfhost.app import (
     apply_disabled_tools,
-    build_selfhost_asgi_app,
-    install_selfhost,
-    prepare_selfhost,
 )
 from canvas_mcp.core.selfhost.settings import (
     DISABLED_TOOLS_ENV,
@@ -47,7 +41,9 @@ from canvas_mcp.core.tool_policy import (
 )
 from canvas_mcp.server import register_all_tools
 
-from .conftest import CLIENT, OID_A, TENANT, acct_key, store_put
+from .account_fixture import _display_in_utc, build_harness, put_row  # noqa: F401
+from .authz.stack import User
+from .conftest import CLIENT, OID_A, TENANT, acct_key
 from .test_startup import HTTP, SECRETS, _run_main, entra_env  # noqa: F401 - fixture
 
 BASE = "https://canvas.example.test"
@@ -86,25 +82,44 @@ class TestSetting:
     def test_unset_and_blank_remove_nothing(self):
         assert load_selfhost_settings(_env()).disabled_tools == ()
         for blank in ("", "  ", ",", " , ,"):
-            assert load_selfhost_settings(_env(SELFHOST_DISABLED_TOOLS=blank)).disabled_tools == ()
+            assert (
+                load_selfhost_settings(
+                    _env(SELFHOST_DISABLED_TOOLS=blank)
+                ).disabled_tools
+                == ()
+            )
 
     def test_names_are_trimmed_lowercased_deduplicated_and_sorted(self):
         settings = load_selfhost_settings(
-            _env(SELFHOST_DISABLED_TOOLS=" read_course_file_text, LIST_USERS ,read_course_file_text,send_message,")
+            _env(
+                SELFHOST_DISABLED_TOOLS=" read_course_file_text, LIST_USERS ,read_course_file_text,send_message,"
+            )
         )
-        assert settings.disabled_tools == ("list_users", "read_course_file_text", "send_message")
+        assert settings.disabled_tools == (
+            "list_users",
+            "read_course_file_text",
+            "send_message",
+        )
 
     def test_read_and_write_tools_are_both_accepted(self):
         raw = f"{READ_TOOL},{WRITE_TOOL},execute_typescript"
         settings = load_selfhost_settings(_env(SELFHOST_DISABLED_TOOLS=raw))
-        assert set(settings.disabled_tools) == {READ_TOOL, WRITE_TOOL, "execute_typescript"}
+        assert set(settings.disabled_tools) == {
+            READ_TOOL,
+            WRITE_TOOL,
+            "execute_typescript",
+        }
 
     def test_every_known_tool_name_is_accepted(self):
         raw = ",".join(sorted(TOOL_EFFECTS))
-        loaded = load_selfhost_settings(_env(SELFHOST_DISABLED_TOOLS=raw)).disabled_tools
+        loaded = load_selfhost_settings(
+            _env(SELFHOST_DISABLED_TOOLS=raw)
+        ).disabled_tools
         assert set(loaded) == set(TOOL_EFFECTS)
 
-    def test_an_unknown_name_stops_startup_and_the_message_lists_only_the_unknown_names(self):
+    def test_an_unknown_name_stops_startup_and_the_message_lists_only_the_unknown_names(
+        self,
+    ):
         problems = _problems(f"{READ_TOOL},read_course_file_txt,no_such_tool")
         assert len(problems) == 1
         assert "SELFHOST_DISABLED_TOOLS" in problems[0]
@@ -120,12 +135,16 @@ class TestSetting:
 
     def test_it_is_reported_together_with_other_problems(self):
         with pytest.raises(SelfhostConfigError) as info:
-            load_selfhost_settings(_env(ENTRA_CLIENT_SECRET="short", SELFHOST_DISABLED_TOOLS="nope"))
+            load_selfhost_settings(
+                _env(ENTRA_CLIENT_SECRET="short", SELFHOST_DISABLED_TOOLS="nope")
+            )
         text = "; ".join(info.value.problems)
         assert "ENTRA_CLIENT_SECRET" in text and "SELFHOST_DISABLED_TOOLS" in text
 
     def test_the_summary_for_config_lists_the_tools(self):
-        settings = load_selfhost_settings(_env(SELFHOST_DISABLED_TOOLS=f"{WRITE_TOOL},{READ_TOOL}"))
+        settings = load_selfhost_settings(
+            _env(SELFHOST_DISABLED_TOOLS=f"{WRITE_TOOL},{READ_TOOL}")
+        )
         lines = server_module._selfhost_summary(settings)
         assert f"  Disabled tools: {WRITE_TOOL}, {READ_TOOL}" in lines
         none = server_module._selfhost_summary(load_selfhost_settings(_env()))
@@ -163,7 +182,9 @@ class TestApply:
         # A tool that is not registered for the student profile: naming it neither
         # registers it nor fails.
         absent = next(
-            name for name, effect in TOOL_EFFECTS.items() if name not in before and effect is Effect.READ
+            name
+            for name, effect in TOOL_EFFECTS.items()
+            if name not in before and effect is Effect.READ
         )
         assert asyncio.run(apply_disabled_tools(mcp, {absent})) == []
         assert self._names(mcp) == before
@@ -189,11 +210,15 @@ class TestStartup:
         real_install = app_module.install_selfhost
 
         def spy(mcp, runtime, config, **kwargs):
-            seen["names"] = {tool.name for tool in asyncio.run(mcp.list_tools(run_middleware=False))}
+            seen["names"] = {
+                tool.name for tool in asyncio.run(mcp.list_tools(run_middleware=False))
+            }
             return real_install(mcp, runtime, config, **kwargs)
 
         mp.setattr(app_module, "install_selfhost", spy)
-        mp.setattr(server_module, "_run_selfhost_http_server", lambda app, host, port: None)
+        mp.setattr(
+            server_module, "_run_selfhost_http_server", lambda app, host, port: None
+        )
         mp.setattr("sys.argv", ["canvas-mcp-server", *HTTP])
         config_module.reset_config()
         try:
@@ -204,7 +229,11 @@ class TestStartup:
         assert READ_TOOL not in seen["names"] and "list_users" not in seen["names"]
         assert "disabled_tools" in caplog.text
 
-    def test_an_unknown_name_exits_1_and_names_only_the_unknown_tool(self, entra_env, caplog):  # noqa: F811
+    def test_an_unknown_name_exits_1_and_names_only_the_unknown_tool(
+        self,
+        entra_env,  # noqa: F811
+        caplog,
+    ):  # noqa: F811
         mp = entra_env["monkeypatch"]
         mp.setenv("SELFHOST_DISABLED_TOOLS", f"{READ_TOOL},read_course_file_txt")
         assert _run_main(mp, *HTTP).code == 1
@@ -219,7 +248,9 @@ class TestStartup:
         assert _run_main(entra_env["monkeypatch"], *HTTP, "--config").code == 1
 
     def test_config_shows_the_list_without_secrets(self, entra_env, capsys):  # noqa: F811
-        entra_env["monkeypatch"].setenv("SELFHOST_DISABLED_TOOLS", f"{WRITE_TOOL},{READ_TOOL}")
+        entra_env["monkeypatch"].setenv(
+            "SELFHOST_DISABLED_TOOLS", f"{WRITE_TOOL},{READ_TOOL}"
+        )
         assert _run_main(entra_env["monkeypatch"], *HTTP, "--config").code == 0
         out = capsys.readouterr().err
         assert f"Disabled tools: {WRITE_TOOL}, {READ_TOOL}" in out
@@ -229,77 +260,58 @@ class TestStartup:
 
 @pytest.fixture
 def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNamespace]:
-    monkeypatch.setattr(fastmcp.settings, "home", tmp_path / "fastmcp")
-    monkeypatch.setenv("CANVAS_API_URL", CANVAS)
     monkeypatch.setenv("STUDENT_WRITE_TOOLS", STUDENT_WRITES)
     monkeypatch.setenv("ALLOWED_WRITE_TOOLS", OPERATOR_ALLOWS)
     monkeypatch.delenv("COURSE_AGENT_POLICY_DEFAULT", raising=False)
-    for name in ("CANVAS_API_TOKEN", "CANVAS_ROLE"):
-        monkeypatch.delenv(name, raising=False)
     reset_config()
     reset_policy_cache()
-
-    settings = load_selfhost_settings(_env(
-        FASTMCP_HOME=str(tmp_path / "fastmcp"),
-        SELFHOST_DATA_DIR=str(tmp_path / "data"),
-        SELFHOST_DISABLED_TOOLS=f"{READ_TOOL},{WRITE_TOOL}",
-    ))
-    runtime = prepare_selfhost(settings)
-    store_put(runtime.store,
-        tenant_id=TENANT, object_id=OID_A, api_token=TOKEN_A, canvas_user_id="1",
-        canvas_user_name="n", entra_display_name="n", entra_upn="n@example.test",
-        canvas_host="canvas.example.edu",
+    h = build_harness(
+        tmp_path,
+        runtime_env={"SELFHOST_DISABLED_TOOLS": f"{READ_TOOL},{WRITE_TOOL}"},
+        register_tools=lambda mcp: register_all_tools(mcp, role="student"),
     )
-    # The user switched both the allowed write tools on.
+    runtime = h.stack.runtime
+    tokens = {}
+    for label, oid, token in (("A", OID_A, TOKEN_A),):
+        tokens["bearer-" + label] = h.stack.tokens_for(User(label, oid))[1][
+            "access_token"
+        ]
+        put_row(h.store, oid, token=token, name="n", canvas_user_id=oid[:2])
     runtime.store.set_tool_prefs(KEY_A, ["mark_module_item_done", WRITE_TOOL])
-
-    from canvas_mcp.core.config import get_config
-
-    config = get_config()
-    policy = resolve_tool_policy(config.allowed_write_tools, "http")
-    mcp = FastMCP(
-        "disabled",
-        auth=StaticTokenVerifier(
-            {"bearer-A": {
-                "client_id": CLIENT, "scopes": ["Canvas.Access"], "tid": TENANT, "oid": OID_A,
-                "azp": CLIENT, "roles": ["Canvas.User"], "name": "user A",
-            }},
-            required_scopes=["Canvas.Access"],
-        ),
-    )
-    register_all_tools(mcp, role="student")
-    asyncio.run(apply_tool_policy(mcp, policy))
-    asyncio.run(apply_disabled_tools(mcp, settings.disabled_tools))
-    install_selfhost(mcp, runtime, config, tool_policy=policy)
-    app = build_selfhost_asgi_app(mcp, runtime, config)
 
     seen: list[tuple[str, str]] = []
 
     def canvas(request: httpx.Request) -> httpx.Response:
         seen.append((request.method, request.url.path))
         if request.url.path == "/api/v1/courses":
-            return httpx.Response(200, json=[{"id": 101, "name": "Python", "course_code": "ICS 33"}])
+            return httpx.Response(
+                200, json=[{"id": 101, "name": "Python", "course_code": "ICS 33"}]
+            )
         return httpx.Response(404, json={"errors": [{"message": "not found"}]})
 
-    with respx.mock(assert_all_called=False) as router, TestClient(app, base_url=BASE) as client:
+    with respx.mock(assert_all_called=False) as router:
         router.route(host="canvas.example.edu").mock(side_effect=canvas)
-        yield SimpleNamespace(client=client, seen=seen)
+        yield SimpleNamespace(client=h.client, seen=seen, tokens=tokens)
     reset_config()
     reset_policy_cache()
 
 
-def _rpc(stack: SimpleNamespace, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+def _rpc(
+    stack: SimpleNamespace, method: str, params: dict[str, Any] | None = None
+) -> dict[str, Any]:
     headers = {
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
-        "Authorization": "Bearer bearer-A",
+        "Authorization": f"Bearer {stack.tokens['bearer-A']}",
     }
     body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
     response = stack.client.post("/mcp", json=body, headers=headers)
     assert response.status_code == 200, response.text
     text = response.text
     if response.headers["content-type"].startswith("text/event-stream"):
-        text = [line[5:].strip() for line in text.splitlines() if line.startswith("data:")][-1]
+        text = [
+            line[5:].strip() for line in text.splitlines() if line.startswith("data:")
+        ][-1]
     return json.loads(text)
 
 
@@ -318,7 +330,9 @@ def _refused(stack: SimpleNamespace, name: str) -> str:
 
 
 class TestWholeStack:
-    def test_a_disabled_read_tool_is_absent_from_the_list_and_refused_on_call(self, stack):
+    def test_a_disabled_read_tool_is_absent_from_the_list_and_refused_on_call(
+        self, stack
+    ):
         names = _tool_names(stack)
         assert READ_TOOL not in names
         assert "list_courses" in names and "read_course_file" in names
@@ -326,7 +340,9 @@ class TestWholeStack:
         assert "unknown" in text.lower() or "not found" in text.lower()
         assert stack.seen == []
 
-    def test_a_disabled_write_tool_stays_gone_even_when_allowed_and_switched_on(self, stack):
+    def test_a_disabled_write_tool_stays_gone_even_when_allowed_and_switched_on(
+        self, stack
+    ):
         names = _tool_names(stack)
         assert WRITE_TOOL not in names
         assert "mark_module_item_done" in names  # allowed, switched on, not disabled
@@ -334,9 +350,14 @@ class TestWholeStack:
         assert stack.seen == []
 
     def test_search_canvas_tools_does_not_advertise_a_disabled_tool(self, stack):
-        payload = _rpc(stack, "tools/call", {
-            "name": "search_canvas_tools", "arguments": {"query": "read_course_file", "detail_level": "names"},
-        })
+        payload = _rpc(
+            stack,
+            "tools/call",
+            {
+                "name": "search_canvas_tools",
+                "arguments": {"query": "read_course_file", "detail_level": "names"},
+            },
+        )
         text = "".join(block.get("text", "") for block in payload["result"]["content"])
         assert "read_course_file" in text
         assert READ_TOOL not in text
@@ -344,4 +365,6 @@ class TestWholeStack:
     def test_the_other_tools_still_work(self, stack):
         payload = _rpc(stack, "tools/call", {"name": "list_courses", "arguments": {}})
         assert not payload["result"].get("isError")
-        assert "Python" in "".join(block.get("text", "") for block in payload["result"]["content"])
+        assert "Python" in "".join(
+            block.get("text", "") for block in payload["result"]["content"]
+        )

@@ -1209,8 +1209,8 @@ class AccountCore:
 
         ``ticked`` are the tools the user wants on (names the server does not offer are
         dropped); names kept from an earlier choice that the server no longer offers
-        stay as they are, unless ``disable_all``. Behind both the HTML form and the JSON
-        API, this is the only place that writes the switches.
+        stay as they are, unless ``disable_all``. The authenticated JSON API
+        delegates here to write the switches.
         """
         key = self._principal_key(session)
         offered = snapshot.offered

@@ -192,10 +192,11 @@ class Database:
             os.close(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
         # Bootstrap before the pooled connect enters WAL. Setting auto_vacuum after
         # WAL leaves a new file at NONE, so use this dedicated connection first.
-        raw = sqlite3.connect(
-            path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS, isolation_level=None
-        )
+        raw = None
         try:
+            raw = sqlite3.connect(
+                path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS, isolation_level=None
+            )
             if (
                 raw.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
@@ -204,8 +205,11 @@ class Database:
             ):
                 raw.execute("PRAGMA auto_vacuum=INCREMENTAL")
                 raw.execute(f"PRAGMA application_id={SQLITE_APPLICATION_ID}")
+        except sqlite3.Error as exc:
+            raise StoreUnavailable(kind=type(exc).__name__) from None
         finally:
-            raw.close()
+            if raw is not None:
+                raw.close()
 
     def tighten_storage(self) -> None:
         """SQLite on POSIX: make sure the database file itself is 0600."""

@@ -7,6 +7,7 @@ Calls are refused here (the security boundary); the tool list hides what is off
 from __future__ import annotations
 
 from collections.abc import Collection
+from dataclasses import fields
 from typing import Any
 
 import pytest
@@ -21,6 +22,8 @@ from canvas_mcp.core.credentials import (
     set_request_tool_prefs,
 )
 from canvas_mcp.core.selfhost import tool_gate
+from canvas_mcp.core.selfhost.db.snapshots import McpSnapshot
+from canvas_mcp.core.selfhost.mcp_state import MCP_READ, McpRead
 from canvas_mcp.core.selfhost.tool_gate import SelfhostCredentialGate
 from canvas_mcp.core.selfhost.tool_prefs import (
     prefs_unreadable_message,
@@ -28,7 +31,7 @@ from canvas_mcp.core.selfhost.tool_prefs import (
     write_tool_off_message,
 )
 
-from .conftest import OID_A, TENANT, make_principal
+from .conftest import OID_A, acct_key, make_principal
 
 ACCOUNT_URL = "https://mcp.example.test/account"
 READS = ("list_courses", "get_my_profile")
@@ -40,11 +43,16 @@ class Body:
 
 
 def build_server(
-    *, ceiling: Collection[str] | None, account_url: str | None = ACCOUNT_URL, extra: tuple[str, ...] = ()
+    *,
+    ceiling: Collection[str] | None,
+    account_url: str | None = ACCOUNT_URL,
+    extra: tuple[str, ...] = (),
 ) -> FastMCP:
     Body.runs = []
     mcp = FastMCP("write-gate-test")
-    mcp.add_middleware(SelfhostCredentialGate(account_url=account_url, write_ceiling=ceiling))
+    mcp.add_middleware(
+        SelfhostCredentialGate(account_url=account_url, write_ceiling=ceiling)
+    )
     for name in (*READS, *WRITES, *extra):
         # One closure per tool so every body records its own name.
         def make(tool_name: str) -> None:
@@ -63,14 +71,41 @@ def _identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         tool_gate,
         "get_access_token",
-        lambda: AccessToken(token="t", client_id="c", scopes=[], claims={"tid": TENANT, "oid": OID_A}),
+        lambda: AccessToken(
+            token="t",
+            client_id="c",
+            scopes=[],
+            claims={
+                "acct": acct_key(OID_A),
+                "iss": "https://canvas.example.test",
+                "token_use": "access",
+            },
+        ),
     )
+    values = {field.name: None for field in fields(McpSnapshot)}
+    values.update(
+        client_id="c",
+        display_name="",
+        status="active",
+        role="user",
+        session_epoch=0,
+        credential_generation=1,
+        write_tools_version=0,
+        jwt_epoch=0,
+        settings_revision=0,
+        grant_expires_at=4_000_000_000,
+    )
+    MCP_READ.set(McpRead(acct_key(OID_A), "grant", McpSnapshot(**values)))
     set_request_principal(make_principal(OID_A))
-    set_request_credentials(RequestCredentials(api_token="x" * 30, api_url="https://c.example.test/api/v1"))
+    set_request_credentials(
+        RequestCredentials(api_token="x" * 30, api_url="https://c.example.test/api/v1")
+    )
 
 
 def switched_on(*names: str, readable: bool = True) -> None:
-    set_request_tool_prefs(RequestToolPrefs(enabled=frozenset(names), readable=readable))
+    set_request_tool_prefs(
+        RequestToolPrefs(enabled=frozenset(names), readable=readable)
+    )
 
 
 async def call(server: FastMCP, name: str) -> Any:
@@ -101,7 +136,9 @@ class TestCalls:
         server = build_server(ceiling=set(WRITES))
         switched_on()
         text = text_of(await call(server, "send_message"))
-        assert "'send_message'" in text and ACCOUNT_URL in text and "Write tools" in text
+        assert (
+            "'send_message'" in text and ACCOUNT_URL in text and "Write tools" in text
+        )
         assert "course may still restrict" in text
 
     async def test_without_any_loaded_preferences_nothing_is_enabled(self) -> None:
@@ -125,7 +162,9 @@ class TestCalls:
         assert (await call(server, "submit_assignment")).is_error
         assert Body.runs == ["send_message"]
 
-    async def test_switching_on_a_tool_the_operator_does_not_allow_does_nothing(self) -> None:
+    async def test_switching_on_a_tool_the_operator_does_not_allow_does_nothing(
+        self,
+    ) -> None:
         server = build_server(ceiling={"send_message"})
         switched_on(*WRITES)  # a record that names more than the operator allows
         assert not (await call(server, "send_message")).is_error
@@ -135,21 +174,27 @@ class TestCalls:
             assert text_of(result) == write_tool_not_offered_message(name)
         assert Body.runs == ["send_message"]
 
-    async def test_an_empty_ceiling_blocks_everything_whatever_the_user_chose(self) -> None:
+    async def test_an_empty_ceiling_blocks_everything_whatever_the_user_chose(
+        self,
+    ) -> None:
         server = build_server(ceiling=set())
         switched_on(*WRITES)
         for name in WRITES:
             assert (await call(server, name)).is_error
         assert Body.runs == []
 
-    async def test_a_tool_the_operator_adds_later_stays_off_until_the_user_turns_it_on(self) -> None:
+    async def test_a_tool_the_operator_adds_later_stays_off_until_the_user_turns_it_on(
+        self,
+    ) -> None:
         # The user turned on send_message while the operator allowed only that.
         switched_on("send_message")
         after = build_server(ceiling={"send_message", "submit_assignment"})
         assert not (await call(after, "send_message")).is_error
         result = await call(after, "submit_assignment")
         assert result.is_error
-        assert text_of(result) == write_tool_off_message("submit_assignment", ACCOUNT_URL)
+        assert text_of(result) == write_tool_off_message(
+            "submit_assignment", ACCOUNT_URL
+        )
 
     async def test_without_a_ceiling_the_registered_tools_are_the_limit(self) -> None:
         server = build_server(ceiling=None)
@@ -158,7 +203,9 @@ class TestCalls:
         assert (await call(server, "delete_page")).is_error
 
     async def test_code_execution_cannot_be_switched_on(self) -> None:
-        server = build_server(ceiling={"execute_typescript"}, extra=("execute_typescript",))
+        server = build_server(
+            ceiling={"execute_typescript"}, extra=("execute_typescript",)
+        )
         switched_on("execute_typescript")
         result = await call(server, "execute_typescript")
         assert result.is_error and Body.runs == []
@@ -221,7 +268,9 @@ class TestListing:
         switched_on("send_message", "create_assignment")
         assert await listed(server) == {*READS, "send_message", "create_assignment"}
 
-    async def test_a_tool_over_the_ceiling_stays_hidden_even_if_switched_on(self) -> None:
+    async def test_a_tool_over_the_ceiling_stays_hidden_even_if_switched_on(
+        self,
+    ) -> None:
         server = build_server(ceiling={"send_message"})
         switched_on(*WRITES)
         assert await listed(server) == {*READS, "send_message"}
@@ -238,7 +287,9 @@ class TestListing:
         server = build_server(ceiling=set(WRITES))
         assert await listed(server) == set(READS)
 
-    async def test_hiding_is_not_the_boundary_a_hidden_tool_called_by_name_is_still_refused(self) -> None:
+    async def test_hiding_is_not_the_boundary_a_hidden_tool_called_by_name_is_still_refused(
+        self,
+    ) -> None:
         server = build_server(ceiling=set(WRITES))
         switched_on()
         assert "send_message" not in await listed(server)

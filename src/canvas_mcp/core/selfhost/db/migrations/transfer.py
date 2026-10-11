@@ -73,6 +73,9 @@ def _holds_rows(conn: Connection) -> bool:
 
 
 def target_holds_rows(target: Database) -> bool:
+    # A preflight must not create an empty SQLite database merely by connecting.
+    if target.sqlite_path is not None and not target.sqlite_path.exists():
+        return False
     with target.guard(), target.read() as conn:
         return _holds_rows(conn)
 

@@ -41,15 +41,32 @@ def env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path
 
 
 def _seed(data_dir: pathlib.Path, keys: str = f"k1:{KEY1}") -> TokenStore:
-    store = make_store(token_db_path(data_dir), Keyring.parse(keys), clock=lambda: 1_800_000_000, public=True)
-    store.initialize()
-    store_put(store,
-        tenant_id=TID, object_id=OID_A, api_token=TOKEN_A, canvas_user_id="1",
-        canvas_user_name="Ada\tLovelace\nTwo", entra_display_name="Ada", entra_upn="ada@example.test",
+    store = make_store(
+        token_db_path(data_dir),
+        Keyring.parse(keys),
+        clock=lambda: 1_800_000_000,
+        public=True,
     )
-    store_put(store,
-        tenant_id=TID, object_id=OID_B, api_token=TOKEN_B, canvas_user_id="2",
-        canvas_user_name="Bob", entra_display_name="Bob", entra_upn="bob@example.test",
+    store.initialize()
+    store_put(
+        store,
+        tenant_id=TID,
+        object_id=OID_A,
+        api_token=TOKEN_A,
+        canvas_user_id="1",
+        canvas_user_name="Ada\tLovelace\nTwo",
+        entra_display_name="Ada",
+        entra_upn="ada@example.test",
+    )
+    store_put(
+        store,
+        tenant_id=TID,
+        object_id=OID_B,
+        api_token=TOKEN_B,
+        canvas_user_id="2",
+        canvas_user_name="Bob",
+        entra_display_name="Bob",
+        entra_upn="bob@example.test",
     )
     store.touch(acct_key(OID_B))
     return store
@@ -86,29 +103,35 @@ def test_list_is_tab_separated_and_has_no_tokens(env, capsys) -> None:
     by_oid = {line.split("\t")[1]: line.split("\t") for line in lines}
     # The first six columns are the ones scripts have always read; the account key is added.
     assert by_oid[OID_A] == [
-        TID, OID_A, "Ada Lovelace Two", "2027-01-15T08:00:00Z", "-", "-", KEY_A,
+        TID,
+        OID_A,
+        "Ada Lovelace Two",
+        "2027-01-15T08:00:00Z",
+        "-",
+        "canvas.example.edu",
+        KEY_A,
     ]
     second = by_oid[OID_B]
     assert second[:3] == [TID, OID_B, "Bob"]
     assert second[4] == "2027-01-15T08:00:00Z"
-    assert second[5] == "-" and second[6] == KEY_B
+    assert second[5] == "canvas.example.edu" and second[6] == KEY_B
     _no_secrets(captured.out, captured.err)
 
 
-def test_revoke_found_and_not_found(env, capsys) -> None:
+def test_remove_found_and_not_found(env, capsys) -> None:
     store = _seed(env)
-    assert token_admin.main(["revoke", TID.upper(), OID_A.upper()]) == 0
+    assert token_admin.main(["remove", KEY_A]) == 0
     assert store.get(acct_key(OID_A)) is None and store.get(acct_key(OID_B)) is not None
     capsys.readouterr()
-    assert token_admin.main(["revoke", TID, OID_A]) == 1
+    assert token_admin.main(["remove", KEY_A]) == 1
     assert "not found" in capsys.readouterr().out
     assert store.count() == 1
 
 
-def test_revoke_rejects_non_guid(env, capsys) -> None:
+def test_remove_rejects_non_uuid(env, capsys) -> None:
     _seed(env)
-    assert token_admin.main(["revoke", "nope", OID_A]) == 2
-    assert "GUID" in capsys.readouterr().err
+    assert token_admin.main(["remove", "nope"]) == 2
+    assert "UUID" in capsys.readouterr().err
 
 
 def test_rotate_then_check_with_new_key_only(env, monkeypatch, capsys) -> None:
@@ -144,8 +167,19 @@ def test_wrong_key_under_same_kid_is_a_config_error(env, monkeypatch, capsys) ->
     _no_secrets(captured.out, captured.err)
 
 
-@pytest.mark.parametrize("value", [None, "", "garbage", f"k1:{_k(1)[:-4]}", "k1:" + base64.b64encode(b"x" * 16).decode()])
-def test_bad_or_missing_keys_exit_2_without_echoing_them(env, monkeypatch, capsys, value) -> None:
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "",
+        "garbage",
+        f"k1:{_k(1)[:-4]}",
+        "k1:" + base64.b64encode(b"x" * 16).decode(),
+    ],
+)
+def test_bad_or_missing_keys_exit_2_without_echoing_them(
+    env, monkeypatch, capsys, value
+) -> None:
     if value is None:
         monkeypatch.delenv("CANVAS_TOKEN_KEYS")
     else:
@@ -172,7 +206,8 @@ def test_corrupt_row_in_rotate_is_exit_2(env, monkeypatch, capsys) -> None:
     store = _seed(env)
     with raw_connection(store) as conn:
         conn.execute(
-            "UPDATE canvas_tokens SET ciphertext = X'00' WHERE principal_key = ?", (acct_key(OID_B),)
+            "UPDATE canvas_credentials SET ciphertext = ? WHERE account_id = ?",
+            (b"\x00" * 40, acct_key(OID_B)),
         )
     monkeypatch.setenv("CANVAS_TOKEN_KEYS", f"k2:{KEY2},k1:{KEY1}")
     # initialize() only probe-decrypts one row per key; make the probe row good.
@@ -193,46 +228,68 @@ def test_runs_as_a_module(env) -> None:
     child_env["PYTHONUTF8"] = "1"
     result = subprocess.run(
         [sys.executable, "-m", "canvas_mcp.core.selfhost.token_admin", "check"],
-        capture_output=True, text=True, env=child_env, timeout=60, encoding="utf-8",
+        capture_output=True,
+        text=True,
+        env=child_env,
+        timeout=60,
+        encoding="utf-8",
     )
     assert result.returncode == 0, result.stderr
     assert "rows: 2" in result.stdout
     _no_secrets(result.stdout, result.stderr)
 
 
-def test_list_shows_the_canvas_host_and_dash_for_legacy_rows(env, capsys) -> None:
+def test_list_shows_each_native_canvas_host(env, capsys) -> None:
     store = _seed(env)
-    store_put(store,
-        tenant_id=TID, object_id=OID_B, api_token=TOKEN_B, canvas_user_id="2",
-        canvas_user_name="Bob", entra_display_name="Bob", entra_upn="bob@example.test",
+    store_put(
+        store,
+        tenant_id=TID,
+        object_id=OID_B,
+        api_token=TOKEN_B,
+        canvas_user_id="2",
+        canvas_user_name="Bob",
+        entra_display_name="Bob",
+        entra_upn="bob@example.test",
         canvas_host="canvas.school-b.edu",
     )
     assert token_admin.main(["list"]) == 0
     captured = capsys.readouterr()
     rows = {line.split("\t")[1]: line.split("\t") for line in captured.out.splitlines()}
     assert all(len(r) == 7 for r in rows.values())
-    assert rows[OID_A][5] == "-"
+    assert rows[OID_A][5] == "canvas.example.edu"
     assert rows[OID_B][5] == "canvas.school-b.edu"
     _no_secrets(captured.out, captured.err)
 
 
 def test_check_reports_schools_in_use(env, capsys) -> None:
     store = _seed(env)
-    store_put(store,
-        tenant_id=TID, object_id=OID_B, api_token=TOKEN_B, canvas_user_id="2",
-        canvas_user_name="Bob", entra_display_name="Bob", entra_upn="bob@example.test",
+    store_put(
+        store,
+        tenant_id=TID,
+        object_id=OID_B,
+        api_token=TOKEN_B,
+        canvas_user_id="2",
+        canvas_user_name="Bob",
+        entra_display_name="Bob",
+        entra_upn="bob@example.test",
         canvas_host="canvas.school-b.edu",
     )
     assert token_admin.main(["check"]) == 0
     out = capsys.readouterr().out
-    assert "schools in use: 1 (+1 legacy row(s))" in out
+    assert "schools in use: 2" in out
 
 
 def test_rotate_with_mixed_rows_keeps_working(env, monkeypatch, capsys) -> None:
     store = _seed(env)
-    store_put(store,
-        tenant_id=TID, object_id=OID_B, api_token=TOKEN_B, canvas_user_id="2",
-        canvas_user_name="Bob", entra_display_name="Bob", entra_upn="bob@example.test",
+    store_put(
+        store,
+        tenant_id=TID,
+        object_id=OID_B,
+        api_token=TOKEN_B,
+        canvas_user_id="2",
+        canvas_user_name="Bob",
+        entra_display_name="Bob",
+        entra_upn="bob@example.test",
         canvas_host="canvas.school-b.edu",
     )
     monkeypatch.setenv("CANVAS_TOKEN_KEYS", f"k2:{KEY2},k1:{KEY1}")
@@ -246,9 +303,7 @@ def test_rotate_with_mixed_rows_keeps_working(env, monkeypatch, capsys) -> None:
 
 
 @pytest.mark.sqlite_only
-
-
-def test_a_version_1_database_is_migrated_by_the_cli_and_stays_manageable(env, monkeypatch, capsys) -> None:
+def test_a_pre_v1_database_is_refused_without_changes(env, monkeypatch, capsys) -> None:
     import sqlite3
 
     path = token_db_path(env)
@@ -258,7 +313,9 @@ def test_a_version_1_database_is_migrated_by_the_cli_and_stays_manageable(env, m
     kid, nonce, ct = ring.encrypt(TOKEN_A.encode(), aad)
     conn = sqlite3.connect(str(path), isolation_level=None)
     try:
-        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID")
+        conn.execute(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID"
+        )
         conn.execute(
             "CREATE TABLE canvas_tokens ("
             " tenant_id TEXT NOT NULL, object_id TEXT NOT NULL, key_id TEXT NOT NULL,"
@@ -276,17 +333,12 @@ def test_a_version_1_database_is_migrated_by_the_cli_and_stays_manageable(env, m
     finally:
         conn.close()
 
-    monkeypatch.setenv("CANVAS_TOKEN_KEYS", f"k2:{KEY2},k1:{KEY1}")
-    assert token_admin.main(["rotate"]) == 0
-    # The upgrade to the account model already re-encrypted the row under the active key.
-    assert "re-encrypted 0 row(s)" in capsys.readouterr().out
-    monkeypatch.setenv("CANVAS_TOKEN_KEYS", f"k2:{KEY2}")
-    assert token_admin.main(["list"]) == 0
-    row = capsys.readouterr().out.splitlines()[0].split("\t")
-    assert row[:2] == [TID, OID_A] and row[5] == "-" and row[6].startswith("acct:")
-    assert token_admin.main(["revoke", TID, OID_A]) == 0
-    assert "revoked 1 enrollment" in capsys.readouterr().out
-    assert token_admin.main(["revoke", TID, OID_A]) == 1
+    with sqlite3.connect(path) as conn:
+        before = list(conn.iterdump())
+    assert token_admin.main(["rotate"]) == token_admin.EXIT_CONFIG
+    assert "pre-v1" in capsys.readouterr().err
+    with sqlite3.connect(path) as conn:
+        assert list(conn.iterdump()) == before
 
 
 # -- disable / enable: the authorization decision --------------------------------
@@ -299,93 +351,101 @@ def test_disable_blocks_and_survives_deleting_the_enrollment(env, capsys) -> Non
     from canvas_mcp.core.selfhost.token_store import PrincipalDisabledError
 
     store = _seed(env)
-    assert token_admin.main(["disable", TID.upper(), OID_A.upper()]) == 0
+    assert token_admin.main(["disable", KEY_A]) == 0
     assert "disabled 1 user" in capsys.readouterr().out
     assert store.get_principal_status(KEY_A).disabled
-    assert store.get_principal_status(KEY_A).disabled_by == "operator"
-    assert token_admin.main(["remove", TID, OID_A]) == 0  # remove the token as well
+    assert store.get_principal_status(KEY_A).disabled_by is None
+    assert token_admin.main(["remove", KEY_A]) == 0  # remove the token as well
     capsys.readouterr()
     assert store.get_principal_status(KEY_A).disabled  # still disabled
     with pytest.raises(PrincipalDisabledError):
-        store_put(store,
-            tenant_id=TID, object_id=OID_A, api_token=TOKEN_A, canvas_user_id="1",
-            canvas_user_name="n", entra_display_name="n", entra_upn="n@example.test",
+        store_put(
+            store,
+            tenant_id=TID,
+            object_id=OID_A,
+            api_token=TOKEN_A,
+            canvas_user_id="1",
+            canvas_user_name="n",
+            entra_display_name="n",
+            entra_upn="n@example.test",
         )
 
 
 def test_disable_twice_and_enable(env, capsys) -> None:
     store = _seed(env)
-    assert token_admin.main(["disable", TID, OID_A]) == 0
-    assert token_admin.main(["disable", TID, OID_A]) == 0
+    assert token_admin.main(["disable", KEY_A]) == 0
+    assert token_admin.main(["disable", KEY_A]) == 0
     assert "already disabled" in capsys.readouterr().out
-    assert token_admin.main(["enable", TID, OID_A]) == 0
+    assert token_admin.main(["enable", KEY_A]) == 0
     assert "enabled 1 user" in capsys.readouterr().out
     assert not store.get_principal_status(KEY_A).disabled
-    assert token_admin.main(["enable", TID, OID_A]) == 1  # nothing to enable
+    assert token_admin.main(["enable", KEY_A]) == 1  # nothing to enable
     assert "not disabled" in capsys.readouterr().out
 
 
 def test_disable_and_enable_reject_non_guids(env, capsys) -> None:
     _seed(env)
-    assert token_admin.main(["disable", "nope", OID_A]) == 2
-    assert token_admin.main(["enable", TID, "nope"]) == 2
-    assert "GUID" in capsys.readouterr().err
+    assert token_admin.main(["disable", "nope"]) == 2
+    assert token_admin.main(["enable", "nope"]) == 2
+    assert "UUID" in capsys.readouterr().err
 
 
 def test_the_last_owner_needs_the_break_glass_flag(env, capsys) -> None:
     store = _seed(env)
     assert store.promote_owner(KEY_A)
-    assert token_admin.main(["disable", TID, OID_A]) == 3
+    assert token_admin.main(["disable", KEY_A]) == 3
     assert "last usable owner" in capsys.readouterr().err
     assert not store.get_principal_status(KEY_A).disabled
     assert store.promote_owner(KEY_B)
-    assert token_admin.main(["disable", TID, OID_A]) == 0  # a second owner exists
+    assert token_admin.main(["disable", KEY_A]) == 0  # a second owner exists
     capsys.readouterr()
-    assert token_admin.main(["disable", TID, OID_B]) == 3  # B is the last one now
+    assert token_admin.main(["disable", KEY_B]) == 3  # B is the last one now
     capsys.readouterr()
-    assert token_admin.main(["disable", TID, OID_B, "--allow-last-owner"]) == 0
+    assert token_admin.main(["disable", KEY_B, "--allow-last-owner"]) == 0
     assert store.count_active_owners() == 0
 
 
 def test_access_lists_disabled_users_and_owners_without_secrets(env, capsys) -> None:
     store = _seed(env)
     assert store.promote_owner(KEY_B)
-    token_admin.main(["disable", TID, OID_A])
+    token_admin.main(["disable", KEY_A])
     capsys.readouterr()
     assert token_admin.main(["access"]) == 0
     captured = capsys.readouterr()
     rows = {r[0]: r for r in (line.split("\t") for line in captured.out.splitlines())}
     assert set(rows) == {KEY_A, KEY_B}
     assert rows[KEY_A][1:3] == ["disabled", "-"]
-    assert rows[KEY_A][4:6] == ["operator", "operator_disabled"]
+    assert rows[KEY_A][4:6] == ["-", "operator_disabled"]
     assert rows[KEY_B][1:3] == ["active", "owner"]
-    # The last column maps the account back to the key of the earlier releases.
-    assert rows[KEY_A][8] == f"entra:{TID}:{OID_A}" and rows[KEY_B][8] == f"entra:{TID}:{OID_B}"
+    assert all(len(row) == 8 for row in rows.values())
     _no_secrets(captured.out, captured.err)
 
 
 def test_history_records_the_cli_transitions(env, capsys) -> None:
     _seed(env)
-    token_admin.main(["disable", TID, OID_A])
-    token_admin.main(["enable", TID, OID_A])
+    token_admin.main(["disable", KEY_A])
+    token_admin.main(["enable", KEY_A])
     capsys.readouterr()
-    assert token_admin.main(["history", TID, OID_A]) == 0
+    assert token_admin.main(["history", KEY_A]) == 0
     lines = [line.split("\t") for line in capsys.readouterr().out.splitlines()]
-    assert [(r[2], r[3]) for r in lines] == [
-        ("enabled", "operator"),
-        ("disabled", "operator"),
-        ("account_created", "operator"),
-    ]
-    assert lines[0][6] == f"entra:{TID}:{OID_A}"
+    actions = [r[2] for r in lines]
+    assert actions[:2] == ["account_enabled", "account_disabled"]
+    assert "account_created_by_operator" in actions
+    assert all(len(row) == 6 for row in lines)
+    assert all(row[1] == KEY_A for row in lines[:2])
     assert token_admin.main(["history"]) == 0
-    assert len(capsys.readouterr().out.splitlines()) == 4  # the first account, the second account, and the two CLI changes
-    assert token_admin.main(["history", TID]) == 1  # a lone GUID names an account, and none has it
+    all_lines = capsys.readouterr().out.splitlines()
+    assert len(all_lines) > len(lines)
+    assert (
+        token_admin.main(["history", TID]) == 0
+    )  # retained audit can outlive an account
+    assert capsys.readouterr().out == ""
 
 
 def test_check_reports_the_access_state(env, capsys) -> None:
     store = _seed(env)
     assert store.promote_owner(KEY_B)
-    token_admin.main(["disable", TID, OID_A])
+    token_admin.main(["disable", KEY_A])
     capsys.readouterr()
     assert token_admin.main(["check"]) == 0
     out = capsys.readouterr().out
@@ -393,30 +453,34 @@ def test_check_reports_the_access_state(env, capsys) -> None:
     assert "accounts: 2 (active 1, pending 0, disabled 1)" in out
 
 
-def test_remove_and_revoke_only_delete_the_token_and_say_so(env, capsys) -> None:
+def test_remove_only_deletes_the_token_and_says_so(env, capsys) -> None:
     store = _seed(env)
-    assert token_admin.main(["remove", TID, OID_A]) == 0
+    assert token_admin.main(["remove", KEY_A]) == 0
     captured = capsys.readouterr()
     assert "removed 1 enrollment" in captured.out
     assert "can enroll again" in captured.err and "disable" in captured.err
     assert not store.get_principal_status(KEY_A).disabled
-    assert token_admin.main(["revoke", TID, OID_B]) == 0
-    assert "revoked 1 enrollment" in capsys.readouterr().out
+    assert token_admin.main(["remove", KEY_B]) == 0
+    assert "removed 1 enrollment" in capsys.readouterr().out
 
 
 def test_a_stale_owner_flag_is_visible_to_the_operator(env, capsys) -> None:
     """A former owner who never signs in again still counts; the CLI says so and shows when."""
     store = _seed(env)
     assert store.promote_owner(KEY_A)
-    assert store.promote_owner(KEY_B)  # B's role is removed later; B never signs in again
-    assert token_admin.main(["disable", TID, OID_A]) == 0  # the guard counts the stale B
+    assert store.promote_owner(
+        KEY_B
+    )  # B's role is removed later; B never signs in again
+    assert token_admin.main(["disable", KEY_A]) == 0  # the guard counts the stale B
     capsys.readouterr()
     assert token_admin.main(["check"]) == 0
     assert "owner_seen_at" in capsys.readouterr().out
     assert token_admin.main(["access"]) == 0
     rows = [line.split("	") for line in capsys.readouterr().out.splitlines()]
     by_key = {r[0]: r for r in rows}
-    assert len(by_key[KEY_B]) == 9 and by_key[KEY_B][7].endswith("Z")  # owner_seen_at, ISO
-    assert token_admin.main(["disable", TID, OID_B]) == 3
+    assert len(by_key[KEY_B]) == 8 and by_key[KEY_B][7].endswith(
+        "Z"
+    )  # owner_seen_at, ISO
+    assert token_admin.main(["disable", KEY_B]) == 3
     err = capsys.readouterr().err
     assert "owner_seen_at" in err and "--allow-last-owner" in err

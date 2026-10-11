@@ -14,6 +14,7 @@ from canvas_mcp.core.selfhost.app import validate_selfhost_startup
 from canvas_mcp.core.selfhost.settings import load_selfhost_settings
 
 from .conftest import CLIENT, TENANT, store_put
+from .spa_fixture import make_dist
 
 SECRETS = {
     "ENTRA_CLIENT_SECRET": "entra-client-secret-0123456789",
@@ -22,16 +23,27 @@ SECRETS = {
     "CANVAS_TOKEN_KEYS": "k1:" + base64.b64encode(bytes(32)).decode(),
 }
 LEGACY_VARS = (
-    "CANVAS_API_TOKEN", "MCP_ACCESS_KEYS", "ENTRA_AUTH_ENABLED", "MCP_ALLOW_UNAUTHENTICATED",
-    "ACCESS_REQUEST_ENABLED", "EXECUTE_TYPESCRIPT_ENABLED", "ALLOWED_WRITE_TOOLS",
-    "STUDENT_WRITE_TOOLS", "CANVAS_ROLE",
+    "CANVAS_API_TOKEN",
+    "MCP_ACCESS_KEYS",
+    "ENTRA_AUTH_ENABLED",
+    "MCP_ALLOW_UNAUTHENTICATED",
+    "ACCESS_REQUEST_ENABLED",
+    "EXECUTE_TYPESCRIPT_ENABLED",
+    "ALLOWED_WRITE_TOOLS",
+    "STUDENT_WRITE_TOOLS",
+    "CANVAS_ROLE",
 )
 
 
 @pytest.fixture
 def entra_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
     """A complete, valid selfhost environment rooted in tmp_path."""
-    for name in LEGACY_VARS:
+    for name in (
+        *LEGACY_VARS,
+        "CANVAS_API_URL",
+        "CANVAS_FEATURED_SCHOOLS",
+        "CANVAS_SCHOOL_SEARCH",
+    ):
         monkeypatch.delenv(name, raising=False)
     home = tmp_path / "fastmcp"
     data = tmp_path / "data"
@@ -40,10 +52,14 @@ def entra_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]
         "PUBLIC_BASE_URL": "https://canvas.example.test",
         "ENTRA_TENANT_ID": TENANT,
         "ENTRA_CLIENT_ID": CLIENT,
-        "CANVAS_API_URL": "https://canvas.example.edu",
+        "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "web")),
         "FASTMCP_HOME": str(home),
         "SELFHOST_DATA_DIR": str(data),
-        **SECRETS,
+        **{
+            name: value
+            for name, value in SECRETS.items()
+            if name != "OAUTH_JWT_SIGNING_KEY"
+        },
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -73,7 +89,9 @@ class TestRefusals:
         assert _run_main(entra_env["monkeypatch"]).code == 1
         assert "streamable-http" in caplog.text
 
-    @pytest.mark.parametrize("flag", [["--test"], ["--list-grants"], ["--revoke", "oid"]])
+    @pytest.mark.parametrize(
+        "flag", [["--test"], ["--list-grants"], ["--revoke", "oid"]]
+    )
     def test_admin_and_test_commands_are_refused(self, entra_env, flag, caplog):
         assert _run_main(entra_env["monkeypatch"], *HTTP, *flag).code == 1
         assert "not available" in caplog.text
@@ -83,10 +101,18 @@ class TestRefusals:
         assert _run_main(entra_env["monkeypatch"], *HTTP).code == 1
         assert "MCP_AUTH_MODE" in caplog.text
 
-    @pytest.mark.parametrize("name", [
-        "PUBLIC_BASE_URL", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "ENTRA_CLIENT_SECRET",
-        "OAUTH_JWT_SIGNING_KEY", "ACCOUNT_SESSION_SECRET", "CANVAS_TOKEN_KEYS", "FASTMCP_HOME",
-    ])
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "PUBLIC_BASE_URL",
+            "ENTRA_TENANT_ID",
+            "ENTRA_CLIENT_ID",
+            "ENTRA_CLIENT_SECRET",
+            "ACCOUNT_SESSION_SECRET",
+            "CANVAS_TOKEN_KEYS",
+            "ACCOUNT_WEB_DIST",
+        ],
+    )
     def test_a_missing_required_variable(self, entra_env, name, caplog):
         entra_env["monkeypatch"].delenv(name)
         assert _run_main(entra_env["monkeypatch"], *HTTP).code == 1
@@ -103,16 +129,19 @@ class TestRefusals:
         assert "short" not in caplog.text.replace("shortly", "")
         assert SECRETS["OAUTH_JWT_SIGNING_KEY"] not in caplog.text
 
-    @pytest.mark.parametrize(("name", "value"), [
-        ("CANVAS_API_TOKEN", "a-server-side-canvas-token-1234567890"),
-        ("MCP_ACCESS_KEYS", "shared-access-key-1234567890"),
-        ("ENTRA_AUTH_ENABLED", "true"),
-        ("MCP_ALLOW_UNAUTHENTICATED", "true"),
-        ("ACCESS_REQUEST_ENABLED", "true"),
-        ("EXECUTE_TYPESCRIPT_ENABLED", "true"),
-        ("ALLOWED_WRITE_TOOLS", "execute_typescript"),
-        ("CANVAS_API_URL", "http://canvas.example.edu"),
-    ])
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("CANVAS_API_TOKEN", "a-server-side-canvas-token-1234567890"),
+            ("MCP_ACCESS_KEYS", "shared-access-key-1234567890"),
+            ("ENTRA_AUTH_ENABLED", "true"),
+            ("MCP_ALLOW_UNAUTHENTICATED", "true"),
+            ("ACCESS_REQUEST_ENABLED", "true"),
+            ("EXECUTE_TYPESCRIPT_ENABLED", "true"),
+            ("ALLOWED_WRITE_TOOLS", "execute_typescript"),
+            ("CANVAS_API_URL", "http://canvas.example.edu"),
+        ],
+    )
     def test_forbidden_legacy_settings(self, entra_env, name, value, caplog):
         mp = entra_env["monkeypatch"]
         mp.setenv(name, value)
@@ -121,8 +150,12 @@ class TestRefusals:
         if value.endswith("1234567890"):  # the secret-looking ones
             assert value not in caplog.text
 
-    @pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes", "on", " True ", "enabled", "2"])
-    def test_fastmcp_ssrf_trust_proxy_is_refused_for_any_truthy_value(self, entra_env, value, caplog):
+    @pytest.mark.parametrize(
+        "value", ["true", "TRUE", "1", "yes", "on", " True ", "enabled", "2"]
+    )
+    def test_fastmcp_ssrf_trust_proxy_is_refused_for_any_truthy_value(
+        self, entra_env, value, caplog
+    ):
         """The proxy-trust switch turns off FastMCP's DNS and private-address checks
         on the CIMD and JWKS fetches unauthenticated clients can trigger."""
         mp = entra_env["monkeypatch"]
@@ -131,21 +164,21 @@ class TestRefusals:
         assert "FASTMCP_SSRF_TRUST_PROXY" in caplog.text
         assert "must not be set" in caplog.text
 
-    def test_a_missing_canvas_url(self, entra_env):
+    def test_startup_does_not_require_a_global_canvas_url_or_fastmcp_home(
+        self, entra_env, caplog
+    ):
         mp = entra_env["monkeypatch"]
-        mp.delenv("CANVAS_API_URL")
-        assert _run_main(mp, *HTTP).code == 1
+        mp.delenv("CANVAS_API_URL", raising=False)
+        mp.delenv("FASTMCP_HOME", raising=False)
+        mp.delenv("OAUTH_JWT_SIGNING_KEY", raising=False)
+        assert _serve(entra_env, caplog)["app"] is not None
 
-    def test_fastmcp_home_must_be_the_one_fastmcp_started_with(self, entra_env, tmp_path, caplog):
-        mp = entra_env["monkeypatch"]
-        mp.setattr(fastmcp.settings, "home", tmp_path / "somewhere-else")
-        assert _run_main(mp, *HTTP).code == 1
-        assert "FASTMCP_HOME" in caplog.text
-
-    def test_a_relative_fastmcp_home(self, entra_env):
-        mp = entra_env["monkeypatch"]
-        mp.setenv("FASTMCP_HOME", "relative/dir")
-        assert _run_main(mp, *HTTP).code == 1
+    def test_an_invalid_react_bundle_is_refused(self, entra_env, tmp_path, caplog):
+        entra_env["monkeypatch"].setenv(
+            "ACCOUNT_WEB_DIST", str(tmp_path / "missing-ui")
+        )
+        assert _run_main(entra_env["monkeypatch"], *HTTP).code == 1
+        assert "ACCOUNT_WEB_DIST" in caplog.text
 
     def test_an_unwritable_data_dir(self, entra_env, tmp_path, caplog):
         blocker = tmp_path / "a-file"
@@ -157,12 +190,21 @@ class TestRefusals:
     def test_the_keyring_must_cover_every_key_id_in_use(self, entra_env, caplog):
         token_store = pytest.importorskip("canvas_mcp.core.selfhost.token_store")
         settings = load_selfhost_settings()
-        store = token_store.TokenStore(settings.token_db_path, token_store.Keyring.parse(SECRETS["CANVAS_TOKEN_KEYS"]))
+        store = token_store.TokenStore(
+            settings.token_db_path,
+            token_store.Keyring.parse(SECRETS["CANVAS_TOKEN_KEYS"]),
+        )
         store.initialize()
-        store_put(store,
-            tenant_id=TENANT, object_id="aaaaaaaa-0000-4000-8000-00000000000a",
-            api_token="canvas-token-1234567890abcdef", canvas_user_id="1",
-            canvas_user_name="A", entra_display_name="A", entra_upn="a@example.test",
+        store_put(
+            store,
+            tenant_id=TENANT,
+            object_id="aaaaaaaa-0000-4000-8000-00000000000a",
+            api_token="canvas-token-1234567890abcdef",
+            canvas_user_id="1",
+            canvas_user_name="A",
+            entra_display_name="A",
+            entra_upn="a@example.test",
+            canvas_host="canvas.example.edu",
         )
         other = "k2:" + base64.b64encode(bytes(range(32))).decode()
         entra_env["monkeypatch"].setenv("CANVAS_TOKEN_KEYS", other)
@@ -171,7 +213,9 @@ class TestRefusals:
         assert "k1" in caplog.text
         assert other.split(":")[1] not in caplog.text
 
-    def test_a_corrupt_token_database_is_a_logged_refusal_not_a_traceback(self, entra_env, caplog):
+    def test_a_corrupt_token_database_is_a_logged_refusal_not_a_traceback(
+        self, entra_env, caplog
+    ):
         pytest.importorskip("canvas_mcp.core.selfhost.token_store")
         db = load_selfhost_settings().token_db_path
         db.parent.mkdir(parents=True, exist_ok=True)
@@ -181,7 +225,9 @@ class TestRefusals:
         assert "token database" in caplog.text
         assert "not a valid database" in caplog.text
 
-    def test_prepare_selfhost_reports_a_corrupt_database_as_a_config_error(self, entra_env):
+    def test_prepare_selfhost_reports_a_corrupt_database_as_a_config_error(
+        self, entra_env
+    ):
         pytest.importorskip("canvas_mcp.core.selfhost.token_store")
         from canvas_mcp.core.selfhost.app import prepare_selfhost
         from canvas_mcp.core.selfhost.settings import SelfhostConfigError
@@ -240,7 +286,7 @@ class TestValidateStartup:
     def test_a_valid_environment_has_no_problems(self, entra_env):
         config = config_module.get_config()
         assert validate_selfhost_startup(config, load_selfhost_settings()) == []
-        assert entra_env["home"].is_dir() and entra_env["data"].is_dir()
+        assert entra_env["data"].is_dir()
 
     def test_legacy_flags_each_produce_a_problem(self, entra_env):
         mp = entra_env["monkeypatch"]
@@ -248,7 +294,9 @@ class TestValidateStartup:
         mp.setenv("MCP_ACCESS_KEYS", "key-1234567890abcdef-1234")
         mp.setenv("ENTRA_AUTH_ENABLED", "true")
         config_module.reset_config()
-        problems = validate_selfhost_startup(config_module.get_config(), load_selfhost_settings())
+        problems = validate_selfhost_startup(
+            config_module.get_config(), load_selfhost_settings()
+        )
         text = " ".join(problems)
         for name in ("CANVAS_API_TOKEN", "MCP_ACCESS_KEYS", "ENTRA_AUTH_ENABLED"):
             assert name in text
@@ -259,30 +307,48 @@ class TestSsrfTrustProxy:
     @pytest.mark.parametrize("value", ["", "false", "FALSE", "0", "no", "off"])
     def test_an_explicit_false_or_empty_value_is_fine(self, entra_env, value):
         entra_env["monkeypatch"].setenv("FASTMCP_SSRF_TRUST_PROXY", value)
-        assert validate_selfhost_startup(config_module.get_config(), load_selfhost_settings()) == []
+        assert (
+            validate_selfhost_startup(
+                config_module.get_config(), load_selfhost_settings()
+            )
+            == []
+        )
 
     def test_unset_is_fine(self, entra_env):
         entra_env["monkeypatch"].delenv("FASTMCP_SSRF_TRUST_PROXY", raising=False)
-        assert validate_selfhost_startup(config_module.get_config(), load_selfhost_settings()) == []
+        assert (
+            validate_selfhost_startup(
+                config_module.get_config(), load_selfhost_settings()
+            )
+            == []
+        )
 
     def test_the_message_names_the_variable_and_never_echoes_the_value(self, entra_env):
         entra_env["monkeypatch"].setenv("FASTMCP_SSRF_TRUST_PROXY", "definitely-on")
-        problems = validate_selfhost_startup(config_module.get_config(), load_selfhost_settings())
+        problems = validate_selfhost_startup(
+            config_module.get_config(), load_selfhost_settings()
+        )
         assert len(problems) == 1
         assert "FASTMCP_SSRF_TRUST_PROXY" in problems[0]
         assert "definitely-on" not in problems[0]
 
-    def test_the_effective_fastmcp_setting_counts_even_without_the_variable(self, entra_env):
+    def test_the_effective_fastmcp_setting_counts_even_without_the_variable(
+        self, entra_env
+    ):
         """FastMCP reads the variable once at import; the live setting is what decides."""
         mp = entra_env["monkeypatch"]
         mp.delenv("FASTMCP_SSRF_TRUST_PROXY", raising=False)
         mp.setattr(fastmcp.settings, "ssrf_trust_proxy", True)
-        problems = validate_selfhost_startup(config_module.get_config(), load_selfhost_settings())
+        problems = validate_selfhost_startup(
+            config_module.get_config(), load_selfhost_settings()
+        )
         assert any("FASTMCP_SSRF_TRUST_PROXY" in problem for problem in problems)
 
 
 class TestHappyPath:
-    def test_serves_through_the_selfhost_runner_with_the_gate_installed(self, entra_env, caplog):
+    def test_serves_through_the_selfhost_runner_with_the_gate_installed(
+        self, entra_env, caplog
+    ):
         pytest.importorskip("canvas_mcp.core.selfhost.token_store")
         pytest.importorskip("canvas_mcp.core.selfhost.account_core")
         mp = entra_env["monkeypatch"]
@@ -336,8 +402,12 @@ class TestRunner:
         server_module._run_selfhost_http_server(sentinel, "127.0.0.1", 8819)  # type: ignore[arg-type]
         assert captured["app"] is sentinel
         assert captured["kwargs"] == {
-            "host": "127.0.0.1", "port": 8819, "log_level": "info", "access_log": False,
-            "proxy_headers": False, "server_header": False,
+            "host": "127.0.0.1",
+            "port": 8819,
+            "log_level": "info",
+            "access_log": False,
+            "proxy_headers": False,
+            "server_header": False,
         }
         assert captured["served"] is True
 
@@ -383,96 +453,28 @@ def _serve(entra_env, caplog) -> dict[str, Any]:
 
 
 class TestSchoolStartup:
-    def test_featured_only_boots_without_a_canvas_url(self, entra_env, caplog, monkeypatch):
-        import socket
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("CANVAS_API_URL", "https://canvas.example.edu"),
+            ("CANVAS_FEATURED_SCHOOLS", "canvas.school-a.edu"),
+            ("CANVAS_SCHOOL_SEARCH", "true"),
+        ],
+    )
+    def test_removed_school_environment_is_refused_with_admin_direction(
+        self, entra_env, name, value, caplog
+    ):
+        entra_env["monkeypatch"].setenv(name, value)
+        assert _run_main(entra_env["monkeypatch"], *HTTP).code == 1
+        assert name in caplog.text
+        assert "removed in v1" in caplog.text
 
-        def no_dns(*_a, **_k):
-            raise AssertionError("startup must not resolve names")
-
-        monkeypatch.setattr(socket, "getaddrinfo", no_dns)
-        mp = entra_env["monkeypatch"]
-        mp.delenv("CANVAS_API_URL")
-        mp.setenv("CANVAS_FEATURED_SCHOOLS", "canvas.school-a.edu=School A,canvas.school-b.edu")
-        captured = _serve(entra_env, caplog)
-        assert captured["port"] == 9912 and captured["app"] is not None
-
-    def test_search_only_boots_without_a_canvas_url(self, entra_env, caplog):
-        mp = entra_env["monkeypatch"]
-        mp.delenv("CANVAS_API_URL")
-        mp.setenv("CANVAS_SCHOOL_SEARCH", "true")
+    def test_a_new_database_can_boot_before_schools_are_configured(
+        self, entra_env, caplog
+    ):
         assert _serve(entra_env, caplog)["app"] is not None
 
-    def test_the_default_school_plus_featured_boots(self, entra_env, caplog):
-        entra_env["monkeypatch"].setenv("CANVAS_FEATURED_SCHOOLS", "canvas.school-a.edu")
-        assert _serve(entra_env, caplog)["app"] is not None
-
-    def test_nothing_configured_is_refused(self, entra_env, caplog):
-        entra_env["monkeypatch"].delenv("CANVAS_API_URL")
-        assert _run_main(entra_env["monkeypatch"], *HTTP).code == 1
-        assert "CANVAS_API_URL is required unless" in caplog.text
-        assert "CANVAS_FEATURED_SCHOOLS" in caplog.text
-
-    def test_search_off_and_nothing_else_is_refused(self, entra_env):
-        mp = entra_env["monkeypatch"]
-        mp.delenv("CANVAS_API_URL")
-        mp.setenv("CANVAS_SCHOOL_SEARCH", "false")
-        assert _run_main(mp, *HTTP).code == 1
-
-    def test_a_cleartext_default_is_refused_even_with_featured_schools(self, entra_env, caplog):
-        mp = entra_env["monkeypatch"]
-        mp.setenv("CANVAS_API_URL", "http://canvas.example.edu")
-        mp.setenv("CANVAS_FEATURED_SCHOOLS", "canvas.school-a.edu")
-        assert _run_main(mp, *HTTP).code == 1
-        assert "CANVAS_API_URL must use https" in caplog.text
-
-    def test_a_scheme_less_default_is_refused(self, entra_env, caplog):
-        entra_env["monkeypatch"].setenv("CANVAS_API_URL", "canvas.example.edu")
-        assert _run_main(entra_env["monkeypatch"], *HTTP).code == 1
-        assert "CANVAS_API_URL" in caplog.text
-
-    @pytest.mark.parametrize("host", ["canvas.local", "db.internal", "localhost.localdomain", "x.test"])
-    def test_a_local_featured_host_is_refused(self, entra_env, host, caplog):
-        mp = entra_env["monkeypatch"]
-        mp.setenv("CANVAS_FEATURED_SCHOOLS", f"canvas.school-a.edu,{host}")
-        assert _run_main(mp, *HTTP).code == 1
-        assert "CANVAS_FEATURED_SCHOOLS entry 2 is not a public address" in caplog.text
-        assert host not in caplog.text
-
-    def test_a_featured_entry_equal_to_the_default_host_is_fine(self, entra_env):
-        """The default school is the operator's own pin and keeps its exemption."""
-        mp = entra_env["monkeypatch"]
-        mp.setenv("CANVAS_API_URL", "https://canvas.corp.lan")
-        mp.setenv("CANVAS_FEATURED_SCHOOLS", "canvas.corp.lan=Our Canvas")
-        config_module.reset_config()
-        assert validate_selfhost_startup(config_module.get_config(), load_selfhost_settings()) == []
-
-    def test_invalid_school_settings_are_refused_at_load(self, entra_env, caplog):
-        mp = entra_env["monkeypatch"]
-        mp.setenv("CANVAS_FEATURED_SCHOOLS", "https://canvas.school-a.edu")
-        mp.setenv("CANVAS_SCHOOL_SEARCH", "maybe")
-        assert _run_main(mp, *HTTP).code == 1
-        assert "CANVAS_FEATURED_SCHOOLS entry 1" in caplog.text
-        assert "CANVAS_SCHOOL_SEARCH must be true or false" in caplog.text
-
-    def test_config_shows_the_schools_summary(self, entra_env, capsys):
-        mp = entra_env["monkeypatch"]
-        mp.setenv("CANVAS_FEATURED_SCHOOLS", "canvas.school-a.edu,canvas.school-b.edu=B")
-        mp.setenv("CANVAS_SCHOOL_SEARCH", "true")
-        assert _run_main(mp, *HTTP, "--config").code == 0
-        out = capsys.readouterr().err
-        assert "Canvas schools: featured=canvas.school-a.edu, canvas.school-b.edu, search=on" in out
-
-    def test_config_without_schools_or_url(self, entra_env, capsys):
-        mp = entra_env["monkeypatch"]
-        mp.delenv("CANVAS_API_URL")
-        mp.setenv("CANVAS_SCHOOL_SEARCH", "true")
-        assert _run_main(mp, *HTTP, "--config").code == 0
-        out = capsys.readouterr().err
-        assert "Canvas API URL: (none)" in out
-        assert "featured=none, search=on" in out
-
-    def test_the_pinned_default_summary_is_unchanged(self, entra_env, capsys):
+    def test_config_points_to_database_managed_school_settings(self, entra_env, capsys):
         assert _run_main(entra_env["monkeypatch"], *HTTP, "--config").code == 0
         out = capsys.readouterr().err
-        assert "Canvas API URL: https://canvas.example.edu/api/v1" in out
-        assert "featured=none, search=off" in out
+        assert "Canvas schools and public sign-in names: database-managed" in out

@@ -243,7 +243,11 @@ class Stack:
         return self.runtime.authz
 
     def account_of(self, user: User) -> str:
-        key = self.store.lookup_identity("entra", f"https://login.microsoftonline.com/{ENTRA_TENANT}/v2.0", user.oid.lower())
+        key = self.store.lookup_identity(
+            "entra",
+            f"https://login.microsoftonline.com/{ENTRA_TENANT}/v2.0",
+            user.oid.lower(),
+        )
         assert key is not None, "the user has no account yet"
         return str(key)
 
@@ -416,7 +420,9 @@ class Browser:
         self, user: User, response: httpx.Response, **claim_overrides: Any
     ) -> httpx.Response:
         """Given the redirect to Entra, 'sign in' as ``user`` and return the callback response."""
-        if response.status_code == 303 and response.headers["location"].startswith("/auth/login/entra"):
+        if response.status_code == 303 and response.headers["location"].startswith(
+            "/auth/login/entra"
+        ):
             response = self.get(response.headers["location"])
         assert response.status_code == 302, response.text
         location = urlsplit(response.headers["location"])
@@ -552,6 +558,7 @@ def _build(
     clock: Clock | None,
     tools: bool,
     account_options: Mapping[str, Any] | None = None,
+    register_tools: Callable[[FastMCP], None] | None = None,
 ) -> tuple[Any, Stack]:
     """The app and a Stack around it (without a client yet).
 
@@ -593,10 +600,24 @@ def _build(
             principal = get_request_principal()
             return principal.key if principal is not None else "anonymous"
 
+    tool_policy = None
+    if register_tools is not None:
+        import asyncio
+
+        from canvas_mcp.core.config import get_config
+        from canvas_mcp.core.selfhost.app import apply_disabled_tools
+        from canvas_mcp.core.tool_policy import apply_tool_policy, resolve_tool_policy
+
+        config = get_config()
+        register_tools(mcp)
+        tool_policy = resolve_tool_policy(config.allowed_write_tools, "http")
+        asyncio.run(apply_tool_policy(mcp, tool_policy))
+        asyncio.run(apply_disabled_tools(mcp, settings.disabled_tools))
     install_selfhost(
         mcp,
         runtime,
         config,
+        tool_policy=tool_policy,
         clock=clock,
         **{"login_transport": idp.net.transport, **dict(account_options or {})},
     )
@@ -613,9 +634,12 @@ def local_stack(
     clock: Clock | None = None,
     tools: bool = True,
     account_options: Mapping[str, Any] | None = None,
+    register_tools: Callable[[FastMCP], None] | None = None,
 ) -> Iterator[Stack]:
     """Start the app in local mode and yield the stack (a context manager: it stops the app)."""
-    app, stack = _build(tmp_path, monkeypatch, env, clock, tools, account_options)
+    app, stack = _build(
+        tmp_path, monkeypatch, env, clock, tools, account_options, register_tools
+    )
     with TestClient(app, base_url=BASE, follow_redirects=False) as client:
         stack.client = client
         stack.new_client = lambda: TestClient(

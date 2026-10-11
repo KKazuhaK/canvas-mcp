@@ -491,3 +491,43 @@ and the first v1 tag remain outstanding.
   still need their native ports. Focused results do not complete the handoff;
   real IdP/guest/Claude/reverse-proxy/multiday gates follow the owner's staging
   deployment. No registry image or release was published.
+
+## Complete native startup, operator and whole-stack regression checkpoint
+
+- Remaining repository, startup, operator CLI, credential gate, disabled-tool
+  and whole-stack regressions now exercise canonical native accounts and the
+  actual local authorization server. Two-user MCP tests include verified Entra
+  login, custody, encrypted PAT storage, CSRF, course-cache isolation, refresh
+  rotation/replay, PKCE, disable/enable epochs, credential replacement and
+  cross-account confirmation refusal. Legacy HTTP and stdio checks remain.
+- Write preference tests use the committed database version, with no TTL or
+  timed revocation assumptions. A new committed version reloads preferences;
+  concurrent reads cannot cache under a different version. Operator policy,
+  user opt-in, course policy and disabled tools retain their separate checks.
+- The root security registry tests use native verified identity and request
+  snapshots. Only the authenticated JSON account API delegates preference writes
+  to the account core. The static token scan excludes public schema constraint
+  names and the RFC 9207 discovery field; it still checks other long literals.
+- Retired proxy/HTML/TTL assumptions are replaced by their native security
+  contracts, rather than adding runtime adapters. Provider/admission and token
+  family coverage remains in the complete login and authorization suites.
+  Database CLI tests explicitly refuse pre-v1 sources without adoption or data
+  changes. Native v1 transfer checks verify sealed values, source preservation,
+  retained target identity, populated-target refusal and transactional rollback.
+  Removed lossy import flags are refused.
+- Three focused production fixes accompany these ports: a silent-switch
+  preflight does not create an absent SQLite target; SQLite bootstrap redacts
+  corrupt-driver errors through the normal store exception; a missing/invalid
+  mandatory React bundle closes the store and exits with configuration errors.
+- Complete self-host, root multi-user and FastMCP compatibility regression:
+  4,155 passed, 48 backend/platform/network skips on latest SQLite and the same
+  result on locked SQLite. Locked PostgreSQL startup/whole-stack/transfer group:
+  290 passed, 2 SQLite-specific skips. Additional native database CLI, account
+  CLI, gate and preference tests: 253 passed on locked PostgreSQL. Scratch
+  servers were stopped after those groups. A complete PostgreSQL run is pending.
+- Source/tests Ruff, changed-file formatting, whitespace checks and Linux-target
+  mypy pass; mypy now checks all 149 source files. Upgrade/compatibility/backup/
+  transfer code stays in `db/migrations/`, with four structural boundary checks.
+- The complete repository and CI matrix, and the new Docker image checks, remain
+  pending at this checkpoint. Real IdP/B2B, Claude, reverse-proxy and multiday
+  acceptance follow the owner's staging deployment. No release was published.
