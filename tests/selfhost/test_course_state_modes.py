@@ -1,8 +1,8 @@
-"""Course state per auth mode: request-local upstream HTTP, and entra-oauth in either mode.
+"""Course state per auth mode: request-local upstream HTTP, and selfhost in either mode.
 
 Upstream's HTTP modes (X-Canvas-Token, access key, Easy Auth) keep course
 aliases and labels inside one request and publish nothing that outlives it.
-A verified principal (MCP_AUTH_MODE=entra-oauth) behaves the same with
+A verified principal (MCP_AUTH_MODE=selfhost) behaves the same with
 ``SELFHOST_COURSE_STATE=request_local`` (the default), and gets caches that
 persist across that principal's requests only with the explicit opt-in
 ``per_principal``. stdio keeps its single local cache.
@@ -46,7 +46,7 @@ async def request_as(
 ) -> Any:
     """Run ``fn`` as one HTTP request (call inside its own task: own context).
 
-    With ``oid`` it is a verified self-hosted principal (entra-oauth); without,
+    With ``oid`` it is a verified self-hosted principal (selfhost); without,
     one of the upstream HTTP modes. ``request_local`` is what the request
     middleware does for a principal: True for ``SELFHOST_COURSE_STATE=request_local``,
     False (the default here) for ``per_principal``.
@@ -90,7 +90,7 @@ class TestMode:
         set_http_request_active(True)
         assert uses_request_local_course_state() is True  # token / access key / Easy Auth
         set_request_principal(make_principal(OID_A))
-        assert uses_request_local_course_state() is False  # entra-oauth
+        assert uses_request_local_course_state() is False  # selfhost
 
 
 class TestUpstreamHttpCourseListAndLabelsAreRequestLocal:

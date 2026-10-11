@@ -16,7 +16,7 @@ beforeEach(() => {
 })
 
 describe('an owner and the connected apps of an account', () => {
-  it('offers the list only for active accounts, and only when the server has the feature', async () => {
+  it('offers the list only for active accounts', async () => {
     await renderApp('/admin', 'local-owner')
     await screen.findByText('Cleo Example')
     expect(screen.getByRole('button', { name: 'Connected apps: Cleo Example' })).toBeInTheDocument()
@@ -25,10 +25,10 @@ describe('an owner and the connected apps of an account', () => {
     expect(screen.queryByRole('button', { name: 'Connected apps: Dev Example' })).toBeNull() // disabled
   })
 
-  it('has no such button without the feature', async () => {
+  it('offers connected apps to every deployment owner', async () => {
     await renderApp('/admin', 'owner')
     await screen.findByText('Cleo Example')
-    expect(screen.queryByRole('button', { name: /^Connected apps/ })).toBeNull()
+    expect(screen.getAllByRole('button', { name: /^Connected apps/ })).toHaveLength(2)
   })
 
   it('lists one account\'s apps in a dialog and ends one of them', async () => {

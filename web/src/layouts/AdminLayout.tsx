@@ -8,10 +8,11 @@ import { useTranslation } from 'react-i18next'
 const TABS = [
   { to: '/admin', labelKey: 'common:nav.adminAccounts' },
   { to: '/admin/enrollments', labelKey: 'common:nav.adminEnrollments' },
+  { to: '/admin/settings', labelKey: 'common:nav.adminSettings' },
   { to: '/admin/audit', labelKey: 'common:nav.adminAudit' },
 ]
 
-/** Tab strip shared by the three owner-only admin pages. */
+/** Tab strip shared by the owner-only admin pages. */
 export default function AdminLayout() {
   const { t } = useTranslation()
   const { pathname } = useLocation()

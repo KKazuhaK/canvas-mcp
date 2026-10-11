@@ -9,7 +9,9 @@ import pytest
 from dbbackend import PG_URL, make_store, raw_sql, reset_public_schema
 
 from canvas_mcp.core.selfhost import accounts as acc
-from canvas_mcp.core.selfhost.db import migrate, schema, transfer
+from canvas_mcp.core.selfhost.db import schema
+from canvas_mcp.core.selfhost.db.migrations import runner as migrate
+from canvas_mcp.core.selfhost.db.migrations import transfer
 from canvas_mcp.core.selfhost.db.repos import SIGN_IN_SURFACES, Repositories
 from canvas_mcp.core.selfhost.token_store import (
     AUDIT_ACTIONS,

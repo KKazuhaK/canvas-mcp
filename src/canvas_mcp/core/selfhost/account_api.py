@@ -1,4 +1,4 @@
-"""The JSON API of the account UI, ``/account/api`` (self-hosted multi-user mode).
+"""The JSON API of the account UI, ``/api/v1`` (self-hosted multi-user mode).
 
 It serves the single-page UI with the data and the actions the server-rendered
 ``/account`` pages have today. It is not a second sign-in or a second set of rules:
@@ -6,7 +6,7 @@ It serves the single-page UI with the data and the actions the server-rendered
 * Authentication is the same sealed ``__Host-cmcp_session`` cookie, re-checked against
   the stored account on every request (a disabled account, a changed session epoch or a
   deleted account is signed out). The sign-in itself stays the server-side OIDC
-  redirect (``/account/login`` and ``/account/callback``).
+  redirect (``/auth/login`` and ``/auth/callback/entra``).
 * Every mutation needs the session's CSRF token in an ``X-CSRF-Token`` header, an
   ``Origin`` equal to the public base URL, and (when the browser sends it)
   ``Sec-Fetch-Site: same-origin``. The school search is a GET but also needs the token,
@@ -49,14 +49,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-import anyio.to_thread
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
-from canvas_mcp.core.selfhost import account_web as web
+from canvas_mcp.core.selfhost import account_core as web
 from canvas_mcp.core.selfhost.account_ops import Refusal, Unlinked, WriteToolsSnapshot
-from canvas_mcp.core.selfhost.accounts import PROVIDER_ENTRA, valid_account_key
+from canvas_mcp.core.selfhost.accounts import valid_account_key
 from canvas_mcp.core.selfhost.schools import (
     MAX_QUERY_CHARS,
     MIN_QUERY_CHARS,
@@ -84,12 +83,19 @@ from canvas_mcp.core.selfhost.tool_prefs import (
 )
 from canvas_mcp.core.tool_policy import TOOL_EFFECTS, Effect
 
+from . import custody
+from .config_snapshot import CURRENT_CONFIG
+from .config_store import ConfigStore, SchoolRemovalConfirmation
+from .db.settings_repo import SettingsAccessDenied, SettingsConflict
+from .db.workers import run_store
+from .pagination import DEFAULT_LIMIT, decode_cursor, page_limit
+from .routes import API_PREFIX
+
 if TYPE_CHECKING:
     from canvas_mcp.core.selfhost.authz.models import GrantRecord
 
 logger = logging.getLogger("canvas_mcp.selfhost.account_api")
 
-API_PREFIX = "/account/api"
 
 #: Every error code the API can answer with, and its HTTP status. The frontend's
 #: ``CODE_SET`` is checked against this table by a test.
@@ -118,6 +124,9 @@ ERROR_STATUS: Mapping[str, int] = {
     "canvas_unavailable": 503,
     "identity_change_required": 409,
     "recheck_not_allowed": 409,
+    "custody_ack_required": 422,
+    "custody_notice_outdated": 409,
+    "not_enrolled": 404,
     # schools
     "school_required": 422,
     "school_invalid": 422,
@@ -132,6 +141,8 @@ ERROR_STATUS: Mapping[str, int] = {
     "write_tools_unavailable": 503,
     # admin
     "last_owner": 409,
+    "settings_conflict": 409,
+    "confirmation_required": 409,
     "cannot_disable_self": 409,
     # linked sign-in methods
     "identity_in_use": 409,
@@ -180,9 +191,10 @@ _HISTORY_REASONS = frozenset(
         "identity_linked",
     }
 )
-_IDENTITY_ID_RE = re.compile(r"^[1-9][0-9]{0,17}$")
 _PROVIDER_FIELD_RE = re.compile(r"^[a-z][a-z0-9:-]{0,63}$")
-_DISABLED_REASONS = frozenset({DISABLE_REASON_ADMIN, DISABLE_REASON_OPERATOR, DISABLE_REASON_DENIED})
+_DISABLED_REASONS = frozenset(
+    {DISABLE_REASON_ADMIN, DISABLE_REASON_OPERATOR, DISABLE_REASON_DENIED}
+)
 _ADMIN_STATUSES = ("active", "pending", "disabled")
 _TXN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _DECISIONS = ("approve", "deny")
@@ -204,11 +216,19 @@ class _Fail(Exception):
     ) -> None:
         super().__init__(code)
         self.code = code if code in ERROR_STATUS else "internal_error"
-        self.params: dict[str, Scalar] = {
+        self.params: dict[str, Any] = {
             str(key): value
             for key, value in (params or {}).items()
             if isinstance(value, str | int) and not isinstance(value, bool)
         }
+        if self.code == "confirmation_required":
+            affected = (params or {}).get("affected")
+            if isinstance(affected, dict):
+                self.params["affected"] = {
+                    host: count
+                    for host, count in affected.items()
+                    if isinstance(host, str) and type(count) is int and count >= 0
+                }
         self.headers = dict(headers or {})
         if self.code == "rate_limited" and "retry_after_s" in self.params:
             self.headers["Retry-After"] = str(self.params["retry_after_s"])
@@ -232,7 +252,9 @@ def _refusal_to_fail(refusal: Refusal) -> _Fail:
 def _clean(value: object, limit: int = MAX_DETAIL_TEXT) -> str:
     """Display text without control characters, at most ``limit`` characters."""
     text = value if isinstance(value, str) else str(value)
-    text = "".join(" " if (ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F) else ch for ch in text)
+    text = "".join(
+        " " if (ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F) else ch for ch in text
+    )
     return " ".join(text.split())[:limit]
 
 
@@ -247,7 +269,7 @@ def _ts(value: int | None) -> str | None:
 
 
 def _account_id(key: str) -> str | None:
-    return key[len("acct:") :] if valid_account_key(key) else None
+    return key if valid_account_key(key) else None
 
 
 def _object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -286,7 +308,9 @@ def _parse_object(raw: bytes) -> dict[str, Any]:
     return value
 
 
-def _closed(body: Mapping[str, Any], *, required: Sequence[str], optional: Sequence[str] = ()) -> None:
+def _closed(
+    body: Mapping[str, Any], *, required: Sequence[str], optional: Sequence[str] = ()
+) -> None:
     """Refuse an unknown field, and a missing required one, with ``validation_failed``."""
     for key in body:
         if key not in required and key not in optional:
@@ -296,7 +320,9 @@ def _closed(body: Mapping[str, Any], *, required: Sequence[str], optional: Seque
             raise _invalid(key)
 
 
-def _text(body: Mapping[str, Any], key: str, *, max_chars: int, nullable: bool = False) -> str:
+def _text(
+    body: Mapping[str, Any], key: str, *, max_chars: int, nullable: bool = False
+) -> str:
     """A string field ('' for an absent or null optional one)."""
     value = body.get(key)
     if value is None and nullable:
@@ -330,16 +356,17 @@ class _Endpoint:
     csrf: bool = False
     body: BodyKind = "none"
     #: Served only with the local authorization server; ``not_found`` otherwise, before any other check.
-    local_authz: bool = False
     #: Served only with two or more sign-in providers; ``not_found`` otherwise, before any other check.
     linking: bool = False
+    max_body: int = MAX_BODY_BYTES
 
 
 class ApiApp:
-    """The JSON API, over one :class:`~.account_web._AccountApp`."""
+    """The JSON API, over one :class:`~.account_core.AccountCore`."""
 
-    def __init__(self, app: web._AccountApp) -> None:
+    def __init__(self, app: web.AccountCore) -> None:
         self.app = app
+        self.config_store = ConfigStore(app.snapshots)
 
     # -- routing ------------------------------------------------------------
 
@@ -347,8 +374,64 @@ class ApiApp:
         """Every (path, {method: endpoint}) of the API."""
         e = _Endpoint
         return [
+            (
+                f"{API_PREFIX}/admin/settings",
+                {"GET": e(self.admin_settings, access="owner")},
+            ),
+            (
+                f"{API_PREFIX}/admin/settings/sign-in-methods",
+                {
+                    "PUT": e(
+                        self.save_sign_in_methods,
+                        access="owner",
+                        mutating=True,
+                        body="json",
+                        max_body=8192,
+                    )
+                },
+            ),
+            (
+                f"{API_PREFIX}/admin/settings/schools",
+                {
+                    "PUT": e(
+                        self.save_featured_schools,
+                        access="owner",
+                        mutating=True,
+                        body="json",
+                        max_body=32768,
+                    )
+                },
+            ),
+            (
+                f"{API_PREFIX}/admin/settings/schools/check",
+                {
+                    "POST": e(
+                        self.check_school,
+                        access="owner",
+                        mutating=True,
+                        body="json",
+                        max_body=8192,
+                    )
+                },
+            ),
+            (
+                f"{API_PREFIX}/admin/settings/directory-search",
+                {
+                    "PUT": e(
+                        self.save_directory_search,
+                        access="owner",
+                        mutating=True,
+                        body="json",
+                        max_body=8192,
+                    )
+                },
+            ),
             (f"{API_PREFIX}/providers", {"GET": e(self.providers, access="public")}),
             (f"{API_PREFIX}/me", {"GET": e(self.me, access="session")}),
+            (
+                f"{API_PREFIX}/me/canvas-token/acknowledge",
+                {"POST": e(self.acknowledge_canvas_token, mutating=True, body="json")},
+            ),
             (
                 f"{API_PREFIX}/me/canvas-token",
                 {
@@ -362,7 +445,10 @@ class ApiApp:
                 {"POST": e(self.recheck_canvas_token, mutating=True, body="empty")},
             ),
             (f"{API_PREFIX}/me/schools", {"GET": e(self.get_schools)}),
-            (f"{API_PREFIX}/me/schools/search", {"GET": e(self.search_schools, csrf=True)}),
+            (
+                f"{API_PREFIX}/me/schools/search",
+                {"GET": e(self.search_schools, csrf=True)},
+            ),
             (
                 f"{API_PREFIX}/me/write-tools",
                 {
@@ -371,17 +457,30 @@ class ApiApp:
                     "DELETE": e(self.delete_write_tools, mutating=True, body="empty"),
                 },
             ),
-            (f"{API_PREFIX}/me/login-history", {"GET": e(self.login_history, access="session")}),
+            (
+                f"{API_PREFIX}/me/login-history",
+                {"GET": e(self.login_history, access="session")},
+            ),
             (
                 f"{API_PREFIX}/me/ui-locale",
-                {"PUT": e(self.put_ui_locale, access="session", mutating=True, body="json")},
+                {
+                    "PUT": e(
+                        self.put_ui_locale, access="session", mutating=True, body="json"
+                    )
+                },
             ),
             (
                 f"{API_PREFIX}/session/logout",
                 {"POST": e(self.logout, access="session", mutating=True, body="empty")},
             ),
-            (f"{API_PREFIX}/admin/accounts", {"GET": e(self.admin_accounts, access="owner")}),
-            (f"{API_PREFIX}/admin/enrollments", {"GET": e(self.admin_enrollments, access="owner")}),
+            (
+                f"{API_PREFIX}/admin/accounts",
+                {"GET": e(self.admin_accounts, access="owner")},
+            ),
+            (
+                f"{API_PREFIX}/admin/enrollments",
+                {"GET": e(self.admin_enrollments, access="owner")},
+            ),
             *(
                 (
                     f"{API_PREFIX}/admin/accounts/{{id}}/{action}",
@@ -398,24 +497,48 @@ class ApiApp:
             ),
             (
                 f"{API_PREFIX}/admin/enrollments/{{id}}/mark-invalid",
-                {"POST": e(self.admin_mark_invalid, access="owner", mutating=True, body="empty")},
+                {
+                    "POST": e(
+                        self.admin_mark_invalid,
+                        access="owner",
+                        mutating=True,
+                        body="empty",
+                    )
+                },
             ),
             (
                 f"{API_PREFIX}/admin/enrollments/{{id}}",
-                {"DELETE": e(self.admin_remove_enrollment, access="owner", mutating=True, body="empty")},
+                {
+                    "DELETE": e(
+                        self.admin_remove_enrollment,
+                        access="owner",
+                        mutating=True,
+                        body="empty",
+                    )
+                },
             ),
             (f"{API_PREFIX}/admin/audit", {"GET": e(self.admin_audit, access="owner")}),
             # Two or more sign-in providers only (not_found otherwise).
-            (f"{API_PREFIX}/me/identities", {"GET": e(self.my_identities, linking=True)}),
+            (
+                f"{API_PREFIX}/me/identities",
+                {"GET": e(self.my_identities, linking=True)},
+            ),
             (
                 f"{API_PREFIX}/me/identities/link",
-                {"POST": e(self.link_identity, mutating=True, body="json", linking=True)},
+                {
+                    "POST": e(
+                        self.link_identity, mutating=True, body="json", linking=True
+                    )
+                },
             ),
             (
                 f"{API_PREFIX}/me/identities/{{id}}",
                 {
                     "DELETE": e(
-                        self.unlink_my_identity, mutating=True, body="empty", linking=True
+                        self.unlink_my_identity,
+                        mutating=True,
+                        body="empty",
+                        linking=True,
                     )
                 },
             ),
@@ -435,28 +558,23 @@ class ApiApp:
             (
                 f"{API_PREFIX}/consent",
                 {
-                    "GET": e(self.get_consent, access="session", local_authz=True),
+                    "GET": e(self.get_consent, access="session"),
                     "POST": e(
                         self.post_consent,
                         access="session",
                         mutating=True,
                         body="json",
-                        local_authz=True,
                     ),
                 },
             ),
-            (f"{API_PREFIX}/me/grants", {"GET": e(self.my_grants, local_authz=True)}),
+            (f"{API_PREFIX}/me/grants", {"GET": e(self.my_grants)}),
             (
                 f"{API_PREFIX}/me/grants/{{id}}",
-                {
-                    "DELETE": e(
-                        self.delete_my_grant, mutating=True, body="empty", local_authz=True
-                    )
-                },
+                {"DELETE": e(self.delete_my_grant, mutating=True, body="empty")},
             ),
             (
                 f"{API_PREFIX}/admin/accounts/{{id}}/grants",
-                {"GET": e(self.admin_account_grants, access="owner", local_authz=True)},
+                {"GET": e(self.admin_account_grants, access="owner")},
             ),
             (
                 f"{API_PREFIX}/admin/grants/{{id}}",
@@ -466,7 +584,6 @@ class ApiApp:
                         access="owner",
                         mutating=True,
                         body="empty",
-                        local_authz=True,
                     )
                 },
             ),
@@ -475,7 +592,9 @@ class ApiApp:
     def route_keys(self) -> set[tuple[str, str]]:
         """``(method, path)`` of every API route (the paths keep their ``{id}`` placeholder)."""
         return {
-            (method, path) for path, endpoints in self.route_table() for method in endpoints
+            (method, path)
+            for path, endpoints in self.route_table()
+            for method in endpoints
         }
 
     def routes(self) -> list[Route]:
@@ -484,7 +603,7 @@ class ApiApp:
             for path, endpoints in self.route_table()
         ]
         # Registered after the real routes and before the single-page fallback, so an
-        # unknown path below /account/api is a JSON 404, never the app's index page.
+        # unknown path below /api/v1 is a JSON 404, never the app's index page.
         routes.append(web.any_method_route(API_PREFIX, self._unknown))
         routes.append(web.any_method_route(API_PREFIX + "/{rest:path}", self._unknown))
         return routes
@@ -492,8 +611,11 @@ class ApiApp:
     async def _unknown(self, request: Request) -> Response:
         return self._error(_Fail("not_found"))
 
-    def _endpoint(self, endpoints: dict[str, _Endpoint]) -> Callable[[Request], Awaitable[Response]]:
+    def _endpoint(
+        self, endpoints: dict[str, _Endpoint]
+    ) -> Callable[[Request], Awaitable[Response]]:
         async def endpoint(request: Request) -> Response:
+            marker = CURRENT_CONFIG.set(None)
             try:
                 return await self._handle(request, endpoints)
             except _Fail as fail:
@@ -506,21 +628,24 @@ class ApiApp:
             except Exception as exc:  # noqa: BLE001 - never leak details
                 logger.error("account api request failed: %s", type(exc).__name__)
                 return self._error(_Fail("internal_error"))
+            finally:
+                CURRENT_CONFIG.reset(marker)
 
         return endpoint
 
     # -- the request pipeline -------------------------------------------------------
 
-    async def _handle(self, request: Request, endpoints: dict[str, _Endpoint]) -> Response:
+    async def _handle(
+        self, request: Request, endpoints: dict[str, _Endpoint]
+    ) -> Response:
         """method, session, active, owner, origin, csrf, body, then the action."""
-        if self.app.authz is None and any(e.local_authz for e in endpoints.values()):
-            # Not served in this mode: as if the path did not exist, for any method.
-            raise _Fail("not_found")
         if self._linking_off() and any(e.linking for e in endpoints.values()):
             raise _Fail("not_found")
         endpoint = endpoints.get(request.method)
         if endpoint is None:
-            raise _Fail("method_not_allowed", headers={"Allow": ", ".join(sorted(endpoints))})
+            raise _Fail(
+                "method_not_allowed", headers={"Allow": ", ".join(sorted(endpoints))}
+            )
         session: web._Session | None = None
         if endpoint.access != "public":
             session = await self._session(request)
@@ -533,9 +658,11 @@ class ApiApp:
                 supplied = request.headers.get(CSRF_HEADER)
                 if not self.app._csrf_ok(session, supplied):
                     raise _Fail("csrf_invalid")
+        if endpoint.access == "public":
+            await self.app.refresh_public_config()
         body: dict[str, Any] | None = None
         if endpoint.body == "json":
-            body = await self._json_body(request)
+            body = await self._json_body(request, max_body=endpoint.max_body)
         elif endpoint.body == "empty":
             if await self._read_body(request):
                 raise _Fail("malformed_request")
@@ -572,7 +699,9 @@ class ApiApp:
         elif fetch_site is not None and fetch_site not in ("same-origin", "none"):
             raise _Fail("origin_not_allowed")
 
-    async def _read_body(self, request: Request) -> bytes:
+    async def _read_body(
+        self, request: Request, *, max_body: int = MAX_BODY_BYTES
+    ) -> bytes:
         declared = request.headers.get("content-length")
         if declared is not None:
             try:
@@ -581,18 +710,20 @@ class ApiApp:
                 raise _Fail("malformed_request") from None
             if length < 0:
                 raise _Fail("malformed_request")
-            if length > MAX_BODY_BYTES:
+            if length > max_body:
                 raise _Fail("payload_too_large")
         chunks: list[bytes] = []
         total = 0
         async for chunk in request.stream():
             total += len(chunk)
-            if total > MAX_BODY_BYTES:
+            if total > max_body:
                 raise _Fail("payload_too_large")
             chunks.append(chunk)
         return b"".join(chunks)
 
-    async def _json_body(self, request: Request) -> dict[str, Any]:
+    async def _json_body(
+        self, request: Request, *, max_body: int = MAX_BODY_BYTES
+    ) -> dict[str, Any]:
         header = request.headers.get("content-type", "")
         media, _, params = header.partition(";")
         if media.strip().lower() != "application/json":
@@ -600,7 +731,7 @@ class ApiApp:
         charset = re.search(r"charset\s*=\s*\"?([^\";\s]+)", params, re.IGNORECASE)
         if charset is not None and charset.group(1).lower() not in ("utf-8", "utf8"):
             raise _Fail("unsupported_media_type")
-        return _parse_object(await self._read_body(request))
+        return _parse_object(await self._read_body(request, max_body=max_body))
 
     # -- responses ------------------------------------------------------------------
 
@@ -611,7 +742,9 @@ class ApiApp:
         merged = {**_JSON_HEADERS, **(headers or {})}
         if payload is None:
             return Response(b"", status_code=status, headers=merged)
-        body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
         return Response(body, status_code=status, headers=merged)
 
     def _error(self, fail: _Fail) -> Response:
@@ -631,14 +764,26 @@ class ApiApp:
     def _school_of(self, host: str | None) -> dict[str, Any] | None:
         resolved = self.app.schools.resolve_stored(host)
         if resolved is not None:
-            return {"host": resolved.host, "name": _clean(resolved.name), "offered": True}
+            return {
+                "host": resolved.host,
+                "name": _clean(resolved.name or resolved.host),
+                "offered": True,
+            }
         if host:
             return {"host": host, "name": _clean(host), "offered": False}
         return None
 
     def _canvas_status(self, info: EnrollmentInfo | None) -> dict[str, Any]:
+        custody_status = {
+            "notice_version": custody.CUSTODY_NOTICE_VERSION,
+            "acknowledged_version": info.custody_notice_version if info else None,
+            "acknowledged_at": _ts(info.custody_ack_at) if info else None,
+            "current": info is not None
+            and info.custody_notice_version == custody.CUSTODY_NOTICE_VERSION,
+        }
         if info is None:
             return {
+                "custody": custody_status,
                 "state": "none",
                 "canvas_user_id": None,
                 "canvas_user_name": None,
@@ -663,13 +808,15 @@ class ApiApp:
             if hint - now <= web._EXPIRY_REMINDER_DAYS * 86400:
                 notice = "soon" if now < hint + 86400 else "passed"
         return {
+            "custody": custody_status,
             "state": "invalid" if invalid else "active",
             "canvas_user_id": str(info.canvas_user_id),
             "canvas_user_name": _clean(info.canvas_user_name),
             "school": self._school_of(info.canvas_host),
             "invalid_reason": reason if invalid else None,
             "invalid_since": _ts(info.invalid_since) if invalid else None,
-            "recheck_allowed": invalid and info.invalid_reason != REASON_REVOKED_BY_ADMIN,
+            "recheck_allowed": invalid
+            and info.invalid_reason != REASON_REVOKED_BY_ADMIN,
             "expires_on": web._fmt_utc_date(hint) if hint is not None else None,
             "expiry_notice": notice,
             "settings_url": self.app.settings_url(info),
@@ -680,7 +827,7 @@ class ApiApp:
         }
 
     async def _canvas_now(self, session: web._Session) -> dict[str, Any]:
-        info = await anyio.to_thread.run_sync(self.app.store.info, session.acct)
+        info = await run_store(self.app.store.info, session.acct)
         return self._canvas_status(info)
 
     def _write_tools_view(self, snapshot: WriteToolsSnapshot) -> dict[str, Any]:
@@ -688,7 +835,11 @@ class ApiApp:
         prefs = snapshot.prefs
 
         def tool(name: str) -> dict[str, Any]:
-            stamp = prefs.enabled_at.get(name) if prefs is not None and name in current else None
+            stamp = (
+                prefs.enabled_at.get(name)
+                if prefs is not None and name in current
+                else None
+            )
             return {
                 "name": name,
                 "offered": name in offered,
@@ -729,28 +880,16 @@ class ApiApp:
 
     async def providers(self, ctx: _Ctx) -> Response:
         logins = self.app.logins
-        if logins is None:
-            # Entra alone: exactly the list the first release served.
-            entries = [
-                {
-                    "id": PROVIDER_ENTRA,
-                    "kind": "oidc",
-                    "name": "Microsoft",
-                    "icon": "microsoft",
-                    "start_url": web._LOGIN_PATH,
-                }
-            ]
-        else:
-            entries = [
-                {
-                    "id": entry.id,
-                    "kind": entry.kind,
-                    "name": _clean(entry.name, 40),
-                    "icon": entry.icon,
-                    "start_url": entry.start_path,
-                }
-                for entry in logins.entries()
-            ]
+        entries = [
+            {
+                "id": entry.id,
+                "kind": entry.kind,
+                "name": _clean(entry.name, 40),
+                "icon": entry.icon,
+                "start_url": entry.start_path,
+            }
+            for entry in logins.entries()
+        ]
         return self._ok({"providers": entries, "mcp_url": self.app.base + "/mcp"})
 
     # -- self --------------------------------------------------------------------------------------
@@ -772,7 +911,9 @@ class ApiApp:
                         "enabled": len(snapshot.current & snapshot.offered),
                     }
                 except Exception as exc:  # noqa: BLE001 - the count is a convenience
-                    logger.error("account api write tools read failed: %s", type(exc).__name__)
+                    logger.error(
+                        "account api write tools read failed: %s", type(exc).__name__
+                    )
         fresh = app._signed_in_recently(session)
         locale = ctx.request.cookies.get(web.LANG_COOKIE)
         zone = getattr(web._display_tz(), "key", None)
@@ -792,11 +933,16 @@ class ApiApp:
                 "session": {
                     "issued_at": _ts(session.iat) if session.iat > 0 else None,
                     "expires_at": _ts(session.exp),
-                    "fresh_until": _ts(session.iat + FRESH_WINDOW_SECONDS) if fresh else None,
+                    "fresh_until": _ts(session.iat + FRESH_WINDOW_SECONDS)
+                    if fresh
+                    else None,
                     "fresh": fresh,
                     "fresh_window_s": FRESH_WINDOW_SECONDS,
                 },
                 "canvas": canvas,
+                "custody_ack_required": canvas is not None
+                and canvas["state"] != "none"
+                and not canvas["custody"]["current"],
                 "write_tools": write_tools,
                 "features": {
                     "school_picker": (not pending) and app.schools.picker_enabled,
@@ -807,15 +953,15 @@ class ApiApp:
                     "identities": (not pending) and not self._linking_off(),
                     # Local authorization server only (see the module docstring). A waiting
                     # account is still told so; its own screens and the API refuse it.
-                    "connected_apps": app.authz is not None,
-                    "consent": app.authz is not None,
                     "logout_everywhere": False,
                     "role_management": False,
                 },
                 "ui_locale": locale if locale in _LOCALES else None,
                 "server": {
                     "mcp_url": app.base + "/mcp",
-                    "display_timezone": zone if isinstance(zone, str) and zone else "UTC",
+                    "display_timezone": zone
+                    if isinstance(zone, str) and zone
+                    else "UTC",
                 },
             }
         )
@@ -830,13 +976,31 @@ class ApiApp:
         _closed(
             body,
             required=("canvas_token",),
-            optional=("school", "school_sig", "expires_on", "confirm_identity_change"),
+            optional=(
+                "school",
+                "school_sig",
+                "expires_on",
+                "confirm_identity_change",
+                "custody",
+            ),
         )
+        acknowledgement = body.get("custody")
+        if (
+            not isinstance(acknowledgement, dict)
+            or acknowledgement.get("acknowledged") is not True
+        ):
+            raise _Fail("custody_ack_required")
+        _closed(
+            acknowledgement, required=("acknowledged",), optional=("notice_version",)
+        )
+        ack = self._custody_acknowledgement(acknowledgement.get("notice_version"))
         token = _text(body, "canvas_token", max_chars=1024)
         school = _text(body, "school", max_chars=253, nullable=True)
         signature = _text(body, "school_sig", max_chars=128, nullable=True)
         expires = _text(body, "expires_on", max_chars=32, nullable=True)
-        confirmation = _text(body, "confirm_identity_change", max_chars=128, nullable=True)
+        confirmation = _text(
+            body, "confirm_identity_change", max_chars=128, nullable=True
+        )
         outcome = await self.app.enroll_token(
             session,
             token_raw=token,
@@ -845,10 +1009,30 @@ class ApiApp:
             confirm_raw=confirmation,
             pick_signature=signature or None,
             require_pick_signature=True,
+            custody=ack,
         )
         if isinstance(outcome, Refusal):
             raise _refusal_to_fail(outcome)
         return self._ok(await self._canvas_now(session))
+
+    def _custody_acknowledgement(self, version: Any) -> custody.CustodyAcknowledgement:
+        if type(version) is not int or version != custody.CUSTODY_NOTICE_VERSION:
+            raise _Fail(
+                "custody_notice_outdated",
+                {"notice_version": custody.CUSTODY_NOTICE_VERSION},
+            )
+        return custody.CustodyAcknowledgement(version, int(self.app.clock()))
+
+    async def acknowledge_canvas_token(self, ctx: _Ctx) -> Response:
+        assert ctx.session is not None and ctx.body is not None
+        _closed(ctx.body, required=(), optional=("notice_version",))
+        ack = self._custody_acknowledgement(ctx.body.get("notice_version"))
+        info = await run_store(
+            self.app.store.acknowledge_custody, ctx.session.acct, ack
+        )
+        if info is None:
+            raise _Fail("not_enrolled")
+        return self._ok(self._canvas_status(info))
 
     async def delete_canvas_token(self, ctx: _Ctx) -> Response:
         assert ctx.session is not None
@@ -860,21 +1044,23 @@ class ApiApp:
         outcome = await self.app.recheck_own_token(ctx.session)
         if isinstance(outcome, Refusal):
             raise _refusal_to_fail(outcome)
-        return self._ok({"result": outcome.result, "canvas": await self._canvas_now(ctx.session)})
+        return self._ok(
+            {"result": outcome.result, "canvas": await self._canvas_now(ctx.session)}
+        )
 
     async def get_schools(self, ctx: _Ctx) -> Response:
         session = ctx.session
         assert session is not None
         schools = self.app.schools
-        info = await anyio.to_thread.run_sync(self.app.store.info, session.acct)
+        info = await run_store(self.app.store.info, session.acct)
         choices: list[dict[str, str]] = []
         selected: str | None = None
         sole: dict[str, str] | None = None
-        mode: Literal["picker", "sole", "fixed"]
+        mode: Literal["picker", "sole", "none"]
         if schools.picker_enabled:
             mode = "picker"
             choices = [
-                {"host": s.host, "name": _clean(s.name), "source": "featured"}
+                {"host": s.host, "name": _clean(s.name or s.host), "source": "featured"}
                 for s in schools.featured
             ]
             listed = {choice["host"] for choice in choices}
@@ -884,23 +1070,19 @@ class ApiApp:
                 and enrolled not in listed
                 and schools.resolve_stored(enrolled) is not None
             ):
-                choices.append({"host": enrolled, "name": _clean(enrolled), "source": "enrolled"})
+                choices.append(
+                    {"host": enrolled, "name": _clean(enrolled), "source": "enrolled"}
+                )
                 listed.add(enrolled)
             if enrolled is not None and enrolled in listed:
                 selected = enrolled
-            elif schools.default is not None:
-                selected = schools.default.host
-            elif choices:
-                selected = choices[0]["host"]
         else:
-            only = schools.sole_school
-            if only is not None and schools.default is None:
-                mode = "sole"
-            else:
-                mode = "fixed"
-            shown = only or schools.default
+            shown = schools.sole_school
+            mode = "sole" if shown is not None else "none"
             if shown is not None:
-                sole = {"host": shown.host, "name": _clean(shown.name)}
+                sole = {"host": shown.host, "name": _clean(shown.name or shown.host)}
+                if info is not None and info.canvas_host == shown.host:
+                    selected = shown.host
         return self._ok(
             {
                 "mode": mode,
@@ -925,7 +1107,9 @@ class ApiApp:
         ):
             raise _invalid("q", min=MIN_QUERY_CHARS, max=MAX_QUERY_CHARS)
         if not app.search_limiter.allow((session.acct,)):
-            raise _Fail("rate_limited", {"retry_after_s": web._SEARCH_LIMIT_WINDOW_SECONDS})
+            raise _Fail(
+                "rate_limited", {"retry_after_s": web._SEARCH_LIMIT_WINDOW_SECONDS}
+            )
         try:
             entries = await app._directory.search(query)
         except DirectoryError:
@@ -940,7 +1124,11 @@ class ApiApp:
             for entry in entries
             if not is_blocked_hostname(entry.domain)
         ]
-        logger.info("account api school search account=%s results=%d", session.acct, len(results))
+        logger.info(
+            "account api school search account=%s results=%d",
+            session.acct,
+            len(results),
+        )
         return self._ok({"results": results})
 
     async def get_write_tools(self, ctx: _Ctx) -> Response:
@@ -956,7 +1144,9 @@ class ApiApp:
         if (
             not isinstance(raw, list)
             or len(raw) > MAX_ENABLED_TOOLS
-            or not all(isinstance(name, str) and _TOOL_NAME_RE.fullmatch(name) for name in raw)
+            or not all(
+                isinstance(name, str) and _TOOL_NAME_RE.fullmatch(name) for name in raw
+            )
             or len(set(raw)) != len(raw)
         ):
             raise _invalid("enabled")
@@ -965,8 +1155,12 @@ class ApiApp:
         for name in raw:
             if name not in allowed:
                 raise _Fail("write_tool_not_allowed", {"tool": name})
-        ticked = frozenset(name for name in raw if name in snapshot.offered and user_can_enable(name))
-        return await self._save_write_tools(session, snapshot, ticked=ticked, disable_all=False)
+        ticked = frozenset(
+            name for name in raw if name in snapshot.offered and user_can_enable(name)
+        )
+        return await self._save_write_tools(
+            session, snapshot, ticked=ticked, disable_all=False
+        )
 
     async def delete_write_tools(self, ctx: _Ctx) -> Response:
         assert ctx.session is not None
@@ -991,25 +1185,55 @@ class ApiApp:
         fresh = await self._write_snapshot(session)
         return self._ok({"result": outcome.result, **self._write_tools_view(fresh)})
 
+    @staticmethod
+    def _page_params(
+        ctx: _Ctx, scope: str, *, integer: bool = False, filters: Sequence[str] = ()
+    ) -> dict[str, Any]:
+        params = ctx.request.query_params
+        if set(params) - {"cursor", "limit", *filters}:
+            raise _invalid("query")
+        if any(len(params.getlist(key)) != 1 for key in params):
+            raise _invalid("query")
+        raw = params.get("limit")
+        limit = DEFAULT_LIMIT
+        if raw is not None:
+            if not re.fullmatch(r"[1-9][0-9]{0,2}", raw):
+                raise _invalid("limit")
+            try:
+                limit = page_limit(int(raw))
+            except ValueError:
+                raise _invalid("limit") from None
+        cursor = params.get("cursor")
+        try:
+            decode_cursor(cursor, scope, integer=integer)
+        except ValueError:
+            raise _invalid("cursor") from None
+        return {"cursor": cursor, "limit": limit}
+
     async def login_history(self, ctx: _Ctx) -> Response:
         session = ctx.session
         assert session is not None
-        events = await anyio.to_thread.run_sync(
-            self.app.store.list_auth_events, session.acct, HISTORY_LIMIT
+        paging = self._page_params(ctx, "auth-events/" + session.acct, integer=True)
+        page = await run_store(
+            lambda: self.app.store.auth_events_page(session.acct, **paging)
         )
         return self._ok(
             {
                 "events": [
                     {
+                        "id": event.id,
                         "at": _ts(event.at),
                         "provider_id": event.provider_id,
                         "outcome": event.outcome
                         if event.outcome in ("success", "pending")
                         else "refused",
-                        "reason": event.reason if event.reason in _HISTORY_REASONS else None,
+                        "reason": event.reason
+                        if event.reason in _HISTORY_REASONS
+                        else None,
                     }
-                    for event in events
-                ]
+                    for event in page.items
+                ],
+                "next_cursor": page.next_cursor,
             }
         )
 
@@ -1021,7 +1245,7 @@ class ApiApp:
         if locale not in _LOCALES:
             raise _invalid("locale")
         response = self._no_content()
-        web._AccountApp._remember_lang(response, str(locale))
+        web.AccountCore._remember_lang(response, str(locale))
         return response
 
     async def logout(self, ctx: _Ctx) -> Response:
@@ -1031,34 +1255,225 @@ class ApiApp:
         self.app.clear_cookie(response, web.SESSION_COOKIE)
         return response
 
+    # -- database-owned server configuration ---------------------------------------
+
+    @staticmethod
+    def _settings_body(ctx: _Ctx, fields: set[str]) -> tuple[dict[str, Any], int]:
+        body = ctx.body or {}
+        if (
+            set(body) != fields
+            or type(body.get("revision")) is not int
+            or body["revision"] < 0
+        ):
+            raise _invalid("revision")
+        return body, body["revision"]
+
+    async def _settings_view(self) -> dict[str, Any]:
+        snapshot = CURRENT_CONFIG.get()
+        assert snapshot is not None
+        counts = await run_store(
+            self.config_store.counts,
+            [school.host for school in snapshot.schools.featured],
+        )
+        return {
+            "revision": snapshot.revision,
+            "sign_in_methods": [
+                {
+                    "id": p.id,
+                    "protocol": p.protocol,
+                    "icon": p.icon,
+                    "configured": p.configured,
+                    "default_name": p.default_name,
+                    "display_name": p.display_name,
+                    "effective_name": p.effective_name,
+                }
+                for p in snapshot.providers
+            ],
+            "schools": {
+                "directory_search": snapshot.schools.search_enabled,
+                "featured": [
+                    {
+                        "host": school.host,
+                        "display_name": school.name,
+                        "rank": rank,
+                        "enrollments": counts[school.host],
+                        "allow_private": school.allow_private,
+                    }
+                    for rank, school in enumerate(snapshot.schools.featured, 1)
+                ],
+                "warnings": list(snapshot.warnings),
+            },
+            "retention": {
+                "auth_events_days": snapshot.settings["retention.auth_events_days"],
+                "audit_days": snapshot.settings["retention.audit_days"],
+            },
+        }
+
+    async def admin_settings(self, ctx: _Ctx) -> Response:
+        return self._ok(await self._settings_view())
+
+    async def _save_config(self, operation: Callable[[], int]) -> None:
+        try:
+            revision = await run_store(operation)
+        except SettingsConflict:
+            raise _Fail("settings_conflict") from None
+        except SettingsAccessDenied:
+            raise _Fail("forbidden") from None
+        except SchoolRemovalConfirmation as exc:
+            raise _Fail(
+                "confirmation_required", {"affected": dict(exc.affected)}
+            ) from None
+        except ValueError:
+            raise _invalid("settings") from None
+        CURRENT_CONFIG.set(await run_store(self.app.snapshots.get, revision))
+
+    async def save_sign_in_methods(self, ctx: _Ctx) -> Response:
+        body, revision = self._settings_body(ctx, {"revision", "names"})
+        if not isinstance(body["names"], dict) or not body["names"]:
+            raise _invalid("names")
+        assert ctx.session is not None
+        actor = ctx.session.acct
+        await self._save_config(
+            lambda: self.config_store.names(
+                body["names"],
+                revision=revision,
+                actor=actor,
+                now=int(self.app.clock()),
+            )
+        )
+        return self._ok(await self._settings_view())
+
+    async def save_directory_search(self, ctx: _Ctx) -> Response:
+        body, revision = self._settings_body(ctx, {"revision", "enabled"})
+        if type(body["enabled"]) is not bool:
+            raise _invalid("enabled")
+        assert ctx.session is not None
+        actor = ctx.session.acct
+        await self._save_config(
+            lambda: self.config_store.setting(
+                "schools.directory_search",
+                body["enabled"],
+                revision=revision,
+                actor=actor,
+                now=int(self.app.clock()),
+            )
+        )
+        return self._ok(await self._settings_view())
+
+    async def save_featured_schools(self, ctx: _Ctx) -> Response:
+        body, revision = self._settings_body(
+            ctx, {"revision", "featured", "confirm_affected"}
+        )
+        featured, confirmed = body["featured"], body["confirm_affected"]
+        if (
+            not isinstance(featured, list)
+            or len(featured) > 50
+            or not isinstance(confirmed, list)
+            or len(confirmed) > 50
+            or any(not isinstance(host, str) for host in confirmed)
+        ):
+            raise _invalid("featured")
+        validated = []
+        for item in featured:
+            if not isinstance(item, dict) or set(item) != {"host", "display_name"}:
+                raise _invalid("featured")
+            try:
+                validated.append(
+                    await self.config_store.validate_school(
+                        item["host"], item["display_name"]
+                    )
+                )
+            except ValueError as exc:
+                code = str(exc)
+                raise (
+                    _Fail(code) if code in ERROR_STATUS else _invalid("featured")
+                ) from None
+        assert ctx.session is not None
+        actor = ctx.session.acct
+        affected: dict[str, int] = {}
+
+        def save() -> int:
+            nonlocal affected
+            result, affected = self.config_store.schools(
+                validated,
+                revision=revision,
+                actor=actor,
+                now=int(self.app.clock()),
+                confirmed=confirmed,
+            )
+            return result
+
+        await self._save_config(save)
+        return self._ok(
+            {**await self._settings_view(), "affected_enrollments": affected}
+        )
+
+    async def check_school(self, ctx: _Ctx) -> Response:
+        body = ctx.body or {}
+        if set(body) != {"host"}:
+            raise _invalid("host")
+        assert ctx.session is not None
+        if not self.app.search_limiter.allow((ctx.session.acct,)):
+            raise _Fail(
+                "rate_limited", {"retry_after_s": web._SEARCH_LIMIT_WINDOW_SECONDS}
+            )
+        try:
+            school = await self.config_store.validate_school(body["host"])
+        except ValueError as exc:
+            reason = str(exc)
+            return self._ok(
+                {
+                    "valid": False,
+                    "reason": reason if reason in ERROR_STATUS else "school_invalid",
+                    "suggested_name": None,
+                    "in_directory": None,
+                }
+            )
+        try:
+            entry = await self.app._directory.confirm(school.host)
+            in_directory: bool | None = entry is not None
+        except web.DirectoryError:
+            entry, in_directory = None, None
+        return self._ok(
+            {
+                "valid": True,
+                "suggested_name": entry.name if entry else None,
+                "in_directory": in_directory,
+            }
+        )
+
     # -- owner ----------------------------------------------------------------------------------------
 
     def _enrollment_view(self, row: EnrollmentInfo) -> dict[str, Any]:
         schools = self.app.schools
-        default = schools.default
         host = row.canvas_host
-        school: dict[str, Any] | None
-        if host is None:
-            school = (
-                {"host": default.host, "name": _clean(default.name), "offered": True, "is_default": True}
-                if default is not None
-                else None
-            )
-        else:
-            resolved = schools.resolve_stored(host)
-            school = {
+        resolved = schools.resolve_stored(host)
+        school = (
+            None
+            if host is None
+            else {
                 "host": host,
-                "name": _clean(resolved.name if resolved is not None else host),
+                "name": _clean(
+                    (resolved.name or host) if resolved is not None else host
+                ),
                 "offered": resolved is not None,
-                "is_default": default is not None and host == default.host,
             }
+        )
         invalid = row.status == STATUS_INVALID
         return {
+            "id": row.credential_id,
+            "is_primary": row.is_primary,
             "canvas_user_name": _clean(row.canvas_user_name),
+            "custody_notice_version": row.custody_notice_version,
+            "custody_ack_at": _ts(row.custody_ack_at),
+            "custody_current": row.custody_notice_version
+            == custody.CUSTODY_NOTICE_VERSION,
             "canvas_user_id": str(row.canvas_user_id),
             "school": school,
             "state": "invalid" if invalid else "active",
-            "invalid_reason": row.invalid_reason if invalid and row.invalid_reason in INVALID_REASONS else None,
+            "invalid_reason": row.invalid_reason
+            if invalid and row.invalid_reason in INVALID_REASONS
+            else None,
             "invalid_since": _ts(row.invalid_since) if invalid else None,
             "last_verified_at": _ts(row.last_verified_at),
             "last_used_at": _ts(row.last_used_at),
@@ -1074,7 +1489,12 @@ class ApiApp:
         if status.pending:
             return ["approve", "deny"]
         actions: list[str] = []
-        if row is not None and row.status != STATUS_INVALID and status.active:
+        if (
+            row is not None
+            and row.is_primary
+            and row.status != STATUS_INVALID
+            and status.active
+        ):
             actions.append("mark_invalid")
         if status.disabled:
             actions.append("enable")
@@ -1082,7 +1502,7 @@ class ApiApp:
             pass  # an enrollment without an account can only be removed
         elif key != caller:
             actions.append("disable")
-        if row is not None:
+        if row is not None and row.is_primary:
             actions.append("remove_enrollment")
         return actions
 
@@ -1127,8 +1547,6 @@ class ApiApp:
 
     def _identities_view(self, identities: Sequence[Any]) -> dict[str, Any]:
         """Every sign-in method of an account (only when providers beyond Entra are configured)."""
-        if self.app.logins is None:
-            return {}
         many = len(identities) > 1 and not self._linking_off()
         return {
             "identities": [
@@ -1140,7 +1558,7 @@ class ApiApp:
                     "issuer": _clean(i.issuer, 255),
                     "linked_at": _ts(i.linked_at),
                     "last_login_at": _ts(i.last_login_at),
-                    "can_unlink": many and i.id > 0,
+                    "can_unlink": many and bool(i.id),
                 }
                 for i in identities
             ]
@@ -1152,27 +1570,21 @@ class ApiApp:
         wanted = ctx.request.query_params.get("status")
         if wanted is not None and wanted not in _ADMIN_STATUSES:
             raise _invalid("status")
-        accounts = await anyio.to_thread.run_sync(self.app.store.list_accounts)
-        enrollments = await anyio.to_thread.run_sync(self.app.store.list_enrollments)
-        rows = {row.principal_key: row for row in enrollments}
-        shown = [a for a in accounts if wanted is None or a.status.status == wanted]
-        shown.sort(key=lambda a: 0 if a.status.pending else 1)
+        paging = self._page_params(ctx, "accounts/" + str(wanted), filters=("status",))
+        page = await run_store(
+            lambda: self.app.store.accounts_page(status=wanted, **paging)
+        )
         views = [
-            view
-            for a in shown
-            if (view := self._admin_account(session, a.status, a.identities, rows.get(a.principal_key)))
-            is not None
+            self._admin_account(
+                session, account.status, account.identities, account.enrollment
+            )
+            for account in page.items
         ]
         return self._ok(
             {
                 "accounts": views,
-                "counts": {
-                    "total": len(accounts),
-                    "active": sum(1 for a in accounts if a.status.active),
-                    "pending": sum(1 for a in accounts if a.status.pending),
-                    "disabled": sum(1 for a in accounts if a.status.disabled),
-                    "owners": sum(1 for a in accounts if a.status.active and a.status.is_owner),
-                },
+                "counts": await run_store(self.app.store.account_counts),
+                "next_cursor": page.next_cursor,
             }
         )
 
@@ -1182,43 +1594,29 @@ class ApiApp:
         wanted = ctx.request.query_params.get("filter", "all")
         if wanted not in ("all", web._FILTER_NEEDS_REENROLL):
             raise _invalid("filter")
-        only_needing = wanted == web._FILTER_NEEDS_REENROLL
-        all_rows = await anyio.to_thread.run_sync(self.app.store.list_enrollments)
-        accounts = await anyio.to_thread.run_sync(self.app.store.list_accounts)
-        by_key = {a.principal_key: a for a in accounts}
-        needing = [row for row in all_rows if row.status == STATUS_INVALID]
-        entries: list[tuple[PrincipalStatus, Sequence[Any], EnrollmentInfo | None]] = []
-        seen: set[str] = set()
-        for row in needing if only_needing else all_rows:
-            seen.add(row.principal_key)
-            account = by_key.get(row.principal_key)
-            if account is not None:
-                entries.append((account.status, account.identities, row))
-            else:
-                entries.append((PrincipalStatus(row.principal_key, status="missing"), (), row))
-        if not only_needing:
-            # A pending or disabled user without an enrollment must still be listed, or
-            # nobody could approve or enable them.
-            entries.extend(
-                (a.status, a.identities, None)
-                for a in accounts
-                if (a.status.pending or a.status.disabled) and a.principal_key not in seen
-            )
-        entries.sort(key=lambda entry: 0 if entry[0].pending else 1)
+        invalid_only = wanted == web._FILTER_NEEDS_REENROLL
+        paging = self._page_params(
+            ctx, "enrollments/" + str(invalid_only), filters=("filter",)
+        )
+        page = await run_store(
+            lambda: self.app.store.enrollments_page(invalid_only=invalid_only, **paging)
+        )
+        accounts = await run_store(self.app.store.enrollment_accounts, page.items)
         views = [
-            view
-            for status, identities, row in entries
-            if (view := self._admin_account(session, status, identities, row)) is not None
+            self._admin_account(
+                session,
+                accounts[row.principal_key].status,
+                accounts[row.principal_key].identities,
+                row,
+            )
+            for row in page.items
+            if row.principal_key in accounts
         ]
         return self._ok(
             {
                 "rows": views,
-                "counts": {
-                    "needing": len(needing),
-                    "total_enrollments": len(all_rows),
-                    "disabled": sum(1 for a in accounts if a.status.disabled),
-                    "pending": sum(1 for a in accounts if a.status.pending),
-                },
+                "counts": await run_store(self.app.store.enrollment_counts),
+                "next_cursor": page.next_cursor,
             }
         )
 
@@ -1227,18 +1625,18 @@ class ApiApp:
         raw = ctx.params.get("id", "")
         if not _UUID_RE.fullmatch(raw):
             raise _invalid("id")
-        return "acct:" + raw
+        return raw
 
     async def _admin_result(self, ctx: _Ctx, target: str, changed: bool) -> Response:
         """The account as it is now, or 404 when nothing changed because it does not exist."""
         session = ctx.session
         assert session is not None
         store = self.app.store
-        status = await anyio.to_thread.run_sync(store.get_principal_status, target)
+        status = await run_store(store.get_principal_status, target)
         if not changed and status.missing:
             raise _Fail("not_found")
-        identities = await anyio.to_thread.run_sync(store.account_identities, target)
-        row = await anyio.to_thread.run_sync(store.info, target)
+        identities = await run_store(store.account_identities, target)
+        row = await run_store(store.info, target)
         account = self._admin_account(session, status, identities, row)
         return self._ok({"changed": changed, "account": account})
 
@@ -1258,7 +1656,7 @@ class ApiApp:
     async def admin_mark_invalid(self, ctx: _Ctx) -> Response:
         assert ctx.session is not None
         target = self._target(ctx)
-        if await anyio.to_thread.run_sync(self.app.store.info, target) is None:
+        if await run_store(self.app.store.info, target) is None:
             raise _Fail("not_found")
         outcome = await self.app.invalidate_enrollment(ctx.session, target)
         if isinstance(outcome, Refusal):
@@ -1284,10 +1682,14 @@ class ApiApp:
             elif isinstance(value, str):
                 out[name] = _clean(value)
             elif isinstance(value, list):
-                out[name] = [_clean(item) for item in value[:100] if isinstance(item, str)]
+                out[name] = [
+                    _clean(item) for item in value[:100] if isinstance(item, str)
+                ]
         return out
 
-    def _audit_entry(self, entry: AuditEntry, names: Mapping[str, str]) -> dict[str, Any]:
+    def _audit_entry(
+        self, entry: AuditEntry, names: Mapping[str, str]
+    ) -> dict[str, Any]:
         actor_kind = "account"
         if entry.actor == OPERATOR_ACTOR:
             actor_kind = "operator"
@@ -1297,11 +1699,15 @@ class ApiApp:
         return {
             "id": entry.id,
             "at": _ts(entry.at),
-            "action": entry.action if _AUDIT_ACTION_RE.fullmatch(entry.action) else "unknown",
+            "action": entry.action
+            if _AUDIT_ACTION_RE.fullmatch(entry.action)
+            else "unknown",
             "actor": {
                 "kind": actor_kind,
                 "key": _clean(entry.actor, 128) if is_account else None,
-                "name": _clean(names[entry.actor]) if is_account and entry.actor in names else None,
+                "name": _clean(names[entry.actor])
+                if is_account and entry.actor in names
+                else None,
             },
             "target": {
                 "key": _clean(entry.target, 128),
@@ -1314,23 +1720,29 @@ class ApiApp:
         }
 
     async def admin_audit(self, ctx: _Ctx) -> Response:
-        raw = ctx.request.query_params.get("before")
-        before: int | None = None
-        if raw is not None:
-            if not (raw.isascii() and raw.isdigit() and len(raw) < 15):
-                raise _invalid("before")
-            before = int(raw)
+        account_id = ctx.request.query_params.get("account_id")
+        if account_id is not None and not _UUID_RE.fullmatch(account_id):
+            raise _invalid("account_id")
+        paging = self._page_params(
+            ctx, "audit/" + str(account_id), integer=True, filters=("account_id",)
+        )
         store = self.app.store
-        entries = await anyio.to_thread.run_sync(store.list_audit, AUDIT_PAGE, before)
-        accounts = await anyio.to_thread.run_sync(store.list_accounts)
-        names = {a.principal_key: a.status.display_name for a in accounts if a.status.display_name}
+        page = await run_store(
+            lambda: store.audit_page(account_id=account_id, **paging)
+        )
+        ids = {
+            key
+            for entry in page.items
+            for key in (entry.actor, entry.target)
+            if key is not None and _UUID_RE.fullmatch(key)
+        }
+        names = await run_store(store.account_names, ids)
         return self._ok(
             {
-                "entries": [self._audit_entry(entry, names) for entry in entries],
-                "next_cursor": str(entries[-1].id) if len(entries) >= AUDIT_PAGE else None,
+                "entries": [self._audit_entry(entry, names) for entry in page.items],
+                "next_cursor": page.next_cursor,
             }
         )
-
 
     # -- connected apps and consent (SELFHOST_AUTH_MODE=local) ------------------------------------
 
@@ -1342,7 +1754,9 @@ class ApiApp:
         return {
             "id": grant.id,
             "client": {
-                "kind": grant.client_kind if grant.client_kind in ("dcr", "cimd") else "dcr",
+                "kind": grant.client_kind
+                if grant.client_kind in ("dcr", "cimd")
+                else "dcr",
                 "label": _clean(grant.client_host, 253) if grant.client_host else name,
                 "name": name,
                 "host": _clean(grant.client_host, 253) if grant.client_host else None,
@@ -1366,7 +1780,6 @@ class ApiApp:
         return raw
 
     def _binding(self, ctx: _Ctx) -> str | None:
-        assert self.app.authz is not None
         return ctx.request.cookies.get(self.app.authz.binding_cookie)
 
     async def get_consent(self, ctx: _Ctx) -> Response:
@@ -1390,7 +1803,9 @@ class ApiApp:
         return self._ok(
             {
                 "client": {
-                    "kind": shown.client_kind if shown.client_kind in ("dcr", "cimd") else "dcr",
+                    "kind": shown.client_kind
+                    if shown.client_kind in ("dcr", "cimd")
+                    else "dcr",
                     "label": _clean(shown.label, 253),
                     "name": _clean(shown.client_name, 100),
                     "host": _clean(shown.label, 253) if verified else None,
@@ -1441,10 +1856,16 @@ class ApiApp:
 
     async def my_grants(self, ctx: _Ctx) -> Response:
         assert ctx.session is not None
-        grants = await self.app.list_own_grants(ctx.session)
+        paging = self._page_params(ctx, "grants/" + ctx.session.acct + "/False")
+        grants = await self.app.list_own_grants(ctx.session, **paging)
         if isinstance(grants, Refusal):
             raise _refusal_to_fail(grants)
-        return self._ok({"grants": [self._grant_view(grant) for grant in grants]})
+        return self._ok(
+            {
+                "grants": [self._grant_view(grant) for grant in grants.items],
+                "next_cursor": grants.next_cursor,
+            }
+        )
 
     @staticmethod
     def _grant_id(ctx: _Ctx) -> str:
@@ -1465,10 +1886,17 @@ class ApiApp:
 
     async def admin_account_grants(self, ctx: _Ctx) -> Response:
         assert ctx.session is not None
-        grants = await self.app.list_account_grants(ctx.session, self._target(ctx))
+        target = self._target(ctx)
+        paging = self._page_params(ctx, "grants/" + target + "/False")
+        grants = await self.app.list_account_grants(ctx.session, target, **paging)
         if isinstance(grants, Refusal):
             raise _refusal_to_fail(grants)
-        return self._ok({"grants": [self._grant_view(grant) for grant in grants]})
+        return self._ok(
+            {
+                "grants": [self._grant_view(grant) for grant in grants.items],
+                "next_cursor": grants.next_cursor,
+            }
+        )
 
     async def admin_revoke_grant(self, ctx: _Ctx) -> Response:
         assert ctx.session is not None
@@ -1480,11 +1908,11 @@ class ApiApp:
     # -- sign-in methods (two or more providers) ---------------------------------------------------
 
     @staticmethod
-    def _identity_id(ctx: _Ctx) -> int:
+    def _identity_id(ctx: _Ctx) -> str:
         raw = ctx.params.get("id", "")
-        if not _IDENTITY_ID_RE.fullmatch(raw):
+        if not _UUID_RE.fullmatch(raw):
             raise _invalid("id")
-        return int(raw)
+        return raw
 
     def _apply_unlink_cookie(
         self, response: Response, session: web._Session, outcome: Unlinked
@@ -1565,7 +1993,7 @@ class ApiApp:
         session = ctx.session
         assert session is not None
         identity_id = self._identity_id(ctx)
-        target = await anyio.to_thread.run_sync(self.app.store.identity_account, identity_id)
+        target = await run_store(self.app.store.identity_account, identity_id)
         if target is None:
             raise _Fail("not_found")
         outcome = await self.app.owner_unlink_identity(session, target, identity_id)
@@ -1577,7 +2005,6 @@ class ApiApp:
         return response
 
 
-def build_api_routes(app: web._AccountApp) -> list[Route]:
-    """The ``/account/api`` routes over an existing account application."""
+def build_api_routes(app: web.AccountCore) -> list[Route]:
+    """The ``/api/v1`` routes over an existing account application."""
     return ApiApp(app).routes()
-

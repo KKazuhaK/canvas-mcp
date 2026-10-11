@@ -23,10 +23,10 @@ import pytest
 
 from canvas_mcp.core import audit
 from canvas_mcp.core.selfhost import account_api
-from canvas_mcp.core.selfhost.account_web import (
+from canvas_mcp.core.selfhost.account_core import (
+    AccountCore,
     CanvasCheckError,
     CanvasIdentity,
-    _AccountApp,
     build_account_app,
 )
 from canvas_mcp.core.selfhost.tool_prefs import ToolPrefsCache, WriteToolCatalog
@@ -63,14 +63,14 @@ from .test_account_web import (
     sign_in,
 )
 
-P = "/account/api"
+P = "/api/v1"
 
 #: Where each legacy (method, path) went. ``None`` marks the two server-side halves of
 #: the sign-in, which are the same routes in both modes.
 LEGACY_TO_API: dict[tuple[str, str], list[tuple[str, str]] | None] = {
     ("GET", "/account"): [("GET", f"{P}/providers"), ("GET", f"{P}/me")],
-    ("GET", "/account/login"): None,
-    ("GET", "/account/callback"): None,
+    ("GET", "/auth/login"): None,
+    ("GET", "/auth/callback/entra"): None,
     ("POST", "/account/token"): [("PUT", f"{P}/me/canvas-token")],
     ("POST", "/account/token/delete"): [("DELETE", f"{P}/me/canvas-token")],
     ("POST", "/account/token/recheck"): [("POST", f"{P}/me/canvas-token/recheck")],
@@ -129,7 +129,7 @@ READ_MODELS = {
 }
 
 
-def legacy_app(tmp_path: pathlib.Path) -> _AccountApp:
+def legacy_app(tmp_path: pathlib.Path) -> AccountCore:
     h = build_harness(tmp_path)
     return build_account_app(make_cfg(), h.store, h.identity)  # type: ignore[arg-type]
 
@@ -167,16 +167,16 @@ class TestRouteMatrix:
         h = build_harness(tmp_path)
         app = build_account_app(make_cfg(), h.store, h.identity, ui="react")  # type: ignore[arg-type]
         paths = {route.path for route in app.routes()}
-        assert paths == {"/account/login", "/account/callback"}
+        assert paths == {"/auth/login", "/auth/callback/entra"}
         full = build_account_app(make_cfg(), h.store, h.identity)  # type: ignore[arg-type]
         assert {r.path for r in full.routes()} >= paths | {"/account/token", "/account/admin"}
 
     def test_the_legacy_default_registers_no_api(self, tmp_path: pathlib.Path) -> None:
-        from canvas_mcp.core.selfhost.account_web import build_account_routes
+        from canvas_mcp.core.selfhost.account_core import build_account_routes
 
         h = build_harness(tmp_path)
         routes = build_account_routes(make_cfg(), h.store, h.identity)  # type: ignore[arg-type]
-        assert not [r for r in routes if r.path.startswith("/account/api")]
+        assert not [r for r in routes if r.path.startswith("/api/v1")]
 
 
 # -- scenarios ----------------------------------------------------------------------------

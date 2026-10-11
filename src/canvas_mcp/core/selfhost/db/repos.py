@@ -1,28 +1,15 @@
-"""SQLAlchemy Core implementations of the repositories (SQLite and PostgreSQL).
+"""Portable v1 repositories; every result is a frozen record with named fields.
 
-Statements are built with the expression language, so one definition serves both
-dialects. Upserts use the dialect's ``insert().on_conflict_do_update`` (both
-SQLite and PostgreSQL support ``excluded``). Every value is a bound parameter.
-Nothing here begins or ends a transaction.
+Repositories never own transaction boundaries. The caller supplies the connection
+and chooses the row-conditional or governance tier before calling a statement.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any, Literal
+from collections.abc import Mapping, Sequence
+from typing import Any, Literal, cast
 
-from sqlalchemy import (
-    Select,
-    and_,
-    delete,
-    false,
-    func,
-    insert,
-    literal,
-    or_,
-    select,
-    update,
-)
+from sqlalchemy import Select, and_, delete, false, func, insert, or_, select, update
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import Connection
 
@@ -36,46 +23,28 @@ from .authz_repos import (
     SqlOAuthClientRepo,
     SqlRefreshRepo,
 )
-from .ports import (
-    AccountRepo,
-    AuditRepo,
-    AuthCodeRepo,
-    AuthEventRepo,
-    CanvasTokenRepo,
-    CimdRepo,
-    CredentialGenerationRepo,
-    GrantRepo,
-    IdentityRepo,
-    JwtEpochRepo,
-    LoginStateRepo,
-    MetaRepo,
-    OAuthClientRepo,
-    PrefsRepo,
-    PrincipalEventRepo,
-    RefreshRepo,
-    Row,
+from .rows import (
+    AccountRow,
+    AuditRow,
+    AuthEventRow,
+    CredentialRow,
+    IdentityRow,
+    WriteToolRow,
 )
+from .types import new_id
 
 Dialect = Literal["sqlite", "postgresql"]
-
-#: The surfaces of the sign-in history a user sees (the ``oauth`` surface is not part of
-#: it). Kept equal to ``accounts.SIGN_IN_SURFACES`` by a test; this module stays free of
-#: imports from the pure admission module.
-SIGN_IN_SURFACES = ("account", "mcp")
-
+SIGN_IN_SURFACES = ("account",)
 STATUS_ACTIVE = "active"
 STATUS_INVALID = "invalid"
 STATUS_DISABLED = "disabled"
 STATUS_PENDING = "pending"
 ROLE_OWNER = "owner"
-ROLE_USER = "user"
 ROLE_SOURCE_RULES = "rules"
 PROVIDER_ENTRA = "entra"
 REASON_DECRYPT_FAILED = "decrypt_failed"
-
-_ct = t.canvas_tokens
-_cg = t.credential_generations
 _a = t.accounts
+_ct = t.canvas_credentials
 _ei = t.external_identities
 _ae = t.auth_events
 _al = t.audit_log
@@ -85,308 +54,43 @@ def _upsert_insert(dialect: Dialect, table: Any) -> Any:
     return (postgresql.insert if dialect == "postgresql" else sqlite.insert)(table)
 
 
-def _generation_of_token_row() -> Any:
-    """The generation of the credential that belongs to ``canvas_tokens.principal_key``.
-
-    Evaluated in the same statement as the row so a token and its generation always
-    match; 0 when the principal has no counter yet.
-    """
-    return func.coalesce(
-        select(_cg.c.generation).where(_cg.c.principal_key == _ct.c.principal_key).scalar_subquery(),
-        0,
-    )
-
-
-def _info_columns() -> list[Any]:
-    return [
-        _ct.c.canvas_user_id,
-        _ct.c.canvas_user_name,
-        _ct.c.key_id,
-        _ct.c.created_at,
-        _ct.c.updated_at,
-        _ct.c.last_used_at,
-        _ct.c.canvas_host,
-        _ct.c.principal_key,
-        _ct.c.status,
-        _ct.c.invalid_reason,
-        _ct.c.invalid_since,
-        _ct.c.last_verified_at,
-        _ct.c.expires_hint_at,
-        _generation_of_token_row().label("credential_generation"),
-    ]
-
-
-def _account_columns() -> list[Any]:
-    return [
-        _a.c.id,
-        _a.c.status,
-        _a.c.role,
-        _a.c.role_source,
-        _a.c.role_seen_at,
-        _a.c.admitted_via,
-        _a.c.display_name,
-        _a.c.contact_email,
-        _a.c.ui_locale,
-        _a.c.created_at,
-        _a.c.approved_at,
-        _a.c.approved_by,
-        _a.c.disabled_reason,
-        _a.c.disabled_at,
-        _a.c.disabled_by,
-        _a.c.last_login_at,
-        _a.c.session_epoch,
-        _a.c.updated_at,
-    ]
+def _actor_id(value: str | None) -> str | None:
+    return None if value is None or value in ("operator", "system") else value
 
 
 def _for_update(stmt: Select[Any], enabled: bool) -> Select[Any]:
-    # SQLite has no row locks and renders nothing for FOR UPDATE (its write lock already
-    # serialises writers). On PostgreSQL this is a real row lock: inside the global writer
-    # lock it is defence in depth, inside ``row_write`` (no advisory lock) it is what
-    # makes a transaction wait for a concurrent change of the same account.
-    return stmt.with_for_update() if enabled else stmt
-
-
-class SqlCanvasTokenRepo:
-    def __init__(self, dialect: Dialect) -> None:
-        self._dialect = dialect
-
-    def row_for_get(self, conn: Connection, key: str) -> Row | None:
-        stmt = select(
-            _ct.c.key_id,
-            _ct.c.nonce,
-            _ct.c.ciphertext,
-            _ct.c.canvas_user_id,
-            _ct.c.canvas_user_name,
-            _ct.c.created_at,
-            _ct.c.updated_at,
-            _ct.c.last_used_at,
-            _ct.c.canvas_host,
-            _ct.c.status,
-            _ct.c.invalid_reason,
-            _ct.c.invalid_since,
-            _ct.c.last_verified_at,
-            _ct.c.expires_hint_at,
-            _generation_of_token_row().label("credential_generation"),
-        ).where(_ct.c.principal_key == key)
-        return conn.execute(stmt).one_or_none()
-
-    def info(self, conn: Connection, key: str) -> Row | None:
-        stmt = select(*_info_columns()).where(_ct.c.principal_key == key)
-        return conn.execute(stmt).one_or_none()
-
-    def list_all(self, conn: Connection) -> list[Row]:
-        stmt = select(*_info_columns()).order_by(_ct.c.created_at, _ct.c.principal_key)
-        return list(conn.execute(stmt).all())
-
-    def count(self, conn: Connection) -> int:
-        return int(conn.execute(select(func.count()).select_from(_ct)).scalar_one())
-
-    def exists(self, conn: Connection, key: str) -> bool:
-        return conn.execute(select(_ct.c.principal_key).where(_ct.c.principal_key == key)).first() is not None
-
-    def upsert(
-        self,
-        conn: Connection,
-        *,
-        principal_key: str,
-        key_id: str,
-        nonce: bytes,
-        ciphertext: bytes,
-        canvas_user_id: str,
-        canvas_user_name: str,
-        canvas_host: str | None,
-        status: str,
-        now: int,
-        expires_hint_at: int | None,
-        keep_expiry_hint: bool,
-    ) -> None:
-        stmt = _upsert_insert(self._dialect, _ct).values(
-            principal_key=principal_key,
-            key_id=key_id,
-            nonce=nonce,
-            ciphertext=ciphertext,
-            canvas_user_id=canvas_user_id,
-            canvas_user_name=canvas_user_name,
-            created_at=now,
-            updated_at=now,
-            canvas_host=canvas_host,
-            status=status,
-            last_verified_at=now,
-            expires_hint_at=expires_hint_at,
-        )
-        excluded = stmt.excluded
-        changes: dict[str, Any] = {
-            "key_id": excluded.key_id,
-            "nonce": excluded.nonce,
-            "ciphertext": excluded.ciphertext,
-            "canvas_user_id": excluded.canvas_user_id,
-            "canvas_user_name": excluded.canvas_user_name,
-            "canvas_host": excluded.canvas_host,
-            "status": excluded.status,
-            "invalid_reason": None,
-            "invalid_since": None,
-            "last_verified_at": excluded.last_verified_at,
-            "updated_at": excluded.updated_at,
-        }
-        if not keep_expiry_hint:
-            # Left out of the update entirely when the stored hint is kept (a
-            # CASE over an integer parameter is not portable).
-            changes["expires_hint_at"] = excluded.expires_hint_at
-        conn.execute(stmt.on_conflict_do_update(index_elements=[_ct.c.principal_key], set_=changes))
-
-    def delete(self, conn: Connection, key: str) -> bool:
-        return conn.execute(delete(_ct).where(_ct.c.principal_key == key)).rowcount > 0
-
-    def touch(self, conn: Connection, key: str, now: int, older_than: int) -> None:
-        conn.execute(
-            update(_ct)
-            .where(
-                _ct.c.principal_key == key,
-                or_(_ct.c.last_used_at.is_(None), _ct.c.last_used_at < older_than),
-            )
-            .values(last_used_at=now)
-        )
-
-    def mark_invalid(
-        self,
-        conn: Connection,
-        key: str,
-        *,
-        reason: str,
-        now: int,
-        expected_updated_at: int | None,
-        expected_generation: int | None,
-    ) -> bool:
-        stmt = (
-            update(_ct)
-            .where(_ct.c.principal_key == key, _ct.c.status == STATUS_ACTIVE)
-            .values(status=STATUS_INVALID, invalid_reason=reason, invalid_since=now)
-        )
-        stmt = self._guard(stmt, expected_updated_at, expected_generation)
-        return conn.execute(stmt).rowcount > 0
-
-    def restore_active(
-        self,
-        conn: Connection,
-        key: str,
-        *,
-        now: int,
-        expected_updated_at: int | None,
-        expected_generation: int | None,
-    ) -> bool:
-        stmt = (
-            update(_ct)
-            .where(_ct.c.principal_key == key, _ct.c.status == STATUS_INVALID)
-            .values(
-                status=STATUS_ACTIVE,
-                invalid_reason=None,
-                invalid_since=None,
-                last_verified_at=now,
-            )
-        )
-        stmt = self._guard(stmt, expected_updated_at, expected_generation)
-        return conn.execute(stmt).rowcount > 0
-
-    def mark_verified(
-        self,
-        conn: Connection,
-        key: str,
-        *,
-        now: int,
-        older_than: int,
-        expected_generation: int | None,
-    ) -> bool:
-        stmt = (
-            update(_ct)
-            .where(
-                _ct.c.principal_key == key,
-                _ct.c.status == STATUS_ACTIVE,
-                or_(_ct.c.last_verified_at.is_(None), _ct.c.last_verified_at < older_than),
-            )
-            .values(last_verified_at=now)
-        )
-        stmt = self._guard(stmt, None, expected_generation)
-        return conn.execute(stmt).rowcount > 0
-
-    @staticmethod
-    def _guard(stmt: Any, expected_updated_at: int | None, expected_generation: int | None) -> Any:
-        """Only touch the row version the caller saw (updated_at, and the generation)."""
-        if expected_updated_at is not None:
-            stmt = stmt.where(_ct.c.updated_at == expected_updated_at)
-        if expected_generation is not None:
-            stmt = stmt.where(_generation_of_token_row() == expected_generation)
-        return stmt
-
-    def rows_not_under_key(self, conn: Connection, key_id: str) -> list[Row]:
-        stmt = select(
-            _ct.c.principal_key,
-            _ct.c.key_id,
-            _ct.c.nonce,
-            _ct.c.ciphertext,
-            _ct.c.canvas_host,
-        ).where(_ct.c.key_id != key_id)
-        return list(conn.execute(stmt).all())
-
-    def reseal(
-        self,
-        conn: Connection,
-        *,
-        principal_key: str,
-        key_id: str,
-        nonce: bytes,
-        ciphertext: bytes,
-    ) -> None:
-        conn.execute(
-            update(_ct)
-            .where(_ct.c.principal_key == principal_key)
-            .values(key_id=key_id, nonce=nonce, ciphertext=ciphertext)
-        )
-
-    def key_ids_in_use(self, conn: Connection) -> list[str]:
-        stmt = select(_ct.c.key_id).distinct().order_by(_ct.c.key_id)
-        return [r[0] for r in conn.execute(stmt)]
-
-    def probe_row(self, conn: Connection, key_id: str) -> Row | None:
-        stmt = (
-            select(_ct.c.principal_key, _ct.c.nonce, _ct.c.ciphertext, _ct.c.canvas_host)
-            .where(
-                _ct.c.key_id == key_id,
-                or_(
-                    _ct.c.status != STATUS_INVALID,
-                    _ct.c.invalid_reason.is_(None),
-                    _ct.c.invalid_reason != REASON_DECRYPT_FAILED,
-                ),
-            )
-            .order_by(_ct.c.principal_key)
-            .limit(1)
-        )
-        return conn.execute(stmt).first()
+    return stmt.with_for_update(key_share=True) if enabled else stmt
 
 
 class SqlCredentialGenerationRepo:
-    def __init__(self, dialect: Dialect) -> None:
-        self._dialect = dialect
-
-    def bump(self, conn: Connection, key: str, reason: str, now: int) -> int:
-        stmt = _upsert_insert(self._dialect, _cg).values(
-            principal_key=key, generation=1, reason=reason, updated_at=now
+    def bump(
+        self,
+        conn: Connection,
+        key: str,
+        reason: str,
+        now: int,
+        *,
+        writing: str | None = None,
+    ) -> int:
+        generation = int(
+            conn.execute(
+                update(_a)
+                .where(_a.c.id == key)
+                .values(
+                    credential_generation=_a.c.credential_generation + 1, updated_at=now
+                )
+                .returning(_a.c.credential_generation)
+            ).scalar_one()
         )
-        conn.execute(
-            stmt.on_conflict_do_update(
-                index_elements=[_cg.c.principal_key],
-                set_={
-                    "generation": _cg.c.generation + 1,
-                    "reason": stmt.excluded.reason,
-                    "updated_at": stmt.excluded.updated_at,
-                },
-            )
-        )
-        return self.get(conn, key)
+        stmt = update(_ct).where(_ct.c.account_id == key)
+        if writing is not None:
+            stmt = stmt.where(_ct.c.id != writing)
+        conn.execute(stmt.values(generation=generation))
+        return generation
 
     def get(self, conn: Connection, key: str) -> int:
         value = conn.execute(
-            select(_cg.c.generation).where(_cg.c.principal_key == key)
+            select(_a.c.credential_generation).where(_a.c.id == key)
         ).scalar_one_or_none()
         return 0 if value is None else int(value)
 
@@ -395,32 +99,21 @@ class SqlAccountRepo:
     def __init__(self, dialect: Dialect) -> None:
         self._dialect = dialect
 
-    def get(self, conn: Connection, account_id: str, *, for_update: bool = False) -> Row | None:
-        stmt = _for_update(select(*_account_columns()).where(_a.c.id == account_id), for_update)
-        return conn.execute(stmt).one_or_none()
+    def get(
+        self, conn: Connection, account_id: str, *, for_update: bool = False
+    ) -> AccountRow | None:
+        stmt = _for_update(select(_a).where(_a.c.id == account_id), for_update)
+        row = conn.execute(stmt).mappings().one_or_none()
+        return None if row is None else AccountRow(**row)
 
-    def get_with_generation(self, conn: Connection, account_id: str) -> tuple[Row | None, int]:
-        """One statement, so the account and the generation come from one snapshot."""
-        anchor = select(
-            literal(account_id, _a.c.id.type).label("account_id"),
-            literal(f"acct:{account_id}", _cg.c.principal_key.type).label("principal_key"),
-        ).subquery("anchor")
-        stmt = select(*_account_columns(), _cg.c.generation.label("credential_generation")).select_from(
-            anchor.outerjoin(_a, _a.c.id == anchor.c.account_id).outerjoin(
-                _cg, _cg.c.principal_key == anchor.c.principal_key
-            )
-        )
-        row = conn.execute(stmt).one()
-        generation = 0 if row[-1] is None else int(row[-1])
-        account_row = None if row[0] is None else tuple(row[:-1])
-        return account_row, generation
 
-    def list_all(self, conn: Connection) -> list[Row]:
-        return list(conn.execute(select(*_account_columns()).order_by(_a.c.created_at, _a.c.id)).all())
-
-    def count_active_owners(self, conn: Connection, *, exclude: str | None = None) -> int:
-        stmt = select(func.count()).select_from(_a).where(
-            _a.c.role == ROLE_OWNER, _a.c.status == STATUS_ACTIVE
+    def count_active_owners(
+        self, conn: Connection, *, exclude: str | None = None
+    ) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(_a)
+            .where(_a.c.role == ROLE_OWNER, _a.c.status == STATUS_ACTIVE)
         )
         if exclude is not None:
             stmt = stmt.where(_a.c.id != exclude)
@@ -457,20 +150,35 @@ class SqlAccountRepo:
             entra = holds(_ei.c.provider_id == PROVIDER_ENTRA)
         else:
             any_listed = holds(_ei.c.provider_id.in_(listed))
-            entra = holds(_ei.c.provider_id == PROVIDER_ENTRA) if PROVIDER_ENTRA in listed else false()
+            entra = (
+                holds(_ei.c.provider_id == PROVIDER_ENTRA)
+                if PROVIDER_ENTRA in listed
+                else false()
+            )
         stmt = select(_a.c.id).where(
             _a.c.role == ROLE_OWNER,
             _a.c.status == STATUS_ACTIVE,
             or_(
                 and_(_a.c.role_source == ROLE_SOURCE_RULES, entra),
-                and_(or_(_a.c.role_source.is_(None), _a.c.role_source != ROLE_SOURCE_RULES), any_listed),
+                and_(
+                    or_(
+                        _a.c.role_source.is_(None),
+                        _a.c.role_source != ROLE_SOURCE_RULES,
+                    ),
+                    any_listed,
+                ),
             ),
         )
         if exclude is not None:
             stmt = stmt.where(_a.c.id != exclude)
-        return [str(r[0]) for r in conn.execute(_for_update(stmt.order_by(_a.c.id), for_update)).all()]
+        return [
+            str(r[0])
+            for r in conn.execute(_for_update(stmt.order_by(_a.c.id), for_update)).all()
+        ]
 
-    def count_usable_owners(self, conn: Connection, provider_ids: Sequence[str] | None) -> int:
+    def count_usable_owners(
+        self, conn: Connection, provider_ids: Sequence[str] | None
+    ) -> int:
         return len(self.usable_owner_ids(conn, provider_ids))
 
     def count_pending(self, conn: Connection) -> int:
@@ -502,11 +210,13 @@ class SqlAccountRepo:
                 admitted_via=admitted_via,
                 display_name=display_name,
                 created_at=now,
-                approved_at=now if status == STATUS_ACTIVE and approved_by is not None else None,
-                approved_by=approved_by,
+                approved_at=now
+                if status == STATUS_ACTIVE and approved_by is not None
+                else None,
+                approved_by=_actor_id(approved_by),
                 disabled_reason=disabled_reason,
                 disabled_at=now if status == STATUS_DISABLED else None,
-                disabled_by=disabled_by,
+                disabled_by=_actor_id(disabled_by),
                 session_epoch=1 if status == STATUS_DISABLED else 0,
                 updated_at=now,
             )
@@ -528,7 +238,7 @@ class SqlAccountRepo:
                 status=STATUS_ACTIVE,
                 admitted_via=admitted_via,
                 approved_at=now,
-                approved_by=approved_by,
+                approved_by=_actor_id(approved_by),
                 updated_at=now,
             )
         )
@@ -537,22 +247,23 @@ class SqlAccountRepo:
     def disable(
         self, conn: Connection, account_id: str, *, reason: str, by: str, now: int
     ) -> int:
-        conn.execute(
+        result = conn.execute(
             update(_a)
             .where(_a.c.id == account_id)
             .values(
                 status=STATUS_DISABLED,
                 disabled_reason=reason,
                 disabled_at=now,
-                disabled_by=by,
+                disabled_by=_actor_id(by),
                 session_epoch=_a.c.session_epoch + 1,
                 updated_at=now,
             )
+            .returning(_a.c.session_epoch)
         )
-        return self._epoch(conn, account_id)
+        return int(result.scalar_one())
 
     def enable(self, conn: Connection, account_id: str, now: int) -> int:
-        conn.execute(
+        result = conn.execute(
             update(_a)
             .where(_a.c.id == account_id)
             .values(
@@ -563,20 +274,18 @@ class SqlAccountRepo:
                 session_epoch=_a.c.session_epoch + 1,
                 updated_at=now,
             )
+            .returning(_a.c.session_epoch)
         )
-        return self._epoch(conn, account_id)
+        return int(result.scalar_one())
 
     def end_sessions(self, conn: Connection, account_id: str, now: int) -> int:
-        conn.execute(
+        result = conn.execute(
             update(_a)
             .where(_a.c.id == account_id)
             .values(session_epoch=_a.c.session_epoch + 1, updated_at=now)
+            .returning(_a.c.session_epoch)
         )
-        return self._epoch(conn, account_id)
-
-    @staticmethod
-    def _epoch(conn: Connection, account_id: str) -> int:
-        return int(conn.execute(select(_a.c.session_epoch).where(_a.c.id == account_id)).scalar_one())
+        return int(result.scalar_one())
 
     def set_role(
         self,
@@ -598,12 +307,16 @@ class SqlAccountRepo:
         self, conn: Connection, account_id: str, admitted_via: str, now: int
     ) -> None:
         conn.execute(
-            update(_a).where(_a.c.id == account_id).values(admitted_via=admitted_via, updated_at=now)
+            update(_a)
+            .where(_a.c.id == account_id)
+            .values(admitted_via=admitted_via, updated_at=now)
         )
 
     def mark_role_seen(self, conn: Connection, account_id: str, now: int) -> None:
         conn.execute(
-            update(_a).where(_a.c.id == account_id).values(role_seen_at=now, updated_at=now)
+            update(_a)
+            .where(_a.c.id == account_id)
+            .values(role_seen_at=now, updated_at=now)
         )
 
     def touch_login(
@@ -614,29 +327,18 @@ class SqlAccountRepo:
             values["display_name"] = display_name
         conn.execute(update(_a).where(_a.c.id == account_id).values(**values))
 
-    def purge_pending(self, conn: Connection, older_than: int) -> list[str]:
-        ids = [
-            r[0]
-            for r in conn.execute(
-                select(_a.c.id).where(_a.c.status == STATUS_PENDING, _a.c.created_at < older_than)
-            )
-        ]
-        if ids:
-            conn.execute(delete(_a).where(_a.c.id.in_(ids), _a.c.status == STATUS_PENDING))
-        return ids
-
 
 class SqlIdentityRepo:
     def lookup(
         self, conn: Connection, provider_id: str, issuer: str, subject: str
     ) -> str | None:
-        stmt = select(_ei.c.account_id).where(
-            _ei.c.provider_id == provider_id,
-            _ei.c.issuer == issuer,
-            _ei.c.subject == subject,
-        )
-        value = conn.execute(stmt).scalar_one_or_none()
-        return None if value is None else str(value)
+        return conn.execute(
+            select(_ei.c.account_id).where(
+                _ei.c.provider_id == provider_id,
+                _ei.c.issuer == issuer,
+                _ei.c.subject == subject,
+            )
+        ).scalar_one_or_none()
 
     def insert(
         self,
@@ -651,15 +353,19 @@ class SqlIdentityRepo:
         email_verified: bool,
         now: int,
     ) -> None:
+        SqlProviderRepo(cast(Dialect, conn.dialect.name)).ensure(
+            conn, provider_id, now=now
+        )
         conn.execute(
             insert(_ei).values(
+                id=new_id(),
                 account_id=account_id,
                 provider_id=provider_id,
                 issuer=issuer,
                 subject=subject,
                 username=username or None,
                 email=email,
-                email_verified=1 if email_verified else 0,
+                email_verified=email_verified,
                 linked_at=now,
             )
         )
@@ -681,7 +387,7 @@ class SqlIdentityRepo:
             values["username"] = username
         if email is not None:
             values["email"] = email
-            values["email_verified"] = 1 if email_verified else 0
+            values["email_verified"] = bool(email_verified)
         conn.execute(
             update(_ei)
             .where(
@@ -692,126 +398,129 @@ class SqlIdentityRepo:
             .values(**values)
         )
 
-    def for_account(self, conn: Connection, account_id: str) -> list[Row]:
-        stmt = (
-            select(
-                _ei.c.provider_id,
-                _ei.c.issuer,
-                _ei.c.subject,
-                _ei.c.username,
-                _ei.c.email,
-                _ei.c.email_verified,
-                _ei.c.linked_at,
-                _ei.c.last_login_at,
-                _ei.c.id,
-            )
-            .where(_ei.c.account_id == account_id)
-            .order_by(_ei.c.id)
-        )
-        return list(conn.execute(stmt).all())
-
-    @staticmethod
-    def _with_id_columns() -> list[Any]:
+    def for_account(self, conn: Connection, account_id: str) -> list[IdentityRow]:
         return [
-            _ei.c.id,
-            _ei.c.provider_id,
-            _ei.c.issuer,
-            _ei.c.subject,
-            _ei.c.username,
-            _ei.c.email,
-            _ei.c.email_verified,
-            _ei.c.linked_at,
-            _ei.c.last_login_at,
+            IdentityRow(**row)
+            for row in conn.execute(
+                select(_ei).where(_ei.c.account_id == account_id).order_by(_ei.c.id)
+            ).mappings()
         ]
 
-    def list_with_ids(self, conn: Connection, account_id: str) -> list[Row]:
-        stmt = (
-            select(*self._with_id_columns())
-            .where(_ei.c.account_id == account_id)
-            .order_by(_ei.c.id)
-        )
-        return list(conn.execute(stmt).all())
-
     def get_for_account(
-        self, conn: Connection, identity_id: int, account_id: str, *, for_update: bool = False
-    ) -> Row | None:
-        stmt = select(*self._with_id_columns()).where(
-            _ei.c.id == identity_id, _ei.c.account_id == account_id
-        )
-        return conn.execute(_for_update(stmt, for_update)).one_or_none()
-
-    def account_of(self, conn: Connection, identity_id: int) -> str | None:
-        stmt = select(_ei.c.account_id).where(_ei.c.id == identity_id)
-        value = conn.execute(stmt).scalar_one_or_none()
-        return None if value is None else str(value)
-
-    def count_for_account(self, conn: Connection, account_id: str) -> int:
-        stmt = select(func.count()).select_from(_ei).where(_ei.c.account_id == account_id)
-        return int(conn.execute(stmt).scalar_one())
-
-    def count_for_provider(self, conn: Connection, account_id: str, provider_id: str) -> int:
-        stmt = (
-            select(func.count())
-            .select_from(_ei)
-            .where(_ei.c.account_id == account_id, _ei.c.provider_id == provider_id)
-        )
-        return int(conn.execute(stmt).scalar_one())
-
-    def delete_one(self, conn: Connection, identity_id: int, account_id: str) -> bool:
-        result = conn.execute(
-            delete(_ei).where(_ei.c.id == identity_id, _ei.c.account_id == account_id)
-        )
-        return int(result.rowcount) == 1
-
-    def all(self, conn: Connection) -> list[Row]:
-        stmt = select(
-            _ei.c.account_id,
-            _ei.c.provider_id,
-            _ei.c.issuer,
-            _ei.c.subject,
-            _ei.c.username,
-            _ei.c.linked_at,
-            _ei.c.last_login_at,
-            _ei.c.id,
-        ).order_by(_ei.c.id)
-        return list(conn.execute(stmt).all())
-
-    def delete_for_accounts(self, conn: Connection, account_ids: Sequence[str]) -> None:
-        if account_ids:
-            conn.execute(delete(_ei).where(_ei.c.account_id.in_(list(account_ids))))
-
-
-class SqlPrincipalEventRepo:
-    def append(
         self,
         conn: Connection,
-        key: str,
-        action: str,
-        actor: str | None,
-        reason: str | None,
-        epoch: int,
-        now: int,
-    ) -> None:
-        conn.execute(
-            insert(t.principal_status_events).values(
-                principal_key=key,
-                action=action,
-                actor=actor,
-                reason=reason,
-                session_epoch=epoch,
-                at=now,
+        identity_id: str,
+        account_id: str,
+        *,
+        for_update: bool = False,
+    ) -> IdentityRow | None:
+        row = (
+            conn.execute(
+                _for_update(
+                    select(_ei).where(
+                        _ei.c.id == identity_id, _ei.c.account_id == account_id
+                    ),
+                    for_update,
+                )
             )
+            .mappings()
+            .one_or_none()
+        )
+        return None if row is None else IdentityRow(**row)
+
+    def account_of(self, conn: Connection, identity_id: str) -> str | None:
+        return conn.execute(
+            select(_ei.c.account_id).where(_ei.c.id == identity_id)
+        ).scalar_one_or_none()
+
+    def count_for_account(self, conn: Connection, account_id: str) -> int:
+        return int(
+            conn.execute(
+                select(func.count())
+                .select_from(_ei)
+                .where(_ei.c.account_id == account_id)
+            ).scalar_one()
         )
 
-    def list_events(self, conn: Connection, key: str | None, limit: int) -> list[Row]:
-        ev = t.principal_status_events
-        stmt = select(
-            ev.c.id, ev.c.principal_key, ev.c.action, ev.c.actor, ev.c.reason, ev.c.session_epoch, ev.c.at
+    def count_for_provider(
+        self, conn: Connection, account_id: str, provider_id: str
+    ) -> int:
+        return int(
+            conn.execute(
+                select(func.count())
+                .select_from(_ei)
+                .where(_ei.c.account_id == account_id, _ei.c.provider_id == provider_id)
+            ).scalar_one()
         )
-        if key is not None:
-            stmt = stmt.where(ev.c.principal_key == key)
-        stmt = stmt.order_by(ev.c.id.desc()).limit(limit)
-        return list(conn.execute(stmt).all())
+
+    def delete_one(self, conn: Connection, identity_id: str, account_id: str) -> bool:
+        return (
+            conn.execute(
+                delete(_ei).where(
+                    _ei.c.id == identity_id, _ei.c.account_id == account_id
+                )
+            ).rowcount
+            == 1
+        )
+
+
+class SqlProviderRepo:
+    def __init__(self, dialect: Dialect) -> None:
+        self._dialect = dialect
+
+    def ensure(self, conn: Connection, identifier: str, *, now: int) -> None:
+        protocol = "oidc" if identifier.startswith("oidc:") else identifier
+        stmt = _upsert_insert(self._dialect, t.login_providers).values(
+            id=identifier, protocol=protocol, created_at=now, updated_at=now
+        )
+        conn.execute(
+            stmt.on_conflict_do_nothing(index_elements=[t.login_providers.c.id])
+        )
+
+    def reconcile(
+        self, conn: Connection, identifiers: Sequence[str], *, now: int
+    ) -> bool:
+        p = t.login_providers
+        changed = False
+        for rank, identifier in enumerate(identifiers):
+            self.ensure(conn, identifier, now=now)
+            result = conn.execute(
+                update(p)
+                .where(
+                    p.c.id == identifier,
+                    p.c.config_source == "env",
+                    or_(p.c.configured == false(), p.c.sort_rank != rank),
+                )
+                .values(
+                    configured=True, sort_rank=rank, configured_at=now, updated_at=now
+                )
+            )
+            changed = changed or result.rowcount > 0
+        result = conn.execute(
+            update(p)
+            .where(
+                p.c.config_source == "env", p.c.configured, p.c.id.not_in(identifiers)
+            )
+            .values(configured=False, updated_at=now)
+        )
+        changed = changed or result.rowcount > 0
+        if changed:
+            conn.execute(
+                update(t.server_state)
+                .where(t.server_state.c.id == 1)
+                .values(
+                    settings_revision=t.server_state.c.settings_revision + 1,
+                    updated_at=now,
+                )
+            )
+        return changed
+
+    def configured(self, conn: Connection) -> frozenset[str]:
+        return frozenset(
+            conn.execute(
+                select(t.login_providers.c.id).where(t.login_providers.c.configured)
+            ).scalars()
+        )
 
 
 class SqlAuthEventRepo:
@@ -825,8 +534,7 @@ class SqlAuthEventRepo:
         surface: str,
         outcome: str,
         reason: str,
-        ip: str,
-        ua_hash: str | None,
+        ua_hash: bytes | None,
     ) -> None:
         conn.execute(
             insert(_ae).values(
@@ -836,31 +544,27 @@ class SqlAuthEventRepo:
                 surface=surface,
                 outcome=outcome,
                 reason=reason,
-                ip=ip,
                 ua_hash=ua_hash,
             )
         )
 
-    def list_for_account(self, conn: Connection, account_id: str, limit: int) -> list[Row]:
+    def list_for_account(
+        self,
+        conn: Connection,
+        account_id: str,
+        limit: int,
+        *,
+        before_id: int | None = None,
+    ) -> list[AuthEventRow]:
         stmt = (
-            select(
-                _ae.c.id,
-                _ae.c.at,
-                _ae.c.provider_id,
-                _ae.c.surface,
-                _ae.c.outcome,
-                _ae.c.reason,
-                _ae.c.ip,
-                _ae.c.ua_hash,
-            )
+            select(_ae)
             .where(_ae.c.account_id == account_id, _ae.c.surface.in_(SIGN_IN_SURFACES))
             .order_by(_ae.c.id.desc())
             .limit(limit)
         )
-        return list(conn.execute(stmt).all())
-
-    def prune_before(self, conn: Connection, cutoff: int) -> int:
-        return int(conn.execute(delete(_ae).where(_ae.c.at < cutoff)).rowcount or 0)
+        if before_id is not None:
+            stmt = stmt.where(_ae.c.id < before_id)
+        return [AuthEventRow(**row) for row in conn.execute(stmt).mappings()]
 
 
 class SqlAuditRepo:
@@ -873,128 +577,400 @@ class SqlAuditRepo:
         action: str,
         target: str | None,
         reason: str | None,
-        detail: str,
+        detail: Mapping[str, Any],
+        target_kind: str = "account",
+        subject_account_id: str | None = None,
     ) -> None:
+        kind = actor if actor in ("operator", "system") else "account"
         conn.execute(
             insert(_al).values(
-                at=now, actor=actor, action=action, target=target, reason=reason, detail=detail
+                at=now,
+                actor_kind=kind,
+                actor_id=_actor_id(actor),
+                subject_account_id=target
+                if target_kind == "account"
+                else subject_account_id,
+                action=action,
+                target_kind=target_kind if target else None,
+                target_id=target,
+                reason=reason,
+                detail=dict(detail),
             )
         )
 
-    def list(self, conn: Connection, limit: int, before_id: int | None) -> list[Row]:
-        stmt = select(
-            _al.c.id, _al.c.at, _al.c.actor, _al.c.action, _al.c.target, _al.c.reason, _al.c.detail
-        )
+    def list(
+        self,
+        conn: Connection,
+        limit: int,
+        before_id: int | None,
+        *,
+        account_id: str | None = None,
+    ) -> list[AuditRow]:
+        stmt = select(_al)
         if before_id is not None:
             stmt = stmt.where(_al.c.id < before_id)
-        stmt = stmt.order_by(_al.c.id.desc()).limit(limit)
-        return list(conn.execute(stmt).all())
+        if account_id is not None:
+            stmt = stmt.where(_al.c.subject_account_id == account_id)
+        return [
+            AuditRow(**row)
+            for row in conn.execute(
+                stmt.order_by(_al.c.id.desc()).limit(limit)
+            ).mappings()
+        ]
 
 
 class SqlPrefsRepo:
-    def __init__(self, dialect: Dialect) -> None:
-        self._dialect = dialect
+    def get(self, conn: Connection, key: str) -> list[WriteToolRow]:
+        p = t.account_write_tools
+        return [
+            WriteToolRow(**row)
+            for row in conn.execute(
+                select(p).where(p.c.account_id == key).order_by(p.c.tool_name)
+            ).mappings()
+        ]
 
-    def get(self, conn: Connection, key: str) -> Row | None:
-        p = t.user_tool_prefs
-        stmt = select(p.c.enabled_write_tools, p.c.enabled_at, p.c.updated_at, p.c.updated_via).where(
-            p.c.principal_key == key
-        )
-        return conn.execute(stmt).one_or_none()
-
-    def upsert(
+    def replace(
         self,
         conn: Connection,
         key: str,
         *,
-        names_json: str,
-        stamps_json: str,
+        stamps: Mapping[str, int],
         now: int,
         via: str,
-    ) -> None:
-        p = t.user_tool_prefs
-        stmt = _upsert_insert(self._dialect, p).values(
-            principal_key=key,
-            enabled_write_tools=names_json,
-            enabled_at=stamps_json,
-            updated_at=now,
-            updated_via=via,
+    ) -> int:
+        p = t.account_write_tools
+        conn.execute(delete(p).where(p.c.account_id == key))
+        if stamps:
+            conn.execute(
+                insert(p),
+                [
+                    {
+                        "account_id": key,
+                        "tool_name": name,
+                        "enabled_at": stamp,
+                        "enabled_via": via,
+                    }
+                    for name, stamp in sorted(stamps.items())
+                ],
+            )
+        return int(
+            conn.execute(
+                update(_a)
+                .where(_a.c.id == key)
+                .values(
+                    write_tools_version=_a.c.write_tools_version + 1, updated_at=now
+                )
+                .returning(_a.c.write_tools_version)
+            ).scalar_one()
         )
-        excluded = stmt.excluded
+
+
+class SqlCanvasCredentialRepo:
+    def acknowledge(
+        self, conn: Connection, account_id: str, *, version: int, now: int
+    ) -> None:
+        conn.execute(
+            update(_ct)
+            .where(_ct.c.account_id == account_id, _ct.c.is_primary)
+            .values(custody_notice_version=version, custody_ack_at=now, updated_at=now)
+        )
+
+    def __init__(self, dialect: Dialect) -> None:
+        self._dialect = dialect
+
+    def primary(self, conn: Connection, account_id: str) -> CredentialRow | None:
+        row = (
+            conn.execute(
+                select(_ct).where(_ct.c.account_id == account_id, _ct.c.is_primary)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return None if row is None else CredentialRow(**row)
+
+    def at_host(
+        self, conn: Connection, account_id: str, host: str
+    ) -> CredentialRow | None:
+        row = (
+            conn.execute(
+                select(_ct).where(
+                    _ct.c.account_id == account_id, _ct.c.canvas_host == host
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return None if row is None else CredentialRow(**row)
+
+
+    def count(self, conn: Connection) -> int:
+        return int(conn.execute(select(func.count()).select_from(_ct)).scalar_one())
+
+    def ensure_school(
+        self, conn: Connection, host: str, *, account_id: str, now: int
+    ) -> None:
+        school = t.canvas_schools
+        stmt = _upsert_insert(self._dialect, school).values(
+            host=host,
+            origin="user",
+            created_at=now,
+            updated_at=now,
+            created_by=account_id,
+        )
+        # Lock an existing parent before credential insertion. An orphan cull
+        # skips this row, and a put that follows a cull inserts a fresh parent.
         conn.execute(
             stmt.on_conflict_do_update(
-                index_elements=[p.c.principal_key],
-                set_={
-                    "enabled_write_tools": excluded.enabled_write_tools,
-                    "enabled_at": excluded.enabled_at,
-                    "updated_at": excluded.updated_at,
-                    "updated_via": excluded.updated_via,
-                },
+                index_elements=[school.c.host], set_={"updated_at": now}
             )
         )
 
+    def put(
+        self,
+        conn: Connection,
+        *,
+        identifier: str,
+        account_id: str,
+        canvas_host: str,
+        generation: int,
+        key_id: str,
+        nonce: bytes,
+        ciphertext: bytes,
+        canvas_user_id: str,
+        canvas_user_name: str,
+        now: int,
+        expires_hint_at: int | None,
+        custody_notice_version: int,
+        custody_ack_at: int,
+    ) -> None:
+        # v1 has exactly one credential per account. Its same-host id and creation
+        # time survive replacement; changing schools removes the former row.
+        conn.execute(
+            delete(_ct).where(_ct.c.account_id == account_id, _ct.c.id != identifier)
+        )
+        stmt = _upsert_insert(self._dialect, _ct).values(
+            id=identifier,
+            account_id=account_id,
+            canvas_host=canvas_host,
+            kind="pat",
+            is_primary=True,
+            generation=generation,
+            key_id=key_id,
+            nonce=nonce,
+            ciphertext=ciphertext,
+            canvas_user_id=canvas_user_id,
+            canvas_user_name=canvas_user_name,
+            created_at=now,
+            updated_at=now,
+            status="active",
+            last_verified_at=now,
+            expires_hint_at=expires_hint_at,
+            custody_notice_version=custody_notice_version,
+            custody_ack_at=custody_ack_at,
+        )
+        fields = {
+            name: stmt.excluded[name]
+            for name in (
+                "canvas_host",
+                "kind",
+                "is_primary",
+                "generation",
+                "key_id",
+                "nonce",
+                "ciphertext",
+                "canvas_user_id",
+                "canvas_user_name",
+                "updated_at",
+                "status",
+                "last_verified_at",
+                "expires_hint_at",
+                "custody_notice_version",
+                "custody_ack_at",
+            )
+        }
+        fields.update(
+            invalid_reason=None,
+            invalid_since=None,
+            oauth_app_id=None,
+            access_expires_at=None,
+            scopes=None,
+        )
+        conn.execute(stmt.on_conflict_do_update(index_elements=[_ct.c.id], set_=fields))
 
-class SqlMetaRepo:
-    def schema_version(self, conn: Connection) -> str | None:
-        stmt = select(t.meta.c.value).where(t.meta.c.key == "schema_version")
-        value = conn.execute(stmt).scalar_one_or_none()
-        return None if value is None else str(value)
+    def delete(self, conn: Connection, account_id: str) -> bool:
+        return (
+            conn.execute(delete(_ct).where(_ct.c.account_id == account_id)).rowcount > 0
+        )
 
-    def set_schema_version(self, conn: Connection, value: str) -> None:
-        exists = self.schema_version(conn) is not None
-        if exists:
-            conn.execute(update(t.meta).where(t.meta.c.key == "schema_version").values(value=value))
-        else:
-            conn.execute(insert(t.meta).values(key="schema_version", value=value))
+    @staticmethod
+    def _guard(
+        stmt: Any, expected_updated_at: int | None, expected_generation: int | None
+    ) -> Any:
+        if expected_updated_at is not None:
+            stmt = stmt.where(_ct.c.updated_at == expected_updated_at)
+        if expected_generation is not None:
+            stmt = stmt.where(_ct.c.generation == expected_generation)
+        return stmt
 
-    def get(self, conn: Connection, key: str) -> str | None:
-        value = conn.execute(select(t.meta.c.value).where(t.meta.c.key == key)).scalar_one_or_none()
-        return None if value is None else str(value)
+    def mark_invalid(
+        self,
+        conn: Connection,
+        key: str,
+        *,
+        reason: str,
+        now: int,
+        expected_updated_at: int | None,
+        expected_generation: int | None,
+    ) -> bool:
+        stmt = (
+            update(_ct)
+            .where(
+                _ct.c.account_id == key, _ct.c.is_primary, _ct.c.status == STATUS_ACTIVE
+            )
+            .values(status=STATUS_INVALID, invalid_reason=reason, invalid_since=now)
+        )
+        return (
+            conn.execute(
+                self._guard(stmt, expected_updated_at, expected_generation)
+            ).rowcount
+            == 1
+        )
 
-    def put(self, conn: Connection, key: str, value: str) -> None:
-        if self.get(conn, key) is None:
-            conn.execute(insert(t.meta).values(key=key, value=value))
-        else:
-            conn.execute(update(t.meta).where(t.meta.c.key == key).values(value=value))
+    def restore_active(
+        self,
+        conn: Connection,
+        key: str,
+        *,
+        now: int,
+        expected_updated_at: int | None,
+        expected_generation: int | None,
+    ) -> bool:
+        stmt = (
+            update(_ct)
+            .where(
+                _ct.c.account_id == key,
+                _ct.c.is_primary,
+                _ct.c.status == STATUS_INVALID,
+            )
+            .values(
+                status=STATUS_ACTIVE,
+                invalid_reason=None,
+                invalid_since=None,
+                last_verified_at=now,
+            )
+        )
+        return (
+            conn.execute(
+                self._guard(stmt, expected_updated_at, expected_generation)
+            ).rowcount
+            == 1
+        )
+
+    def touch(self, conn: Connection, key: str, now: int, older_than: int) -> None:
+        candidate = (
+            select(_ct.c.id)
+            .where(
+                _ct.c.account_id == key,
+                _ct.c.is_primary,
+                or_(_ct.c.last_used_at.is_(None), _ct.c.last_used_at < older_than),
+            )
+            .with_for_update(key_share=True, skip_locked=True)
+            .scalar_subquery()
+        )
+        conn.execute(update(_ct).where(_ct.c.id == candidate).values(last_used_at=now))
+
+    def mark_verified(
+        self,
+        conn: Connection,
+        key: str,
+        *,
+        now: int,
+        older_than: int,
+        expected_generation: int | None,
+    ) -> bool:
+        candidate = select(_ct.c.id).where(
+            _ct.c.account_id == key,
+            _ct.c.is_primary,
+            _ct.c.status == STATUS_ACTIVE,
+            or_(_ct.c.last_verified_at.is_(None), _ct.c.last_verified_at < older_than),
+        )
+        if expected_generation is not None:
+            candidate = candidate.where(_ct.c.generation == expected_generation)
+        identifier = candidate.with_for_update(
+            key_share=True, skip_locked=True
+        ).scalar_subquery()
+        return (
+            conn.execute(
+                update(_ct).where(_ct.c.id == identifier).values(last_verified_at=now)
+            ).rowcount
+            == 1
+        )
+
+    def rows_not_under_key(self, conn: Connection, key_id: str) -> list[CredentialRow]:
+        return [
+            CredentialRow(**row)
+            for row in conn.execute(
+                select(_ct).where(_ct.c.key_id != key_id).order_by(_ct.c.id)
+            ).mappings()
+        ]
+
+    def reseal(
+        self,
+        conn: Connection,
+        *,
+        identifier: str,
+        key_id: str,
+        nonce: bytes,
+        ciphertext: bytes,
+    ) -> None:
+        conn.execute(
+            update(_ct)
+            .where(_ct.c.id == identifier)
+            .values(key_id=key_id, nonce=nonce, ciphertext=ciphertext)
+        )
+
+    def key_ids_in_use(self, conn: Connection) -> list[str]:
+        return list(
+            conn.execute(
+                select(_ct.c.key_id).distinct().order_by(_ct.c.key_id)
+            ).scalars()
+        )
+
+    def probe_row(self, conn: Connection, key_id: str) -> CredentialRow | None:
+        stmt = (
+            select(_ct)
+            .where(
+                _ct.c.key_id == key_id,
+                or_(
+                    _ct.c.status != STATUS_INVALID,
+                    _ct.c.invalid_reason.is_(None),
+                    _ct.c.invalid_reason != REASON_DECRYPT_FAILED,
+                ),
+            )
+            .order_by(_ct.c.id)
+            .limit(1)
+        )
+        row = conn.execute(stmt).mappings().one_or_none()
+        return None if row is None else CredentialRow(**row)
 
 
 class Repositories:
-    """The repositories of one dialect, bundled for the store.
-
-    The attributes are annotated with the interfaces of :mod:`.ports`, so a type
-    checker proves the SQL implementations satisfy them.
-    """
+    """Stateless statement bundles for the caller's selected database dialect."""
 
     def __init__(self, dialect: Dialect) -> None:
-        self.dialect: Dialect = dialect
-        self.tokens: CanvasTokenRepo = SqlCanvasTokenRepo(dialect)
-        self.generations: CredentialGenerationRepo = SqlCredentialGenerationRepo(dialect)
-        self.accounts: AccountRepo = SqlAccountRepo(dialect)
-        self.identities: IdentityRepo = SqlIdentityRepo()
-        self.events: PrincipalEventRepo = SqlPrincipalEventRepo()
-        self.auth_events: AuthEventRepo = SqlAuthEventRepo()
-        self.audit: AuditRepo = SqlAuditRepo()
-        self.prefs: PrefsRepo = SqlPrefsRepo(dialect)
-        self.meta: MetaRepo = SqlMetaRepo()
-        # The authorization server's tables (empty and unused in entra_proxy mode).
-        self.clients: OAuthClientRepo = SqlOAuthClientRepo()
-        self.cimd: CimdRepo = SqlCimdRepo(dialect)
-        self.grants: GrantRepo = SqlGrantRepo()
-        self.codes: AuthCodeRepo = SqlAuthCodeRepo()
-        self.refresh: RefreshRepo = SqlRefreshRepo()
-        self.login_states: LoginStateRepo = SqlLoginStateRepo()
-        self.jwt_epoch: JwtEpochRepo = SqlJwtEpochRepo()
-
-
-__all__ = [
-    "Repositories",
-    "SqlAccountRepo",
-    "SqlAuditRepo",
-    "SqlAuthEventRepo",
-    "SqlCanvasTokenRepo",
-    "SqlCredentialGenerationRepo",
-    "SqlIdentityRepo",
-    "SqlMetaRepo",
-    "SqlPrefsRepo",
-    "SqlPrincipalEventRepo",
-]
+        self.dialect = dialect
+        self.credentials = SqlCanvasCredentialRepo(dialect)
+        self.generations = SqlCredentialGenerationRepo()
+        self.accounts = SqlAccountRepo(dialect)
+        self.identities = SqlIdentityRepo()
+        self.providers = SqlProviderRepo(dialect)
+        self.auth_events = SqlAuthEventRepo()
+        self.audit = SqlAuditRepo()
+        self.prefs = SqlPrefsRepo()
+        self.clients = SqlOAuthClientRepo()
+        self.cimd = SqlCimdRepo(dialect)
+        self.grants = SqlGrantRepo()
+        self.codes = SqlAuthCodeRepo()
+        self.refresh = SqlRefreshRepo()
+        self.login_states = SqlLoginStateRepo()
+        self.jwt_epoch = SqlJwtEpochRepo()

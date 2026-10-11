@@ -43,7 +43,6 @@ from .stack import (
     Served,
     User,
     cimd_document,
-    local_stack,
     pkce,
     served_stack,
 )
@@ -74,7 +73,7 @@ class MemoryStorage:
 def make_oauth(
     served: Served, user: User = ALICE, *, client_metadata_url: str | None = None,
     storage: MemoryStorage | None = None, results: list[dict[str, str]] | None = None,
-    decision: str = "approve", react: bool = False,
+    decision: str = "approve", react: bool = True,
 ) -> tuple[OAuthClientProvider, MemoryStorage, list[dict[str, str]]]:
     storage = storage or MemoryStorage()
     results = results if results is not None else []
@@ -141,7 +140,7 @@ class TestOfficialSdkClient:
         # RFC 9207: the SDK validated iss; it is the one issuer string
         assert results[0]["iss"] == ISSUER
         assert storage.tokens is not None and storage.tokens.refresh_token
-        claims = stack.authz.codec.decode(storage.tokens.access_token)
+        claims = stack.authz.codec.decode(storage.tokens.access_token).claims
         assert claims["aud"] == AUDIENCE and claims["iss"] == ISSUER and claims["acct"] == stack.account_of(ALICE)
         assert claims["client_id"] == storage.client_info.client_id and claims["scope"] == SCOPE
         # the refresh token is opaque and only its hash is stored
@@ -159,7 +158,7 @@ class TestOfficialSdkClient:
         assert storage.client_info is not None and storage.client_info.client_id == CIMD_URL
         assert raw_sql(stack.store, "SELECT COUNT(*) FROM oauth_clients")[0][0] == 0
         assert results[0]["iss"] == ISSUER
-        assert stack.authz.codec.decode(storage.tokens.access_token)["client_id"] == CIMD_URL  # type: ignore[union-attr]
+        assert stack.authz.codec.decode(storage.tokens.access_token).claims["client_id"] == CIMD_URL  # type: ignore[union-attr]
         assert grants(served)[0][1] == "cimd"
         # a refresh works for a CIMD client too
         first = storage.tokens
@@ -352,60 +351,12 @@ class TestTwoBrowsers:
         assert started.status_code == 302
         stranger = Browser(stack)
         refused = stranger.get(started.headers["location"])
-        assert refused.status_code == 400 and "location" not in refused.headers
+        assert refused.status_code == 303
+        assert refused.headers["location"] == "/account/sign-in?error=authorization_invalid"
         landed = owner.connect(stack.authorize_params(client_id, challenge), ALICE)
         assert "code" in landed.query
 
 
-class TestModeSwitch:
-    def test_a_token_of_the_local_server_is_nothing_to_the_proxy_and_the_reverse(self, tmp_path, monkeypatch) -> None:
-        with local_stack(tmp_path / "local", monkeypatch) as local:
-            local.enroll(ALICE)
-            _, tokens = local.tokens_for(ALICE)
-            assert local.mcp_status(tokens["access_token"]) == 200
-        with local_stack(tmp_path / "proxy", monkeypatch, env={"SELFHOST_AUTH_MODE": "entra_proxy"}) as proxy:
-            assert proxy.mcp_status(tokens["access_token"]) == 401
-
-    def test_in_local_mode_no_proxy_storage_exists_and_the_provider_is_ours(self, tmp_path, monkeypatch) -> None:
-        from canvas_mcp.core.selfhost.authz.server import LocalAuthorizationServer
-        from canvas_mcp.core.selfhost.oauth import oauth_storage_of
-
-        with local_stack(tmp_path, monkeypatch) as stack:
-            stack.enroll(ALICE)
-            assert isinstance(stack.mcp.auth, LocalAuthorizationServer)
-            assert oauth_storage_of(stack.mcp.auth) is None
-            assert not (tmp_path / "fastmcp" / "oauth-proxy").exists()
-
-    def test_in_proxy_mode_nothing_of_the_local_server_is_loaded_or_written(self, tmp_path) -> None:
-        import subprocess
-        import sys
-        import textwrap
-
-        script = textwrap.dedent(
-            """
-            import sys
-            from canvas_mcp.core.selfhost import app, oauth, request_context, tool_gate, edge_guard, account_web  # noqa
-            from canvas_mcp.core.selfhost.settings import load_selfhost_settings
-            loaded = sorted(m for m in sys.modules if m.startswith("canvas_mcp.core.selfhost.authz"))
-            print(",".join(loaded))
-            """
-        )
-        import os
-
-        env = {**os.environ, "PYTHONPATH": app_src(), "PYTHONUTF8": "1", "PYTHON_DOTENV_DISABLED": "1"}
-        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, timeout=120)
-        assert result.returncode == 0, result.stderr
-        loaded = set(result.stdout.strip().split(","))
-        assert loaded <= {"canvas_mcp.core.selfhost.authz", "canvas_mcp.core.selfhost.authz.fastmcp_compat"}
-
-    def test_the_default_mode_never_writes_grants(self, tmp_path, monkeypatch) -> None:
-        with local_stack(tmp_path, monkeypatch, env={"SELFHOST_AUTH_MODE": "entra_proxy"}) as stack:
-            stack.enroll(ALICE)
-            assert stack.runtime.authz is None
-            for table in ("oauth_clients", "oauth_grants", "oauth_codes", "oauth_refresh_tokens", "login_states", "cimd_clients"):
-                assert raw_sql(stack.store, f"SELECT COUNT(*) FROM {table}")[0][0] == 0
-            assert stack.client.get("/account/consent").status_code == 404
-            assert stack.client.post("/revoke", data={"token": "x", "client_id": "y"}).status_code in (404, 405)
 
 
 def app_src() -> str:

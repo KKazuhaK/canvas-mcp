@@ -33,6 +33,9 @@ describe('closed error code set', () => {
         'canvas_unavailable',
         'identity_change_required',
         'recheck_not_allowed',
+        'custody_ack_required',
+        'custody_notice_outdated',
+        'not_enrolled',
         // schools
         'school_required',
         'school_invalid',
@@ -46,6 +49,8 @@ describe('closed error code set', () => {
         'write_tool_not_allowed',
         'write_tools_unavailable',
         // admin
+        'settings_conflict',
+        'confirmation_required',
         'last_owner',
         'cannot_disable_self',
         // linked sign-in methods
@@ -62,7 +67,6 @@ describe('closed error code set', () => {
         'sign_in_incomplete',
         'sign_in_unverified',
         'wrong_tenant',
-        'wrong_client',
         'bad_subject',
         'bad_roles',
         'access_denied',

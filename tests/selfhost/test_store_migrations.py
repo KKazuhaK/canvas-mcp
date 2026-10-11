@@ -523,7 +523,7 @@ class TestOfflineDdl:
         expected = _normalized(SNAPSHOT.read_text(encoding="utf-8"))
         assert rendered == expected, (
             "the PostgreSQL DDL changed; if intended, regenerate the snapshot with: "
-            "python -c \"from canvas_mcp.core.selfhost.db.migrate import render_sql; "
+            "python -c \"from canvas_mcp.core.selfhost.db.migrations.runner import render_sql; "
             f"print(render_sql('postgresql'))\" > {SNAPSHOT.name}"
         )
 

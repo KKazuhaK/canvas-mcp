@@ -64,7 +64,7 @@ class TestAuthorizeUrl:
         assert f"{parts.scheme}://{parts.netloc}{parts.path}" == idp.endpoints["authorization"]
         query = {k: v[0] for k, v in parse_qs(parts.query, keep_blank_values=True).items()}
         assert query == {
-            "response_type": "code", "client_id": "canvas-mcp", "redirect_uri": f"{BASE}/account/callback/oidc/school",
+            "response_type": "code", "client_id": "canvas-mcp", "redirect_uri": f"{BASE}/auth/callback/oidc/school",
             "scope": "openid profile", "state": "S" * 43, "nonce": "N" * 43, "code_challenge": "C" * 43,
             "code_challenge_method": "S256",
         }
@@ -89,8 +89,8 @@ class TestAuthorizeUrl:
 
     def test_the_redirect_uri_comes_from_the_public_url_and_the_slug(self) -> None:
         provider, _ = make()
-        assert provider.redirect_uri == f"{BASE}/account/callback/oidc/school"
-        assert provider.start_path == "/account/login/oidc/school" and provider.id == "oidc:school"
+        assert provider.redirect_uri == f"{BASE}/auth/callback/oidc/school"
+        assert provider.start_path == "/auth/login/oidc/school" and provider.id == "oidc:school"
         assert provider.display.name == "school" and provider.display.icon == "key"
 
 
@@ -108,7 +108,7 @@ class TestFinish:
         await sign_in(provider, idp)
         form = idp.token_requests[0]["form"]
         assert form["grant_type"] == "authorization_code"
-        assert form["redirect_uri"] == f"{BASE}/account/callback/oidc/school"
+        assert form["redirect_uri"] == f"{BASE}/auth/callback/oidc/school"
         assert len(form["code_verifier"]) >= 43 and "code" in form
 
     async def test_client_secret_basic_uses_the_rfc_6749_encoding(self) -> None:
@@ -289,7 +289,7 @@ class TestGoogle:
         assert f"{parts.scheme}://{parts.netloc}{parts.path}" == "https://accounts.google.com/o/oauth2/v2/auth"
         query = {k: v[0] for k, v in parse_qs(parts.query).items()}
         assert query["scope"] == "openid email profile" and query["prompt"] == "select_account"
-        assert query["hd"] == "example.edu" and query["redirect_uri"] == f"{BASE}/account/callback/google"
+        assert query["hd"] == "example.edu" and query["redirect_uri"] == f"{BASE}/auth/callback/google"
         assert query["code_challenge_method"] == "S256" and "response_mode" not in query
 
     async def test_no_hd_hint_without_a_single_domain_rule(self) -> None:

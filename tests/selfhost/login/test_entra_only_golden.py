@@ -18,8 +18,8 @@ from ..authz.stack import ALICE, Browser, Stack
 LEGACY_PATHS = frozenset(
     {
         "/account",
-        "/account/login",
-        "/account/callback",
+        "/auth/login",
+        "/auth/callback/entra",
         "/account/token",
         "/account/token/delete",
         "/account/token/recheck",
@@ -41,21 +41,21 @@ LOCAL_EXTRA = frozenset(
 )
 TODAYS_PROVIDERS = {
     "providers": [
-        {"id": "entra", "kind": "oidc", "name": "Microsoft", "icon": "microsoft", "start_url": "/account/login"}
+        {"id": "entra", "kind": "oidc", "name": "Microsoft", "icon": "microsoft", "start_url": "/auth/login"}
     ],
     "mcp_url": "https://canvas.example.test/mcp",
 }
 SESSION_KEYS = {"v", "acct", "pid", "name", "upn", "owner", "iat", "exp", "csrf", "ep"}
 
 
-def account_app(stack: Stack) -> web._AccountApp:
+def account_app(stack: Stack) -> web.AccountCore:
     """The account application behind the routes of a running stack (found on a route's endpoint)."""
     for route in stack.mcp._additional_http_routes:
-        if getattr(route, "path", "") == "/account/login":
+        if getattr(route, "path", "") == "/auth/login":
             endpoint = route.endpoint  # type: ignore[attr-defined]
             names = endpoint.__code__.co_freevars
             return endpoint.__closure__[names.index("self")].cell_contents  # type: ignore[no-any-return]
-    raise AssertionError("no /account/login route")
+    raise AssertionError("no /auth/login route")
 
 
 def server_paths(stack: Stack) -> set[str]:
@@ -74,13 +74,13 @@ class TestRoutes:
         paths = {path for path, _ in app.route_table()}
         expected = LEGACY_PATHS | (LOCAL_EXTRA if either.settings.authz_mode == "local" else frozenset())
         assert paths == expected
-        for new in ("/account/login/entra", "/account/login/google", "/account/sign-in-methods"):
+        for new in ("/auth/login/entra", "/auth/login/google", "/account/sign-in-methods"):
             assert new not in server_paths(either)
 
     def test_no_provider_route_exists(self, either: Stack) -> None:
         for path in (
-            "/account/login/entra", "/account/login/google", "/account/login/github",
-            "/account/login/oidc/x", "/account/callback/google", "/account/identities/link",
+            "/auth/login/entra", "/auth/login/google", "/auth/login/github",
+            "/auth/login/oidc/x", "/auth/callback/google", "/account/identities/link",
             "/account/sign-in-methods",
         ):
             assert path not in server_paths(either)
@@ -88,12 +88,12 @@ class TestRoutes:
 
     def test_react_keeps_exactly_the_two_sign_in_halves(self, entra_react: Stack) -> None:
         app = account_app(entra_react)
-        assert {r.path for r in app.routes()} == {"/account/login", "/account/callback"}  # type: ignore[attr-defined]
+        assert {r.path for r in app.routes()} == {"/auth/login", "/auth/callback/entra"}  # type: ignore[attr-defined]
 
 
 class TestProvidersAndFeatures:
     def test_the_provider_list_is_todays_payload(self, entra_react: Stack) -> None:
-        assert entra_react.client.get("/account/api/providers").json() == TODAYS_PROVIDERS
+        assert entra_react.client.get("/api/v1/providers").json() == TODAYS_PROVIDERS
 
     def test_identities_are_not_a_feature_and_the_api_has_no_identity_route(self, entra_react: Stack) -> None:
         browser = Browser(entra_react, react=True)
@@ -105,7 +105,7 @@ class TestProvidersAndFeatures:
 
 class TestTheEntraRedirectAndCookies:
     def test_the_authorize_redirect(self, either: Stack) -> None:
-        response = either.new_client().get("/account/login")
+        response = either.new_client().get("/auth/login")
         assert response.status_code == 302
         location = urlsplit(response.headers["location"])
         assert location.netloc == "login.microsoftonline.com"
@@ -115,7 +115,7 @@ class TestTheEntraRedirectAndCookies:
             "client_id", "response_type", "redirect_uri", "response_mode", "scope", "state", "nonce",
             "code_challenge", "code_challenge_method", "prompt",
         }
-        assert query["redirect_uri"] == "https://canvas.example.test/account/callback"
+        assert query["redirect_uri"] == "https://canvas.example.test/auth/callback/entra"
         assert query["scope"] == "openid profile" and query["prompt"] == "select_account"
         assert query["response_mode"] == "query" and query["code_challenge_method"] == "S256"
         assert list(parse_qs(location.query)) == [
@@ -125,7 +125,7 @@ class TestTheEntraRedirectAndCookies:
 
     def test_the_login_cookie_payload_keys(self, either: Stack) -> None:
         client = either.new_client()
-        response = client.get("/account/login")
+        response = client.get("/auth/login")
         cookie = next(
             h for h in response.headers.get_list("set-cookie") if h.startswith("__Host-cmcp_login=")
         )
@@ -148,19 +148,19 @@ class TestTheEntraRedirectAndCookies:
 class TestCallbackOrder:
     def test_state_is_checked_before_the_providers_error(self, either: Stack) -> None:
         client = either.new_client()
-        client.get("/account/login")
-        wrong = client.get("/account/callback", params={"error": "access_denied", "state": "forged"})
+        client.get("/auth/login")
+        wrong = client.get("/auth/callback/entra", params={"error": "access_denied", "state": "forged"})
         assert wrong.status_code == 400 and "invalid or expired" in wrong.text
         client = either.new_client()
-        login = client.get("/account/login")
+        login = client.get("/auth/login")
         state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
-        right = client.get("/account/callback", params={"error": "access_denied", "state": state})
+        right = client.get("/auth/callback/entra", params={"error": "access_denied", "state": state})
         assert right.status_code == 403 and "not completed" in right.text and "access_denied" in right.text
 
     def test_the_callback_still_clears_the_login_cookie(self, either: Stack) -> None:
         client = either.new_client()
-        client.get("/account/login")
-        response = client.get("/account/callback", params={"state": "x"})
+        client.get("/auth/login")
+        response = client.get("/auth/callback/entra", params={"state": "x"})
         assert any(
             h.startswith("__Host-cmcp_login=") and "Max-Age=0" in h
             for h in response.headers.get_list("set-cookie")
@@ -170,12 +170,12 @@ class TestCallbackOrder:
 class TestPages:
     def test_the_signed_out_page_offers_microsoft_only(self, either: Stack) -> None:
         page = either.client.get("/account")
-        assert "Sign in with Microsoft" in page.text and 'href="/account/login"' in page.text
+        assert "Sign in with Microsoft" in page.text and 'href="/auth/login"' in page.text
         for other in ("Google", "GitHub", "providers", "pico"):
             assert other not in page.text
 
     def test_login_does_not_choose_anything(self, either: Stack) -> None:
-        assert either.new_client().get("/account/login").status_code == 302
+        assert either.new_client().get("/auth/login").status_code == 302
 
     def test_the_identity_line_still_says_microsoft(self, either: Stack) -> None:
         browser = Browser(either)

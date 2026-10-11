@@ -16,7 +16,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from canvas_mcp.core.selfhost.db import migrate
+from canvas_mcp.core.selfhost.db.migrations import runner as migrate
 from canvas_mcp.core.selfhost.token_store import Keyring
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "schema4_d40a2e1.json"

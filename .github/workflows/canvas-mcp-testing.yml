@@ -194,7 +194,7 @@ jobs:
   # code work with whatever pip resolves today"; this answers "does it work with
   # the exact dependency set that ships". Dockerfile.selfhost installs from the
   # same lock, with the same uv and Python, so a locked version that differs from
-  # the latest resolvable one (fastmcp 4.0.3 and py-key-value-aio 0.4.6 when this
+  # the latest resolvable one (fastmcp 4.0.3 when this
   # job was added) is otherwise never exercised. --locked fails the job when
   # uv.lock is stale against pyproject.toml instead of quietly re-resolving.
   test-locked:
@@ -347,3 +347,37 @@ jobs:
         echo "## Canvas MCP test results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "Full suite passed on Ubuntu with Python 3.11, 3.12, 3.13 and 3.14, on Windows with Python 3.14, on Ubuntu with Python 3.14 against the exact dependency versions in uv.lock, and the self-hosted tests also passed against PostgreSQL 18 with both latest allowed and lock-pinned dependencies (the test-postgres matrix). The web UI (web/) passed lint, typecheck, tests, build and the dist checks." >> $GITHUB_STEP_SUMMARY
+
+  selfhost-image-verify:
+    name: Verify self-host image (${{ matrix.platform }})
+    if: ${{ github.repository == 'KKazuhaK/canvas-mcp' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the reviewed image without publishing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.selfhost
+          platforms: ${{ matrix.platform }}
+          load: true
+          push: false
+          tags: canvas-mcp:verify
+      - name: Exercise the native v1 image contract
+        run: bash deploy/selfhost/smoke-test.sh canvas-mcp:verify

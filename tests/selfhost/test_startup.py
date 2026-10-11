@@ -1,4 +1,4 @@
-"""main() in entra-oauth mode fails closed, and legacy startup is not disturbed."""
+"""main() in selfhost mode fails closed, and legacy startup is not disturbed."""
 
 import base64
 import logging
@@ -30,13 +30,13 @@ LEGACY_VARS = (
 
 @pytest.fixture
 def entra_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
-    """A complete, valid entra-oauth environment rooted in tmp_path."""
+    """A complete, valid selfhost environment rooted in tmp_path."""
     for name in LEGACY_VARS:
         monkeypatch.delenv(name, raising=False)
     home = tmp_path / "fastmcp"
     data = tmp_path / "data"
     values = {
-        "MCP_AUTH_MODE": "entra-oauth",
+        "MCP_AUTH_MODE": "selfhost",
         "PUBLIC_BASE_URL": "https://canvas.example.test",
         "ENTRA_TENANT_ID": TENANT,
         "ENTRA_CLIENT_ID": CLIENT,
@@ -225,7 +225,7 @@ class TestConfigCommand:
     def test_config_prints_a_summary_without_secrets(self, entra_env, capsys):
         assert _run_main(entra_env["monkeypatch"], *HTTP, "--config").code == 0
         out = capsys.readouterr().err
-        assert "entra-oauth" in out
+        assert "selfhost" in out
         assert "https://canvas.example.test/mcp" in out
         assert TENANT in out
         for secret in SECRETS.values():
@@ -284,7 +284,7 @@ class TestSsrfTrustProxy:
 class TestHappyPath:
     def test_serves_through_the_selfhost_runner_with_the_gate_installed(self, entra_env, caplog):
         pytest.importorskip("canvas_mcp.core.selfhost.token_store")
-        pytest.importorskip("canvas_mcp.core.selfhost.account_web")
+        pytest.importorskip("canvas_mcp.core.selfhost.account_core")
         mp = entra_env["monkeypatch"]
         caplog.set_level(logging.INFO)
         captured: dict[str, Any] = {}
@@ -306,7 +306,7 @@ class TestHappyPath:
             config_module.reset_config()
         assert captured["port"] == 9911
         assert captured["app"] is not None
-        assert "entra-oauth" in caplog.text
+        assert "selfhost" in caplog.text
         assert TENANT in caplog.text and CLIENT in caplog.text
         for secret in SECRETS.values():
             assert secret not in caplog.text

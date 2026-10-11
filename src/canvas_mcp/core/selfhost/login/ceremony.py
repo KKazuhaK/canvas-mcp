@@ -78,9 +78,19 @@ class FlowRecord:
     def to_json(self) -> bytes:
         raw = json.dumps(
             {
-                "v": self.v, "p": self.p, "cv": self.cv, "n": self.n, "pp": self.pp,
-                "txn": self.txn, "rt": self.rt, "rz": self.rz, "ru": self.ru,
-                "la": self.la, "le": self.le, "li": self.li, "iat": self.iat,
+                "v": self.v,
+                "p": self.p,
+                "cv": self.cv,
+                "n": self.n,
+                "pp": self.pp,
+                "txn": self.txn,
+                "rt": self.rt,
+                "rz": self.rz,
+                "ru": self.ru,
+                "la": self.la,
+                "le": self.le,
+                "li": self.li,
+                "iat": self.iat,
             },
             separators=(",", ":"),
         ).encode("utf-8")
@@ -118,7 +128,9 @@ class FlowRecord:
             )
         except (KeyError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
             raise ValueError("invalid flow record") from None
-        if record.pp == "link" and (record.la is None or record.le is None or record.li is None):
+        if record.pp == "link" and (
+            record.la is None or record.le is None or record.li is None
+        ):
             raise ValueError("link without a session")
         return record
 
@@ -132,7 +144,12 @@ def new_cookie_payload(
     consent, an expired state) still send a link ceremony back to the Sign-in methods screen.
     """
     return {
-        "v": FLOW_COOKIE_VERSION, "s": state, "b": binding, "p": provider_id, "pp": purpose, "iat": now,
+        "v": FLOW_COOKIE_VERSION,
+        "s": state,
+        "b": binding,
+        "p": provider_id,
+        "pp": purpose,
+        "iat": now,
     }
 
 
@@ -151,7 +168,10 @@ class FlowCookie:
         if payload is None or payload.get("v") != FLOW_COOKIE_VERSION:
             return None
         state, binding, provider, iat = (
-            payload.get("s"), payload.get("b"), payload.get("p"), payload.get("iat"),
+            payload.get("s"),
+            payload.get("b"),
+            payload.get("p"),
+            payload.get("iat"),
         )
         if (
             not isinstance(state, str)

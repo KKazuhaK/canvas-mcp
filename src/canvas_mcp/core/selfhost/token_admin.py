@@ -1,121 +1,28 @@
-"""Operator CLI for the self-hosted accounts and the encrypted Canvas token store.
+"""Operator commands for v1 accounts, credentials, grants and configuration.
 
-Usage::
+Run ``python -m canvas_mcp.core.selfhost.token_admin --help`` for all commands.
+Account targets are canonical bare UUIDs printed by ``accounts``; identity
+operations use the identity UUID printed by ``identities``. Provider subjects,
+Entra tenant/object pairs and pre-v1 principal-key forms are not account ids.
 
-    python -m canvas_mcp.core.selfhost.token_admin check
-    python -m canvas_mcp.core.selfhost.token_admin list
-    python -m canvas_mcp.core.selfhost.token_admin accounts
-    python -m canvas_mcp.core.selfhost.token_admin identities [PRINCIPAL]
-    python -m canvas_mcp.core.selfhost.token_admin unlink-identity PRINCIPAL IDENTITY_ID
-    python -m canvas_mcp.core.selfhost.token_admin login-providers [--check]
-    python -m canvas_mcp.core.selfhost.token_admin approve PRINCIPAL
-    python -m canvas_mcp.core.selfhost.token_admin promote-owner PRINCIPAL
-    python -m canvas_mcp.core.selfhost.token_admin disable PRINCIPAL [--allow-last-owner]
-    python -m canvas_mcp.core.selfhost.token_admin enable PRINCIPAL
-    python -m canvas_mcp.core.selfhost.token_admin access
-    python -m canvas_mcp.core.selfhost.token_admin history [PRINCIPAL] [--limit N]
-    python -m canvas_mcp.core.selfhost.token_admin remove PRINCIPAL
-    python -m canvas_mcp.core.selfhost.token_admin rotate
-    python -m canvas_mcp.core.selfhost.token_admin list-grants [PRINCIPAL] [--all]
-    python -m canvas_mcp.core.selfhost.token_admin revoke-grant GRANT_ID
-    python -m canvas_mcp.core.selfhost.token_admin revoke-grant --account PRINCIPAL
-    python -m canvas_mcp.core.selfhost.token_admin rotate-jwt-key
-    python -m canvas_mcp.core.selfhost.token_admin db current
-    python -m canvas_mcp.core.selfhost.token_admin db upgrade [--backup PATH] [--dry-run]
-                                                              [--mark-undecryptable-invalid]
-    python -m canvas_mcp.core.selfhost.token_admin db import-sqlite PATH
-                                                              [--mark-undecryptable-invalid]
+``check`` prints native aggregates and encryption key ids, never ciphertext.
+``accounts``, ``list``, ``identities``, ``access`` and ``list-grants`` stream
+bounded pages. ``history [UUID] --limit 1..200 [--cursor CURSOR]`` prints one
+page and emits its next cursor on stderr, separate from tab-separated records.
+``remove UUID`` deletes the primary credential; ``disable UUID`` cuts off the
+account. Governance commands protect the last usable/active owner.
 
-``PRINCIPAL`` names an account in any of these forms: ``acct:<uuid>`` (or the bare
-uuid), ``entra:<tenant id>:<object id>`` (the key of the releases before the account
-model, mapped through the account's Entra identity), or the old pair ``TENANT_ID
-OBJECT_ID``.
+All schema creation, upgrades, backups and SQLite-to-PostgreSQL import live in
+``db/migrations/``. ``db current`` only inspects schema state; ``db upgrade``
+applies the reviewed v1 revision graph. Pre-v1 databases are refused. Import
+snapshots a v1 SQLite source privately, verifies all sealed values and commits
+the target atomically. It never modifies the source. Multi-instance operators
+set ``DATABASE_AUTO_MIGRATE=false`` and upgrade before starting servers.
 
-``disable`` and ``enable`` are the authorization decision: a disabled user is refused
-at ``/account`` and on every MCP request, cannot enroll, and stays disabled until
-``enable`` (or an owner on the admin page). ``disable`` of an Entra user who has never
-signed in creates a disabled account for them, so someone can be blocked before their
-first sign-in. ``approve`` activates an account that waits for approval
-(``ACCESS_POLICY=approval``). ``promote-owner`` makes an active account an owner (a role
-the operator granted is not taken back by the rules): the emergency entrance when no
-owner exists. The running server notices a change made here within a few seconds (its
-access cache), a request already running is not interrupted, and a Canvas call already
-sent is not cancelled. ``remove`` (also spelled ``revoke``, the old name) only deletes
-the stored Canvas token: the user can enroll again, so it is not a way to cut someone
-off. Every change is recorded in the token database (``history``). ``access`` lists the
-accounts that are not active and the owners.
-
-``list`` prints one tab-separated line per enrollment: tenant id, object id (``-`` for a
-user who is not an Entra user), Canvas name, created, last used, the Canvas host (``-``
-for a row that belongs to the default school ``CANVAS_API_URL``) and, last, the account
-key. ``accounts`` prints one line per account: key, status, role, how it was admitted,
-display name, sign-in name, provider, created, last sign-in and the legacy
-``entra:<tid>:<oid>`` key (``-`` if none).
-
-A PRINCIPAL may also name an account by one of its sign-in identities: ``google:<subject>``,
-``github:<numeric user id>`` or ``oidc:<slug>:<subject>``. The issuer of an ``oidc`` identity
-comes from ``OIDC_<SLUG>_ISSUER`` in the environment; without it the provider and subject must
-match exactly one linked identity (otherwise exit 2 with a hint).
-
-``identities`` prints one tab-separated line per linked sign-in method (every account, or
-one): account key, identity id, provider, issuer, subject, sign-in name, linked, last sign-in.
-It never prints an e-mail address. ``unlink-identity`` removes one by the id that line
-shows: an account always keeps at least one (exit 3), every browser session of the account
-ends, connected apps stay, and the audit log records it. ``login-providers`` prints the
-configured sign-in providers with the redirect URI to register at each; ``--check`` also asks
-every OpenID Connect provider for its discovery document and key set (the only command that
-makes network calls; it never asks for a token) and prints the issuer, the hosts of its
-endpoints, the signature algorithms, whether PKCE S256 and the RFC 9207 ``iss`` parameter are
-advertised, and for GitHub the scopes a sign-in would request. It exits 1 if a provider is
-unusable. It reads the server's environment, so it needs the same variables as the server.
-
-``list-grants`` (``SELFHOST_AUTH_MODE=local``) prints one tab-separated line per connected
-app: grant id, account key, client kind (``dcr`` or ``cimd``, which answers how a client
-identifies itself), client id (the metadata URL for CIMD), the app's name for itself, the
-return host, created, last used, expires, and the state (``active``, ``expired`` or
-``revoked:<reason>``); ``--all`` includes the ended ones, ``PRINCIPAL`` keeps one account's
-(exit 1 if there is no such account). It never prints a token, a code or a hash.
-``revoke-grant`` ends one connection by its id, or all of one account's with ``--account``
-(each one is audited; exit 1 if there is nothing to end); the running server notices within
-``GRANT_STATUS_CACHE_S``. ``rotate-jwt-key`` invalidates every access token (apps simply
-refresh; connections are untouched; running servers notice within 30 seconds). To rotate
-the signing key itself, put a new key first in ``CANVAS_TOKEN_KEYS``. ``check`` also prints
-how many connections are live.
-
-``db current`` prints the backend (without credentials), the Alembic revision, the
-schema version marker and whether the database is current; it needs no keys and
-changes nothing. ``db upgrade`` applies pending schema revisions. The upgrade to the
-account model re-encrypts every stored Canvas token under its new account, so it needs
-``CANVAS_TOKEN_KEYS`` whenever the database holds tokens; stop every server first. A
-SQLite file is copied to ``<file>.pre-0002-accounts-<time>.bak`` before anything is
-written (or use ``--backup PATH`` to choose the copy); back up PostgreSQL with
-``pg_dump -Fc`` first. ``--dry-run`` does all of it inside a transaction, prints what
-would happen and rolls everything back. A token that does not decrypt with the keys
-stops the upgrade; ``--mark-undecryptable-invalid`` marks such rows invalid instead (the
-user enrolls again). ``db import-sqlite PATH`` copies a SQLite token database into an
-empty PostgreSQL database (``DATABASE_URL``): a file from before the account model is
-first migrated to the current schema in a private copy (it needs the keys and accepts
-``--mark-undecryptable-invalid`` like ``db upgrade``), then the schema and every row are
-created in one PostgreSQL transaction and every token is checked to still decrypt. The
-flag marks tokens that fail to decrypt under a key the keyring has (the user enrolls
-again, the credential generation is raised and the audit log records it); a stored key
-id that ``CANVAS_TOKEN_KEYS`` lacks always stops the import, because the server would
-refuse to start on it. The output counts the tokens marked invalid. On any failure
-PostgreSQL is left as it was; the source file is never modified.
-
-Every command except ``db ...`` refuses to run (exit 2) on a database that holds no
-rows while the default SQLite file in the data directory still has data: using it
-would hide the disablements stored in that file. Import the file first.
-
-Reads ``CANVAS_TOKEN_KEYS``, ``SELFHOST_DATA_DIR`` (default ``/data``) and
-``DATABASE_URL`` (unset: the SQLite file in the data directory) from the
-environment, like the server. Schema changes are applied before a command runs
-unless ``DATABASE_AUTO_MIGRATE=false``. Never prints a token, a key, a database
-password or any other secret.
-
-Exit codes: 0 ok, 1 not found, 2 configuration, keyring or database error, 3
-refused (for example disabling the last usable owner), 4 ``db current`` found the
-schema behind this build (run ``db upgrade``).
+Reads ``CANVAS_TOKEN_KEYS``, ``SELFHOST_DATA_DIR`` and ``DATABASE_URL`` as the
+server does. Never prints tokens, encryption keys or database passwords.
+Exit codes: 0 success, 1 not found, 2 configuration/storage error, 3 protected
+operation refused, 4 ``db current`` found a schema behind this build.
 """
 
 from __future__ import annotations
@@ -126,7 +33,7 @@ import os
 import pathlib
 import re
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -148,8 +55,6 @@ from canvas_mcp.core.selfhost.token_store import (
     TokenDecryptionError,
     TokenStore,
     TokenStoreError,
-    entra_principal_key,
-    split_entra_key,
 )
 
 if TYPE_CHECKING:
@@ -191,16 +96,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def principal(p: argparse.ArgumentParser, *, optional: bool = False) -> None:
-        nargs = "?" if optional else None
         p.add_argument(
             "principal",
-            nargs=nargs,
-            help=(
-                "acct:<uuid>, a bare uuid, entra:<tenant id>:<object id>, google:<subject>, "
-                "github:<numeric user id>, oidc:<slug>:<subject>, or TENANT_ID with OBJECT_ID"
-            ),
+            nargs="?" if optional else None,
+            help="canonical bare account UUID printed by 'accounts'",
         )
-        p.add_argument("object_id", nargs="?", help="the object id when PRINCIPAL is a tenant id")
 
     sub.add_parser("check", help="open the store, print the row counts and key ids")
     identities = sub.add_parser(
@@ -208,32 +108,41 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     principal(identities, optional=True)
     unlink = sub.add_parser(
-        "unlink-identity", help="remove one sign-in method from an account (it keeps at least one)"
+        "unlink-identity",
+        help="remove one sign-in method from an account (it keeps at least one)",
     )
-    unlink.add_argument(
-        "principal",
-        help=(
-            "acct:<uuid>, a bare uuid, entra:<tenant id>:<object id>, google:<subject>, "
-            "github:<numeric user id> or oidc:<slug>:<subject>"
-        ),
-    )
-    unlink.add_argument("identity_id", type=int, help="the identity id printed by 'identities'")
-    unlink.set_defaults(object_id=None)
+    principal(unlink)
+    unlink.add_argument("identity_id", help="the identity UUID printed by 'identities'")
     providers = sub.add_parser(
-        "login-providers", help="show the configured sign-in providers and the redirect URIs to register"
+        "login-providers",
+        help="show the configured sign-in providers and the redirect URIs to register",
     )
     providers.add_argument(
         "--check",
         action="store_true",
         help="also fetch each OpenID Connect provider's discovery document and keys (network)",
     )
-    sub.add_parser("list", help="list enrollments with their Canvas host (tab-separated, no tokens)")
-    sub.add_parser("accounts", help="list every account (tab-separated)")
-    approve = sub.add_parser("approve", help="approve an account that waits for approval")
+    sub.add_parser(
+        "list",
+        help="list enrollments with their Canvas host (tab-separated, no tokens)",
+    )
+    accounts = sub.add_parser("accounts", help="list accounts or delete one account")
+    actions = accounts.add_subparsers(dest="accounts_action")
+    delete_account = actions.add_parser(
+        "delete", help="delete an account and its bindings; retain audit history"
+    )
+    delete_account.add_argument("account_id", help="canonical bare account UUID")
+    approve = sub.add_parser(
+        "approve", help="approve an account that waits for approval"
+    )
     principal(approve)
-    promote = sub.add_parser("promote-owner", help="make an active account an owner (emergency)")
+    promote = sub.add_parser(
+        "promote-owner", help="make an active account an owner (emergency)"
+    )
     principal(promote)
-    disable = sub.add_parser("disable", help="disable a user: refused everywhere until enabled")
+    disable = sub.add_parser(
+        "disable", help="disable a user: refused everywhere until enabled"
+    )
     principal(disable)
     disable.add_argument(
         "--allow-last-owner",
@@ -242,63 +151,51 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     enable = sub.add_parser("enable", help="lift a disablement")
     principal(enable)
-    sub.add_parser("access", help="list accounts that are not active, and owners (tab-separated)")
+    sub.add_parser(
+        "access", help="list accounts that are not active, and owners (tab-separated)"
+    )
     history = sub.add_parser("history", help="show the access history, newest first")
     principal(history, optional=True)
     history.add_argument("--limit", type=int, default=50)
+    history.add_argument(
+        "--cursor", help="opaque continuation from the previous history page"
+    )
     remove_help = (
         "delete one user's stored Canvas token only (the user can enroll again; "
         "use 'disable' to cut someone off)"
     )
-    for remove in (
-        sub.add_parser("remove", help=remove_help),
-        sub.add_parser("revoke", help=remove_help + " [old name of 'remove']"),
-    ):
-        principal(remove)
+    principal(sub.add_parser("remove", help=remove_help))
     sub.add_parser("rotate", help="re-encrypt rows under the active key")
     list_grants = sub.add_parser(
-        "list-grants", help="list connected apps (SELFHOST_AUTH_MODE=local; tab-separated, no secrets)"
+        "list-grants",
+        help="list connected apps (MCP_AUTH_MODE=selfhost; tab-separated, no secrets)",
     )
     principal(list_grants, optional=True)
-    list_grants.add_argument("--all", action="store_true", help="include ended and expired connections")
-    revoke_grant = sub.add_parser(
-        "revoke-grant", help="end one connected app's connection, or all of one account's"
+    list_grants.add_argument(
+        "--all", action="store_true", help="include ended and expired connections"
     )
-    revoke_grant.add_argument("grant_id", nargs="?", help="the grant id printed by list-grants")
+    revoke_grant = sub.add_parser(
+        "revoke-grant",
+        help="end one connected app's connection, or all of one account's",
+    )
+    revoke_grant.add_argument(
+        "grant_id", nargs="?", help="the grant id printed by list-grants"
+    )
     revoke_grant.add_argument(
         "--account",
         metavar="PRINCIPAL",
         help="end every live connection of this account (acct:<uuid>, a bare uuid or entra:<tenant id>:<object id>)",
     )
-    sub.add_parser("rotate-jwt-key", help="invalidate every access token (apps refresh; grants stay)")
-    db = sub.add_parser("db", help="inspect and upgrade the database schema")
-    db_sub = db.add_subparsers(dest="db_command", required=True)
-    db_sub.add_parser("current", help="show the schema state; exit 4 if it is behind")
-    upgrade = db_sub.add_parser("upgrade", help="apply pending schema revisions")
-    upgrade.add_argument(
-        "--backup",
-        metavar="PATH",
-        help="SQLite only: copy the database to this new private file before upgrading",
+    sub.add_parser(
+        "rotate-jwt-key",
+        help="invalidate every access token (apps refresh; grants stay)",
     )
-    upgrade.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="run the upgrade, print what it would do and roll everything back",
-    )
-    upgrade.add_argument(
-        "--mark-undecryptable-invalid",
-        action="store_true",
-        help="mark tokens that do not decrypt invalid instead of stopping the upgrade",
-    )
-    import_sqlite = db_sub.add_parser(
-        "import-sqlite", help="copy a SQLite token database into an empty PostgreSQL database"
-    )
-    import_sqlite.add_argument("path", help="the SQLite file to import (it is not modified)")
-    import_sqlite.add_argument(
-        "--mark-undecryptable-invalid",
-        action="store_true",
-        help="mark tokens that do not decrypt invalid instead of refusing the import",
-    )
+    from .db.migrations.cli import register_subcommands
+
+    register_subcommands(sub)
+    from .config_cli import register
+
+    register(sub)
     return parser
 
 
@@ -318,7 +215,11 @@ def _database() -> Database:
 
     data_dir = _data_dir()
     problems: list[str] = []
-    allow = (os.environ.get(ALLOW_OUTSIDE_ENV) or "").strip().lower() in ("true", "1", "yes")
+    allow = (os.environ.get(ALLOW_OUTSIDE_ENV) or "").strip().lower() in (
+        "true",
+        "1",
+        "yes",
+    )
     target = parse_database_url(
         (os.environ.get(DATABASE_URL_ENV) or "").strip(),
         data_dir,
@@ -348,7 +249,7 @@ def _open_store() -> TokenStore:
     """Open and initialize the store; raises TokenStoreError/OSError."""
     keyring = Keyring.parse(os.environ.get(KEYS_ENV, ""))
     database = _database()
-    from canvas_mcp.core.selfhost.db.transfer import refuse_silent_switch
+    from canvas_mcp.core.selfhost.db.migrations.transfer import refuse_silent_switch
 
     # Before anything is created or written: a command that ran on an empty target
     # next to a SQLite file with data would lose that file's disablements.
@@ -358,199 +259,53 @@ def _open_store() -> TokenStore:
     return store
 
 
-def _optional_keyring() -> Keyring | None:
-    """The keyring if ``CANVAS_TOKEN_KEYS`` is set (the schema upgrade may need it)."""
-    raw = os.environ.get(KEYS_ENV, "")
-    return Keyring.parse(raw) if raw.strip() else None
-
-
 def _run_db(args: argparse.Namespace) -> int:
-    """The ``db`` subcommands. ``current`` needs no keys; ``upgrade`` needs them for tokens."""
-    command: str = args.db_command
-    db = _database()  # first: reports a missing extra before anything imports SQLAlchemy
-    from canvas_mcp.core.selfhost.db import migrate
+    """Delegate every database upgrade command to the isolated migration package."""
+    db = _database()
+    from .db.migrations.cli import run
 
-    if command == "current":
-        status = migrate.current(db)
-        print(f"backend: {db.description}")
-        print(f"alembic revision: {status.alembic_revision or '(none)'}")
-        print(f"schema version marker: {status.meta_version or '(none)'}")
-        print(f"head revision: {status.head}")
-        print(f"state: {status.state}")
-        if status.state == migrate.STATE_CURRENT:
-            return EXIT_OK
-        if status.state in (migrate.STATE_NEWER, migrate.STATE_UNREADABLE):
-            return EXIT_CONFIG
-        return EXIT_BEHIND
-    if command == "upgrade":
-        backup = pathlib.Path(args.backup) if args.backup else None
-        report = migrate.AccountMigrationReport()
-        before, after = migrate.upgrade(
-            db,
-            backup_to=backup,
-            keyring=_optional_keyring(),
-            dry_run=args.dry_run,
-            mark_undecryptable_invalid=args.mark_undecryptable_invalid,
-            report=report,
-        )
-        if args.dry_run:
-            if before.state == migrate.STATE_CURRENT:
-                print(f"dry run: already current at {before.alembic_revision}; nothing to do")
-            else:
-                print("dry run: nothing was changed. The upgrade would:")
-                for line in report.lines():
-                    print(f"  {line}")
-            return EXIT_OK
-        if backup is not None:
-            print(f"backup written to {backup}")
-        elif report.backup_path:
-            print(f"backup written to {report.backup_path}")
-        if before.state == migrate.STATE_CURRENT:
-            print(f"already current at {after.alembic_revision}")
-        else:
-            print(f"upgraded: {before.alembic_revision or '(none)'} -> {after.alembic_revision}")
-            if report.ran:
-                for line in report.lines():
-                    print(f"  {line}")
-        return EXIT_OK
-    if command == "import-sqlite":
-        from canvas_mcp.core.selfhost.db.transfer import import_sqlite
-
-        keyring = Keyring.parse(os.environ.get(KEYS_ENV, ""))
-        report_ = import_sqlite(
-            db,
-            pathlib.Path(args.path),
-            keyring,
-            mark_undecryptable_invalid=args.mark_undecryptable_invalid,
-        )
-        for table, count in report_.counts.items():
-            print(f"{table}: {count} row(s)")
-        if report_.migration.ran:
-            print("migration of the private copy:")
-            for line in report_.migration.lines():
-                print(f"  {line}")
-        print(f"tokens marked invalid during the import: {report_.total_marked_invalid}")
-        print(
-            "imported at the current schema; every stored token that is not marked invalid "
-            "decrypts with CANVAS_TOKEN_KEYS"
-        )
-        return EXIT_OK
-    raise AssertionError(command)  # pragma: no cover - argparse enforces choices
+    try:
+        return run(db, args)
+    finally:
+        db.dispose()
 
 
 @dataclass(frozen=True)
 class _Target:
-    """A principal as the operator typed it."""
-
-    account_key: str | None
-    entra: tuple[str, str] | None  # (tenant id, object id)
-    #: ``(provider id, subject, issuer or None)`` of a Google, GitHub or generic OIDC identity.
-    external: tuple[str, str, str | None] | None = None
+    account_key: str
 
 
 class _BadPrincipal(ValueError):
-    """The typed principal is not a known form (``detail`` is a fixed text, never user input)."""
-
-    detail: str | None = None
+    """A typed target is not a canonical account UUID."""
 
 
-class _AmbiguousPrincipal(_BadPrincipal):
-    """An OpenID Connect subject without its issuer matches more than one provider identity."""
-
-    detail = (
-        "error: that subject is linked to more than one account issuer; set "
-        "OIDC_<SLUG>_ISSUER in the environment (the same variables as the server) so the "
-        "identity is looked up by its issuer, or name the account as acct:<uuid>"
-    )
-
-
-_EXTERNAL_GOOGLE_RE = re.compile(r"^google:([A-Za-z0-9_-]{1,255})$")
-_EXTERNAL_GITHUB_RE = re.compile(r"^github:([1-9][0-9]{0,19})$")
-_EXTERNAL_OIDC_RE = re.compile(r"^oidc:([a-z](?:[a-z0-9-]{0,30}[a-z0-9])?):([\x21-\x7e]{1,255})$")
-
-
-def _external_target(text: str) -> _Target | None:
-    """``google:<sub>``, ``github:<numeric id>`` or ``oidc:<slug>:<sub>`` (subjects keep their case)."""
-    if (match := _EXTERNAL_GOOGLE_RE.match(text)) is not None:
-        return _Target(None, None, (acc.PROVIDER_GOOGLE, match.group(1), acc.GOOGLE_ISSUER))
-    if (match := _EXTERNAL_GITHUB_RE.match(text)) is not None:
-        return _Target(None, None, (acc.PROVIDER_GITHUB, match.group(1), acc.GITHUB_ISSUER))
-    if (match := _EXTERNAL_OIDC_RE.match(text)) is not None and "," not in text:
-        from canvas_mcp.core.selfhost.login.config import env_prefix
-
-        provider_id = f"{acc.PROVIDER_OIDC_PREFIX}{match.group(1)}"
-        configured = os.environ.get(env_prefix(match.group(1)) + "ISSUER", "").strip()
-        return _Target(None, None, (provider_id, match.group(2), configured or None))
-    return None
-
-
-def _parse_target(principal: str | None, object_id: str | None) -> _Target:
-    if principal is None:
+def _parse_target(principal: str | None) -> _Target:
+    if not isinstance(principal, str) or not _UUID_RE.fullmatch(principal):
         raise _BadPrincipal
-    external = None if object_id is not None else _external_target(principal.strip())
-    if external is not None:
-        return external
-    text = principal.strip().lower()
-    if object_id is not None:
-        key = entra_principal_key(text, object_id)  # raises ValueError unless both are GUIDs
-        parts = split_entra_key(key)
-        assert parts is not None
-        return _Target(None, parts)
-    if _UUID_RE.match(text):
-        return _Target(f"acct:{text}", None)
-    if acc.valid_account_key(text):
-        return _Target(text, None)
-    parts = split_entra_key(text)
-    if parts is not None:
-        return _Target(None, parts)
-    raise _BadPrincipal
+    return _Target(principal)
 
 
 def _lookup(store: TokenStore, target: _Target) -> str | None:
-    """The account key a typed principal names, or None if there is no such account."""
-    if target.account_key is not None:
-        return target.account_key if store.get_principal_status(target.account_key).stored else None
-    if target.external is not None:
-        provider_id, subject, issuer = target.external
-        if issuer is not None:
-            return store.lookup_identity(provider_id, issuer, subject)
-        # No issuer in the environment: a provider and subject that match exactly one identity name it.
-        found = {
-            account.principal_key
-            for account in store.list_accounts()
-            for identity in account.identities
-            if identity.provider_id == provider_id and identity.subject == subject
-        }
-        if len(found) > 1:
-            raise _AmbiguousPrincipal
-        return next(iter(found), None)
-    assert target.entra is not None
-    return store.lookup_identity(
-        acc.PROVIDER_ENTRA, acc.entra_issuer(target.entra[0]), target.entra[1]
+    return (
+        target.account_key
+        if store.get_principal_status(target.account_key).stored
+        else None
     )
 
 
-_BAD_PRINCIPAL = (
-    "error: name the account as acct:<uuid>, entra:<tenant GUID>:<object GUID>, google:<subject>, "
-    "github:<numeric user id>, oidc:<slug>:<subject>, or give TENANT_ID and OBJECT_ID (both GUIDs)"
-)
-
-
-def _bad_principal(exc: ValueError) -> str:
-    """The message for a principal the operator typed wrongly (fixed text only)."""
-    return (exc.detail if isinstance(exc, _BadPrincipal) else None) or _BAD_PRINCIPAL
-
+def _bad_principal(_exc: ValueError) -> str:
+    return "error: name the account by its canonical bare UUID (see 'accounts')"
 
 
 def _identity_columns(account: AccountInfo | None) -> tuple[str, str]:
-    legacy = None if account is None else account.legacy_key
-    parts = split_entra_key(legacy) if legacy else None
-    return parts if parts is not None else ("-", "-")
+    if account is not None:
+        for identity in account.identities:
+            if identity.provider_id == acc.PROVIDER_ENTRA:
+                return identity.tenant_id or "-", identity.subject
+    return "-", "-"
 
 
 _GRANT_ID_RE = _UUID_RE
-#: ``list-grants`` reads at most this many connections (the store's own ceiling).
-_MAX_LISTED_GRANTS = 2000
 
 
 def _grant_state(grant: object, now: int) -> str:
@@ -565,10 +320,10 @@ def _live_grants(store: TokenStore) -> str:
     from canvas_mcp.core.selfhost.authz.store import AuthzStore
 
     try:
-        count = len(AuthzStore(store.database).list_all_grants(limit=_MAX_LISTED_GRANTS))
+        count = AuthzStore(store.database).count_live_grants()
     except Exception:  # noqa: BLE001 - check must work on any readable store
         return "-"
-    return f"{count}+" if count >= _MAX_LISTED_GRANTS else str(count)
+    return str(count)
 
 
 def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
@@ -584,7 +339,7 @@ def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
         wanted: str | None = None
         if args.principal is not None:
             try:
-                found = _lookup(store, _parse_target(args.principal, args.object_id))
+                found = _lookup(store, _parse_target(args.principal))
             except ValueError as exc:
                 print(_bad_principal(exc), file=sys.stderr)
                 return EXIT_CONFIG
@@ -592,9 +347,7 @@ def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
                 print("not found: no such account", file=sys.stderr)
                 return EXIT_NOT_FOUND
             wanted = found
-        for grant in authz.list_all_grants(
-            include_inactive=args.all, limit=_MAX_LISTED_GRANTS, account_key=wanted
-        ):
+        for grant in authz.iter_grants(include_inactive=args.all, account_key=wanted):
             print(
                 "	".join(
                     [
@@ -614,17 +367,20 @@ def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
         return EXIT_OK
     if command == "revoke-grant":
         if (args.grant_id is None) == (args.account is None):
-            print("error: give a GRANT_ID, or --account PRINCIPAL (not both)", file=sys.stderr)
+            print(
+                "error: give a GRANT_ID, or --account PRINCIPAL (not both)",
+                file=sys.stderr,
+            )
             return EXIT_CONFIG
         if args.account is not None:
             try:
-                key = _lookup(store, _parse_target(args.account, None))
+                key = _lookup(store, _parse_target(args.account))
             except ValueError as exc:
                 print(_bad_principal(exc), file=sys.stderr)
                 return EXIT_CONFIG
             ended = 0
             if key is not None:
-                for grant in authz.list_grants(key):
+                for grant in authz.iter_grants(account_key=key):
                     ended += 1 if authz.operator_revoke_grant(grant.id) else 0
             if ended == 0:
                 print("not found: no live connection for that account")
@@ -632,7 +388,9 @@ def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
             print(f"revoked {ended} connection(s)")
             return EXIT_OK
         grant_id = str(args.grant_id).strip().lower()
-        if not _GRANT_ID_RE.match(grant_id) or not authz.operator_revoke_grant(grant_id):
+        if not _GRANT_ID_RE.match(grant_id) or not authz.operator_revoke_grant(
+            grant_id
+        ):
             print("not found: no live connection with that id")
             return EXIT_NOT_FOUND
         print("revoked 1 connection")
@@ -648,51 +406,67 @@ def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
 def _run(args: argparse.Namespace, store: TokenStore) -> int:
     command: str = args.command
     if command == "check":
-        rows = store.list_enrollments()
-        kids = sorted({row.key_id for row in rows})
-        print(f"rows: {len(rows)}")
+        total, schools, kids = store.credential_inventory()
+        print(f"rows: {total}")
         print("key ids in use: " + (", ".join(kids) if kids else "(none)"))
-        schools = sorted({row.canvas_host for row in rows if row.canvas_host})
-        legacy = sum(1 for row in rows if not row.canvas_host)
-        print(f"schools in use: {len(schools)}" + (f" (+{legacy} legacy row(s))" if legacy else ""))
-        accounts = store.list_principal_statuses()
-        by_status = {
-            name: sum(1 for st in accounts if st.status == name) for name in acc.ACCOUNT_STATUSES
-        }
+        print(f"schools in use: {schools}")
+        by_status = store.account_counts()
         print(
-            f"accounts: {len(accounts)} (active {by_status['active']}, "
+            f"accounts: {by_status['total']} (active {by_status['active']}, "
             f"pending {by_status['pending']}, disabled {by_status['disabled']})"
         )
-        known = {st.principal_key for st in accounts}
-        orphans = sum(1 for row in rows if row.principal_key not in known)
-        print(f"tokens of principals without an account: {orphans}")
         print(f"live connected apps: {_live_grants(store)}")
         print(f"disabled users: {by_status['disabled']}")
         print(
             f"active owners seen: {store.count_active_owners()}"
             " (as of each owner's last sign-in; see 'access' for owner_seen_at)"
         )
+        from .config_cli import summary
+
+        for line in summary(store):
+            print(line)
         return EXIT_OK
     if command == "list":
-        by_key = {a.principal_key: a for a in store.list_accounts()}
-        for row in store.list_enrollments():
-            tid, oid = _identity_columns(by_key.get(row.principal_key))
-            print(
-                "\t".join(
-                    [
-                        tid,
-                        oid,
-                        _cell(row.canvas_user_name),
-                        _iso(row.created_at),
-                        _iso(row.last_used_at),
-                        _cell(row.canvas_host or "") or "-",
-                        row.principal_key,
-                    ]
+        cursor = None
+        while True:
+            page = store.enrollments_page(cursor=cursor, limit=200)
+            by_key = store.enrollment_accounts(page.items)
+            for row in page.items:
+                tid, oid = _identity_columns(by_key.get(row.principal_key))
+                print(
+                    "\t".join(
+                        [
+                            tid,
+                            oid,
+                            _cell(row.canvas_user_name),
+                            _iso(row.created_at),
+                            _iso(row.last_used_at),
+                            row.canvas_host or "-",
+                            row.principal_key,
+                        ]
+                    )
                 )
-            )
-        return EXIT_OK
+            if page.next_cursor is None:
+                return EXIT_OK
+            cursor = page.next_cursor
     if command == "accounts":
-        for account in store.list_accounts():
+        if args.accounts_action == "delete":
+            if not _UUID_RE.fullmatch(args.account_id):
+                print("account id must be a canonical bare UUID", file=sys.stderr)
+                return EXIT_CONFIG
+            try:
+                changed = store.delete_account(
+                    args.account_id, listed_providers=_listed_providers(store)
+                )
+            except AccessActionRefused:
+                print(
+                    "refused: deletion would remove the last usable or active owner",
+                    file=sys.stderr,
+                )
+                return EXIT_REFUSED
+            print("deleted 1 account" if changed else "not found: no such account")
+            return EXIT_OK if changed else EXIT_NOT_FOUND
+        for account in store.iter_accounts():
             st = account.status
             identity = account.identities[0] if account.identities else None
             print(
@@ -707,7 +481,6 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
                         identity.provider_id if identity is not None else "-",
                         _iso(st.created_at),
                         _iso(st.last_login_at),
-                        account.legacy_key or "-",
                     ]
                 )
             )
@@ -725,8 +498,8 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
     try:
         target = (
             None
-            if command == "history" and args.principal is None and args.object_id is None
-            else _parse_target(args.principal, args.object_id)
+            if command == "history" and args.principal is None
+            else _parse_target(args.principal)
         )
     except ValueError as exc:
         print(_bad_principal(exc), file=sys.stderr)
@@ -736,16 +509,16 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
     assert target is not None
     try:
         key = _lookup(store, target)
-    except _AmbiguousPrincipal as exc:
+    except _BadPrincipal as exc:
         print(_bad_principal(exc), file=sys.stderr)
         return EXIT_CONFIG
 
-    if command in ("remove", "revoke"):
+    if command == "remove":
         removed = store.delete(key, actor=OPERATOR) if key is not None else False
         if not removed:
             print("not found: no enrollment for that account")
             return EXIT_NOT_FOUND
-        print("revoked 1 enrollment" if command == "revoke" else "removed 1 enrollment")
+        print("removed 1 enrollment")
         print(
             "note: this only deleted the stored Canvas token; the user can enroll again. "
             "Use 'disable' to cut a user off.",
@@ -754,20 +527,8 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
         return EXIT_OK
     if command == "disable":
         if key is None:
-            if target.entra is None:
-                print("not found: no such account", file=sys.stderr)
-                return EXIT_NOT_FOUND
-            # Block someone before their first sign-in: a disabled account that their
-            # identity will find.
-            store.create_operator_account(
-                provider_id=acc.PROVIDER_ENTRA,
-                issuer=acc.entra_issuer(target.entra[0]),
-                subject=target.entra[1],
-                status="disabled",
-                reason=DISABLE_REASON_OPERATOR,
-            )
-            print("disabled 1 user (a new account was created for them)")
-            return EXIT_OK
+            print("not found: no such account", file=sys.stderr)
+            return EXIT_NOT_FOUND
         try:
             changed = store.disable_principal(
                 key,
@@ -811,7 +572,10 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
             print("not found: no such account", file=sys.stderr)
             return EXIT_NOT_FOUND
         result = store.unlink_identity(
-            key, args.identity_id, actor=OPERATOR, listed_providers=_listed_providers(store),
+            key,
+            args.identity_id,
+            actor=OPERATOR,
+            listed_providers=_listed_providers(store),
             additional_provider_lists=_protected_provider_lists(store),
         )
         if result.ok:
@@ -835,7 +599,10 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
                 file=sys.stderr,
             )
             return EXIT_REFUSED
-        print("not found: that account has no sign-in method with that id", file=sys.stderr)
+        print(
+            "not found: that account has no sign-in method with that id",
+            file=sys.stderr,
+        )
         return EXIT_NOT_FOUND
     if command == "promote-owner":
         changed = key is not None and store.promote_owner(
@@ -853,43 +620,41 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
     raise AssertionError(command)  # pragma: no cover - argparse enforces choices
 
 
-def _history(args: argparse.Namespace, store: TokenStore, target: _Target | None) -> int:
-    key: str | None = None
-    if target is not None:
-        try:
-            key = _lookup(store, target)
-        except _AmbiguousPrincipal as exc:
-            print(_bad_principal(exc), file=sys.stderr)
-            return EXIT_CONFIG
-        if key is None:
-            print("not found: no such account", file=sys.stderr)
-            return EXIT_NOT_FOUND
-    by_key = {a.principal_key: a for a in store.list_accounts()}
-    for event in store.list_status_events(key, limit=args.limit):
-        account = by_key.get(event.principal_key)
+def _history(
+    args: argparse.Namespace, store: TokenStore, target: _Target | None
+) -> int:
+    # Retained audit history is readable after its account was deleted.
+    key = target.account_key if target is not None else None
+    try:
+        page = store.audit_page(account_id=key, limit=args.limit, cursor=args.cursor)
+    except ValueError:
+        print("error: invalid history cursor or limit (1-200)", file=sys.stderr)
+        return EXIT_CONFIG
+    for event in page.items:
         print(
             "\t".join(
                 [
                     _iso(event.at),
-                    event.principal_key,
+                    event.target or "-",
                     event.action,
                     _cell(event.actor or "") or "-",
                     _cell(event.reason or "") or "-",
-                    str(event.session_epoch),
-                    (account.legacy_key if account is not None else None) or "-",
+                    str(event.detail.get("session_epoch", "-")),
                 ]
             )
         )
+    if page.next_cursor is not None:
+        print("next_cursor: " + page.next_cursor, file=sys.stderr)
     return EXIT_OK
 
 
 def _identities(args: argparse.Namespace, store: TokenStore) -> int:
-    keys: list[str]
-    if args.principal is None and args.object_id is None:
-        keys = [st.principal_key for st in store.list_principal_statuses()]
+    keys: Iterable[str]
+    if args.principal is None:
+        keys = (a.principal_key for a in store.iter_accounts())
     else:
         try:
-            target = _parse_target(args.principal, args.object_id)
+            target = _parse_target(args.principal)
             found = _lookup(store, target)
         except ValueError as exc:
             print(_bad_principal(exc), file=sys.stderr)
@@ -918,11 +683,9 @@ def _identities(args: argparse.Namespace, store: TokenStore) -> int:
 
 
 def _redirect_uri(base: str, provider_id: str) -> str:
-    if provider_id == acc.PROVIDER_ENTRA:
-        return f"{base}/account/callback"
-    if provider_id in (acc.PROVIDER_GOOGLE, acc.PROVIDER_GITHUB):
-        return f"{base}/account/callback/{provider_id}"
-    return f"{base}/account/callback/oidc/{provider_id.removeprefix('oidc:')}"
+    from .routes import redirect_uri
+
+    return redirect_uri(base, provider_id)
 
 
 def _endpoint_hosts(meta: Any) -> str:
@@ -930,7 +693,12 @@ def _endpoint_hosts(meta: Any) -> str:
     from urllib.parse import urlsplit
 
     hosts: list[str] = []
-    for url in (meta.authorization_endpoint, meta.token_endpoint, meta.jwks_uri, meta.userinfo_endpoint):
+    for url in (
+        meta.authorization_endpoint,
+        meta.token_endpoint,
+        meta.jwks_uri,
+        meta.userinfo_endpoint,
+    ):
         host = urlsplit(url).hostname if url else None
         if host and host not in hosts:
             hosts.append(host)
@@ -944,8 +712,6 @@ def _protected_provider_lists(store: TokenStore) -> tuple[frozenset[str], ...]:
     intersection. Each guard runs inside the mutation's writer transaction.
     """
     recorded = store.recorded_login_providers()
-    if recorded is None:
-        return ()
     if not (os.environ.get("SELFHOST_LOGIN_PROVIDERS") or "").strip():
         return (recorded,)
     from_env = _environment_providers()
@@ -981,36 +747,18 @@ def _listed_providers(store: TokenStore) -> frozenset[str] | None:
 
     recorded = store.recorded_login_providers()
     named = bool((os.environ.get(LOGIN_PROVIDERS_ENV) or "").strip())
-    if recorded is not None and not named:
+    if not named:
         return recorded
     from_env = _environment_providers()
-    if recorded is not None:
-        if from_env is None or from_env == recorded:
-            return recorded
-        both = recorded & from_env
-        print(
-            f"note: {LOGIN_PROVIDERS_ENV} in this environment ({', '.join(sorted(from_env))}) "
-            f"differs from the list the server last recorded ({', '.join(sorted(recorded))}); "
-            + (
-                "promotion uses both lists; disable and unlink preserve an owner under each list"
-                if both
-                else "they share no provider, so the recorded list is used"
-            ),
-            file=sys.stderr,
-        )
-        # No provider in common: an intersection would make every owner unusable and so take
-        # every guard away, so the server's own record stands.
-        return both or recorded
-    if from_env is not None:
-        if not named:
-            _note_assumed_entra_only(store)
-        return from_env
+    if from_env is None or from_env == recorded:
+        return recorded
+    both = recorded & from_env
     print(
-        "note: SELFHOST_LOGIN_PROVIDERS is not readable in this environment; every provider is "
-        "assumed to be listed, so the usable-owner check is more permissive than the server's",
+        f"note: {LOGIN_PROVIDERS_ENV} differs from the configured providers in the database; "
+        "disable and unlink preserve an owner under each list",
         file=sys.stderr,
     )
-    return None
+    return both or recorded
 
 
 def _environment_providers() -> frozenset[str] | None:
@@ -1034,7 +782,7 @@ def _environment_providers() -> frozenset[str] | None:
         # authz_mode "local": the mode of the other settings is not known here, and this reads
         # the list alone.
         with _quiet_login_config():
-            ids = parse_login_providers(os.environ, ignored, authz_mode="local").ids
+            ids = parse_login_providers(os.environ, ignored).ids
     except Exception:  # noqa: BLE001 - an unreadable list is reported by the caller
         return None
     if ids and not any(p.startswith(LOGIN_PROVIDERS_ENV) for p in ignored):
@@ -1047,7 +795,7 @@ def _note_assumed_entra_only(store: TokenStore) -> None:
     others = sorted(
         {
             identity.provider_id
-            for account in store.list_accounts()
+            for account in store.iter_accounts()
             for identity in account.identities
             if identity.provider_id != acc.PROVIDER_ENTRA
         }
@@ -1124,8 +872,13 @@ def _run_login_providers(args: argparse.Namespace) -> int:
             provider: Any = runtime.providers.get(provider_id)
             discovery = getattr(provider, "discovery", None)
             if provider_id == acc.PROVIDER_GITHUB and provider is not None:
-                scopes = "user:email" + (",read:org" if provider.wants_membership else "")
-                print(line + f"	OK	scopes={scopes}	endpoints=github.com,api.github.com	pkce=S256")
+                scopes = "user:email" + (
+                    ",read:org" if provider.wants_membership else ""
+                )
+                print(
+                    line
+                    + f"	OK	scopes={scopes}	endpoints=github.com,api.github.com	pkce=S256"
+                )
                 continue
             if provider is None or discovery is None:
                 print(line + "	OK	(nothing to discover)")
@@ -1152,11 +905,10 @@ def _run_login_providers(args: argparse.Namespace) -> int:
 
 
 def _access(store: TokenStore) -> int:
-    by_key = {a.principal_key: a for a in store.list_accounts()}
-    for st in store.list_principal_statuses():
+    for account in store.iter_accounts():
+        st = account.status
         if st.active and not st.is_owner:
             continue
-        account = by_key.get(st.principal_key)
         print(
             "\t".join(
                 [
@@ -1168,7 +920,6 @@ def _access(store: TokenStore) -> int:
                     _cell(st.disabled_reason or "") or "-",
                     str(st.session_epoch),
                     _iso(st.role_seen_at) if st.is_owner else "-",
-                    (account.legacy_key if account is not None else None) or "-",
                 ]
             )
         )
@@ -1183,9 +934,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "login-providers":
             return _run_login_providers(args)
         store = _open_store()
-        if args.command == "access":
-            return _access(store)
-        return _run(args, store)
+        try:
+            if args.command in {"schools", "providers", "settings"}:
+                from .config_cli import refusal, run
+                from .config_store import SchoolRemovalConfirmation
+                from .db.settings_repo import SettingsConflict
+
+                try:
+                    return run(args, store)
+                except (ValueError, SettingsConflict, SchoolRemovalConfirmation) as exc:
+                    print("error: " + refusal(exc), file=sys.stderr)
+                    return EXIT_CONFIG
+            if args.command == "access":
+                return _access(store)
+            return _run(args, store)
+        finally:
+            store.close()
     except TokenDecryptionError:
         print("error: a stored token could not be decrypted", file=sys.stderr)
         return EXIT_CONFIG
@@ -1194,7 +958,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_CONFIG
     except OSError as exc:
-        print(f"error: cannot open the token store ({type(exc).__name__})", file=sys.stderr)
+        print(
+            f"error: cannot open the token store ({type(exc).__name__})",
+            file=sys.stderr,
+        )
         return EXIT_CONFIG
 
 

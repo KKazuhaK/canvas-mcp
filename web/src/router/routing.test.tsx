@@ -9,7 +9,7 @@ import { useLanguage } from '@/stores/language'
 vi.mock('@/utils/navigate', () => ({ hardNavigate: vi.fn() }))
 
 const FIXED_SCHOOL = {
-  mode: 'fixed',
+  mode: 'sole',
   choices: [],
   selected: null,
   sole: { host: 'canvas.example.edu', name: 'Example University' },
@@ -48,7 +48,7 @@ describe('routing and the session gate', () => {
     expect(await screen.findByText('Page not found')).toBeInTheDocument()
   })
 
-  it.each(['/identities', '/connected-apps', '/consent/abc', '/login'])(
+  it.each(['/identities', '/consent/abc', '/login'])(
     'has no page at %s (that feature is not built, or lives on the server)',
     async (path) => {
       const { router } = await renderApp(path, 'enrolled')
@@ -70,6 +70,7 @@ describe('routing and the session gate', () => {
       '/',
       '/token',
       '/write-tools',
+      '/connected-apps',
       '/activity',
     ])
 

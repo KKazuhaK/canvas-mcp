@@ -305,7 +305,11 @@ class TestPostgresDialectSpecifics:
 
     def test_the_writer_lock_key_is_a_fixed_signed_64_bit_integer(self) -> None:
         assert -(2**63) <= db_engine.WRITER_LOCK_KEY < 2**63
-        assert db_engine.WRITER_LOCK_KEY != db_engine.MIGRATION_LOCK_KEY
+        from canvas_mcp.core.selfhost.db.migrations.connections import (
+            MIGRATION_LOCK_KEY,
+        )
+
+        assert db_engine.WRITER_LOCK_KEY != MIGRATION_LOCK_KEY
         assert db_engine._ADVISORY_XACT_SQL == f"SELECT pg_advisory_xact_lock({db_engine.WRITER_LOCK_KEY})"
         # sha256("canvas-mcp/token-store/writer") must stay the key forever: an older
         # and a newer server share the lock only if they derive the same number.

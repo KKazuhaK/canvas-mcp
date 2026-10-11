@@ -16,7 +16,7 @@ describe('safeProviderRedirect', () => {
     ['javascript:alert(1)'],
     ['data:text/html,<script>alert(1)</script>'],
     ['//idp.example.test/auth'],
-    ['/account/login/google'],
+    ['/auth/login/google'],
     ['https://user@idp.example.test/auth'],
     ['https://user:pass@idp.example.test/auth'],
     ['https://idp.example.test/a b'],

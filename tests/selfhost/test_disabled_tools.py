@@ -66,10 +66,8 @@ def _env(**overrides: str) -> dict[str, str]:
         "ENTRA_TENANT_ID": TENANT,
         "ENTRA_CLIENT_ID": CLIENT,
         "ENTRA_CLIENT_SECRET": "entra-client-secret-0123456789",
-        "OAUTH_JWT_SIGNING_KEY": "jwt-signing-key-" + "z" * 40,
         "ACCOUNT_SESSION_SECRET": base64.b64encode(bytes(range(32))).decode(),
         "CANVAS_TOKEN_KEYS": "k1:" + base64.b64encode(bytes(32)).decode(),
-        "FASTMCP_HOME": "/data/fastmcp",
     }
     env.update(overrides)
     return env

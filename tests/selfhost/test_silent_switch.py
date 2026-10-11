@@ -16,9 +16,12 @@ from dbbackend import PG_URL, reset_public_schema
 
 from canvas_mcp.core.selfhost import token_admin
 from canvas_mcp.core.selfhost.app import prepare_selfhost
-from canvas_mcp.core.selfhost.db import migrate
 from canvas_mcp.core.selfhost.db.engine import Database
-from canvas_mcp.core.selfhost.db.transfer import refuse_silent_switch, target_holds_rows
+from canvas_mcp.core.selfhost.db.migrations import runner as migrate
+from canvas_mcp.core.selfhost.db.migrations.transfer import (
+    refuse_silent_switch,
+    target_holds_rows,
+)
 from canvas_mcp.core.selfhost.db.url import default_sqlite_path
 from canvas_mcp.core.selfhost.settings import (
     SelfhostConfigError,
@@ -45,10 +48,8 @@ def _settings_env(data_dir: pathlib.Path, **extra: str) -> dict[str, str]:
         "ENTRA_TENANT_ID": TENANT,
         "ENTRA_CLIENT_ID": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         "ENTRA_CLIENT_SECRET": "s3cret-value-of-entra-client",
-        "OAUTH_JWT_SIGNING_KEY": "k" * 48,
         "ACCOUNT_SESSION_SECRET": base64.b64encode(bytes(range(32))).decode(),
         "CANVAS_TOKEN_KEYS": KEYS,
-        "FASTMCP_HOME": str(data_dir / "fastmcp"),
         "SELFHOST_DATA_DIR": str(data_dir),
         **extra,
     }
@@ -240,7 +241,7 @@ class TestPostgres:
         # The import fails inside the PostgreSQL transaction. DDL is transactional
         # there, so the schema it created goes with the rows: "uninitialized" again,
         # not "current but empty". Either way the guard refuses (it counts rows).
-        from canvas_mcp.core.selfhost.db import transfer
+        from canvas_mcp.core.selfhost.db.migrations import transfer
 
         source = env / "old.sqlite3"
         legacy.build(source, "v4")
@@ -261,7 +262,7 @@ class TestPostgres:
     ) -> None:
         # Here the schema was created before (db upgrade), so it legitimately stays:
         # "current" and empty. What matters is that no row got in and the server refuses.
-        from canvas_mcp.core.selfhost.db import transfer
+        from canvas_mcp.core.selfhost.db.migrations import transfer
 
         assert token_admin.main(["db", "upgrade"]) == 0
         source = env / "old.sqlite3"

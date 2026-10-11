@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from importlib.resources import files
+from uuid import uuid4
 
 from sqlalchemy import bindparam, inspect, text
 from sqlalchemy.engine import Connection
 
-from .errors import TokenStoreError
-from .types import Uuid, new_id
+from ..errors import TokenStoreError
+from ..types import Uuid
 
 SCHEMA_EPOCH = 1
-BASELINE_REVISION = "0001_v1"
+BASELINE_REVISION = "0001_v1_baseline"
 VERSION_TABLE = "canvas_mcp_alembic_version"
 
 
@@ -20,7 +21,7 @@ def statements(dialect: str) -> tuple[str, ...]:
     if dialect not in ("sqlite", "postgresql"):
         raise TokenStoreError("unsupported baseline database backend")
     raw = (
-        files("canvas_mcp.core.selfhost.db.baselines")
+        files("canvas_mcp.core.selfhost.db.migrations.baselines")
         .joinpath(dialect + "-v1.sql")
         .read_text(encoding="utf-8")
     )
@@ -41,7 +42,7 @@ def create(conn: Connection, *, now: int) -> str:
         raise TokenStoreError("the v1 baseline requires an empty database")
     for statement in statements(conn.dialect.name):
         conn.exec_driver_sql(statement)
-    database_id = new_id()
+    database_id = str(uuid4())
     insert = text(
         "INSERT INTO server_state (id, database_id, compat_floor, jwt_epoch, "
         "settings_revision, created_at, updated_at) "

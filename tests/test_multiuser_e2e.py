@@ -33,6 +33,7 @@ import httpx
 import httpx2
 import pytest
 import respx
+from canvas_mcp.core.selfhost.oauth import build_entra_auth_provider
 from dbbackend import raw_connection, stack_env
 from fastmcp import FastMCP
 from joserfc import jwt
@@ -46,7 +47,6 @@ from canvas_mcp.core.selfhost.app import (
     install_selfhost,
     prepare_selfhost,
 )
-from canvas_mcp.core.selfhost.oauth import build_entra_auth_provider
 from canvas_mcp.core.selfhost.settings import load_selfhost_settings
 from canvas_mcp.core.write_confirmation import (
     ConfirmationGuard,
@@ -462,10 +462,8 @@ def world(
         "ENTRA_TENANT_ID": TENANT,
         "ENTRA_CLIENT_ID": CLIENT_ID,
         "ENTRA_CLIENT_SECRET": "entra-client-secret-0123456789",
-        "OAUTH_JWT_SIGNING_KEY": "jwt-signing-key-" + "z" * 40,
         "ACCOUNT_SESSION_SECRET": base64.b64encode(bytes(range(32))).decode(),
         "CANVAS_TOKEN_KEYS": "k1:" + base64.b64encode(bytes(range(32, 64))).decode(),
-        "FASTMCP_HOME": str(tmp_path / "fastmcp"),
         "SELFHOST_DATA_DIR": str(tmp_path / "data"),
         "SELFHOST_COURSE_STATE": request.param,
         **stack_env(),

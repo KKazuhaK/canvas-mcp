@@ -30,10 +30,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
-import anyio.to_thread
 from pydantic import AnyUrl
 
 from ...logging import log_info, log_warning
+from ..db.workers import run_store
 from . import fastmcp_compat as compat
 from . import tokens as tk
 from .clients import ClientDirectory, PublicClient, clean_label
@@ -134,7 +134,9 @@ class ConsentService:
             return None
 
     async def _client_for(self, pending: PendingAuthorization) -> PublicClient | None:
-        client = await self._directory.get_for_consent(pending.client_id, pending.created_at)
+        client = await self._directory.get_for_consent(
+            pending.client_id, pending.created_at
+        )
         if client is None:
             return None
         try:
@@ -158,7 +160,9 @@ class ConsentService:
         digest = self._bound(txn_id, binding)
         if digest is None:
             return ConsentRefusal(CODE_AUTHORIZATION_INVALID)
-        pending = self._parse(await self._txns.peek(TXN_KIND, txn_id, binding_hash=digest))
+        pending = self._parse(
+            await self._txns.peek(TXN_KIND, txn_id, binding_hash=digest)
+        )
         if pending is None:
             return ConsentRefusal(CODE_AUTHORIZATION_INVALID)
         client = await self._client_for(pending)
@@ -196,7 +200,9 @@ class ConsentService:
         if decision == "approve" and account_pending:
             # Refused without consuming the transaction: the person can still cancel.
             return ConsentRefusal(CODE_PENDING_APPROVAL)
-        pending = self._parse(await self._txns.pop(TXN_KIND, txn_id, binding_hash=digest))
+        pending = self._parse(
+            await self._txns.pop(TXN_KIND, txn_id, binding_hash=digest)
+        )
         if pending is None:
             return ConsentRefusal(CODE_AUTHORIZATION_INVALID)
         client = await self._client_for(pending)
@@ -210,24 +216,23 @@ class ConsentService:
         if decision == "deny":
             params["error"] = "access_denied"
             params["error_description"] = "The user denied the request."
-            await anyio.to_thread.run_sync(
-                self._store.record_consent_denied, account_key.removeprefix("acct:")
-            )
+            await run_store(self._store.record_consent_denied, account_key)
             log_info("oauth_consent", decision="deny")
             return ConsentRedirect(
-                compat.client_redirect(pending.redirect_uri, params, iss=self._issuer), approved=False
+                compat.client_redirect(pending.redirect_uri, params, iss=self._issuer),
+                approved=False,
             )
 
         raw_code = tk.new_auth_code()
         host = host_of(pending.redirect_uri)
-        created = await anyio.to_thread.run_sync(
+        created = await run_store(
             lambda: self._store.create_code(
                 code_hash=tk.hash_secret(raw_code),
                 client_id=pending.client_id,
                 client_kind=client.kind,
                 client_name=clean_label(client.client_name),
                 client_host=client.client_host,
-                account_id=account_key.removeprefix("acct:"),
+                account_id=account_key,
                 redirect_uri=pending.redirect_uri,
                 redirect_uri_explicit=pending.redirect_uri_explicit,
                 redirect_host=host,
@@ -245,10 +250,13 @@ class ConsentService:
             # either way and no code exists. Telling the second case "access disabled" would
             # be wrong, so it gets the generic "request no longer valid" page: start again
             # from the app. The read only chooses the message.
-            active = await anyio.to_thread.run_sync(self._store.account_is_active, account_key.removeprefix("acct:"))
-            return ConsentRefusal(CODE_AUTHORIZATION_INVALID if active else CODE_ACCESS_DISABLED)
+            active = await run_store(self._store.account_is_active, account_key)
+            return ConsentRefusal(
+                CODE_AUTHORIZATION_INVALID if active else CODE_ACCESS_DISABLED
+            )
         params["code"] = raw_code
         log_info("oauth_consent", decision="approve", client_kind=client.kind)
         return ConsentRedirect(
-            compat.client_redirect(pending.redirect_uri, params, iss=self._issuer), approved=True
+            compat.client_redirect(pending.redirect_uri, params, iss=self._issuer),
+            approved=True,
         )

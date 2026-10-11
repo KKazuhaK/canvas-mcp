@@ -22,7 +22,7 @@ from canvas_mcp.core.selfhost.login.ceremony import (
 def record(**kw: Any) -> FlowRecord:
     base: dict[str, Any] = {
         "p": "google", "cv": "v" * 64, "n": "n" * 43, "pp": "sign_in", "txn": None, "rt": None,
-        "rz": False, "ru": "https://canvas.example.test/account/callback/google",
+        "rz": False, "ru": "https://canvas.example.test/auth/callback/google",
         "la": None, "le": None, "li": None, "iat": 1_800_000_000,
     }
     base.update(kw)

@@ -13,11 +13,17 @@ import pytest
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from dbbackend import make_store, raw_connection
+from sqlalchemy import select, update
 
 from canvas_mcp.core.selfhost import token_store as token_store_module
+from canvas_mcp.core.selfhost.custody import (
+    CUSTODY_NOTICE_VERSION,
+    CustodyAcknowledgement,
+)
+from canvas_mcp.core.selfhost.db import schema as schema
+from canvas_mcp.core.selfhost.db.migrations.runner import SCHEMA_EPOCH, head_revision
 from canvas_mcp.core.selfhost.token_store import (
     OPERATOR,
-    SCHEMA_VERSION,
     EnrollmentInfo,
     Keyring,
     KeyringError,
@@ -82,6 +88,8 @@ def _put(store: TokenStore, token: str = TOKEN_A, **kw):  # type: ignore[no-unty
         "api_token": token,
         "canvas_user_id": "42",
         "canvas_user_name": "Ada Lovelace",
+        "canvas_host": "canvas.school-a.edu",
+        "custody": CustodyAcknowledgement(CUSTODY_NOTICE_VERSION, store._now()),
     }
     args.update(kw)
     return store.put(**args)  # type: ignore[arg-type]
@@ -96,7 +104,7 @@ def _columns(path: pathlib.Path) -> list[str]:
 
     conn = sqlite3.connect(str(path))
     try:
-        return [r[1] for r in conn.execute("PRAGMA table_info(canvas_tokens)")]
+        return [r[1] for r in conn.execute("PRAGMA table_info(canvas_credentials)")]
     finally:
         conn.close()
 
@@ -203,7 +211,7 @@ class TestRoundtrip:
         for i in range(50):
             _put(store, token=f"{i:02d}~" + "y" * 40)
             with _raw(store) as conn:
-                n = conn.execute("SELECT nonce FROM canvas_tokens").fetchone()[0]
+                n = conn.execute("SELECT nonce FROM canvas_credentials").fetchone()[0]
             assert len(n) == 12
             seen.add(n)
         assert len(seen) == 50
@@ -241,12 +249,12 @@ class TestRoundtrip:
         assert len(info.canvas_user_name) == 200
 
     def test_list_count_info_delete(self, store: TokenStore, clock: Clock) -> None:
-        assert store.count() == 0 and store.list_enrollments() == []
+        assert store.count() == 0 and list(store.iter_enrollments()) == []
         _put(store, principal_key=PK_B)
         clock.now += 10
         _put(store, principal_key=PK_A)
-        rows = store.list_enrollments()
-        assert [r.principal_key for r in rows] == [PK_B, PK_A]  # by created_at
+        rows = list(store.iter_enrollments())
+        assert [r.principal_key for r in rows] == [PK_A, PK_B]  # descending native credential UUID
         assert store.count() == 2
         info = store.info(PK_A)
         assert info is not None and info.canvas_user_id == "42"
@@ -261,18 +269,18 @@ class TestTamperResistance:
         _put(store)
         with _raw(store) as conn:
             ct, nonce = conn.execute(
-                "SELECT ciphertext, nonce FROM canvas_tokens"
+                "SELECT ciphertext, nonce FROM canvas_credentials"
             ).fetchone()
             conn.execute(
-                "UPDATE canvas_tokens SET ciphertext = ?",
+                "UPDATE canvas_credentials SET ciphertext = ?",
                 (bytes([ct[0] ^ 1]) + ct[1:],),
             )
         with pytest.raises(TokenDecryptionError):
             store.get(PK_A)
         with _raw(store) as conn:
-            conn.execute("UPDATE canvas_tokens SET ciphertext = ?", (ct,))
+            conn.execute("UPDATE canvas_credentials SET ciphertext = ?", (ct,))
             conn.execute(
-                "UPDATE canvas_tokens SET nonce = ?",
+                "UPDATE canvas_credentials SET nonce = ?",
                 (bytes([nonce[0] ^ 1]) + nonce[1:],),
             )
         with pytest.raises(TokenDecryptionError):
@@ -283,7 +291,7 @@ class TestTamperResistance:
     ) -> None:
         info = _put(store)
         with _raw(store) as conn:
-            conn.execute("UPDATE canvas_tokens SET ciphertext = x'00'")
+            conn.execute("UPDATE canvas_credentials SET ciphertext = x'0000000000000000000000000000000000000000000000000000000000000000'")
         with pytest.raises(TokenDecryptionError) as exc:
             store.get(PK_A)
         assert exc.value.updated_at == info.updated_at
@@ -293,12 +301,12 @@ class TestTamperResistance:
         _put(store, principal_key=PK_B, token=TOKEN_B)
         with _raw(store) as conn:
             nonce_b, ct_b = conn.execute(
-                "SELECT nonce, ciphertext FROM canvas_tokens WHERE principal_key = ?",
+                "SELECT nonce, ciphertext FROM canvas_credentials WHERE account_id = ?",
                 (PK_B,),
             ).fetchone()
             conn.execute(
-                "UPDATE canvas_tokens SET nonce = ?, ciphertext = ?"
-                " WHERE principal_key = ?",
+                "UPDATE canvas_credentials SET nonce = ?, ciphertext = ?"
+                " WHERE account_id = ?",
                 (nonce_b, ct_b, PK_A),
             )
         with pytest.raises(TokenDecryptionError):
@@ -313,7 +321,7 @@ class TestTamperResistance:
         make_account(store, OID_A)
         _put(store)
         with _raw(store) as conn:
-            conn.execute("UPDATE canvas_tokens SET key_id = 'k2'")
+            conn.execute("UPDATE canvas_credentials SET key_id = 'k2'")
         with pytest.raises(TokenDecryptionError):
             store.get(PK_A)
 
@@ -353,19 +361,12 @@ class TestInitialize:
         make_store(path, _ring(("k1", 1))).initialize()
         assert s.count() == 1
 
-    def test_schema_version_present_and_future_refused(
-        self, store: TokenStore
-    ) -> None:
+    def test_native_revision_and_compatibility_floor(self, store: TokenStore) -> None:
         with _raw(store) as conn:
-            assert conn.execute(
-                "SELECT value FROM meta WHERE key = 'schema_version'"
-            ).fetchone() == (str(SCHEMA_VERSION),)
-            conn.execute("UPDATE meta SET value = '6' WHERE key = 'schema_version'")
-        with pytest.raises(TokenStoreError, match="newer"):
-            store.initialize()
-        with _raw(store) as conn:
-            conn.execute("UPDATE meta SET value = 'x' WHERE key = 'schema_version'")
-        with pytest.raises(TokenStoreError):
+            assert conn.execute("SELECT version_num FROM canvas_mcp_alembic_version").fetchone() == (head_revision(),)
+            assert conn.execute("SELECT compat_floor FROM server_state").fetchone() == (SCHEMA_EPOCH,)
+            conn.execute("UPDATE server_state SET compat_floor = ?", (SCHEMA_EPOCH + 1,))
+        with pytest.raises(TokenStoreError, match="newer|compatibility"):
             store.initialize()
 
     @pytest.mark.sqlite_only
@@ -401,7 +402,7 @@ class TestInitialize:
         _put(first, principal_key=PK_A)
         _put(first, principal_key=PK_B, token=TOKEN_B)
         with _raw(first) as conn:
-            conn.execute("UPDATE canvas_tokens SET ciphertext = x'00' WHERE principal_key = ?", (PK_A,))
+            conn.execute("UPDATE canvas_credentials SET ciphertext = x'0000000000000000000000000000000000000000000000000000000000000000' WHERE account_id = ?", (PK_A,))
         first.mark_invalid(PK_A, reason="decrypt_failed")
         make_store(path, _ring(("k1", 1))).initialize()
         with pytest.raises(KeyringError):
@@ -424,7 +425,7 @@ class TestRotation:
         assert both.rotate() == 2
         assert both.rotate() == 0
         with _raw(both) as conn:
-            kids = {r[0] for r in conn.execute("SELECT key_id FROM canvas_tokens")}
+            kids = {r[0] for r in conn.execute("SELECT key_id FROM canvas_credentials")}
         assert kids == {"k2"}
         only_new = make_store(path, _ring(("k2", 2)))
         only_new.initialize()  # proves no row needs k1
@@ -445,14 +446,14 @@ class TestRotation:
         _put(old, principal_key=PK_B)
         with _raw(old) as conn:
             conn.execute(
-                "UPDATE canvas_tokens SET ciphertext = X'00' WHERE principal_key = ?",
+                "UPDATE canvas_credentials SET ciphertext = X'0000000000000000000000000000000000000000000000000000000000000000' WHERE account_id = ?",
                 (PK_B,),
             )
         both = make_store(path, _ring(("k2", 2), ("k1", 1)))
         with pytest.raises(TokenDecryptionError):
             both.rotate()
         with _raw(both) as conn:
-            kids = {r[0] for r in conn.execute("SELECT key_id FROM canvas_tokens")}
+            kids = {r[0] for r in conn.execute("SELECT key_id FROM canvas_credentials")}
         assert kids == {"k1"}  # nothing half-rotated
 
 
@@ -528,12 +529,12 @@ class TestCanvasHost:
         got = store.get(PK_A)
         assert got is not None and got.canvas_host == HOST_A and got.api_token == TOKEN_A
         assert store.info(PK_A).canvas_host == HOST_A  # type: ignore[union-attr]
-        assert [r.canvas_host for r in store.list_enrollments()] == [HOST_A]
+        assert [r.canvas_host for r in list(store.iter_enrollments())] == [HOST_A]
 
-    def test_no_host_means_the_default_school(self, store: TokenStore) -> None:
-        assert _put(store).canvas_host is None
-        got = store.get(PK_A)
-        assert got is not None and got.canvas_host is None
+    def test_an_explicit_school_is_required(self, store: TokenStore) -> None:
+        with pytest.raises(ValueError, match="explicit Canvas host"):
+            _put(store, canvas_host=None)
+        assert store.count() == 0
 
     @pytest.mark.parametrize(
         "bad", ["", "Canvas.School.EDU", "canvas.school.edu\n", "café.edu", "a" * 254, "a\x1fb.edu", 5]
@@ -554,58 +555,21 @@ class TestCanvasHost:
         got = store.get(PK_A)
         assert got is not None and (got.canvas_host, got.api_token) == (HOST_B, TOKEN_B)
 
-    def test_replacing_a_default_school_row_with_a_host_changes_the_layout(
-        self, store: TokenStore
-    ) -> None:
-        _put(store)
+    def test_changing_school_reseals_the_credential(self, store: TokenStore) -> None:
+        first = _put(store, canvas_host=HOST_A)
+        second = _put(store, canvas_host=HOST_B)
+        assert first.credential_id != second.credential_id
+        assert store.get(PK_A).canvas_host == HOST_B
+
+
+
+    def test_an_unknown_host_is_rejected_without_changing_the_token(self, store: TokenStore) -> None:
+        from sqlalchemy.exc import IntegrityError
         _put(store, canvas_host=HOST_A)
-        with _raw(store) as conn:
-            conn.execute("UPDATE canvas_tokens SET canvas_host = NULL")
-        with pytest.raises(TokenDecryptionError):
-            store.get(PK_A)
-
-    def test_aad_layouts(self) -> None:
-        v2 = token_store_module._aad_v2
-        v3 = token_store_module._aad_v3
-        with_host = v2(PK_A, HOST_A, "k1")
-        default_school = v3(PK_A, "k1")
-        assert with_host.startswith(b"canvas-mcp/canvas-token/v2\x1f")
-        assert default_school.startswith(b"canvas-mcp/canvas-token/v3\x1f")
-        assert with_host == (
-            b"canvas-mcp/canvas-token/v2\x1f"
-            + PK_A.encode()
-            + b"\x1f"
-            + HOST_A.encode()
-            + b"\x1f"
-            + b"k1"
-        )
-        assert default_school == (
-            b"canvas-mcp/canvas-token/v3\x1f" + PK_A.encode() + b"\x1f" + b"k1"
-        )
-        assert default_school != with_host
-        assert v2(PK_A, HOST_A, "k1") != v2(PK_A, HOST_B, "k1")
-        assert v2(PK_A, HOST_A, "k1") != v2(PK_B, HOST_A, "k1")
-        assert v2(PK_A, HOST_A, "k1") != v2(PK_A, HOST_A, "k2")
-        assert v3(PK_A, "k1") != v3(PK_B, "k1") and v3(PK_A, "k1") != v3(PK_A, "k2")
-        # The field boundaries cannot be shifted into one another.
-        assert v2("a", "b.edu", "k1") != v2("a\x1fb", ".edu", "k1")
-        assert v3("a", "k1") != v3("a\x1fk", "1")
-
-    def test_aad_for_a_principal_picks_the_layout_from_the_host(self) -> None:
-        aad = token_store_module._aad_for_principal
-        assert aad(PK_A, HOST_A, "k1") == token_store_module._aad_v2(PK_A, HOST_A, "k1")
-        assert aad(PK_A, None, "k1") == token_store_module._aad_v3(PK_A, "k1")
-        with pytest.raises(ValueError):
-            aad("google:12345", None, "k1")
-        with pytest.raises(ValueError):
-            aad(f"entra:{TID}:{OID_A}", None, "k1")
-
-    def test_the_database_value_is_used_exactly_as_read(self, store: TokenStore) -> None:
-        _put(store, canvas_host=HOST_A)
-        with _raw(store) as conn:
-            conn.execute("UPDATE canvas_tokens SET canvas_host = ?", (HOST_A.upper(),))
-        with pytest.raises(TokenDecryptionError):
-            store.get(PK_A)
+        with pytest.raises(IntegrityError):
+            with store.database.engine.begin() as conn:
+                conn.execute(update(schema.canvas_credentials).values(canvas_host=HOST_A.upper()))
+        assert store.get(PK_A).api_token == TOKEN_A
 
 
 class TestHostTamper:
@@ -614,27 +578,27 @@ class TestHostTamper:
         _put(store, principal_key=PK_B, token=TOKEN_B, canvas_host=HOST_B)
         with _raw(store) as conn:
             conn.execute(
-                "UPDATE canvas_tokens SET canvas_host = ? WHERE principal_key = ?", (HOST_B, PK_A)
+                "UPDATE canvas_credentials SET canvas_host = ? WHERE account_id = ?", (HOST_B, PK_A)
             )
         with pytest.raises(TokenDecryptionError):
             store.get(PK_A)
         other = store.get(PK_B)
         assert other is not None and other.api_token == TOKEN_B
 
-    def test_nulling_a_host_fails(self, store: TokenStore) -> None:
+    def test_nulling_a_host_is_rejected_by_the_database(self, store: TokenStore) -> None:
+        from canvas_mcp.core.selfhost.db.errors import StoreUnavailable
         _put(store, canvas_host=HOST_A)
-        with _raw(store) as conn:
-            conn.execute("UPDATE canvas_tokens SET canvas_host = NULL")
-        with pytest.raises(TokenDecryptionError):
-            store.get(PK_A)
+        with pytest.raises(StoreUnavailable):
+            with store.database.write() as conn:
+                conn.execute(update(schema.canvas_credentials).values(canvas_host=None))
+        assert store.get(PK_A).api_token == TOKEN_A
 
-    def test_adding_a_host_to_a_default_school_row_fails(self, store: TokenStore) -> None:
+    def test_all_new_rows_use_the_native_aad(self, store: TokenStore) -> None:
         _put(store)
-        assert store.get(PK_A).api_token == TOKEN_A  # type: ignore[union-attr]
-        with _raw(store) as conn:
-            conn.execute("UPDATE canvas_tokens SET canvas_host = ?", (HOST_A,))
-        with pytest.raises(TokenDecryptionError):
-            store.get(PK_A)
+        with store.database.read() as conn:
+            row = conn.execute(select(schema.canvas_credentials)).mappings().one()
+        aad = token_store_module.credential_aad(PK_A, row["canvas_host"], "pat", row["key_id"])
+        assert AESGCM(_key(1)).decrypt(row["nonce"], row["ciphertext"], aad) == TOKEN_A.encode()
 
     def test_a_tampered_probe_row_is_a_keyring_error_at_open(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
@@ -642,12 +606,15 @@ class TestHostTamper:
         s.initialize()
         make_account(s, OID_A)
         _put(s, canvas_host=HOST_A)
+        make_account(s, OID_B)
+        _put(s, principal_key=PK_B, canvas_host=HOST_B)
+        s.delete(PK_B)
         with _raw(s) as conn:
-            conn.execute("UPDATE canvas_tokens SET canvas_host = ?", (HOST_B,))
+            conn.execute("UPDATE canvas_credentials SET canvas_host = ?", (HOST_B,))
         with pytest.raises(KeyringError):
             make_store(path, _ring(("k1", 1))).initialize()
 
-    def test_wrong_key_with_v2_rows_is_a_keyring_error(self, tmp_path: pathlib.Path) -> None:
+    def test_wrong_key_with_native_rows_is_a_keyring_error(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
         s = make_store(path, _ring(("k1", 1)))
         s.initialize()
@@ -659,14 +626,14 @@ class TestHostTamper:
 
 
 class TestMixedRotation:
-    def test_rotation_keeps_hosts_and_both_aad_kinds(self, tmp_path: pathlib.Path) -> None:
+    def test_rotation_keeps_hosts_and_native_aad(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
         old = make_store(path, _ring(("k1", 1)))
         old.initialize()
         make_account(old, OID_A)
         make_account(old, OID_B)
-        _put(old, principal_key=PK_A, token=TOKEN_A)  # no host: layout v3
-        _put(old, principal_key=PK_B, token=TOKEN_B, canvas_host=HOST_B)  # layout v2
+        _put(old, principal_key=PK_A, token=TOKEN_A)  # explicit default test host
+        _put(old, principal_key=PK_B, token=TOKEN_B, canvas_host=HOST_B)
         both = make_store(path, _ring(("k2", 2), ("k1", 1)))
         both.initialize()
         assert both.rotate() == 2
@@ -675,7 +642,7 @@ class TestMixedRotation:
         only_new.initialize()
         a = only_new.get(PK_A)
         b = only_new.get(PK_B)
-        assert a is not None and (a.api_token, a.canvas_host, a.key_id) == (TOKEN_A, None, "k2")
+        assert a is not None and (a.api_token, a.canvas_host, a.key_id) == (TOKEN_A, HOST_A, "k2")
         assert b is not None and (b.api_token, b.canvas_host, b.key_id) == (TOKEN_B, HOST_B, "k2")
         with pytest.raises(KeyringError):
             make_store(path, _ring(("k1", 1))).initialize()
@@ -691,7 +658,7 @@ class TestPrincipalKey:
         got = store.get(PK_A)
         assert got is not None and got.api_token == TOKEN_A and got.principal_key == PK_A
         assert store.info(PK_A).principal_key == PK_A  # type: ignore[union-attr]
-        assert [r.principal_key for r in store.list_enrollments()] == [PK_A]
+        assert [r.principal_key for r in list(store.iter_enrollments())] == [PK_A]
         store.touch(PK_A, min_interval_seconds=0)
         assert store.info(PK_A).last_used_at is not None  # type: ignore[union-attr]
         assert store.delete(PK_A) is True
@@ -715,16 +682,7 @@ class TestPrincipalKey:
                 call()
         assert store.count() == 1
 
-    def test_the_legacy_key_is_mapped_through_the_identity_table(self, store: TokenStore) -> None:
-        assert store.resolve_legacy_key(f"entra:{TID}:{OID_A}") == PK_A
-        assert token_store_module.entra_principal_key(TID.upper(), OID_A.upper()) == (
-            f"entra:{TID}:{OID_A}"
-        )
 
-    def test_the_key_matches_the_identity_module(self) -> None:
-        from canvas_mcp.core.selfhost.identity import principal_key
-
-        assert token_store_module.entra_principal_key(TID, OID_A) == principal_key(TID, OID_A)
 
     def test_put_needs_an_account_key(self, store: TokenStore) -> None:
         with pytest.raises(TypeError):
@@ -767,7 +725,7 @@ class TestPrincipalKey:
     def test_the_principal_key_is_stored_in_the_row(self, store: TokenStore) -> None:
         _put(store, canvas_host=HOST_A)
         with _raw(store) as conn:
-            assert conn.execute("SELECT principal_key FROM canvas_tokens").fetchall() == [(PK_A,)]
+            assert conn.execute("SELECT CAST(account_id AS TEXT) FROM canvas_credentials").fetchall() == [(PK_A,)]
 
 
 class TestTheAccountGate:
@@ -801,7 +759,7 @@ class TestTheAccountGate:
         _put(store, canvas_host=HOST_A, token=TOKEN_B)
         store.mark_invalid(PK_A, reason="revoked_by_admin", actor=OPERATOR)
         store.delete(PK_A, actor=OPERATOR)
-        rows = [(e.action, e.actor, e.target) for e in store.list_audit()]
+        rows = [(e.action, e.actor, e.target) for e in store.iter_audit() if e.action != "custody_notice_acknowledged"]
         assert rows[:4] == [
             ("token_deleted", "operator", PK_A),
             ("token_marked_invalid", "operator", PK_A),
@@ -809,100 +767,56 @@ class TestTheAccountGate:
             ("token_enrolled", PK_A, PK_A),
         ]
         # The audit trail never holds the token or the ciphertext.
-        text = repr([(e.detail, e.reason) for e in store.list_audit()])
+        text = repr([(e.detail, e.reason) for e in list(store.iter_audit())])
         assert TOKEN_A not in text and TOKEN_B not in text
 
 
 class TestAadBinding:
-    def test_the_ciphertext_is_bound_to_principal_host_and_key_id(self, store: TokenStore) -> None:
-        """Decrypt the raw row with the documented layout, and with nothing else."""
+    def test_the_ciphertext_is_bound_to_account_school_kind_and_key_id(self, store: TokenStore) -> None:
         _put(store, canvas_host=HOST_A)
         with _raw(store) as conn:
-            kid, nonce, ct = conn.execute("SELECT key_id, nonce, ciphertext FROM canvas_tokens").fetchone()
+            kid, nonce, ct = conn.execute("SELECT key_id, nonce, ciphertext FROM canvas_credentials").fetchone()
         aead = AESGCM(_key(1))
-        documented = (
-            b"canvas-mcp/canvas-token/v2\x1f"
-            + PK_A.encode()
-            + b"\x1f"
-            + HOST_A.encode()
-            + b"\x1f"
-            + kid.encode()
-        )
+        documented = b"\x1f".join(value.encode() for value in (
+            "canvas-mcp/canvas-credential/v1", PK_A, HOST_A, "pat", kid,
+        ))
         assert aead.decrypt(bytes(nonce), bytes(ct), documented) == TOKEN_A.encode()
-        for wrong in (
-            documented.replace(PK_A.encode(), PK_B.encode()),
-            documented.replace(HOST_A.encode(), HOST_B.encode()),
-            documented.replace(b"v2", b"v1"),
-            documented.replace(b"v2", b"v3"),
-            documented + b"\x1f",
-        ):
+        for old, new in ((PK_A, PK_B), (HOST_A, HOST_B), ("pat", "oauth"), (kid, "k2"), ("v1", "v2")):
             with pytest.raises(InvalidTag):
-                aead.decrypt(bytes(nonce), bytes(ct), wrong)
+                aead.decrypt(bytes(nonce), bytes(ct), documented.replace(old.encode(), new.encode()))
+        with pytest.raises(InvalidTag):
+            aead.decrypt(bytes(nonce), bytes(ct), documented + b"\x1f")
 
-    def test_a_default_school_row_is_bound_to_principal_and_key_id(self, store: TokenStore) -> None:
-        _put(store)
-        with _raw(store) as conn:
-            kid, nonce, ct = conn.execute("SELECT key_id, nonce, ciphertext FROM canvas_tokens").fetchone()
-        aead = AESGCM(_key(1))
-        documented = b"canvas-mcp/canvas-token/v3\x1f" + PK_A.encode() + b"\x1f" + kid.encode()
-        assert aead.decrypt(bytes(nonce), bytes(ct), documented) == TOKEN_A.encode()
-        for wrong in (
-            documented.replace(PK_A.encode(), PK_B.encode()),
-            documented.replace(b"v3", b"v2"),
-            documented.replace(b"v3", b"v1"),
-            documented + b"\x1f",
-            documented.replace(b"\x1f" + kid.encode(), b"\x1fk2"),
-        ):
-            with pytest.raises(InvalidTag):
-                aead.decrypt(bytes(nonce), bytes(ct), wrong)
 
-    def test_moving_a_row_to_another_principal_fails(self, store: TokenStore) -> None:
-        _put(store, canvas_host=HOST_A)
-        _put(store, principal_key=PK_B, token=TOKEN_B, canvas_host=HOST_A)
-        with _raw(store) as conn:
-            # Swap the two principals' keys (through a placeholder: the key is unique).
-            conn.execute("UPDATE canvas_tokens SET principal_key = 'tmp' WHERE principal_key = ?", (PK_A,))
-            conn.execute("UPDATE canvas_tokens SET principal_key = ? WHERE principal_key = ?", (PK_A, PK_B))
-            conn.execute("UPDATE canvas_tokens SET principal_key = ? WHERE principal_key = 'tmp'", (PK_B,))
-        for key in (PK_A, PK_B):
-            with pytest.raises(TokenDecryptionError):
-                store.get(key)
 
-    def test_renaming_the_principal_of_a_v2_row_fails(self, store: TokenStore) -> None:
+    def test_renaming_the_account_of_a_native_row_fails(self, store: TokenStore) -> None:
         _put(store, canvas_host=HOST_A)
         other = PK_B
         with _raw(store) as conn:
-            conn.execute("UPDATE canvas_tokens SET principal_key = ?", (other,))
+            conn.execute("UPDATE canvas_credentials SET account_id = ?", (other,))
         assert store.get(PK_A) is None
         with pytest.raises(TokenDecryptionError):
             store.get(other)
 
-    def test_renaming_the_principal_of_a_default_school_row_fails(self, store: TokenStore) -> None:
-        _put(store)
-        other = PK_B
-        with _raw(store) as conn:
-            conn.execute("UPDATE canvas_tokens SET principal_key = ?", (other,))
-        with pytest.raises(TokenDecryptionError):
-            store.get(other)
 
-    def test_swapping_principal_and_host_together_fails(self, store: TokenStore) -> None:
+    def test_swapping_account_and_school_together_fails(self, store: TokenStore) -> None:
         _put(store, canvas_host=HOST_A)
-        other = PK_B
+        _put(store, principal_key=PK_B, canvas_host=HOST_B)
+        store.delete(PK_B)
         with _raw(store) as conn:
-            conn.execute(
-                "UPDATE canvas_tokens SET principal_key = ?, canvas_host = ?", (other, HOST_B)
-            )
+            conn.execute("UPDATE canvas_credentials SET account_id = ?, canvas_host = ?", (PK_B, HOST_B))
         with pytest.raises(TokenDecryptionError):
-            store.get(other)
+            store.get(PK_B)
 
     def test_a_tampered_principal_key_is_a_keyring_error_at_open(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
         s = make_store(path, _ring(("k1", 1)))
         s.initialize()
         make_account(s, OID_A)
+        make_account(s, OID_B)
         _put(s, canvas_host=HOST_A)
         with _raw(s) as conn:
-            conn.execute("UPDATE canvas_tokens SET principal_key = ?", (PK_B,))
+            conn.execute("UPDATE canvas_credentials SET account_id = ?", (PK_B,))
         with pytest.raises(KeyringError):
             make_store(path, _ring(("k1", 1))).initialize()
 
@@ -910,7 +824,7 @@ class TestAadBinding:
 class TestStatusColumns:
     NEW_COLUMNS = (
         "canvas_host",
-        "principal_key",
+        "account_id",
         "status",
         "invalid_reason",
         "invalid_since",
@@ -922,7 +836,7 @@ class TestStatusColumns:
         with _raw(store) as conn:
             return conn.execute(
                 "SELECT status, invalid_reason, invalid_since, last_verified_at, expires_hint_at"
-                " FROM canvas_tokens"
+                " FROM canvas_credentials"
             ).fetchone()
 
     @pytest.mark.sqlite_only
@@ -943,7 +857,7 @@ class TestStatusColumns:
         _put(store, canvas_host=HOST_A)
         with _raw(store) as conn:
             conn.execute(
-                "UPDATE canvas_tokens SET status = 'invalid', invalid_reason = 'canvas_token_rejected',"
+                "UPDATE canvas_credentials SET status = 'invalid', invalid_reason = 'canvas_token_rejected',"
                 " invalid_since = 5, last_verified_at = 4, expires_hint_at = 99"
             )
         clock.now += 60
@@ -955,6 +869,23 @@ class TestStatusColumns:
     def test_the_status_columns_do_not_change_reads(self, store: TokenStore) -> None:
         _put(store, canvas_host=HOST_A)
         with _raw(store) as conn:
-            conn.execute("UPDATE canvas_tokens SET status = 'invalid', invalid_reason = 'x'")
+            conn.execute("UPDATE canvas_credentials SET status = 'invalid', invalid_reason = 'x', invalid_since = 5")
         got = store.get(PK_A)
         assert got is not None and got.api_token == TOKEN_A
+
+
+class TestKnownCorruptKeyringProbe:
+    def test_known_corrupt_rows_still_require_their_key_and_fail_strict_verification(self, store: TokenStore) -> None:
+        from canvas_mcp.core.selfhost.db.sealed import verify
+        _put(store)
+        with store.database.engine.begin() as conn:
+            conn.execute(update(schema.canvas_credentials).values(ciphertext=bytes(32)))
+        store.mark_invalid(PK_A, reason="decrypt_failed")
+        with store.database.read() as conn:
+            assert verify(conn, _ring(("k1", 1))) == 0
+            with pytest.raises(KeyringError, match="missing key"):
+                verify(conn, _ring(("k2", 2)))
+            with pytest.raises(KeyringError, match="does not match"):
+                verify(conn, _ring(("k1", 1)), all_values=True)
+        with pytest.raises(TokenDecryptionError):
+            store.get(PK_A)

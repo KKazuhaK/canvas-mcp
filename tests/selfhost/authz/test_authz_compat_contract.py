@@ -560,3 +560,38 @@ def test_the_public_modules_the_rest_of_the_package_may_use_exist() -> None:
     assert hasattr(mcp.server.auth.provider, "AuthorizeError") and hasattr(mcp.shared.auth, "OAuthMetadata")
     assert hasattr(mcp.server.auth.settings, "RevocationOptions")
 
+
+
+@pytest.mark.parametrize(("name", "floor", "below", "ceiling"), [
+    ("fastmcp", "4.0.3", "4.0.0", "5.0.0"),
+    ("mcp", "2.1.1", "2.1.0", "3.0.0"),
+    ("joserfc", "1.7.2", "1.7.1", "2.0.0"),
+])
+def test_dependency_floors_and_installed_versions(name, floor, below, ceiling):
+    """The declared, locked and installed authorization APIs agree on supported versions."""
+    import tomllib
+    from importlib.metadata import version
+
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
+    root = pathlib.Path(__file__).resolve().parents[3]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    lines = project["project"]["dependencies"] + project["project"]["optional-dependencies"]["selfhost"]
+    req = next(Requirement(line) for line in lines if Requirement(line).name == name)
+    assert Version(floor) in req.specifier
+    assert Version(below) not in req.specifier
+    assert Version(ceiling) not in req.specifier
+    assert Version(version(name)) in req.specifier
+    packages = tomllib.loads((root / "uv.lock").read_text(encoding="utf-8"))["package"]
+    assert Version(next(p["version"] for p in packages if p["name"] == name)) in req.specifier
+
+
+def test_proxy_storage_is_not_a_direct_dependency():
+    import tomllib
+
+    from packaging.requirements import Requirement
+
+    root = pathlib.Path(__file__).resolve().parents[3]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "py-key-value-aio" not in {Requirement(line).name for line in project["project"]["dependencies"]}

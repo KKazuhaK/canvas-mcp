@@ -1,6 +1,8 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { http } from '@/api/client'
+import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import { hardNavigate } from '@/utils/navigate'
 import { resources } from '@/i18n/options'
 import { useLanguage } from '@/stores/language'
@@ -25,6 +27,17 @@ function rowOf(name: string): HTMLElement {
   if (!(row instanceof HTMLElement)) throw new Error(`no row for ${name}`)
   return row
 }
+
+// Small pages exercise continuation without changing the mock/API default of 50.
+function smallAuditPages() {
+  const inner = http.defaults.adapter as (config: InternalAxiosRequestConfig) => Promise<AxiosResponse>
+  http.defaults.adapter = (config: InternalAxiosRequestConfig) => {
+    if (config.url === '/admin/audit') config.params = { ...config.params, limit: 3 }
+    return inner(config)
+  }
+}
+
+const auditCursor = (id: number) => btoa(JSON.stringify([1, 'audit/None', id])).replace(/=+$/, '')
 
 describe('Admin accounts', () => {
   it('lists the accounts with counts, status, token state and the actions the server offers', async () => {
@@ -218,35 +231,33 @@ describe('Admin accounts', () => {
     expect(alert).toHaveTextContent('Sign in again to continue')
     expect(screen.queryByText('Bob Example')).toBeNull()
     await user.click(within(alert).getByRole('button', { name: 'Sign in again' }))
-    expect(hardNavigate).toHaveBeenCalledWith('/account/login?return_to=%2Faccount%2Fadmin')
+    expect(hardNavigate).toHaveBeenCalledWith('/auth/login?return_to=%2Faccount%2Fadmin')
   })
 })
 
 describe('Admin enrollments', () => {
-  it('lists every token, and the accounts waiting for approval, with the actions the server offers', async () => {
+  it('lists stored tokens with the actions the server offers', async () => {
     await renderApp('/admin/enrollments', 'owner')
     expect(await screen.findByRole('heading', { name: 'Canvas enrollments' })).toBeInTheDocument()
-    await screen.findByText('Bob Example')
+    await screen.findAllByText('Cleo Example')
     const cleo = rowOf('Cleo Example')
     expect(within(cleo).getByText('Rejected by Canvas')).toBeInTheDocument()
     expect(within(cleo).getByText('Example University')).toBeInTheDocument()
     expect(within(cleo).getByRole('button', { name: 'Remove token: Cleo Example' })).toBeInTheDocument()
-    // A pending account without a token is listed so it can be approved.
-    expect(within(rowOf('Bob Example')).getByRole('button', { name: 'Approve: Bob Example' })).toBeInTheDocument()
+    // Pending accounts are managed on the accounts page, not token rows.
+    expect(screen.queryByText('Bob Example')).toBeNull()
   })
 
-  it('keeps what the server-rendered page showed: last verified, disabled since, and every count', async () => {
+  it('shows last verification and global account/token counts', async () => {
     await renderApp('/admin/enrollments', 'owner')
-    await screen.findByText('Bob Example')
+    await screen.findAllByText('Cleo Example')
     const counts = screen.getByRole('group', { name: 'Totals' })
     expect(within(counts).getByText('Need replacing: 1')).toBeInTheDocument()
     expect(within(counts).getByText('Tokens stored: 2')).toBeInTheDocument()
     expect(within(counts).getByText('Disabled accounts: 1')).toBeInTheDocument()
     expect(within(counts).getByText('Pending accounts: 1')).toBeInTheDocument()
 
-    const dev = rowOf('Dev Example')
-    expect(within(dev).getByText(/Disabled since/)).toBeInTheDocument()
-    expect(dev.querySelector('time')).not.toBeNull()
+    expect(screen.queryByText('Dev Example')).toBeNull()
 
     const cleo = rowOf('Cleo Example')
     expect(within(cleo).getByText('Last verified')).toBeInTheDocument()
@@ -255,11 +266,11 @@ describe('Admin enrollments', () => {
   it('narrows to the tokens that need replacing through the server', async () => {
     const user = userEvent.setup()
     await renderApp('/admin/enrollments', 'owner')
-    await screen.findByText('Bob Example')
+    await screen.findAllByText('Cleo Example')
     const seen = recordRequests()
     await user.click(screen.getByRole('combobox', { name: 'Show' }))
     await user.click(await screen.findByRole('option', { name: 'Tokens that need replacing' }))
-    await waitFor(() => expect(screen.queryByText('Bob Example')).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Mark token invalid: Ada Example' })).toBeNull())
     expect(seen.find((r) => r.url === '/admin/enrollments')?.params).toEqual({ filter: 'needs_reenroll' })
     expect(screen.getAllByText('Cleo Example').length).toBeGreaterThan(0)
   })
@@ -290,7 +301,7 @@ describe('Admin enrollments', () => {
 describe('Admin audit log', () => {
   it('shows the newest entries with who did what, and loads older ones with the cursor', async () => {
     const user = userEvent.setup()
-    await renderApp('/admin/audit', 'owner')
+    await renderApp('/admin/audit', 'owner', smallAuditPages)
     expect(await screen.findByRole('heading', { name: 'Audit log' })).toBeInTheDocument()
     expect(await screen.findByText('Account created')).toBeInTheDocument()
     expect(screen.getByText('Enrolled Canvas token')).toBeInTheDocument()
@@ -301,14 +312,14 @@ describe('Admin audit log', () => {
     const seen = recordRequests()
     await user.click(screen.getByRole('button', { name: 'Load more' }))
     expect(await screen.findByText('Disabled account')).toBeInTheDocument()
-    expect(seen.find((r) => r.url === '/admin/audit')?.params).toEqual({ before: '5' })
+    expect(seen.find((r) => r.url === '/admin/audit')?.params).toEqual({ cursor: auditCursor(5) })
     expect(screen.getByText('Server operator')).toBeInTheDocument()
     // One more page (a full page means there may be more), then the end.
     await user.click(screen.getByRole('button', { name: 'Load more' }))
     expect(await screen.findByText('Database upgraded')).toBeInTheDocument()
     expect(seen.filter((r) => r.url === '/admin/audit').map((r) => r.params)).toEqual([
-      { before: '5' },
-      { before: '2' },
+      { cursor: auditCursor(5) },
+      { cursor: auditCursor(2) },
     ])
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull())
   })
@@ -378,7 +389,7 @@ describe('Admin audit log', () => {
 
   it('does not claim the log is empty when the filter only saw the loaded pages', async () => {
     const user = userEvent.setup()
-    await renderApp('/admin/audit', 'owner')
+    await renderApp('/admin/audit', 'owner', smallAuditPages)
     await screen.findByText('Approved account')
     await user.click(screen.getByRole('combobox', { name: 'Action' }))
     await user.click(await screen.findByRole('option', { name: 'Disabled account' }))

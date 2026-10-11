@@ -37,7 +37,7 @@ class TestMode:
     def test_accepted_values(self, raw, mode):
         assert _load(SELFHOST_AUTH_MODE=raw).authz_mode == mode
 
-    @pytest.mark.parametrize("raw", ["proxy", "entra-oauth", "locall", "1", "on"])
+    @pytest.mark.parametrize("raw", ["proxy", "selfhost", "locall", "1", "on"])
     def test_anything_else_is_refused_without_echoing_it(self, raw):
         problems = _problems(SELFHOST_AUTH_MODE=raw)
         assert problems == ["SELFHOST_AUTH_MODE must be unset, 'entra_proxy' or 'local'"]

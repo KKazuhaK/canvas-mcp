@@ -18,7 +18,7 @@ import pytest
 
 from canvas_mcp.core import audit
 from canvas_mcp.core.selfhost import account_web
-from canvas_mcp.core.selfhost.account_web import ACCOUNT_PATH, SESSION_COOKIE
+from canvas_mcp.core.selfhost.account_core import ACCOUNT_PATH, SESSION_COOKIE
 from canvas_mcp.core.selfhost.principal_access import PrincipalAccessCache
 from canvas_mcp.core.selfhost.token_store import (
     DISABLE_REASON_OPERATOR,

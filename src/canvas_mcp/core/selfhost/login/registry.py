@@ -1,10 +1,7 @@
-"""The providers a running server offers, wired from the settings.
+"""The configured sign-in providers on one common OIDC/OAuth ceremony.
 
-:func:`build_login_runtime` returns ``None`` for an Entra-only deployment, so ``account_web``
-keeps the exact code path it always had. For anything else it builds the Google, GitHub and
-generic OpenID Connect providers (sharing one :class:`~.http.SafeHttp`), a descriptor for Entra
-when it is listed, a start-rate bucket per provider and the one-time store that holds the
-ceremonies (``login_states``, the same table the authorization server's transactions use).
+Every deployment builds Entra, Google, GitHub or generic OIDC providers over the
+same safe HTTP client, cookie binding, one-time state store and start-rate buckets.
 """
 
 from __future__ import annotations
@@ -17,12 +14,7 @@ from typing import TYPE_CHECKING, Any
 from ..accounts import PROVIDER_ENTRA, PROVIDER_GITHUB, PROVIDER_GOOGLE
 from ..limits import RateLimiters, TokenBucketLimiter, build_rate_limiters
 from .config import LoginProvidersConfig
-from .entra import (
-    ENTRA_ALIAS_START_PATH,
-    ENTRA_CALLBACK_PATH,
-    ENTRA_START_PATH,
-    EntraDescriptor,
-)
+from .entra import ENTRA_CALLBACK_PATH, ENTRA_START_PATH, build_entra_provider
 from .github import GitHubLoginProvider
 from .google import build_google_provider
 from .http import SafeHttp
@@ -32,6 +24,7 @@ from .protocol import LoginProvider
 if TYPE_CHECKING:
     import httpx
 
+    from ..config_snapshot import ConfigSnapshots
     from ..login_state import LoginStateStore
     from ..settings import SelfhostSettings
 
@@ -46,7 +39,7 @@ START_REFILL_PER_SECOND = 10.0
 
 @dataclass(frozen=True)
 class ProviderEntry:
-    """One line of the sign-in page and of ``/account/api/providers``."""
+    """One line of the sign-in page and of ``/api/v1/providers``."""
 
     id: str
     kind: str
@@ -61,7 +54,7 @@ class LoginRuntime:
     providers: Mapping[str, LoginProvider]
     flow_store: LoginStateStore
     http: SafeHttp
-    entra: EntraDescriptor | None = None
+    snapshots: ConfigSnapshots | None = None
     start_buckets: dict[str, TokenBucketLimiter] = field(default_factory=dict)
 
     @property
@@ -83,21 +76,20 @@ class LoginRuntime:
 
     def entries(self) -> list[ProviderEntry]:
         """Every provider, in the configured order."""
+        from ..config_snapshot import CURRENT_CONFIG
+
+        snapshot = CURRENT_CONFIG.get() or (
+            self.snapshots.current if self.snapshots else None
+        )
         out: list[ProviderEntry] = []
         for provider_id in self.config.order:
-            if provider_id == PROVIDER_ENTRA:
-                assert self.entra is not None
-                out.append(
-                    ProviderEntry(
-                        PROVIDER_ENTRA, self.entra.kind, self.entra.display.name,
-                        self.entra.display.icon, self.entra.start_path,
-                    )
-                )
-                continue
             provider = self.providers[provider_id]
             out.append(
                 ProviderEntry(
-                    provider.id, provider.kind, provider.display.name, provider.display.icon,
+                    provider.id,
+                    provider.kind,
+                    snapshot.name(provider_id) if snapshot else provider.display.name,
+                    provider.display.icon,
                     provider.start_path,
                 )
             )
@@ -107,7 +99,7 @@ class LoginRuntime:
         return next((e for e in self.entries() if e.id == provider_id), None)
 
     def provider_paths(self) -> list[str]:
-        """The start and callback paths of the non-Entra providers (exact, no parameters)."""
+        """The exact start and callback paths of every configured provider."""
         paths: list[str] = []
         for provider in self.providers.values():
             paths.extend((provider.start_path, provider.callback_path))
@@ -117,16 +109,14 @@ class LoginRuntime:
 def build_login_runtime(
     settings: SelfhostSettings,
     *,
-    flow_store: LoginStateStore | None,
+    flow_store: LoginStateStore,
     clock: Callable[[], float] = time.time,
     rate_limiters: RateLimiters | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
-) -> LoginRuntime | None:
-    """The runtime for ``SELFHOST_LOGIN_PROVIDERS``, or None when Entra is the only provider."""
+    snapshots: ConfigSnapshots | None = None,
+) -> LoginRuntime:
+    """Build every configured provider, including Entra-only deployments."""
     config = settings.login_providers
-    if config.order == (PROVIDER_ENTRA,):
-        return None
-    assert flow_store is not None, "sign-in providers other than Entra need the local authorization server"
     http = SafeHttp(transport=transport)
     policy = settings.access_policy
     base = settings.public_base_url
@@ -135,38 +125,54 @@ def build_login_runtime(
     for provider_id in config.order:
         built: Any
         if provider_id == PROVIDER_ENTRA:
-            continue
-        if provider_id == PROVIDER_GOOGLE:
+            built = build_entra_provider(
+                tenant_id=settings.tenant_id,
+                client_id=settings.client_id,
+                client_secret=settings.client_secret,
+                public_base_url=base,
+                http=http,
+                parse_groups=policy.has_group_rule(),
+                clock=clock,
+            )
+        elif provider_id == PROVIDER_GOOGLE:
             assert config.google is not None
             domains = policy.google_domains()
             built = build_google_provider(
-                config.google, public_base_url=base, http=http,
-                domain_hint=domains[0] if len(domains) == 1 else None, clock=clock,
+                config.google,
+                public_base_url=base,
+                http=http,
+                domain_hint=domains[0] if len(domains) == 1 else None,
+                clock=clock,
             )
         elif provider_id == PROVIDER_GITHUB:
             assert config.github is not None
             built = GitHubLoginProvider(
-                config.github, public_base_url=base, http=http,
-                orgs=policy.github_orgs(), teams=policy.github_teams(),
+                config.github,
+                public_base_url=base,
+                http=http,
+                orgs=policy.github_orgs(),
+                teams=policy.github_teams(),
             )
         else:
             oidc = config.oidc_by_id()[provider_id]
             built = build_oidc_provider(
-                oidc, public_base_url=base, http=http,
-                claim_names=policy.oidc_claim_names(provider_id), clock=clock,
+                oidc,
+                public_base_url=base,
+                http=http,
+                claim_names=policy.oidc_claim_names(provider_id),
+                clock=clock,
             )
         providers[provider_id] = built
-    entra = None
-    if config.entra_enabled:
-        entra = EntraDescriptor(start_path=ENTRA_ALIAS_START_PATH)
     return LoginRuntime(
         config=config,
         providers=providers,
         flow_store=flow_store,
         http=http,
-        entra=entra,
+        snapshots=snapshots,
         start_buckets={
-            provider_id: limiters.token_bucket(START_BURST, START_REFILL_PER_SECOND, clock)
+            provider_id: limiters.token_bucket(
+                START_BURST, START_REFILL_PER_SECOND, clock
+            )
             for provider_id in providers
         },
     )

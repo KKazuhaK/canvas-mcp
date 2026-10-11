@@ -1,18 +1,9 @@
-"""The image smoke test's local-mode checks, replayed in process.
-
-``deploy/selfhost/smoke-test.sh`` needs Docker, which CI has and a developer machine may not.
-Its sections (m), (m2) and (n) check the externally visible contract of
-``SELFHOST_AUTH_MODE=local`` with curl; this file replays the same requests against the same app
-(``Host: 127.0.0.1:<port>`` as curl sends it) so an expectation in the script that the code does
-not meet fails here, not only in the image build. ``tests/test_selfhost_docs.py`` ties the script's
-text to these checks.
-"""
+"""Replay the v1 image smoke test's public contract against the real ASGI stack."""
 
 from __future__ import annotations
 
 import json
 import pathlib
-import re
 
 import pytest
 
@@ -32,15 +23,12 @@ REGISTRATION = {
 }
 
 
-def test_the_script_has_the_sections_this_file_replays() -> None:
+def test_the_script_has_the_native_sections_this_file_replays() -> None:
     text = SMOKE.read_text(encoding="utf-8")
-    for marker in ("(m) SELFHOST_AUTH_MODE=local", "(m2) local mode with the React UI", "(n) an unknown SELFHOST_AUTH_MODE fails closed"):
-        assert marker in text, marker
-    assert text.index("(l) ACCOUNT_UI=react with no usable build") < text.index("(m) SELFHOST_AUTH_MODE=local")
-    assert text.index("(m2)") < text.index("(n) an unknown")
-    # The optional provider section (o) comes after (n); its own checks are in
-    # tests/selfhost/login/test_smoke_providers.py.
-    assert text.index("(n) an unknown") < text.index("(o) optional: sign-in providers (SMOKE_EXPECT_PROVIDERS")
+    markers = ("(a) hardened native image", "(b) local OAuth metadata", "(c) mandatory React", "(d) registration", "(e) startup refuses", "(o) optional: sign-in providers")
+    assert [text.index(marker) for marker in markers] == sorted(text.index(marker) for marker in markers)
+    assert "-e SELFHOST_AUTH_MODE=local" not in text
+    assert "-e ACCOUNT_UI=react" not in text
 
 
 @pytest.fixture
@@ -112,9 +100,9 @@ class TestSectionM:
         assert response.status_code == 400 and "location" not in response.headers
 
     def test_a_sign_in_request_that_does_not_exist(self, local) -> None:
-        response = local.client.get(f"{BASE}/account/login?txn=bogus")
-        assert response.status_code == 400 and "location" not in response.headers
-        assert "opened in another browser" in response.text
+        response = local.client.get(f"{BASE}/auth/login?txn=bogus")
+        assert response.status_code == 303
+        assert "/account/sign-in?error=authorization_invalid" in response.headers["location"]
 
     @pytest.mark.parametrize("path", ["/consent", "/auth/callback", "/.well-known/openid-configuration"])
     def test_the_proxys_routes_are_not_served(self, local, path: str) -> None:
@@ -133,7 +121,7 @@ class TestSectionM2:
         assert doc["token_endpoint_auth_methods_supported"] == ["none"]
 
     def test_a_bad_sign_in_request_ends_on_the_sign_in_page(self, stack) -> None:
-        response = stack.client.get(f"{BASE}/account/login?txn=bogus")
+        response = stack.client.get(f"{BASE}/auth/login?txn=bogus")
         assert response.status_code == 303
         assert "/account/sign-in?error=authorization_invalid" in response.headers["location"]
 
@@ -141,7 +129,7 @@ class TestSectionM2:
         txn = "A" * 43
         page = stack.client.get(f"{BASE}/account/consent?txn={txn}")
         assert page.status_code == 200 and 'id="root"' in page.text and 'name="decision"' not in page.text
-        for path in (f"/account/api/consent?txn={txn}", "/account/api/me/grants"):
+        for path in (f"/api/v1/consent?txn={txn}", "/api/v1/me/grants"):
             response = stack.client.get(f"{BASE}{path}")
             assert response.status_code == 401 and "not_authenticated" in response.text
 
@@ -149,7 +137,7 @@ class TestSectionM2:
 class TestSectionN:
     @pytest.mark.parametrize(
         "extra",
-        [{"SELFHOST_AUTH_MODE": "bogus"}, {"SELFHOST_AUTH_MODE": "local", "ACCESS_TOKEN_TTL": "1"}],
+        [{"SELFHOST_AUTH_MODE": ""}, {"ACCESS_TOKEN_TTL": "1"}],
     )
     def test_a_bad_value_stops_the_server(self, tmp_path, monkeypatch, extra) -> None:
         from canvas_mcp.core.selfhost.settings import SelfhostConfigError
@@ -161,5 +149,5 @@ class TestSectionN:
 
     def test_the_script_exercises_exactly_these_two_values(self) -> None:
         text = SMOKE.read_text(encoding="utf-8")
-        assert re.search(r"-e SELFHOST_AUTH_MODE=bogus", text) and "ACCESS_TOKEN_TTL=1" in text
+        assert "for removed in SELFHOST_AUTH_MODE" in text and "ACCESS_TOKEN_TTL=1" in text
         assert SCOPE

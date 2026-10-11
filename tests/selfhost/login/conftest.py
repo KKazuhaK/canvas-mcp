@@ -8,7 +8,7 @@ from collections.abc import Iterator
 import pytest
 
 from ..authz.stack import Stack, local_stack
-from ..test_account_spa import make_dist
+from ..spa_fixture import make_dist
 
 
 @pytest.fixture
@@ -21,12 +21,12 @@ def entra_local(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> Iter
 @pytest.fixture
 def entra_proxy(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Stack]:
     """Entra alone, in the default entra_proxy mode."""
-    with local_stack(tmp_path, monkeypatch, env={"SELFHOST_AUTH_MODE": "entra_proxy"}) as running:
+    with local_stack(tmp_path, monkeypatch, env={}) as running:
         yield running
 
 
 @pytest.fixture
 def entra_react(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Stack]:
-    env = {"ACCOUNT_UI": "react", "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist"))}
+    env = { "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist"))}
     with local_stack(tmp_path / "app", monkeypatch, env=env) as running:
         yield running

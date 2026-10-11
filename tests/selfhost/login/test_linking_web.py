@@ -269,7 +269,7 @@ class TestLinkFailsBeforeTheRecordIsPopped:
         person.sign_in("google")
         page = person.post_link("entra")
         state = query_of(person.meta_url(page))["state"]
-        response = person.get("/account/callback", params={"error": "access_denied", "state": state})
+        response = person.get("/auth/callback/entra", params={"error": "access_denied", "state": state})
         assert outcome(response) == {"error": "provider_error"}
 
     def test_an_expired_state_of_a_link_returns_to_the_sign_in_methods_screen(self, ps: ProviderStack) -> None:

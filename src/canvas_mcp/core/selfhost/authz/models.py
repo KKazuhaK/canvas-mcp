@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -52,35 +51,20 @@ def split_scopes(value: str) -> tuple[str, ...]:
 @dataclass(frozen=True)
 class ClientRecord:
     client_id: str
-    info_json: str
+    info: dict[str, Any]
     client_name: str
     created_at: int
     expires_at: int
-
-    @classmethod
-    def from_row(cls, row: Sequence[Any]) -> ClientRecord:
-        return cls(str(row[0]), str(row[1]), str(row[2]), int(row[3]), int(row[4]))
 
 
 @dataclass(frozen=True)
 class CimdSnapshot:
     url: str
-    doc_json: str
+    doc: dict[str, Any]
     fetched_at: int
     fresh_until: int
     last_error_at: int | None
     last_error: str | None
-
-    @classmethod
-    def from_row(cls, row: Sequence[Any]) -> CimdSnapshot:
-        return cls(
-            str(row[0]),
-            str(row[1]),
-            int(row[2]),
-            int(row[3]),
-            None if row[4] is None else int(row[4]),
-            None if row[5] is None else str(row[5]),
-        )
 
 
 @dataclass(frozen=True)
@@ -104,30 +88,9 @@ class GrantRecord:
     revoked_reason: str | None
     revoked_by: str | None
 
-    @classmethod
-    def from_row(cls, row: Sequence[Any]) -> GrantRecord:
-        return cls(
-            id=str(row[0]),
-            account_id=str(row[1]),
-            client_id=str(row[2]),
-            client_kind=str(row[3]),
-            client_name=str(row[4]),
-            client_host=None if row[5] is None else str(row[5]),
-            redirect_host=str(row[6]),
-            scopes=split_scopes(str(row[7])),
-            resource=str(row[8]),
-            created_at=int(row[9]),
-            last_used_at=None if row[10] is None else int(row[10]),
-            upstream_auth_at=int(row[11]),
-            expires_at=int(row[12]),
-            revoked_at=None if row[13] is None else int(row[13]),
-            revoked_reason=None if row[14] is None else str(row[14]),
-            revoked_by=None if row[15] is None else str(row[15]),
-        )
-
     @property
     def account_key(self) -> str:
-        return f"acct:{self.account_id}"
+        return self.account_id
 
     def active(self, now: int) -> bool:
         return self.revoked_at is None and self.expires_at > now
@@ -158,30 +121,6 @@ class CodeRecord:
     grant_id: str | None
     grace_replays: int
 
-    @classmethod
-    def from_row(cls, row: Sequence[Any]) -> CodeRecord:
-        return cls(
-            code_hash=str(row[0]),
-            client_id=str(row[1]),
-            account_id=str(row[2]),
-            redirect_uri=str(row[3]),
-            redirect_uri_explicit=bool(row[4]),
-            code_challenge=str(row[5]),
-            scopes=split_scopes(str(row[6])),
-            resource=str(row[7]),
-            client_kind=str(row[8]),
-            client_name=str(row[9]),
-            client_host=None if row[10] is None else str(row[10]),
-            redirect_host=str(row[11]),
-            upstream_auth_at=int(row[12]),
-            session_epoch=int(row[13]),
-            created_at=int(row[14]),
-            expires_at=int(row[15]),
-            consumed_at=None if row[16] is None else int(row[16]),
-            grant_id=None if row[17] is None else str(row[17]),
-            grace_replays=int(row[18]),
-        )
-
 
 @dataclass(frozen=True)
 class RefreshView:
@@ -201,28 +140,10 @@ class RefreshView:
     account_id: str | None
     grant_revoked_at: int | None
 
-    @classmethod
-    def from_row(cls, row: Sequence[Any]) -> RefreshView:
-        return cls(
-            token_hash=str(row[0]),
-            grant_id=str(row[1]),
-            parent_hash=None if row[2] is None else str(row[2]),
-            created_at=int(row[3]),
-            expires_at=int(row[4]),
-            used_at=None if row[5] is None else int(row[5]),
-            replaced_by=None if row[6] is None else str(row[6]),
-            grace_replays=int(row[7]),
-            client_id=None if row[8] is None else str(row[8]),
-            scopes=split_scopes("" if row[9] is None else str(row[9])),
-            resource="" if row[10] is None else str(row[10]),
-            account_id=None if row[11] is None else str(row[11]),
-            grant_revoked_at=None if row[12] is None else int(row[12]),
-        )
-
 
 @dataclass(frozen=True)
 class GrantStatus:
-    """What the request path needs to know about a grant (cached for a few seconds)."""
+    """The committed grant standing returned by its named database read."""
 
     found: bool
     account_id: str | None = None
@@ -231,20 +152,6 @@ class GrantStatus:
     expires_at: int = 0
     last_used_at: int | None = None
     account_status: str | None = None
-
-    @classmethod
-    def from_row(cls, row: Sequence[Any] | None) -> GrantStatus:
-        if row is None:
-            return cls(found=False)
-        return cls(
-            found=True,
-            account_id=str(row[0]),
-            client_id=str(row[1]),
-            revoked=row[2] is not None,
-            expires_at=int(row[3]),
-            last_used_at=None if row[4] is None else int(row[4]),
-            account_status=None if row[5] is None else str(row[5]),
-        )
 
     def usable(self, now: int) -> bool:
         return (
@@ -261,7 +168,9 @@ class ExchangeOutcome(Enum):
     WON = "won"  # this call consumed the code and created the grant
     GRACE = "grace"  # a benign duplicate inside the grace window: a sibling was issued
     CAPPED = "capped"  # a duplicate inside the window, but too many already
-    REPLAY_REVOKED = "replay_revoked"  # a replay outside the window: the grant is revoked
+    REPLAY_REVOKED = (
+        "replay_revoked"  # a replay outside the window: the grant is revoked
+    )
     DEAD = "dead"  # unknown, expired, or the grant is gone
     INACTIVE = "inactive"  # the account is not active
     REAUTH = "reauth"  # the user must sign in again (MAX_UPSTREAM_AUTH_AGE)
@@ -284,6 +193,7 @@ class ExchangeResult:
     outcome: ExchangeOutcome
     grant: GrantRecord | None = None
     refresh_issued: bool = False
+    jwt_epoch: int | None = None
 
 
 @dataclass(frozen=True)
@@ -291,3 +201,4 @@ class RotateResult:
     outcome: RotateOutcome
     grant: GrantRecord | None = None
     refresh_issued: bool = False
+    jwt_epoch: int | None = None

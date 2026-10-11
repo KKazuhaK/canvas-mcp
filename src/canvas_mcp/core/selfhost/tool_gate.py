@@ -21,8 +21,8 @@ cancelled.
 The same check refuses a call from a request whose Canvas credential was replaced,
 removed, found dead or restored after the request began (the credential generation
 the store reports, or this process has already heard of, is newer than the one the
-request was authorized under). A change made in this process is seen at once; one
-made by another process is seen within the access cache's bound. Such a
+request was authorized under). A change learned by this process is seen immediately; the next request on every
+instance reads the committed account generation. Such a
 request holds the old token; it is told to retry rather than start a further tool
 call, which matters most for a write that was previewed under the old credential.
 """
@@ -30,9 +30,8 @@ call, which matters most for a write that was previewed under the old credential
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
-from typing import Any, Protocol
+from typing import Any
 
-import anyio.to_thread
 import mcp.types as mt
 from fastmcp.exceptions import ResourceError, ToolError
 from fastmcp.resources import ResourceResult
@@ -50,9 +49,12 @@ from ..credentials import (
     request_credential_is_stale,
 )
 from ..logging import log_error
-from .accounts import entra_issuer
-from .principal_access import access_refusal_message, access_unavailable_message
-from .token_store import PrincipalStatus
+from .mcp_state import MCP_READ
+from .principal_access import (
+    access_refusal_message,
+    access_unavailable_message,
+    snapshot_status,
+)
 from .tool_prefs import (
     WriteDecision,
     decide,
@@ -69,49 +71,30 @@ _CREDENTIAL_CHANGED = (
 _IDENTITY_MISMATCH = "Identity check failed; reconnect the connector."
 
 
-class AccessChecker(Protocol):
-    """The slice of the access cache the gate uses (synchronous)."""
-
-    def status(self, principal_key: str) -> PrincipalStatus: ...
-
-
 def _check_generation_in_process(error_type: type[Exception]) -> None:
-    """Raise ``error_type`` if this process already knows a newer credential generation.
-
-    The access cache can lag by its TTL; this process's own registry does not, so a
-    change made here (a token saved at ``/account``, removed, found dead) is seen at
-    once. It runs after the credential check so a request that carries no usable
-    credential keeps the more specific message (for example the re-enroll one that
-    follows from the request itself marking the token invalid).
-    """
+    """Refuse a call after this process learned a newer credential generation."""
     if request_credential_is_stale():
         raise error_type(_CREDENTIAL_CHANGED)
 
 
-async def _check_access(access: AccessChecker | None, error_type: type[Exception]) -> None:
-    """Raise ``error_type`` unless the account of this request is active (or if that is unreadable)."""
-    if access is None:
-        return
+async def _check_access(error_type: type[Exception]) -> None:
+    """Check the snapshot authorized for this request without another database read."""
     principal = get_request_principal()
     if principal is None:
         raise error_type(_NOT_SIGNED_IN)
-    try:
-        status = await anyio.to_thread.run_sync(access.status, principal.key)
-    except Exception:  # noqa: BLE001 - fail closed; the error text is not logged
-        log_error("principal access check failed")
-        raise error_type(access_unavailable_message()) from None
-    refusal = access_refusal_message(status)
+    read = MCP_READ.get()
+    if read is None or read.account_id != principal.key:
+        raise error_type(access_unavailable_message())
+    refusal = access_refusal_message(snapshot_status(read))
     if refusal is not None:
         raise error_type(refusal)
     held = get_request_credential_generation()
-    # Only a store that is *ahead* of the request counts: a cached answer older than
-    # the request's own read says nothing against it.
-    if held is not None and status.credential_generation > held:
+    if held is not None and read.snapshot.credential_generation > held:
         raise error_type(_CREDENTIAL_CHANGED)
 
 
 def _check_local_identity(error_type: type[Exception]) -> None:
-    """Like :func:`_check_identity`, for a token issued by this server (``SELFHOST_AUTH_MODE=local``).
+    """Like :func:`_check_identity`, for a token issued by this server (built-in authorization).
 
     The verified token and the request context must agree on the account, the issuer and
     the kind of token, and the principal must be one the local resolver made.
@@ -131,29 +114,6 @@ def _check_local_identity(error_type: type[Exception]) -> None:
         or get("iss") != principal.issuer
         or get("token_use") != "access"
     ):
-        log_error("identity mismatch between access token and request context")
-        raise error_type(_IDENTITY_MISMATCH)
-
-
-def _check_identity(error_type: type[Exception]) -> None:
-    """Raise ``error_type`` unless the verified token and the request context agree."""
-    principal = get_request_principal()
-    if principal is None:
-        raise error_type(_NOT_SIGNED_IN)
-
-    token = get_access_token()
-    claims: Any = getattr(token, "claims", None)
-    tid = claims.get("tid") if hasattr(claims, "get") else None
-    oid = claims.get("oid") if hasattr(claims, "get") else None
-    if (
-        not isinstance(tid, str)
-        or not isinstance(oid, str)
-        or not principal.issuer
-        or entra_issuer(tid) != principal.issuer
-        or oid.lower() != principal.subject
-    ):
-        # Defence in depth: the verified token and the ContextVar must agree on the
-        # external identity (issuer and subject), not on the object id alone.
         log_error("identity mismatch between access token and request context")
         raise error_type(_IDENTITY_MISMATCH)
 
@@ -184,22 +144,11 @@ class SelfhostCredentialGate(Middleware):
         *,
         account_url: str | None = None,
         write_ceiling: Collection[str] | None = None,
-        access: AccessChecker | None = None,
-        identity_mode: str = "entra",
     ) -> None:
-        self._access = access
-        self._local_identity = identity_mode == "local"
         self._account_url = account_url
         self._ceiling: frozenset[str] | None = (
             None if write_ceiling is None else frozenset(write_ceiling)
         )
-
-    def _verify_identity(self, error_type: type[Exception]) -> None:
-        """The identity check of this server's mode (resolved when called)."""
-        if self._local_identity:
-            _check_local_identity(error_type)
-        else:
-            _check_identity(error_type)
 
     @staticmethod
     def _enabled_write_tools() -> frozenset[str]:
@@ -208,7 +157,9 @@ class SelfhostCredentialGate(Middleware):
 
     def _check_write_tool(self, name: str) -> None:
         """Refuse a write tool the user has not switched on (or the server does not offer)."""
-        decision = decide(name, enabled=self._enabled_write_tools(), ceiling=self._ceiling)
+        decision = decide(
+            name, enabled=self._enabled_write_tools(), ceiling=self._ceiling
+        )
         if decision is WriteDecision.ALLOWED:
             return
         if decision is WriteDecision.NOT_OFFERED:
@@ -223,8 +174,8 @@ class SelfhostCredentialGate(Middleware):
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        self._verify_identity(ToolError)
-        await _check_access(self._access, ToolError)
+        _check_local_identity(ToolError)
+        await _check_access(ToolError)
         _check_credentials(ToolError)
         _check_generation_in_process(ToolError)
         self._check_write_tool(context.message.name)
@@ -249,8 +200,8 @@ class SelfhostCredentialGate(Middleware):
         context: MiddlewareContext[mt.ReadResourceRequestParams],
         call_next: CallNext[mt.ReadResourceRequestParams, ResourceResult],
     ) -> ResourceResult:
-        self._verify_identity(ResourceError)
-        await _check_access(self._access, ResourceError)
+        _check_local_identity(ResourceError)
+        await _check_access(ResourceError)
         _check_credentials(ResourceError)
         _check_generation_in_process(ResourceError)
         return await call_next(context)

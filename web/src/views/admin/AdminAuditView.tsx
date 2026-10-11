@@ -14,12 +14,17 @@ import { PageSkeleton } from '../StateViews'
 
 /** The audit actions the server writes (token_store.AUDIT_ACTIONS); anything else shows as "Other". */
 const KNOWN_ACTIONS = [
+  'sign_in_method_renamed',
+  'featured_schools_changed',
+  'setting_changed',
+  'school_access_changed',
   'account_created',
   'account_created_by_operator',
   'account_activated',
   'account_approved',
   'account_denied',
   'account_disabled',
+  'account_deleted',
   'account_enabled',
   'role_changed',
   'token_enrolled',
@@ -32,6 +37,12 @@ const KNOWN_ACTIONS = [
   'grant_revoked',
   'grants_revoked_for_account',
   'jwt_key_rotated',
+  'custody_notice_acknowledged',
+  'identity_linked',
+  'identity_unlinked',
+  'identity_unlinked_by_owner',
+  'identity_unlinked_by_operator',
+  'owner_loss_refused_last_owner',
 ] as const
 
 function isKnown(action: string): boolean {
@@ -55,6 +66,9 @@ const KNOWN_DETAIL_KEYS = [
   'version',
   'client_kind',
   'epoch',
+  'custody_notice_version',
+  'old',
+  'new',
 ] as const
 
 function isKnownDetailKey(key: string): boolean {

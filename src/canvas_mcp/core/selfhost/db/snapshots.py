@@ -10,6 +10,8 @@ from sqlalchemy.engine import Connection
 
 @dataclass(frozen=True)
 class McpSnapshot:
+    client_id: str
+    display_name: str
     status: str
     role: str
     session_epoch: int
@@ -26,6 +28,8 @@ class McpSnapshot:
     nonce: bytes | None
     ciphertext: bytes | None
     credential_status: str | None
+    invalid_reason: str | None
+    credential_updated_at: int | None
     credential_used_at: int | None
     last_verified_at: int | None
     canvas_user_id: str | None
@@ -43,10 +47,11 @@ class SessionSnapshot:
 
 
 _MCP = text("""
-SELECT a.status, a.role, a.session_epoch, a.credential_generation, a.write_tools_version,
+SELECT g.client_id, a.display_name, a.status, a.role, a.session_epoch, a.credential_generation, a.write_tools_version,
        g.revoked_at, g.expires_at AS grant_expires_at, g.last_used_at AS grant_used_at,
        c.id AS credential_id, c.canvas_host, c.kind, c.generation, c.key_id, c.nonce, c.ciphertext,
-       c.status AS credential_status, c.last_used_at AS credential_used_at, c.last_verified_at,
+       c.status AS credential_status, c.invalid_reason, c.updated_at AS credential_updated_at,
+       c.last_used_at AS credential_used_at, c.last_verified_at,
        c.canvas_user_id, c.custody_notice_version, s.jwt_epoch, s.settings_revision
 FROM oauth_grants g
 JOIN accounts a ON a.id = g.account_id

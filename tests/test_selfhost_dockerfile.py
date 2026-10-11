@@ -155,18 +155,16 @@ def test_healthcheck_targets_healthz(instructions):
     assert "127.0.0.1" in checks[0] and "8819" in checks[0]
 
 
-def test_healthcheck_treats_any_http_answer_below_500_as_alive(instructions):
-    """Legacy access-key mode has no /healthz route and answers 401. urlopen raises
-    on that and would report a working container unhealthy."""
+def test_healthcheck_requires_the_selfhost_liveness_answer(instructions):
     (check,) = [args for name, args in instructions if name == "HEALTHCHECK"]
     assert "urlopen" not in check
-    assert "getresponse().status<500" in check
+    assert "getresponse().status==200" in check
 
 
-def test_the_oauth_state_directory_exists_in_the_image_so_a_volume_can_be_mounted_there(instructions):
+def test_protocol_state_has_no_separate_proxy_directory(instructions):
     run = " ".join(args for name, args in instructions if name == "RUN")
-    assert "/data/fastmcp" in run
-    assert "chown 10001:10001 /data /data/fastmcp" in run
+    assert "/data/fastmcp" not in run
+    assert "FASTMCP_HOME" not in _env_names(instructions)
 
 
 def test_dockerignore_keeps_env_and_key_files_out_at_any_depth():
@@ -185,7 +183,7 @@ def test_dockerignore_keeps_env_and_key_files_out_at_any_depth():
 def test_the_image_points_the_server_at_the_built_account_ui(instructions):
     env = " ".join(args for name, args in instructions if name == "ENV")
     assert "ACCOUNT_WEB_DIST=/app/web-dist" in env
-    # The copy target and the setting agree, and the default UI is not changed here.
+    # The required production build and the configured path agree.
     copies = [args for name, args in instructions if name == "COPY" and "--from=web" in args]
     assert copies == ["--from=web /web/dist /app/web-dist"]
     assert "ACCOUNT_UI" not in env
@@ -206,7 +204,7 @@ def test_safe_defaults_are_set(instructions):
     for expected in (
         "EXECUTE_TYPESCRIPT_ENABLED=false",
         "ENABLE_DATA_ANONYMIZATION=true",
-        "FASTMCP_HOME=/data/fastmcp",
+        "MCP_AUTH_MODE=selfhost",
         "SELFHOST_DATA_DIR=/data",
     ):
         assert expected in env
@@ -217,3 +215,18 @@ def test_the_data_directory_is_private_and_owned_by_the_service_user(instruction
     assert "chown 10001:10001 /data" in run
     assert "chmod 0700 /data" in run
     assert "/usr/sbin/nologin" in run
+
+
+def test_feature_branch_image_verification_has_no_publishing_permissions():
+    yaml = pytest.importorskip("yaml")
+    workflow = yaml.safe_load((ROOT / ".github/workflows/canvas-mcp-testing.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["selfhost-image-verify"]
+    assert "KKazuhaK/canvas-mcp" in job["if"]
+    assert job["permissions"] == {"contents": "read"}
+    matrix = job["strategy"]["matrix"]["include"]
+    assert {row["platform"] for row in matrix} == {"linux/amd64", "linux/arm64"}
+    builds = [step for step in job["steps"] if step.get("uses", "").startswith("docker/build-push-action@")]
+    assert len(builds) == 1
+    assert builds[0]["with"]["load"] is True and builds[0]["with"]["push"] is False
+    assert not any("login-action" in step.get("uses", "") for step in job["steps"])
+    assert job["steps"][-1]["run"] == "bash deploy/selfhost/smoke-test.sh canvas-mcp:verify"

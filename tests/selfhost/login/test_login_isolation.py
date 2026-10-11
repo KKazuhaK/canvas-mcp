@@ -63,10 +63,8 @@ def test_an_entra_only_start_never_imports_the_relying_party_modules() -> None:
             "ENTRA_TENANT_ID": "11111111-2222-3333-4444-555555555555",
             "ENTRA_CLIENT_ID": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             "ENTRA_CLIENT_SECRET": "entra-secret-value-0123456789",
-            "OAUTH_JWT_SIGNING_KEY": "k" * 48,
             "ACCOUNT_SESSION_SECRET": "{session}",
             "CANVAS_TOKEN_KEYS": "k1:" + "A" * 43 + "=",
-            "FASTMCP_HOME": "/data/fastmcp",
         }})
         assert settings.login_providers.single
         loaded = [m for m in sys.modules if m.startswith("canvas_mcp.core.selfhost.login")]
@@ -83,7 +81,7 @@ def test_the_account_pages_load_no_relying_party_module_by_themselves() -> None:
     code = textwrap.dedent(
         """
         import sys
-        import canvas_mcp.core.selfhost.account_web
+        import canvas_mcp.core.selfhost.account_core
         import canvas_mcp.core.selfhost.login.ceremony
         loaded = sorted(m for m in sys.modules if m.startswith("canvas_mcp.core.selfhost.login"))
         heavy = {"flows", "registry", "jwks", "idtoken", "oidc", "github", "google", "http", "metadata", "linking"}

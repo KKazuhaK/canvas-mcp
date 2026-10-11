@@ -1418,7 +1418,7 @@ The API takes `cursor` (an opaque base64url of the last key) and `limit` (defaul
        - the TypeDecorators convert text uuids to `uuid`, 0/1 to boolean, JSON text to `jsonb` and BLOB to `bytea`.
      - Skip `ephemeral` tables (`oauth_codes`, `login_states`).
      - `server_state`: copy `jwt_epoch` and `settings_revision + 1`, so caches rebuild. Keep the target's own `database_id` and `compat_floor`.
-     - `setval(pg_get_serial_sequence(t, 'id'), max(id))` for `auth_events` and `audit_log`; entity ids are uuids and need nothing.
+     - Advance the sequences for `auth_events` and `audit_log` with transactional `ALTER SEQUENCE ... RESTART WITH max(id) + 1`; entity ids are uuids and need nothing. Unlike `setval`, `RESTART` also rolls back if importing into an already initialized empty target fails.
      - Compare row counts per table.
      - Decrypt every sealed value through `SEALED`.
   3. Commit. Any failure rolls back everything.

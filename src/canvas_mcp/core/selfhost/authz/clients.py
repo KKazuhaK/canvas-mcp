@@ -34,13 +34,13 @@ from dataclasses import dataclass
 from typing import Any
 
 import anyio
-import anyio.to_thread
 from mcp.server.auth.provider import RegistrationError
 from mcp.shared.auth import InvalidRedirectUriError, OAuthClientInformationFull
 from pydantic import AnyHttpUrl, AnyUrl, PrivateAttr, ValidationError
 
 from ...logging import log_info, log_warning
 from ..db.errors import StoreUnavailable
+from ..db.workers import run_store
 from ..limits import InMemorySlidingWindowLimiter
 from ..settings import AuthzSettings
 from . import fastmcp_compat as compat
@@ -52,10 +52,14 @@ from .urls import host_of, is_loopback_host, redirect_matches, redirect_uri_synt
 #: document; ``token`` (``/token`` and ``/revoke``) may use the last good copy.
 PURPOSE_AUTHORIZE = "authorize"
 PURPOSE_TOKEN = "token"
-LOOKUP_PURPOSE: ContextVar[str] = ContextVar("canvas_mcp_authz_lookup_purpose", default=PURPOSE_AUTHORIZE)
+LOOKUP_PURPOSE: ContextVar[str] = ContextVar(
+    "canvas_mcp_authz_lookup_purpose", default=PURPOSE_AUTHORIZE
+)
 #: Set to a list by the endpoint wrappers; ``get_client`` appends when the database was
 #: unreachable, so an outage is answered 503 instead of "unknown client".
-LOOKUP_OUTAGE: ContextVar[list[bool] | None] = ContextVar("canvas_mcp_authz_lookup_outage", default=None)
+LOOKUP_OUTAGE: ContextVar[list[bool] | None] = ContextVar(
+    "canvas_mcp_authz_lookup_outage", default=None
+)
 
 #: A registration lives this long (it is extended to the end of its last grant).
 DCR_TTL_SECONDS = 30 * 86400
@@ -137,7 +141,9 @@ class PublicClient(OAuthClientInformationFull):
             usable = [
                 u
                 for u in registered
-                if redirect_uri_syntax_ok(u) and not is_loopback_host(host_of(u)) and self._allowed(u)
+                if redirect_uri_syntax_ok(u)
+                and not is_loopback_host(host_of(u))
+                and self._allowed(u)
             ]
             if len(registered) == 1 and len(usable) == 1:
                 return AnyUrl(usable[0])
@@ -150,7 +156,9 @@ class PublicClient(OAuthClientInformationFull):
             or not any(redirect_matches(candidate, r) for r in registered)
             or not self._allowed(candidate)
         ):
-            raise InvalidRedirectUriError("Redirect URI is not registered for this client")
+            raise InvalidRedirectUriError(
+                "Redirect URI is not registered for this client"
+            )
         return redirect_uri
 
 
@@ -158,7 +166,9 @@ class PublicClient(OAuthClientInformationFull):
 
 
 def validate_dcr_metadata(
-    info: OAuthClientInformationFull, allowlist: Collection[str], server_scopes: Collection[str]
+    info: OAuthClientInformationFull,
+    allowlist: Collection[str],
+    server_scopes: Collection[str],
 ) -> RegistrationError | None:
     """Why this registration must be refused, or None. Fixed descriptions, never the input."""
 
@@ -167,14 +177,20 @@ def validate_dcr_metadata(
 
     uris = [str(u) for u in info.redirect_uris or []]
     if not uris or len(uris) > MAX_REDIRECT_URIS:
-        return bad("invalid_redirect_uri", "Between 1 and 10 redirect URIs are required.")
+        return bad(
+            "invalid_redirect_uri", "Between 1 and 10 redirect URIs are required."
+        )
     for uri in uris:
         if (
             not redirect_uri_syntax_ok(uri)
             or not any(redirect_matches(uri, entry) for entry in allowlist)
-            or not compat.redirect_allowed_for_application_type(uri, info.application_type)
+            or not compat.redirect_allowed_for_application_type(
+                uri, info.application_type
+            )
         ):
-            return bad("invalid_redirect_uri", "A redirect URI is not allowed on this server.")
+            return bad(
+                "invalid_redirect_uri", "A redirect URI is not allowed on this server."
+            )
     grants = set(info.grant_types or [])
     if "authorization_code" not in grants or not grants <= _ALLOWED_GRANTS:
         return bad(
@@ -204,8 +220,17 @@ def make_public(info: OAuthClientInformationFull, default_scope: str) -> None:
     info.client_secret = None
     info.client_secret_expires_at = None
     info.scope = info.scope or default_scope
-    for name in ("jwks", "jwks_uri", "contacts", "software_id", "software_version",
-                 "client_uri", "logo_uri", "tos_uri", "policy_uri"):
+    for name in (
+        "jwks",
+        "jwks_uri",
+        "contacts",
+        "software_id",
+        "software_version",
+        "client_uri",
+        "logo_uri",
+        "tos_uri",
+        "policy_uri",
+    ):
         setattr(info, name, None)
 
 
@@ -239,7 +264,11 @@ class CimdClientData:
 
 def cimd_url_ok(url: str) -> bool:
     """A client id that can be a CIMD URL: canonical https with a path, no query, fragment or user info."""
-    if not isinstance(url, str) or not url.startswith("https://") or len(url) > MAX_CIMD_URL_CHARS:
+    if (
+        not isinstance(url, str)
+        or not url.startswith("https://")
+        or len(url) > MAX_CIMD_URL_CHARS
+    ):
         return False
     if any(ch in url for ch in ("?", "#", "@", " ", "\\", "*")) or not url.isascii():
         return False
@@ -293,10 +322,16 @@ class CimdResolver:
         self._fetch = fetch
         self._clock = clock
         self._monotonic = monotonic
-        self._inflight: dict[str, asyncio.Future[tuple[CimdClientData | None, str | None]]] = {}
+        self._inflight: dict[
+            str, asyncio.Future[tuple[CimdClientData | None, str | None]]
+        ] = {}
         self._failed_until: dict[str, float] = {}
-        per_host = InMemorySlidingWindowLimiter(CIMD_HOST_FETCHES_PER_MINUTE, 60, 1024, monotonic)
-        overall = InMemorySlidingWindowLimiter(CIMD_TOTAL_FETCHES_PER_MINUTE, 60, 4, monotonic)
+        per_host = InMemorySlidingWindowLimiter(
+            CIMD_HOST_FETCHES_PER_MINUTE, 60, 1024, monotonic
+        )
+        overall = InMemorySlidingWindowLimiter(
+            CIMD_TOTAL_FETCHES_PER_MINUTE, 60, 4, monotonic
+        )
         self._per_host, self._overall = per_host, overall
 
     # -- reading ------------------------------------------------------------------------
@@ -304,7 +339,7 @@ class CimdResolver:
     def _from_snapshot(self, snapshot: CimdSnapshot) -> CimdClientData | None:
         """The stored document, checked against the *current* allowlist and scopes."""
         try:
-            data = json.loads(snapshot.doc_json)
+            data = snapshot.doc
             uris = [u for u in data["redirect_uris"] if self._redirect_allowed(u)]
             scope = " ".join(s for s in str(data["scope"]).split() if s in self._scopes)
             grants = tuple(g for g in data["grant_types"] if g in _ALLOWED_GRANTS)
@@ -330,7 +365,9 @@ class CimdResolver:
             and any(redirect_matches(uri, entry) for entry in self._allowlist)
         )
 
-    async def snapshot_only(self, url: str, not_before: int = 0) -> CimdClientData | None:
+    async def snapshot_only(
+        self, url: str, not_before: int = 0
+    ) -> CimdClientData | None:
         """The stored document, without any fetch, if ``/authorize`` can have relied on it (consent).
 
         ``not_before`` is when the request began. The copy is good if it was fetched since, or if
@@ -342,18 +379,23 @@ class CimdResolver:
         """
         if not self._settings.cimd_enabled or not cimd_url_ok(url):
             return None
-        snapshot = await anyio.to_thread.run_sync(self._store.cimd_snapshot, url)
+        snapshot = await run_store(self._store.cimd_snapshot, url)
         if snapshot is None:
             return None
-        if snapshot.fetched_at < not_before - CONSENT_FETCH_SLACK_S and snapshot.fresh_until <= not_before:
+        if (
+            snapshot.fetched_at < not_before - CONSENT_FETCH_SLACK_S
+            and snapshot.fresh_until <= not_before
+        ):
             return None
         return self._from_snapshot(snapshot)
 
-    async def get(self, url: str, purpose: str = PURPOSE_AUTHORIZE) -> CimdClientData | None:
+    async def get(
+        self, url: str, purpose: str = PURPOSE_AUTHORIZE
+    ) -> CimdClientData | None:
         if not self._settings.cimd_enabled or not cimd_url_ok(url):
             return None
         now = int(self._clock())
-        snapshot = await anyio.to_thread.run_sync(self._store.cimd_snapshot, url)
+        snapshot = await run_store(self._store.cimd_snapshot, url)
         stored = None if snapshot is None else self._from_snapshot(snapshot)
         if snapshot is not None and stored is not None and now < snapshot.fresh_until:
             return stored
@@ -388,9 +430,13 @@ class CimdResolver:
             future.add_done_callback(forget)
         return await asyncio.shield(future)
 
-    async def _fetch_and_store(self, url: str) -> tuple[CimdClientData | None, str | None]:
+    async def _fetch_and_store(
+        self, url: str
+    ) -> tuple[CimdClientData | None, str | None]:
         host = host_of(url)
-        if not self._per_host.allow(("host", host)) or not self._overall.allow(("all",)):
+        if not self._per_host.allow(("host", host)) or not self._overall.allow(
+            ("all",)
+        ):
             return await self._failed(url, CIMD_BUDGET)
         timeout = float(self._settings.cimd_fetch_timeout_s)
         try:
@@ -406,9 +452,12 @@ class CimdResolver:
             data = self._accept(url, fetched)
         except compat.DocumentRejected as exc:
             return await self._failed(url, exc.code)
-        stored = await anyio.to_thread.run_sync(
+        stored = await run_store(
             lambda: self._store.upsert_cimd(
-                url, data.to_json(), fetched_at=data.fetched_at, fresh_until=data.fresh_until
+                url,
+                data.to_json(),
+                fetched_at=data.fetched_at,
+                fresh_until=data.fresh_until,
             )
         )
         self._failed_until.pop(url, None)
@@ -420,7 +469,7 @@ class CimdResolver:
         if len(self._failed_until) > 4096:
             self._failed_until.clear()
         log_warning("cimd_fetch", reason=code)
-        await anyio.to_thread.run_sync(self._store.record_cimd_error, url, code)
+        await run_store(self._store.record_cimd_error, url, code)
         return None, code
 
     def _accept(self, url: str, fetched: compat.FetchedDocument) -> CimdClientData:
@@ -503,22 +552,28 @@ class ClientDirectory:
             return None
 
     async def get_registered(self, client_id: str) -> PublicClient | None:
-        record = await anyio.to_thread.run_sync(self._store.get_client_record, client_id)
+        record = await run_store(self._store.get_client_record, client_id)
         if record is None or record.expires_at < int(self._clock()):
             return None
         try:
-            info = json.loads(record.info_json)
+            info = dict(record.info)
             info["client_id"] = client_id
             # The allowlist may have narrowed since this client registered.
-            uris = [u for u in info.get("redirect_uris", []) if self._redirect_allowed(u)]
+            uris = [
+                u for u in info.get("redirect_uris", []) if self._redirect_allowed(u)
+            ]
             if not uris:
                 return None
             info["redirect_uris"] = uris
             info["token_endpoint_auth_method"] = "none"
             info["client_secret"] = None
-            scope = " ".join(s for s in str(info.get("scope") or "").split() if s in self._scopes)
+            scope = " ".join(
+                s for s in str(info.get("scope") or "").split() if s in self._scopes
+            )
             info["scope"] = scope or " ".join(self._scopes)
-            return PublicClient.build(info, kind=CLIENT_KIND_DCR, allowlist=self._allowlist)
+            return PublicClient.build(
+                info, kind=CLIENT_KIND_DCR, allowlist=self._allowlist
+            )
         except (ValueError, TypeError, ValidationError):
             return None
 
@@ -546,7 +601,9 @@ class ClientDirectory:
             client_host=host_of(data.url),
         )
 
-    async def get_for_consent(self, client_id: str, not_before: int) -> PublicClient | None:
+    async def get_for_consent(
+        self, client_id: str, not_before: int
+    ) -> PublicClient | None:
         """The client as the consent page needs it: from the database only, never a fetch.
 
         A CIMD document must have been fetched no earlier than the request it belongs to,

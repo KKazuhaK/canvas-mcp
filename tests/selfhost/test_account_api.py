@@ -1,4 +1,4 @@
-"""The JSON API under /account/api, on whichever backend the run selects.
+"""The JSON API under /api/v1, on whichever backend the run selects.
 
 The API is exercised through the "fallback" composition (``ui="react"`` without a
 built bundle): the HTML pages and the API are registered over one application, which
@@ -21,7 +21,7 @@ import pytest
 from canvas_mcp.core import audit
 from canvas_mcp.core.selfhost import account_api
 from canvas_mcp.core.selfhost import accounts as acc
-from canvas_mcp.core.selfhost.account_web import (
+from canvas_mcp.core.selfhost.account_core import (
     SESSION_COOKIE,
     CanvasCheckError,
     CanvasIdentity,
@@ -62,7 +62,7 @@ from .test_account_web import (
     sign_in,
 )
 
-P = "/account/api"
+P = "/api/v1"
 OID_PENDING = "dddddddd-0000-4000-8000-0000000000dd"
 OID_BLOCKED = "eeeeeeee-0000-4000-8000-0000000000ee"
 OWNER_RULE = AccessRule("entra", "role", "Canvas.Owner")
@@ -257,7 +257,7 @@ class TestProviders:
                     "kind": "oidc",
                     "name": "Microsoft",
                     "icon": "microsoft",
-                    "start_url": "/account/login",
+                    "start_url": "/auth/login",
                 }
             ],
             "mcp_url": f"{BASE}/mcp",
@@ -1719,7 +1719,7 @@ def wt_rig_with(r: WtRig, *, ceiling: set[str]) -> Api:
     from starlette.applications import Starlette
     from starlette.testclient import TestClient
 
-    from canvas_mcp.core.selfhost.account_web import build_account_routes
+    from canvas_mcp.core.selfhost.account_core import build_account_routes
 
     async def listing() -> list[str]:
         return list(REGISTERED)

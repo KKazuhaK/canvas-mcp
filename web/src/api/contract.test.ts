@@ -14,7 +14,7 @@ const KEYS = [...contract.matchAll(/^\s*'((?:GET|POST|PUT|PATCH|DELETE) \/[^']*)
 
 describe('api/contract.ts', () => {
   it('lists the routes of the server (and nothing for the sign-in itself)', () => {
-    expect(KEYS).toHaveLength(33)
+    expect(KEYS).toHaveLength(39)
     expect(new Set(KEYS).size).toBe(KEYS.length)
     for (const key of KEYS) {
       expect(key, key).not.toMatch(/login\//)

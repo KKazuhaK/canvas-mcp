@@ -20,7 +20,7 @@ import PublicLayout from '@/layouts/PublicLayout'
 import { useConsent, useDecideConsent, useMe } from '@/query/hooks'
 import { safeAppRedirect, TXN_PATTERN, consentLoginPath } from '@/utils/appRedirect'
 import { hardNavigate } from '@/utils/navigate'
-import { FullPageLoading, NotFoundNotice } from './StateViews'
+import { FullPageLoading } from './StateViews'
 
 /** Only a failure that may pass is worth another try: a used, expired or foreign request never comes back. */
 function retryable(error: unknown): boolean {
@@ -236,13 +236,6 @@ export default function ConsentView() {
     return (
       <PublicLayout>
         <RequestNotice error={me.error} onRetry={retryable(me.error) ? () => void me.refetch() : undefined} />
-      </PublicLayout>
-    )
-  }
-  if (!me.data.features.consent) {
-    return (
-      <PublicLayout>
-        <NotFoundNotice />
       </PublicLayout>
     )
   }

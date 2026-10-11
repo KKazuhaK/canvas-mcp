@@ -109,10 +109,8 @@ def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNam
         "ENTRA_TENANT_ID": TENANT,
         "ENTRA_CLIENT_ID": CLIENT,
         "ENTRA_CLIENT_SECRET": "entra-client-secret-0123456789",
-        "OAUTH_JWT_SIGNING_KEY": "jwt-signing-key-" + "z" * 40,
         "ACCOUNT_SESSION_SECRET": base64.b64encode(bytes(range(32))).decode(),
         "CANVAS_TOKEN_KEYS": "k1:" + base64.b64encode(bytes(32)).decode(),
-        "FASTMCP_HOME": str(tmp_path / "fastmcp"),
         "SELFHOST_DATA_DIR": str(tmp_path / "data"),
         **stack_env(),
     })

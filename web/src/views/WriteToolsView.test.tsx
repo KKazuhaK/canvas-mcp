@@ -102,7 +102,7 @@ describe('WriteToolsView', () => {
     expect(screen.queryByRole('button', { name: 'Turn all off' })).toBeNull()
   })
 
-  it('asks for a fresh sign-in to turn a tool on, and goes to /account/login with a return_to', async () => {
+  it('asks for a fresh sign-in to turn a tool on, and goes to /auth/login with a return_to', async () => {
     const user = userEvent.setup()
     await renderApp('/write-tools', 'stale-owner')
     await user.click(await screen.findByRole('switch', { name: 'Submit assignment' }))
@@ -112,7 +112,7 @@ describe('WriteToolsView', () => {
     expect(alert).toHaveTextContent('Sign in again to continue')
     expect(alert).toHaveTextContent('last 10 minutes')
     await user.click(within(alert).getByRole('button', { name: 'Sign in again' }))
-    expect(hardNavigate).toHaveBeenCalledWith('/account/login?return_to=%2Faccount%2Fwrite-tools')
+    expect(hardNavigate).toHaveBeenCalledWith('/auth/login?return_to=%2Faccount%2Fwrite-tools')
   })
 
   it('does not stack the browser leave-site prompt on the sign-in-again button, and says what is lost', async () => {

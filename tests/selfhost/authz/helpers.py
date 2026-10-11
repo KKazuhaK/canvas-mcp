@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
 from canvas_mcp.core.selfhost.authz import tokens as tk
 from canvas_mcp.core.selfhost.authz.store import AuthzStore
+from canvas_mcp.core.selfhost.db.types import new_id
 from canvas_mcp.core.selfhost.settings import AuthzSettings
 from canvas_mcp.core.selfhost.token_store import TokenStore
 
@@ -32,11 +32,11 @@ class Env:
 
     @property
     def account_id(self) -> str:
-        return self.account_key.removeprefix("acct:")
+        return self.account_key
 
     def epoch(self, account_id: str | None = None) -> int:
         """The current ``session_epoch`` of an account (the one a fresh sign-in would carry)."""
-        return self.tokens.get_principal_status(f"acct:{account_id or self.account_id}").session_epoch
+        return self.tokens.get_principal_status(account_id or self.account_id).session_epoch
 
     def new_code(
         self,
@@ -78,7 +78,7 @@ class Env:
 
     def exchange(self, raw_code: str, *, client_id: str = CLIENT, refresh: bool = True) -> tuple[Any, str | None, str]:
         """Redeem a raw code; returns (result, raw refresh token, grant id used)."""
-        grant_id = str(uuid.uuid4())
+        grant_id = new_id()
         raw_refresh = tk.new_refresh_token() if refresh else None
         result = self.authz.exchange_code(
             code_hash=tk.hash_secret(raw_code),

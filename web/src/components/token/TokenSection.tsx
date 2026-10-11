@@ -11,12 +11,15 @@ import CardContent from '@mui/material/CardContent'
 import Typography from '@mui/material/Typography'
 import { useState, type ReactNode } from 'react'
 import { Trans, useTranslation } from 'react-i18next'
+import { useQueryClient } from '@tanstack/react-query'
+import { acknowledgeCanvasToken } from '@/api/endpoints'
 import type { CanvasTokenStatus } from '@/api/types'
 import ConfirmDialog from '@/components/ConfirmDialog'
+import CustodyNotice from '@/components/CustodyNotice'
 import ErrorNotice from '@/components/ErrorNotice'
 import ExternalLink from '@/components/ExternalLink'
 import TimeText from '@/components/TimeText'
-import { useDeleteCanvasToken, useRecheckCanvasToken } from '@/query/hooks'
+import { refreshAfterTokenChange, useDeleteCanvasToken, useRecheckCanvasToken } from '@/query/hooks'
 import { useDisplayZone } from '@/stores/displayZone'
 import { useLanguage } from '@/stores/language'
 import { useToast } from '@/stores/toast'
@@ -226,11 +229,39 @@ function ExpiryBanner({ canvas }: { canvas: CanvasTokenStatus }) {
 }
 
 /** The Canvas token UI for every enrollment state. Shared by the home page and /token. */
+function AcknowledgeCard({ version }: { version: number }) {
+  const { t, i18n } = useTranslation()
+  const client = useQueryClient()
+  const [checked, setChecked] = useState(false)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  async function acknowledge() {
+    if (!checked || !i18n.exists(`account:custody.v${version}`)) return
+    setPending(true)
+    setError(null)
+    try {
+      await acknowledgeCanvasToken(version)
+    } catch (failure) {
+      setChecked(false)
+      setError(failure)
+    } finally {
+      await refreshAfterTokenChange(client)
+      setPending(false)
+    }
+  }
+  return <Card><CardContent sx={{ display: 'grid', gap: 2 }}>
+    <CustodyNotice version={version} checked={checked} onChange={setChecked} disabled={pending} />
+    {error ? <ErrorNotice error={error} /> : null}
+    <Button variant="contained" disabled={!checked || pending} onClick={() => void acknowledge()}>{t('account:custody.acknowledge')}</Button>
+  </CardContent></Card>
+}
+
 export default function TokenSection({ canvas }: { canvas: CanvasTokenStatus }) {
   if (canvas.state === 'none') return <EnrollCard />
 
   return (
     <Box sx={{ display: 'grid', gap: 2 }}>
+      {!canvas.custody.current ? <AcknowledgeCard key={canvas.custody.notice_version} version={canvas.custody.notice_version} /> : null}
       {canvas.state === 'invalid' ? <InvalidBanner canvas={canvas} /> : null}
       <ExpiryBanner canvas={canvas} />
       <EnrolledCard canvas={canvas} />

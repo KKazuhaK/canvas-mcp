@@ -1,4 +1,4 @@
-"""The sign-in methods in the JSON API (``/account/api/me/identities`` and ``/admin/identities``).
+"""The sign-in methods in the JSON API (``/api/v1/me/identities`` and ``/admin/identities``).
 
 They exist for a server with two or more sign-in providers (local mode). Everywhere else every
 one of them answers ``not_found`` before any other check, so an Entra-only server is unchanged.
@@ -17,13 +17,13 @@ from canvas_mcp.core.selfhost import account_api
 from canvas_mcp.core.selfhost import account_web as web
 
 from ..authz.stack import ALICE, BOB, OWNER, Browser, User
+from ..spa_fixture import make_dist
 from ..test_account_api_parity import (
     LEGACY_TO_API,
     LINKING_LEGACY_TO_API,
     LOCAL_LEGACY_TO_API,
     READ_MODELS,
 )
-from ..test_account_spa import make_dist
 from .fake_idp import IdpUser
 from .stack_providers import ProviderStack, provider_stack, query_of
 from .test_entra_only_golden import account_app
@@ -37,7 +37,7 @@ PREFIX = "https://github.com/login/oauth/authorize?"
 
 @pytest.fixture
 def ps(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
-    env = {"ACCOUNT_UI": "react", "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist"))}
+    env = { "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist"))}
     with provider_stack(tmp_path / "app", monkeypatch, env=env) as stack:
         yield stack
 
@@ -89,7 +89,7 @@ def owner(ps: ProviderStack) -> Spa:
     if ps.stack.settings.login_providers.order == ("entra",):
         # Entra alone keeps its single start path.
         browser = Browser(ps.stack, client=person.client, react=True)
-        assert browser.entra_login(OWNER, browser.get("/account/login")).status_code == 303
+        assert browser.entra_login(OWNER, browser.get("/auth/login")).status_code == 303
     else:
         assert person.sign_in_entra(OWNER).status_code == 303
     return Spa(ps, person)
@@ -115,7 +115,7 @@ class TestAbsentWithoutLinking:
     def test_every_route_is_not_found_before_anything_else(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, mode: str
     ) -> None:
-        env = {"ACCOUNT_UI": "react", "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist"))}
+        env = { "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist"))}
         providers = "google" if mode == "one_provider" else "entra"
         with provider_stack(tmp_path / "app", monkeypatch, providers=providers, env=env) as ps:
             person = ps.person()
@@ -132,19 +132,19 @@ class TestAbsentWithoutLinking:
             # Not even a session, a CSRF token or an Origin is asked for first.
             anonymous = ps.person()
             for method, path in self.PATHS:
-                response = anonymous.client.request(method, "/account/api" + path)
+                response = anonymous.client.request(method, "/api/v1" + path)
                 assert code_of(response, 404) == "not_found", (method, path)
 
     def test_the_admin_account_views_have_no_identities_key_with_entra_alone(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        env = {"ACCOUNT_UI": "react", "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist"))}
+        env = { "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist"))}
         with provider_stack(tmp_path / "app", monkeypatch, providers="entra", env=env) as ps:
             admin = owner(ps)
             accounts = admin.get("/admin/accounts").json()["accounts"]
             assert accounts and all("identities" not in account for account in accounts)
             assert admin.get("/providers").json()["providers"] == [
-                {"id": "entra", "kind": "oidc", "name": "Microsoft", "icon": "microsoft", "start_url": "/account/login"}
+                {"id": "entra", "kind": "oidc", "name": "Microsoft", "icon": "microsoft", "start_url": "/auth/login"}
             ]
 
 
@@ -156,13 +156,13 @@ class TestRouteTables:
             app = account_app(ps.stack)
             legacy = {(method, path) for path, handlers in app.route_table() for method in handlers}
             sign_in_halves = {
-                ("GET", "/account/login/entra"),
-                ("GET", "/account/login/google"),
-                ("GET", "/account/callback/google"),
-                ("GET", "/account/login/github"),
-                ("GET", "/account/callback/github"),
-                ("GET", "/account/login/oidc/school"),
-                ("GET", "/account/callback/oidc/school"),
+                ("GET", "/auth/login/entra"),
+                ("GET", "/auth/login/google"),
+                ("GET", "/auth/callback/google"),
+                ("GET", "/auth/login/github"),
+                ("GET", "/auth/callback/github"),
+                ("GET", "/auth/login/oidc/school"),
+                ("GET", "/auth/callback/oidc/school"),
                 ("GET", web.SIGN_IN_METHODS_PATH),  # read model: GET /me/identities
             }
             assert legacy == set(LEGACY_TO_API) | set(LOCAL_LEGACY_TO_API) | set(LINKING_LEGACY_TO_API) | sign_in_halves
@@ -170,7 +170,7 @@ class TestRouteTables:
             for targets in LINKING_LEGACY_TO_API.values():
                 for target in targets:
                     assert target in registered, target
-            assert ("GET", "/account/api/me/identities") in registered and ("GET", "/account/api/me/identities") in READ_MODELS
+            assert ("GET", "/api/v1/me/identities") in registered and ("GET", "/api/v1/me/identities") in READ_MODELS
 
     def test_the_page_a_link_returns_to_is_the_single_page_app(self, ps: ProviderStack) -> None:
         spa = alice(ps)
@@ -182,13 +182,13 @@ class TestRouteTables:
         self, ps: ProviderStack
     ) -> None:
         paths = {getattr(r, "path", "") for r in ps.stack.mcp._additional_http_routes}
-        assert {"/account/login", "/account/callback", "/account/login/entra", "/account/login/google",
-                "/account/callback/google", "/account/login/github", "/account/callback/github",
-                "/account/login/oidc/school", "/account/callback/oidc/school"} <= paths
+        assert {"/auth/login", "/auth/callback/entra", "/auth/login/entra", "/auth/login/google",
+                "/auth/callback/google", "/auth/login/github", "/auth/callback/github",
+                "/auth/login/oidc/school", "/auth/callback/oidc/school"} <= paths
         assert not {"/account/identities/link", "/account/identities/unlink", "/account/sign-in-methods"} & paths
-        api = {p for p in paths if p.startswith("/account/api")}
-        assert {"/account/api/me/identities", "/account/api/me/identities/link",
-                "/account/api/me/identities/{id}", "/account/api/admin/identities/{id}"} <= api
+        api = {p for p in paths if p.startswith("/api/v1")}
+        assert {"/api/v1/me/identities", "/api/v1/me/identities/link",
+                "/api/v1/me/identities/{id}", "/api/v1/admin/identities/{id}"} <= api
 
 
 # -- the list ---------------------------------------------------------------------------------------
@@ -221,7 +221,7 @@ class TestList:
         response = spa.get("/me/identities")
         assert response.headers["cache-control"] == "no-store"
         anonymous = ps.person()
-        assert code_of(anonymous.client.get("/account/api/me/identities"), 401) == "not_authenticated"
+        assert code_of(anonymous.client.get("/api/v1/me/identities"), 401) == "not_authenticated"
 
     def test_a_cross_site_read_is_refused(self, ps: ProviderStack) -> None:
         spa = alice(ps)
@@ -229,7 +229,7 @@ class TestList:
         assert code_of(response, 403) == "origin_not_allowed"
 
     def test_a_waiting_account_is_told_so(self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        env = {"ACCOUNT_UI": "react", "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist"))}
+        env = { "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist"))}
         policy = {"ACCESS_POLICY": "approval", "ACCESS_OPEN_ACKNOWLEDGE_PUBLIC": "true"}
         with provider_stack(tmp_path / "app", monkeypatch, env=env, policy=policy) as ps:
             person = ps.person()
@@ -339,7 +339,7 @@ class TestLink:
         )
         assert site.status_code == 403
         form = spa.person.client.post(
-            "/account/api/me/identities/link", data={"provider": "github"},
+            "/api/v1/me/identities/link", data={"provider": "github"},
             headers={"Origin": "https://canvas.example.test", "X-CSRF-Token": csrf},
         )
         assert code_of(form, 415) == "unsupported_media_type"
@@ -387,7 +387,7 @@ class TestLink:
     def test_the_rules_decide_what_may_be_attached(self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from .fake_idp import GitHubUser
 
-        env = {"ACCOUNT_UI": "react", "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist"))}
+        env = { "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist"))}
         policy = {"ACCESS_POLICY": "rules", "ACCESS_RULES": "entra:role:Canvas.User,github:user:583231"}
         with provider_stack(tmp_path / "app", monkeypatch, env=env, policy=policy) as ps:
             spa = alice(ps)

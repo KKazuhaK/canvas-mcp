@@ -47,22 +47,22 @@ class TestChooser:
         txn = query_of(login)["txn"]
         page = person.get(login)
         assert page.status_code == 200 and "Sign in with Google" in page.text
-        assert f'href="/account/login?txn={txn}&amp;lang=zh"' in page.text
+        assert f'href="/auth/login?txn={txn}&amp;lang=zh"' in page.text
         page = person.get(login + "&reauth=1")
-        assert f'href="/account/login?txn={txn}&amp;reauth=1&amp;lang=zh"' in page.text
+        assert f'href="/auth/login?txn={txn}&amp;reauth=1&amp;lang=zh"' in page.text
         # The buttons carry the request id too (this is what the toggle must not lose).
-        assert f'href="/account/login/google?txn={txn}"' in person.get(login).text
+        assert f'href="/auth/login/google?txn={txn}"' in person.get(login).text
 
     def test_the_toggle_never_reflects_a_value_that_is_not_a_request_id(self, ps: ProviderStack) -> None:
         person = ps.person()
-        page = person.get("/account/login", params={"txn": "<script>alert(1)</script>"})
+        page = person.get("/auth/login", params={"txn": "<script>alert(1)</script>"})
         assert "<script>alert" not in page.text
         assert "txn=" not in re.findall(r'href="([^"]*lang=zh[^"]*)"', page.text)[0]
-        plain = person.get("/account/login")
-        assert 'href="/account/login?lang=zh"' in plain.text
+        plain = person.get("/auth/login")
+        assert 'href="/auth/login?lang=zh"' in plain.text
 
     def test_every_provider_has_an_inline_icon_and_nothing_is_fetched(self, ps: ProviderStack) -> None:
-        page = ps.person().get("/account/login")
+        page = ps.person().get("/auth/login")
         assert page.status_code == 200
         buttons = re.findall(r'<a class="btn provider"[^>]*>(.*?)</a>', page.text, re.S)
         assert len(buttons) == 4
@@ -75,7 +75,7 @@ class TestChooser:
         assert "img-src" not in page.headers["content-security-policy"] or "'self'" in page.headers["content-security-policy"]
 
     def test_the_chooser_in_chinese(self, ps: ProviderStack) -> None:
-        page = ps.person().get("/account/login", params={"lang": "zh"})
+        page = ps.person().get("/auth/login", params={"lang": "zh"})
         # "Sign in with Google" in Chinese (built from code points: this file is English).
         assert cjk(0x4f7f, 0x7528, " Google ", 0x767b, 0x5f55) in page.text and "Sign in with Google" not in page.text
 
@@ -147,7 +147,7 @@ class TestAdminPage:
         with provider_stack(tmp_path, monkeypatch, providers="entra") as ps:
             person = ps.person()
             browser = Browser(ps.stack, client=person.client)
-            browser.entra_login(OWNER, browser.get("/account/login"))
+            browser.entra_login(OWNER, browser.get("/auth/login"))
             ps.enroll_canvas(person.account())
             page = person.get(ADMIN)
             assert "<th>Entra user</th>" in page.text and "<th>User</th>" not in page.text
@@ -187,7 +187,7 @@ class TestAccountPage:
         with provider_stack(tmp_path, monkeypatch, providers="entra") as ps:
             person = ps.person()
             browser = Browser(ps.stack, client=person.client)
-            browser.entra_login(OWNER, browser.get("/account/login"))
+            browser.entra_login(OWNER, browser.get("/auth/login"))
             assert 'id="sign-in-methods"' not in person.get("/account").text
 
     def test_a_single_non_entra_provider_has_no_card_either(

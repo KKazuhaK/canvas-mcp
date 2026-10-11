@@ -95,14 +95,14 @@ class TestProviderErrors:
     def test_error_comes_before_the_state_check(self, ps: ProviderStack, provider: str) -> None:
         person = ps.person()
         response = person.get(
-            f"/account/callback/{'oidc/school' if provider == 'school' else provider}",
+            f"/auth/callback/entra/{'oidc/school' if provider == 'school' else provider}",
             params={"error": "access_denied", "state": "forged"},
         )
         assert response.status_code == 403  # the provider's refusal, not state_invalid
 
     def test_odd_error_values_are_not_echoed(self, ps: ProviderStack, provider: str) -> None:
         person = ps.person()
-        path = f"/account/callback/{'oidc/school' if provider == 'school' else provider}"
+        path = f"/auth/callback/entra/{'oidc/school' if provider == 'school' else provider}"
         response = person.get(path, params={"error": "<script>alert(1)</script>"})
         assert response.status_code == 403 and "<script>" not in response.text
 
@@ -273,13 +273,13 @@ class TestStartRoute:
     def test_the_authorize_url_is_built_from_the_configured_public_url(self, ps: ProviderStack) -> None:
         person = ps.person()
         person.sign_in("google")
-        assert ps.google.last_authorize["redirect_uri"] == "https://canvas.example.test/account/callback/google"
+        assert ps.google.last_authorize["redirect_uri"] == "https://canvas.example.test/auth/callback/google"
         person.sign_in("github")
-        assert ps.github.last_authorize["redirect_uri"] == "https://canvas.example.test/account/callback/github"
+        assert ps.github.last_authorize["redirect_uri"] == "https://canvas.example.test/auth/callback/github"
 
     def test_head_is_refused_and_writes_nothing(self, ps: ProviderStack) -> None:
         rows = flow_rows(ps)
-        response = ps.stack.client.head("/account/login/google")
+        response = ps.stack.client.head("/auth/login/google")
         assert response.status_code == 405 and flow_rows(ps) == rows
 
     def test_the_rate_bucket_limits_starts_per_provider(self, ps: ProviderStack) -> None:
@@ -289,20 +289,20 @@ class TestStartRoute:
         bucket = account_app(ps.stack).logins.start_buckets["github"]
         while bucket.take() == 0:
             pass
-        assert client.get("/account/login/github").status_code == 429
-        assert client.get("/account/login/google").status_code == 302  # another provider's bucket
+        assert client.get("/auth/login/github").status_code == 429
+        assert client.get("/auth/login/google").status_code == 302  # another provider's bucket
         ps.clock.advance(3)
-        assert client.get("/account/login/github").status_code == 302
+        assert client.get("/auth/login/github").status_code == 302
 
     def test_discovery_down_is_a_provider_error_and_writes_no_row(self, ps: ProviderStack) -> None:
         ps.net.blocked.add("idp.example.edu")
         rows = flow_rows(ps)
-        response = ps.stack.client.get("/account/login/oidc/school")
+        response = ps.stack.client.get("/auth/login/oidc/school")
         assert response.status_code == 502 and "idp.example.edu" not in response.text
         assert flow_rows(ps) == rows
 
     def test_the_flow_cookie_is_host_prefixed_sealed_and_short_lived(self, ps: ProviderStack) -> None:
-        response = ps.stack.new_client().get("/account/login/google")
+        response = ps.stack.new_client().get("/auth/login/google")
         header = next(h for h in response.headers.get_list("set-cookie") if h.startswith(COOKIE))
         for needle in ("Secure", "HttpOnly", "SameSite=lax", "Path=/", "Max-Age=600"):
             assert needle.lower() in header.lower(), header
@@ -319,12 +319,12 @@ class TestStartRoute:
         response = owner.start(ps.stack.authorize_params(client_id, challenge))
         txn = query_of(response.headers["location"])["txn"]
         stranger = ps.person()
-        refused = stranger.get(f"/account/login/google?txn={txn}")
+        refused = stranger.get(f"/auth/login/google?txn={txn}")
         assert refused.status_code == 400 and "expired or was opened in another browser" in refused.text
         assert ps.google.counts["token"] == 0
 
     def test_a_malformed_return_to_or_reauth_is_not_carried(self, ps: ProviderStack) -> None:
-        response = ps.stack.client.get("/account/login", params={"return_to": "//evil.example", "reauth": "yes"})
+        response = ps.stack.client.get("/auth/login", params={"return_to": "//evil.example", "reauth": "yes"})
         assert response.status_code == 200  # the chooser, with links that carry nothing
         assert "evil.example" not in response.text
 

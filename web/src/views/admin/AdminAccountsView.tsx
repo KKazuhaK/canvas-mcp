@@ -1,3 +1,4 @@
+import LoadMore from '@/components/LoadMore'
 import Box from '@mui/material/Box'
 import Chip from '@mui/material/Chip'
 import MenuItem from '@mui/material/MenuItem'
@@ -13,7 +14,7 @@ import ErrorNotice from '@/components/ErrorNotice'
 import ResponsiveTable, { type Column } from '@/components/ResponsiveTable'
 import { AccountStatusChip, DisabledSince, TokenStateChip } from '@/components/StatusChips'
 import TimeText from '@/components/TimeText'
-import { useAdminAccounts, useMe } from '@/query/hooks'
+import { useAdminAccounts } from '@/query/hooks'
 import { PageSkeleton } from '../StateViews'
 
 function Details({ account }: { account: AdminAccount }) {
@@ -67,8 +68,6 @@ export default function AdminAccountsView() {
   const [status, setStatus] = useState<AdminStatusFilter | ''>('')
   const [search, setSearch] = useState('')
   const accounts = useAdminAccounts(status)
-  // Only with the server's own authorization server: then an account may have connected apps.
-  const connectedApps = useMe().data?.features.connected_apps === true
 
   const needle = search.trim().toLowerCase()
   const rows = (accounts.data?.accounts ?? []).filter(
@@ -132,7 +131,7 @@ export default function AdminAccountsView() {
       render: (a) => (
         <Box sx={{ display: 'grid', gap: 0.5, justifyItems: 'start' }}>
           <AdminActions account={a} />
-          {connectedApps && a.status === 'active' ? <AccountApps account={a} /> : null}
+          {a.status === 'active' ? <AccountApps account={a} /> : null}
         </Box>
       ),
     },
@@ -161,6 +160,7 @@ export default function AdminAccountsView() {
           size="small"
           type="search"
           label={t('admin:accounts.search')}
+          helperText={t('admin:accounts.searchScope')}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           sx={{ flex: '1 1 220px' }}
@@ -197,6 +197,7 @@ export default function AdminAccountsView() {
           rowKey={(a) => a.id}
         />
       ) : null}
+      <LoadMore query={accounts} />
     </>
   )
 }

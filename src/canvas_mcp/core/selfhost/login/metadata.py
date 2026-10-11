@@ -21,7 +21,18 @@ from .http import CAP_DISCOVERY, SafeHttp, UpstreamError
 
 #: Signature algorithms the server will verify. ``none`` and the HMAC family are never allowed.
 ALLOWED_ALGS = frozenset(
-    {"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"}
+    {
+        "RS256",
+        "RS384",
+        "RS512",
+        "PS256",
+        "PS384",
+        "PS512",
+        "ES256",
+        "ES384",
+        "ES512",
+        "EdDSA",
+    }
 )
 
 TTL_DEFAULT_S = 3600
@@ -29,10 +40,12 @@ TTL_MIN_S = 300
 TTL_MAX_S = 86400
 STALE_IF_ERROR_S = 86400
 #: RFC 9207 metadata member (written in two pieces to keep the long name readable).
-ISS_PARAM_KEY = "authorization_response_iss_" "parameter_supported"
+ISS_PARAM_KEY = "authorization_response_iss_parameter_supported"
 FAILURE_BACKOFF_S = 30
 
-_MAX_AGE_RE = re.compile(r"(?:^|[,\s])max-age\s*=\s*(\d{1,9})(?:[,\s]|$)", re.IGNORECASE)
+_MAX_AGE_RE = re.compile(
+    r"(?:^|[,\s])max-age\s*=\s*(\d{1,9})(?:[,\s]|$)", re.IGNORECASE
+)
 
 
 class ProviderUnavailable(Exception):

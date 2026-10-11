@@ -24,7 +24,7 @@ from starlette.testclient import TestClient
 
 from canvas_mcp.core.selfhost import account_web
 from canvas_mcp.core.selfhost import accounts as acc
-from canvas_mcp.core.selfhost.account_web import (
+from canvas_mcp.core.selfhost.account_core import (
     ACCOUNT_CALLBACK_PATH,
     ACCOUNT_PATH,
     LOGIN_COOKIE,
@@ -188,7 +188,7 @@ def h(tmp_path: pathlib.Path) -> Harness:
 
 
 def login_params(h: Harness) -> dict[str, str]:
-    response = h.client.get("/account/login")
+    response = h.client.get("/auth/login")
     assert response.status_code == 302
     query = parse_qs(urlparse(response.headers["location"]).query)
     return {k: v[0] for k, v in query.items()}
@@ -278,7 +278,7 @@ class TestSignedOut:
         response = h.client.get(ACCOUNT_PATH)
         assert response.status_code == 200
         assert_security_headers(response)
-        assert 'href="/account/login"' in response.text
+        assert 'href="/auth/login"' in response.text
         assert f"{BASE}/mcp" in response.text
         assert "<script" not in response.text.lower()
         assert 'name="canvas_token"' not in response.text
@@ -286,7 +286,7 @@ class TestSignedOut:
     def test_every_kind_of_response_carries_the_headers(self, h: Harness) -> None:
         responses = [
             h.client.get(ACCOUNT_PATH),
-            h.client.get("/account/login"),  # 302
+            h.client.get("/auth/login"),  # 302
             h.client.get(ACCOUNT_CALLBACK_PATH),  # 400
             h.client.post("/account/token", headers=ORIGIN),  # 303 (no session)
             h.client.get("/account/admin"),  # 403
@@ -301,8 +301,8 @@ class TestSignedOut:
         "path",
         [
             "/account",
-            "/account/login",
-            "/account/callback",
+            "/auth/login",
+            "/auth/callback/entra",
             "/account/token",
             "/account/token/delete",
             "/account/logout",
@@ -327,7 +327,7 @@ class TestSignedOut:
 
 class TestLogin:
     def test_redirect_parameters(self, h: Harness) -> None:
-        response = h.client.get("/account/login")
+        response = h.client.get("/auth/login")
         assert response.status_code == 302
         location = urlparse(response.headers["location"])
         assert location.scheme == "https"
@@ -336,7 +336,7 @@ class TestLogin:
         q = {k: v[0] for k, v in parse_qs(location.query).items()}
         assert q["client_id"] == CLIENT_ID
         assert q["response_type"] == "code"
-        assert q["redirect_uri"] == f"{BASE}/account/callback"
+        assert q["redirect_uri"] == f"{BASE}/auth/callback/entra"
         assert q["response_mode"] == "query"
         assert q["scope"] == "openid profile"
         assert q["code_challenge_method"] == "S256"
@@ -347,7 +347,7 @@ class TestLogin:
         assert "client_secret" not in location.query
 
     def test_login_cookie_flags_and_pkce_binding(self, h: Harness) -> None:
-        response = h.client.get("/account/login")
+        response = h.client.get("/auth/login")
         params = {
             k: v[0]
             for k, v in parse_qs(urlparse(response.headers["location"]).query).items()
@@ -493,7 +493,7 @@ class TestCallback:
         assert form["client_secret"] == CLIENT_SECRET
         assert form["grant_type"] == "authorization_code"
         assert form["code"] == "the-code"
-        assert form["redirect_uri"] == f"{BASE}/account/callback"
+        assert form["redirect_uri"] == f"{BASE}/auth/callback/entra"
         assert form["scope"] == "openid profile"
         digest = hashlib.sha256(form["code_verifier"].encode()).digest()
         challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
@@ -564,7 +564,7 @@ class TestCallback:
             clock=h.clock,
         )
         client = TestClient(Starlette(routes=routes), base_url=BASE, follow_redirects=False)
-        location = client.get("/account/login").headers["location"]
+        location = client.get("/auth/login").headers["location"]
         q = parse_qs(urlparse(location).query)
         h.claims = {
             "tid": TID, "oid": OID, "nonce": q["nonce"][0],
@@ -698,7 +698,7 @@ class TestSession:
             clock=h.clock,
         )
         client = TestClient(Starlette(routes=routes), base_url=BASE, follow_redirects=False)
-        q = parse_qs(urlparse(client.get("/account/login").headers["location"]).query)
+        q = parse_qs(urlparse(client.get("/auth/login").headers["location"]).query)
         h.claims = {
             "tid": TID, "oid": OID, "roles": ["Canvas.User"], "nonce": q["nonce"][0],
             "iat": int(h.now), "exp": int(h.now) + 3600,
@@ -1588,7 +1588,7 @@ class TestLanguageToggle:
                     "/account/admin",
                     "/account/admin?lang=zh",
                     "/account/admin?lang=en",
-                    "/account/login",
+                    "/auth/login",
                 }, href
 
     def test_header_for_signed_in_users(self, h: Harness) -> None:
@@ -1883,8 +1883,8 @@ class TestRegistration:
         paths = {route.path for route in mcp._additional_http_routes}  # type: ignore[attr-defined]
         assert paths == {
             "/account",
-            "/account/login",
-            "/account/callback",
+            "/auth/login",
+            "/auth/callback/entra",
             "/account/token",
             "/account/token/delete",
             "/account/token/recheck",

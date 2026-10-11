@@ -176,9 +176,9 @@ class TestStore:
 # ---------------------------------------------------------------------------- the whole stack
 
 
-@pytest.fixture(params=["html", "react"])
-def any_stack(request: pytest.FixtureRequest) -> Stack:
-    return request.getfixturevalue("stack" if request.param == "html" else "react_stack")  # type: ignore[no-any-return]
+@pytest.fixture
+def any_stack(react_stack: Stack) -> Stack:
+    return react_stack
 
 
 def redeem(stack: Stack, client_id: str, verifier: str, code: str):
@@ -224,7 +224,7 @@ class TestWholeStack:
         client_id, verifier, code, _ = stack.code_for(ALICE)
         epoch = stack.store.get_principal_status(key).session_epoch
         elsewhere = Browser(stack)
-        refused = elsewhere.entra_login(replace(ALICE, roles=()), elsewhere.get("/account/login"))
+        refused = elsewhere.entra_login(replace(ALICE, roles=()), elsewhere.get("/auth/login"))
         assert refused.status_code in (303, 403)  # the page, or the sign-in page of the single-page UI
         status = stack.store.get_principal_status(key)
         assert status.active and status.session_epoch == epoch + 1  # the loss of admission ended the sessions
@@ -295,7 +295,9 @@ class TestWholeStack:
         verifier, challenge = pkce()
         # the old session is gone: the request goes through the identity provider again
         start = browser.start(stack.authorize_params(client_id, challenge))
-        login = browser.get(start.headers["location"])
+        choice = browser.get(start.headers["location"])
+        assert choice.status_code == 303
+        login = browser.get(choice.headers["location"])
         assert login.status_code == 302 and "login.microsoftonline.com" in login.headers["location"]
         landed = browser.connect(stack.authorize_params(client_id, challenge), ALICE)
         response = redeem(stack, client_id, verifier, landed.query["code"])

@@ -31,7 +31,17 @@ SKEW_SECONDS = 600
 
 REASONS = frozenset(
     {
-        "malformed", "alg", "kid", "signature", "iss", "aud", "azp", "exp", "iat", "nbf", "nonce",
+        "malformed",
+        "alg",
+        "kid",
+        "signature",
+        "iss",
+        "aud",
+        "azp",
+        "exp",
+        "iat",
+        "nbf",
+        "nonce",
         "sub",
     }
 )
@@ -81,7 +91,9 @@ def peek_header(raw: str) -> dict[str, Any]:
         raise IdTokenRejected("malformed")
     try:
         header = json.loads(
-            base64.urlsafe_b64decode(parts[0] + "=" * (-len(parts[0]) % 4)).decode("utf-8"),
+            base64.urlsafe_b64decode(parts[0] + "=" * (-len(parts[0]) % 4)).decode(
+                "utf-8"
+            ),
             object_pairs_hook=_pairs,
             parse_constant=_refuse,
         )
@@ -143,7 +155,9 @@ def verify_id_token(
         raise IdTokenRejected("signature") from None
     claims: dict[str, Any] = dict(token.claims)
 
-    if not (isinstance(claims.get("iss"), str) and claims["iss"] in set(accepted_issuers)):
+    if not (
+        isinstance(claims.get("iss"), str) and claims["iss"] in set(accepted_issuers)
+    ):
         raise IdTokenRejected("iss")
     _check_audience(claims, client_id)
     exp = _number(claims.get("exp"))

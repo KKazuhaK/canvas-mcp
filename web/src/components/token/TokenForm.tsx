@@ -4,14 +4,15 @@ import Button from '@mui/material/Button'
 import Skeleton from '@mui/material/Skeleton'
 import TextField from '@mui/material/TextField'
 import { useQueryClient } from '@tanstack/react-query'
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { putCanvasToken } from '@/api/endpoints'
 import { ApiError, toApiError } from '@/api/errors'
 import type { CanvasTokenRequest } from '@/api/types'
 import ConfirmDialog from '@/components/ConfirmDialog'
+import CustodyNotice from '@/components/CustodyNotice'
 import ErrorNotice from '@/components/ErrorNotice'
-import { refreshAfterTokenChange, useSchools } from '@/query/hooks'
+import { refreshAfterTokenChange, useMe, useSchools } from '@/query/hooks'
 import { useToast } from '@/stores/toast'
 import { TOKEN_MAX_LENGTH, TOKEN_MIN_LENGTH, checkTokenShape } from '@/utils/tokenInput'
 import SchoolPicker, { initialSelection, type SchoolSelection } from './SchoolPicker'
@@ -36,8 +37,8 @@ function isExpiryRefusal(error: unknown): boolean {
   )
 }
 
-function asText(value: string | number | undefined): string {
-  return value === undefined ? '' : String(value)
+function asText(value: unknown): string {
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
 }
 
 /**
@@ -59,8 +60,13 @@ export default function TokenForm({
   submitLabel: string
   onSaved?: () => void
 }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const client = useQueryClient()
+  const me = useMe()
+  const noticeVersion = me.data?.canvas?.custody.notice_version
+  const [acknowledged, setAcknowledged] = useState(false)
+  const noticeAvailable = noticeVersion !== undefined && i18n.exists(`account:custody.v${noticeVersion}`)
+  useEffect(() => { setAcknowledged(false) }, [noticeVersion])
   const schools = useSchools()
   const [value, setValue] = useState('')
   const [expiresOn, setExpiresOn] = useState('')
@@ -72,10 +78,11 @@ export default function TokenForm({
   const schoolData = schools.data
   const picker = schoolData?.mode === 'picker'
   const selection = picked !== undefined ? picked : schoolData ? initialSelection(schoolData) : null
-  const needsSchool = picker && selection === null
+  const needsSchool = schoolData?.mode === 'none' || (picker && selection === null)
   const expiryRefused = isExpiryRefusal(error)
 
   async function send(confirmation: string | null) {
+    if (!acknowledged || !noticeAvailable || noticeVersion === undefined || needsSchool) return
     const checked = checkTokenShape(value)
     if (!checked.ok) {
       setValue('')
@@ -83,7 +90,7 @@ export default function TokenForm({
       setError(new ApiError(422, checked.code))
       return
     }
-    const body: CanvasTokenRequest = { canvas_token: checked.token }
+    const body: CanvasTokenRequest = { canvas_token: checked.token, custody: { acknowledged: true, notice_version: noticeVersion } }
     if (picker && selection !== null) {
       body.school = selection.host
       if (selection.sig !== null) body.school_sig = selection.sig
@@ -113,6 +120,10 @@ export default function TokenForm({
       } else {
         setChange(null)
         setError(failure)
+        if (failure.code === 'custody_notice_outdated') {
+          setAcknowledged(false)
+          await me.refetch()
+        }
       }
     } finally {
       if (!keepToken) setValue('')
@@ -122,7 +133,7 @@ export default function TokenForm({
 
   function onSubmit(event: FormEvent) {
     event.preventDefault()
-    if (pending || needsSchool) return
+    if (pending || needsSchool || !acknowledged || !noticeAvailable) return
     void send(null)
   }
 
@@ -133,9 +144,8 @@ export default function TokenForm({
 
   return (
     <Box component="form" noValidate onSubmit={onSubmit} sx={{ display: 'grid', gap: 2 }}>
-      <Alert severity="warning" icon={false} role="note">
-        <strong>{t('account:enroll.warning')}</strong>
-      </Alert>
+      <Alert severity="warning" icon={false} role="note"><strong>{t('account:enroll.warning')}</strong></Alert>
+      {noticeVersion !== undefined ? <CustodyNotice version={noticeVersion} checked={acknowledged} onChange={setAcknowledged} disabled={pending || change !== null} /> : null}
 
       {schools.isPending ? <Skeleton variant="rounded" height={40} /> : null}
       {schools.isError ? (
@@ -191,7 +201,7 @@ export default function TokenForm({
         <Button
           type="submit"
           variant="contained"
-          disabled={pending || value.length === 0 || needsSchool || schools.isPending}
+          disabled={pending || value.length === 0 || needsSchool || schools.isPending || !acknowledged || !noticeAvailable}
         >
           {pending ? t('account:enroll.submitting') : submitLabel}
         </Button>

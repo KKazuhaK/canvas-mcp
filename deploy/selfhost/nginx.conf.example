@@ -1,10 +1,10 @@
-# nginx reverse proxy example: canvas.mcp.kazuhahub.com -> 127.0.0.1:8819
+# nginx reverse proxy example: canvas.example.com -> 127.0.0.1:8819
 # Replace the certificate paths with your own (certbot / acme.sh / a Cloudflare Origin certificate all work).
 # Put this file in conf.d/ or sites-enabled/ (it is included inside the http block),
 # so the limit_req_zone at the top can sit at the top level of the file.
 
 # Rate limiting: /register (dynamic client registration) and /authorize need no sign-in,
-# anyone can call them, and every call writes a file to the data volume. The service has
+# anyone can call them, and requests can persist short-lived SQL protocol state. The service has
 # its own process-wide limit as a backstop, but it cannot tell source IPs apart (uvicorn
 # does not trust X-Forwarded-*), so the per-IP limit has to be done here.
 # If Cloudflare is in front, $binary_remote_addr is a Cloudflare address:
@@ -13,7 +13,7 @@
 # rate-limiting rule instead (see the README).
 limit_req_zone $binary_remote_addr zone=canvas_oauth:10m rate=10r/m;
 
-# SELFHOST_AUTH_MODE=local only: /token (code exchange and every token refresh) and /revoke are
+# /token (code exchange and every token refresh) and /revoke are
 # called by the MCP clients themselves, so they get a higher per-IP limit than the entry points
 # above. claude.ai refreshes all come from Anthropic's shared egress range 160.79.104.0/21, so
 # counting that range per IP would throttle every claude.ai user at once: the geo/map pair below
@@ -30,8 +30,8 @@ map $canvas_token_exempt $canvas_token_key {
 }
 limit_req_zone $canvas_token_key zone=canvas_token:10m rate=120r/m;
 
-# The sign-in itself (/account/login, /account/login/<provider>, /account/callback and
-# /account/callback/<provider>): a browser starts one sign-in and gets one callback, so 30 a minute per
+# The sign-in itself (/auth/login, /auth/login/<provider>, /auth/callback and
+# /auth/callback/<provider>): a browser starts one sign-in and gets one callback, so 30 a minute per
 # IP is generous. It also covers the Microsoft sign-in, and people behind one address (a campus NAT, an
 # office) share the budget: raise the rate or the burst for them. The service has its own limit per
 # provider (a burst of 600, refilled at 10 a second, for the whole process) only as a backstop on the
@@ -42,7 +42,7 @@ limit_req_status 429;
 
 # Logging: the default `combined` format writes the whole request line, and the OAuth
 # redirects carry one-time values in it (/authorize?...&state=..., /auth/callback?code=..&state=..,
-# and with SELFHOST_AUTH_MODE=local the request id in /account/login?txn=.. and /account/consent?txn=..).
+# and the request id in /auth/login?txn=.. and /account/consent?txn=..).
 # Log the path only ($uri has no query string) and never the Authorization header or cookies.
 # nginx still writes the request line into error_log when an upstream error happens: keep that
 # log at `error` level, readable by root only, with short retention.
@@ -51,7 +51,7 @@ log_format canvas_safe '$remote_addr [$time_local] "$request_method $uri" $statu
 server {
     listen 80;
     listen [::]:80;
-    server_name canvas.mcp.kazuhahub.com;
+    server_name canvas.example.com;
 
     # If ACME validation uses HTTP-01, add a location /.well-known/acme-challenge/ here
     location / {
@@ -68,13 +68,13 @@ server {
     # `listen 443 ssl http2;` and `listen [::]:443 ssl http2;`.
     # HTTP/2 is not required; if you do not want the hassle, just delete the line.
     http2 on;
-    server_name canvas.mcp.kazuhahub.com;
+    server_name canvas.example.com;
 
     access_log /var/log/nginx/canvas-mcp.access.log canvas_safe;
     error_log  /var/log/nginx/canvas-mcp.error.log error;
 
-    ssl_certificate     /etc/letsencrypt/live/canvas.mcp.kazuhahub.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/canvas.mcp.kazuhahub.com/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/canvas.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/canvas.example.com/privkey.pem;
     ssl_protocols       TLSv1.2 TLSv1.3;
 
     add_header Strict-Transport-Security "max-age=31536000" always;
@@ -121,7 +121,7 @@ server {
     # The sign-in paths of every provider (the Microsoft sign-in too). ^~ keeps these prefixes from being
     # taken by a regular expression location, and the query string (code, state) never reaches the log
     # (see canvas_safe above).
-    location ^~ /account/login {
+    location ^~ /auth/ {
         limit_req zone=canvas_signin burst=20 nodelay;
         proxy_pass http://127.0.0.1:8819;
         proxy_http_version 1.1;
@@ -130,14 +130,6 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    location ^~ /account/callback {
-        limit_req zone=canvas_signin burst=20 nodelay;
-        proxy_pass http://127.0.0.1:8819;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
 
     location = /authorize {
         limit_req zone=canvas_oauth burst=5 nodelay;

@@ -1,7 +1,7 @@
 # Caddy reverse proxy example: TLS certificates are obtained and renewed automatically, and the Host header is forwarded unchanged by default.
 #
 # Rate limiting: /register (dynamic client registration) and /authorize need no sign-in,
-# and every call writes a file to the data volume. The service has a process-wide limit
+# and requests can persist short-lived SQL protocol state. The service has a process-wide limit
 # as a backstop, but it cannot tell source IPs apart, so the per-IP limit belongs in the
 # proxy layer. Standard Caddy has no rate-limit module; pick one of two options:
 #   1. Build Caddy with xcaddy including github.com/mholt/caddy-ratelimit, then enable
@@ -15,10 +15,10 @@
 # trusted_proxies together with {client_ip}, or simply use option 2.
 #
 # Logging: the sign-in flow puts one-time values in URLs (/authorize?...state=...,
-# /auth/callback?code=...&state=..., and with SELFHOST_AUTH_MODE=local the request id in
-# /account/login?txn=... and /account/consent?txn=...). The log block below blanks them, and the headers that
+# /auth/callback?code=...&state=..., and the request id in
+# /auth/login?txn=... and /account/consent?txn=...). The log block below blanks them, and the headers that
 # carry credentials, before anything is written. Keep it when you add log outputs or sinks.
-canvas.mcp.kazuhahub.com {
+canvas.example.com {
 	log {
 		output file /var/log/caddy/canvas-mcp.access.log
 		format filter {
@@ -49,7 +49,7 @@ canvas.mcp.kazuhahub.com {
 	# 	}
 	# }
 	#
-	# SELFHOST_AUTH_MODE=local also serves /token (every token refresh) and /revoke, which the MCP
+	# The local authorization server serves /token (every token refresh) and /revoke, which the MCP
 	# clients call themselves: a higher limit, and not for claude.ai's shared egress range
 	# 160.79.104.0/21, whose users would otherwise be throttled together.
 	# @oauth_token {
@@ -64,10 +64,10 @@ canvas.mcp.kazuhahub.com {
 	# 	}
 	# }
 
-	# The sign-in paths of every provider (the Microsoft sign-in too): /account/login, /account/login/<provider>,
-	# /account/callback and /account/callback/<provider>. 30 a minute per IP; people behind one address
+	# The sign-in paths of every provider (the Microsoft sign-in too): /auth/login, /auth/login/<provider>,
+	# /auth/callback and /auth/callback/<provider>. 30 a minute per IP; people behind one address
 	# (a campus NAT) share it, so raise it for them.
-	# @signin path /account/login* /account/callback*
+	# @signin path /auth/login /auth/login/* /auth/callback/*
 	# rate_limit @signin {
 	# 	zone signin {
 	# 		key    {remote_host}

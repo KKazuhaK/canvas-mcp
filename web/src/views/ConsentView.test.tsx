@@ -42,7 +42,7 @@ describe('the consent screen', () => {
     expect(screen.getByText('Ada Example')).toBeInTheDocument()
     expect(screen.getByText(/ada@example.edu/)).toBeInTheDocument()
     const link = screen.getByRole('link', { name: 'Use a different account' })
-    expect(link).toHaveAttribute('href', `/account/login?txn=${MOCK_TXN.verified}&reauth=1`)
+    expect(link).toHaveAttribute('href', `/auth/login?txn=${MOCK_TXN.verified}&reauth=1`)
   })
 
   it('warns that a self-registered app is unverified', async () => {
@@ -64,7 +64,7 @@ describe('the consent screen', () => {
     await renderApp(consentPath(MOCK_TXN.unverified), 'local', () => {
       scriptAdapter((request) =>
         request.url === '/me'
-          ? { status: 200, data: meFixture({}, { features: { ...meFixture().features, consent: true } }) }
+          ? { status: 200, data: meFixture() }
           : {
               status: 200,
               data: {
@@ -133,7 +133,7 @@ describe('the consent screen', () => {
         await renderApp(consentPath(MOCK_TXN.verified), 'local', () => {
           scriptAdapter((request) => {
             if (request.url === '/me') {
-              return { status: 200, data: meFixture({}, { features: { ...meFixture().features, consent: true } }) }
+              return { status: 200, data: meFixture() }
             }
             if (request.method === 'POST') return { status: 200, data: { redirect_to: unsafe } }
             return {
@@ -161,7 +161,7 @@ describe('the consent screen', () => {
       await renderApp(consentPath(MOCK_TXN.verified), 'local', () => {
         scriptAdapter((request) => {
           if (request.url === '/me') {
-            return { status: 200, data: meFixture({}, { features: { ...meFixture().features, consent: true } }) }
+            return { status: 200, data: meFixture() }
           }
           if (request.method === 'POST') return { status: 400, data: errorBody('authorization_invalid') }
           return {
@@ -202,7 +202,7 @@ describe('the consent screen', () => {
     it('goes to the server-side sign-in of this very request, and nothing is asked of the server', async () => {
       await renderApp(consentPath(MOCK_TXN.verified), 'signed-out')
       const seen = recordRequests()
-      await waitFor(() => expect(hardNavigate).toHaveBeenCalledWith(`/account/login?txn=${MOCK_TXN.verified}`))
+      await waitFor(() => expect(hardNavigate).toHaveBeenCalledWith(`/auth/login?txn=${MOCK_TXN.verified}`))
       expect(seen.find((request) => request.url === '/consent')).toBeUndefined()
       expect(screen.getByText('Taking you to sign in…')).toBeInTheDocument()
     })
@@ -211,11 +211,11 @@ describe('the consent screen', () => {
       const { router } = await renderApp(consentPath(MOCK_TXN.verified), 'local', () => {
         scriptAdapter((request) =>
           request.url === '/me'
-            ? { status: 200, data: meFixture({}, { features: { ...meFixture().features, consent: true } }) }
+            ? { status: 200, data: meFixture() }
             : { status: 401, data: errorBody('not_authenticated') },
         )
       })
-      await waitFor(() => expect(hardNavigate).toHaveBeenCalledWith(`/account/login?txn=${MOCK_TXN.verified}`))
+      await waitFor(() => expect(hardNavigate).toHaveBeenCalledWith(`/auth/login?txn=${MOCK_TXN.verified}`))
       expect(router.state.location.pathname).toBe('/consent')
     })
   })
@@ -226,7 +226,7 @@ describe('the consent screen', () => {
       await renderApp(consentPath(MOCK_TXN.verified), 'local', () => {
         scriptAdapter((request) => {
           if (request.url === '/me') {
-            return { status: 200, data: meFixture({}, { features: { ...meFixture().features, consent: true } }) }
+            return { status: 200, data: meFixture() }
           }
           if (request.method === 'POST') return { status: 401, data: errorBody('not_authenticated') }
           return {
@@ -243,7 +243,7 @@ describe('the consent screen', () => {
         })
       })
       await user.click(await screen.findByRole('button', { name: 'Allow' }))
-      await waitFor(() => expect(hardNavigate).toHaveBeenCalledWith(`/account/login?txn=${MOCK_TXN.verified}`))
+      await waitFor(() => expect(hardNavigate).toHaveBeenCalledWith(`/auth/login?txn=${MOCK_TXN.verified}`))
     })
   })
 
@@ -279,7 +279,7 @@ describe('the consent screen', () => {
       await renderApp(consentPath(MOCK_TXN.verified), 'local', () => {
         scriptAdapter((request) => {
           if (request.url === '/me') {
-            return { status: 200, data: meFixture({}, { features: { ...meFixture().features, consent: true } }) }
+            return { status: 200, data: meFixture() }
           }
           if (failing) return { status: 503, data: errorBody('token_store_unavailable') }
           return {
@@ -301,10 +301,9 @@ describe('the consent screen', () => {
       expect(await screen.findByRole('button', { name: 'Allow' })).toBeInTheDocument()
     })
 
-    it('is not there when the server does not serve the consent screen', async () => {
+    it('offers consent on every self-hosted deployment', async () => {
       await renderApp(consentPath(MOCK_TXN.verified), 'enrolled')
-      expect(await screen.findByText('Page not found')).toBeInTheDocument()
-      expect(screen.queryByRole('button', { name: 'Allow' })).toBeNull()
+      expect(await screen.findByRole('button', { name: 'Allow' })).toBeInTheDocument()
     })
   })
 
@@ -317,7 +316,7 @@ describe('the consent screen', () => {
     expect(await screen.findByRole('heading', { name: /^\u8981\u628a\u8fd9\u4e2a\u5e94\u7528\u8fde\u63a5\u5230\u4f60\u7684\u8d26\u6237\u5417/ })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '\u4f7f\u7528\u5176\u4ed6\u8d26\u53f7' })).toHaveAttribute(
       'href',
-      `/account/login?txn=${MOCK_TXN.verified}&reauth=1`,
+      `/auth/login?txn=${MOCK_TXN.verified}&reauth=1`,
     )
   })
 })

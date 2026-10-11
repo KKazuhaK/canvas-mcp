@@ -23,14 +23,14 @@ def ps(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def test_login_shows_a_chooser_with_every_provider_in_order_and_no_remote_image(ps: ProviderStack) -> None:
-    page = ps.stack.client.get("/account/login")
+    page = ps.stack.client.get("/auth/login")
     assert page.status_code == 200
     labels = re.findall(r'class="btn provider" href="([^"]+)">.*?<span>(.*?)</span>', page.text)
     assert labels == [
-        ("/account/login/entra", "Sign in with Microsoft"),
-        ("/account/login/google", "Sign in with Google"),
-        ("/account/login/github", "Sign in with GitHub"),
-        ("/account/login/oidc/school", "Sign in with school"),
+        ("/auth/login/entra", "Sign in with Microsoft"),
+        ("/auth/login/google", "Sign in with Google"),
+        ("/auth/login/github", "Sign in with GitHub"),
+        ("/auth/login/oidc/school", "Sign in with school"),
     ]
     assert "<img" not in page.text and "http://" not in page.text.replace("http://www.w3.org", "")
     assert page.headers["cache-control"] == "no-store"
@@ -135,10 +135,10 @@ def test_a_oidc_claim_rule(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPat
 
 def test_a_single_non_entra_provider_redirects_login_straight_to_it(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
     with provider_stack(tmp_path, monkeypatch, providers="google") as ps:
-        response = ps.stack.client.get("/account/login")
-        assert response.status_code == 303 and response.headers["location"] == "/account/login/google"
-        sub = ps.stack.client.get("/account/login", params={"reauth": "1"})
-        assert sub.headers["location"] == "/account/login/google?reauth=1"
+        response = ps.stack.client.get("/auth/login")
+        assert response.status_code == 303 and response.headers["location"] == "/auth/login/google"
+        sub = ps.stack.client.get("/auth/login", params={"reauth": "1"})
+        assert sub.headers["location"] == "/auth/login/google?reauth=1"
 
 
 def test_entra_still_signs_in_next_to_the_others(ps: ProviderStack) -> None:
@@ -150,8 +150,8 @@ def test_entra_still_signs_in_next_to_the_others(ps: ProviderStack) -> None:
 
 def test_without_entra_there_is_no_entra_callback_or_start(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
     with provider_stack(tmp_path, monkeypatch, providers="google,github") as ps:
-        for path in ("/account/callback", "/account/login/entra"):
+        for path in ("/auth/callback/entra", "/auth/login/entra"):
             assert ps.stack.client.get(path, params={"state": "x"}).status_code in (404, 405)
-        page = ps.stack.client.get("/account/login")
+        page = ps.stack.client.get("/auth/login")
         assert "Microsoft" not in page.text and "Sign in with Google" in page.text
         assert ps.stack.settings.tenant_id == "" and not ps.stack.settings.entra_enabled

@@ -46,7 +46,7 @@ class TestAuthorizeUrl:
         assert f"{parts.scheme}://{parts.netloc}{parts.path}" == "https://github.com/login/oauth/authorize"
         query = {k: v[0] for k, v in parse_qs(parts.query).items()}
         assert query == {
-            "client_id": "Iv1.0123456789abcdef", "redirect_uri": f"{BASE}/account/callback/github",
+            "client_id": "Iv1.0123456789abcdef", "redirect_uri": f"{BASE}/auth/callback/github",
             "scope": "user:email", "state": "S" * 43, "code_challenge": "C" * 43, "code_challenge_method": "S256",
         }
 
@@ -67,7 +67,7 @@ class TestAuthorizeUrl:
         provider, _ = make()
         assert provider.id == "github" and provider.kind == "oauth2" and provider.response_issuer is None
         assert not provider.requires_iss()
-        assert provider.redirect_uri == f"{BASE}/account/callback/github"
+        assert provider.redirect_uri == f"{BASE}/auth/callback/github"
         assert provider.display.icon == "github"
 
 
@@ -84,7 +84,7 @@ class TestIdentity:
         provider, gh = make()
         await sign_in(provider, gh)
         form = gh.token_requests[0]
-        assert form["redirect_uri"] == f"{BASE}/account/callback/github" and len(form["code_verifier"]) >= 43
+        assert form["redirect_uri"] == f"{BASE}/auth/callback/github" and len(form["code_verifier"]) >= 43
         assert form["client_secret"] == gh.client_secret
         methods = {(m, p) for m, p, _ in gh.api_requests}
         assert methods == {("GET", "/user"), ("GET", "/user/emails")}

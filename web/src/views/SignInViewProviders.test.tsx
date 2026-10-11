@@ -9,10 +9,10 @@ vi.mock('@/utils/navigate', () => ({ hardNavigate: vi.fn() }))
 const TXN = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO_-'
 
 const PROVIDERS = [
-  { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/account/login/entra' },
-  { id: 'google', kind: 'oidc', name: 'Google', icon: 'google', start_url: '/account/login/google' },
-  { id: 'github', kind: 'oauth2', name: 'GitHub', icon: 'github', start_url: '/account/login/github' },
-  { id: 'oidc:school', kind: 'oidc', name: 'School SSO', icon: 'key', start_url: '/account/login/oidc/school' },
+  { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/auth/login/entra' },
+  { id: 'google', kind: 'oidc', name: 'Google', icon: 'google', start_url: '/auth/login/google' },
+  { id: 'github', kind: 'oauth2', name: 'GitHub', icon: 'github', start_url: '/auth/login/github' },
+  { id: 'oidc:school', kind: 'oidc', name: 'School SSO', icon: 'key', start_url: '/auth/login/oidc/school' },
 ]
 
 beforeEach(() => {
@@ -38,10 +38,10 @@ describe('SignInView with several providers', () => {
       'Sign in with School SSO',
     ])
     expect(links.map((link) => link.getAttribute('href'))).toEqual([
-      '/account/login/entra',
-      '/account/login/google',
-      '/account/login/github',
-      '/account/login/oidc/school',
+      '/auth/login/entra',
+      '/auth/login/google',
+      '/auth/login/github',
+      '/auth/login/oidc/school',
     ])
     // Inline SVG only: nothing is fetched for the icons.
     for (const link of links) {
@@ -55,17 +55,17 @@ describe('SignInView with several providers', () => {
     const links = await screen.findAllByRole('link', { name: /Sign in with/ })
     expect(screen.getByRole('note')).toHaveTextContent('An app is waiting for you to sign in')
     expect(links.map((link) => link.getAttribute('href'))).toEqual([
-      `/account/login/entra?txn=${TXN}&reauth=1`,
-      `/account/login/google?txn=${TXN}&reauth=1`,
-      `/account/login/github?txn=${TXN}&reauth=1`,
-      `/account/login/oidc/school?txn=${TXN}&reauth=1`,
+      `/auth/login/entra?txn=${TXN}&reauth=1`,
+      `/auth/login/google?txn=${TXN}&reauth=1`,
+      `/auth/login/github?txn=${TXN}&reauth=1`,
+      `/auth/login/oidc/school?txn=${TXN}&reauth=1`,
     ])
   })
 
   it('carries a return address and no request id when no app is waiting', async () => {
     await renderApp('/sign-in?return_to=%2Faccount%2Factivity', 'signed-out', signedOutWithProviders)
     const link = await screen.findByRole('link', { name: /Sign in with GitHub/ })
-    expect(link).toHaveAttribute('href', '/account/login/github?return_to=%2Faccount%2Factivity')
+    expect(link).toHaveAttribute('href', '/auth/login/github?return_to=%2Faccount%2Factivity')
     expect(screen.queryByRole('note')).toBeNull()
   })
 
@@ -76,7 +76,7 @@ describe('SignInView with several providers', () => {
       signedOutWithProviders,
     )
     const link = await screen.findByRole('link', { name: /Sign in with Google/ })
-    expect(link).toHaveAttribute('href', '/account/login/google')
+    expect(link).toHaveAttribute('href', '/auth/login/google')
     expect(screen.queryByRole('note')).toBeNull()
   })
 
@@ -87,14 +87,14 @@ describe('SignInView with several providers', () => {
       signedOutWithProviders,
     )
     const link = await screen.findByRole('link', { name: /Sign in with Google/ })
-    expect(link).toHaveAttribute('href', `/account/login/google?txn=${TXN}`)
+    expect(link).toHaveAttribute('href', `/auth/login/google?txn=${TXN}`)
   })
 
   it('stays open for someone who is already signed in and asked for another account', async () => {
     const { router } = await renderApp('/sign-in?reauth=1', 'multi')
     const links = await screen.findAllByRole('link', { name: /Sign in with/ })
     expect(links).toHaveLength(4)
-    expect(links[1]).toHaveAttribute('href', '/account/login/google?reauth=1')
+    expect(links[1]).toHaveAttribute('href', '/auth/login/google?reauth=1')
     expect(router.state.location.pathname).toBe('/sign-in')
   })
 
@@ -154,7 +154,7 @@ describe('SignInView with several providers', () => {
               data: {
                 providers: [
                   { ...PROVIDERS[1], start_url: 'https://accounts.example.test/start' },
-                  { ...PROVIDERS[2], start_url: '/account/login/github?x=1' },
+                  { ...PROVIDERS[2], start_url: '/auth/login/github?x=1' },
                   PROVIDERS[3],
                 ],
                 mcp_url: 'https://x.test/mcp',

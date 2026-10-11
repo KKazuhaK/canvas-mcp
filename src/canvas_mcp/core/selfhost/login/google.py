@@ -22,13 +22,14 @@ from dataclasses import replace
 from typing import Any
 
 from ..accounts import GOOGLE_ISSUER, PROVIDER_GOOGLE, ExternalClaims
+from ..routes import auth_callback, auth_login
 from .config import GoogleConfig
 from .http import SafeHttp
 from .oidc import OidcLoginProvider, OidcProfile, clean_text
 from .protocol import ProviderDisplay
 
-GOOGLE_START_PATH = "/account/login/google"
-GOOGLE_CALLBACK_PATH = "/account/callback/google"
+GOOGLE_START_PATH = auth_login(PROVIDER_GOOGLE)
+GOOGLE_CALLBACK_PATH = auth_callback(PROVIDER_GOOGLE)
 GOOGLE_SCOPES = ("openid", "email", "profile")
 _GOOGLE_ISSUERS = frozenset({GOOGLE_ISSUER, "accounts.google.com"})
 

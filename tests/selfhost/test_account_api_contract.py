@@ -13,9 +13,14 @@ import re
 import pytest
 
 from canvas_mcp.core.selfhost import account_api
-from canvas_mcp.core.selfhost.account_web import SIGN_IN_ERROR_CODES, build_account_app
+from canvas_mcp.core.selfhost.account_core import (
+    SIGN_IN_ERROR_CODES,
+    AccountConfig,
+    build_account_app,
+)
+from canvas_mcp.core.selfhost.login.registry import build_login_runtime
 
-from .test_account_web import build_harness, make_cfg
+from .authz.stack import BASE, local_stack
 
 WEB_API = pathlib.Path(__file__).resolve().parents[2] / "web" / "src" / "api"
 CONTRACT = WEB_API / "contract.ts"
@@ -30,13 +35,25 @@ def _normalise(path: str) -> str:
     return re.sub(r"(\$\{[^}]+\}|:[A-Za-z_]+|\{[A-Za-z_]+\})", "{id}", path)
 
 
-def test_the_web_apps_routes_are_the_servers_routes(tmp_path: pathlib.Path) -> None:
-    h = build_harness(tmp_path)
-    app = build_account_app(make_cfg(), h.store, h.identity)  # type: ignore[arg-type]
-    server = {
-        (method, _normalise(path[len(account_api.API_PREFIX) :]))
-        for method, path in account_api.ApiApp(app).route_keys()
-    }
+def test_the_web_apps_routes_are_the_servers_routes(
+    tmp_path: pathlib.Path, monkeypatch
+) -> None:
+    with local_stack(tmp_path, monkeypatch) as h:
+        logins = build_login_runtime(
+            h.settings, flow_store=h.authz.txns, snapshots=h.runtime.snapshots
+        )
+        app = build_account_app(
+            AccountConfig(BASE, h.settings.account_session_secret),
+            h.store,
+            h.runtime.identity,
+            authz=h.authz,
+            logins=logins,
+            snapshots=h.runtime.snapshots,
+        )
+        server = {
+            (method, _normalise(path[len(account_api.API_PREFIX) :]))
+            for method, path in account_api.ApiApp(app).route_keys()
+        }
     text = CONTRACT.read_text(encoding="utf-8")
     web = {
         (method, _normalise(path))
@@ -44,7 +61,9 @@ def test_the_web_apps_routes_are_the_servers_routes(tmp_path: pathlib.Path) -> N
             r"""['"](GET|POST|PUT|PATCH|DELETE) (/[^'"]*)['"]\s*:""", text
         )
     }
-    assert web == server, f"only in the web app: {web - server}; only on the server: {server - web}"
+    assert web == server, (
+        f"only in the web app: {web - server}; only on the server: {server - web}"
+    )
 
 
 def test_the_web_apps_error_codes_are_the_servers() -> None:

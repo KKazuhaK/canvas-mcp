@@ -112,10 +112,10 @@ class Person:
 
     def start(self, provider: str, **params: str) -> httpx.Response:
         path = {
-            "google": "/account/login/google",
-            "github": "/account/login/github",
-            "school": "/account/login/oidc/school",
-            "entra": "/account/login/entra",
+            "google": "/auth/login/google",
+            "github": "/auth/login/github",
+            "school": "/auth/login/oidc/school",
+            "entra": "/auth/login/entra",
         }[provider]
         return self.get(path, params=params)
 
@@ -144,7 +144,7 @@ class Person:
 
     def sign_in_entra(self, user: User, **claims: Any) -> httpx.Response:
         browser = Browser(self.ps.stack, client=self.client)
-        login = browser.get("/account/login/entra")
+        login = browser.get("/auth/login/entra")
         return browser.entra_login(user, login, **claims)
 
     # -- linking ---------------------------------------------------------------------------------
@@ -177,7 +177,7 @@ class Person:
             nonce = query_of(url)["nonce"]
             self.ps.stack.idp.set_user(user, nonce)
             return self.get(
-                "/account/callback", params={"code": "entra-code", "state": query_of(url)["state"]}
+                "/auth/callback/entra", params={"code": "entra-code", "state": query_of(url)["state"]}
             )
         if user is not None:
             self.set_user(provider, user)
@@ -197,7 +197,7 @@ class Person:
         return self._account_from_session(cookie)
 
     def _account_from_session(self, cookie: str) -> str:
-        from canvas_mcp.core.selfhost.account_web import SESSION_COOKIE, _CookieCodec
+        from canvas_mcp.core.selfhost.account_core import SESSION_COOKIE, _CookieCodec
 
         codec = _CookieCodec(self.ps.stack.settings.account_session_secret)
         payload = codec.unseal(SESSION_COOKIE, cookie)
@@ -215,7 +215,7 @@ class Person:
         assert response.status_code in (302, 303), response.text
         parts = urlsplit(response.headers["location"])
         location = parts.path + "?" + parts.query
-        assert location.startswith("/account/login?txn="), location
+        assert location.startswith("/auth/login?txn="), location
         return client_id, verifier, location
 
     def connect(
@@ -228,7 +228,7 @@ class Person:
         params = {"txn": txn, **({"reauth": "1"} if reauth else {})}
         if provider == "entra":
             assert user is not None
-            chooser = self.get("/account/login/entra", params=params)
+            chooser = self.get("/auth/login/entra", params=params)
             callback = chooser if chooser.status_code == 303 else browser.entra_login(user, chooser)
         else:
             if user is not None:
@@ -324,6 +324,7 @@ def provider_stack(
         tmp_path, monkeypatch, env=options, account_options={"login_transport": net.transport},
         **stack_kw,
     ) as stack:
+        net.handlers.update(stack.idp.net.handlers)
         for idp in (google, school):
             idp.now = stack.clock
         yield ProviderStack(stack, net, google, github, school)

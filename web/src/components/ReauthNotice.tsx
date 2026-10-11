@@ -10,7 +10,7 @@ import { SITE_BASE, sanitizeReturnTo } from '@/utils/returnTo'
 
 /**
  * The server wants a sign-in from the last 10 minutes (owner pages, and turning a
- * write tool on). The button is a full-page trip through /account/login that comes
+ * write tool on). The button is a full-page trip through /auth/login that comes
  * back to this page. It is a button, not an automatic redirect: a redirect would
  * throw away what the person was in the middle of, and a session that never counts
  * as fresh could loop.

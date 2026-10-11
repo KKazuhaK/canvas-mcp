@@ -1,3 +1,4 @@
+import LoadMore from '@/components/LoadMore'
 import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
 import Typography from '@mui/material/Typography'
@@ -122,6 +123,7 @@ export default function ConnectedAppsView() {
         }}
         onConfirm={() => void confirmRevoke()}
       />
+      <LoadMore query={grants} />
     </>
   )
 }

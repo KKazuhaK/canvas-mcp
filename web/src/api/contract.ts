@@ -1,5 +1,9 @@
 import type {
+  PageQuery,
   AdminAccountsResponse,
+  AdminSettingsResponse,
+  FeaturedSchoolsRequest,
+  SchoolCheckResponse,
   AdminActionResponse,
   AdminAuditResponse,
   AdminEnrollmentFilter,
@@ -27,7 +31,7 @@ import type {
 } from './types'
 
 /**
- * The route table of /account/api: one entry per (method, path), with the query
+ * The route table of /api/v1: one entry per (method, path), with the query
  * string, the JSON body and the response it takes. Paths are relative to
  * API_BASE_URL and `{id}` is an account id.
  *
@@ -37,23 +41,30 @@ import type {
  * route cannot be added on one side only. `void` means "204, no body".
  */
 export interface Contract {
+  'GET /admin/settings': { response: AdminSettingsResponse }
+  'PUT /admin/settings/sign-in-methods': { body: { revision: number; names: Record<string, string | null> }; response: AdminSettingsResponse }
+  'PUT /admin/settings/schools': { body: FeaturedSchoolsRequest; response: AdminSettingsResponse }
+  'POST /admin/settings/schools/check': { body: { host: string }; response: SchoolCheckResponse }
+  'PUT /admin/settings/directory-search': { body: { revision: number; enabled: boolean }; response: AdminSettingsResponse }
+
   'GET /providers': { response: ProvidersResponse }
   'GET /me': { response: MeResponse }
   'GET /me/canvas-token': { response: CanvasTokenStatus }
   'PUT /me/canvas-token': { body: CanvasTokenRequest; response: CanvasTokenStatus }
   'DELETE /me/canvas-token': { response: void }
   'POST /me/canvas-token/recheck': { response: RecheckResponse }
+  'POST /me/canvas-token/acknowledge': { body: { notice_version: number }; response: CanvasTokenStatus }
   'GET /me/schools': { response: SchoolsResponse }
   'GET /me/schools/search': { query: { q: string }; response: SchoolSearchResponse }
   'GET /me/write-tools': { response: WriteToolsResponse }
   'PUT /me/write-tools': { body: { enabled: string[] }; response: WriteToolsSavedResponse }
   'DELETE /me/write-tools': { response: WriteToolsSavedResponse }
-  'GET /me/login-history': { response: LoginHistoryResponse }
+  'GET /me/login-history': { query: PageQuery; response: LoginHistoryResponse }
   'PUT /me/ui-locale': { body: { locale: UiLocale }; response: void }
   'POST /session/logout': { response: void }
-  'GET /admin/accounts': { query: { status?: AdminStatusFilter }; response: AdminAccountsResponse }
+  'GET /admin/accounts': { query: PageQuery & { status?: AdminStatusFilter }; response: AdminAccountsResponse }
   'GET /admin/enrollments': {
-    query: { filter?: AdminEnrollmentFilter }
+    query: PageQuery & { filter?: AdminEnrollmentFilter }
     response: AdminEnrollmentsResponse
   }
   'POST /admin/accounts/{id}/approve': { response: AdminActionResponse }
@@ -62,7 +73,7 @@ export interface Contract {
   'POST /admin/accounts/{id}/enable': { response: AdminActionResponse }
   'POST /admin/enrollments/{id}/mark-invalid': { response: AdminActionResponse }
   'DELETE /admin/enrollments/{id}': { response: AdminActionResponse }
-  'GET /admin/audit': { query: { before?: string }; response: AdminAuditResponse }
+  'GET /admin/audit': { query: PageQuery & { account_id?: string }; response: AdminAuditResponse }
   // Only with two or more sign-in providers: the server answers not_found for these
   // otherwise, and GET /me `features.identities` says so. `{id}` is an identity's decimal id.
   'GET /me/identities': { response: IdentitiesResponse }
@@ -78,9 +89,9 @@ export interface Contract {
     body: { txn: string; decision: ConsentDecision }
     response: ConsentDecisionResponse
   }
-  'GET /me/grants': { response: GrantsResponse }
+  'GET /me/grants': { query: PageQuery; response: GrantsResponse }
   'DELETE /me/grants/{id}': { response: void }
-  'GET /admin/accounts/{id}/grants': { response: GrantsResponse }
+  'GET /admin/accounts/{id}/grants': { query: PageQuery; response: GrantsResponse }
   'DELETE /admin/grants/{id}': { response: GrantRevokeResponse }
 }
 

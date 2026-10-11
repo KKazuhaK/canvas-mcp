@@ -122,7 +122,9 @@ def redirect_uri_syntax_ok(uri: str) -> bool:
     if _has_dot_segment(parts.path):
         return False
     scheme = parts.scheme.lower()
-    if uri[: len(scheme)] != scheme:  # an upper-case scheme is not an exact match anywhere
+    if (
+        uri[: len(scheme)] != scheme
+    ):  # an upper-case scheme is not an exact match anywhere
         return False
     if scheme == "https":
         return host not in LOOPBACK_HOSTS and not host.endswith(".localhost")

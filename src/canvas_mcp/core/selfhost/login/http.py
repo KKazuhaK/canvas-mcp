@@ -41,7 +41,15 @@ CAP_USERINFO = 32 * 1024
 CAP_GITHUB = 256 * 1024
 
 ERROR_CODES = frozenset(
-    {"blocked_url", "timeout", "network", "http_status", "too_large", "not_json", "redirect"}
+    {
+        "blocked_url",
+        "timeout",
+        "network",
+        "http_status",
+        "too_large",
+        "not_json",
+        "redirect",
+    }
 )
 _OAUTH_ERROR_RE = re.compile(r"^[a-z_]{1,64}$")
 
@@ -154,7 +162,11 @@ class SafeHttp:
         """One request. A status in ``ok_statuses`` is returned (its body parsed as JSON when it is
         a 200, and best-effort otherwise); any other status raises ``http_status``."""
         check_url(url)
-        sent = {"User-Agent": USER_AGENT, "Accept": "application/json", **(headers or {})}
+        sent = {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+            **(headers or {}),
+        }
         if basic_auth is not None:
             # The caller form-encodes both parts first (RFC 6749 section 2.3.1).
             pair = f"{basic_auth[0]}:{basic_auth[1]}".encode()
@@ -164,7 +176,9 @@ class SafeHttp:
                 async with httpx.AsyncClient(
                     transport=self._transport,
                     follow_redirects=False,
-                    timeout=httpx.Timeout(self._total_timeout, connect=self._connect_timeout),
+                    timeout=httpx.Timeout(
+                        self._total_timeout, connect=self._connect_timeout
+                    ),
                 ) as client:
                     request = client.build_request(
                         method,
@@ -179,7 +193,9 @@ class SafeHttp:
                             raise UpstreamError("redirect", status=status)
                         raw = await self._read(response, max_bytes)
                         content_type = response.headers.get("content-type", "")
-                        result_headers = {k.lower(): v for k, v in response.headers.items()}
+                        result_headers = {
+                            k.lower(): v for k, v in response.headers.items()
+                        }
                     finally:
                         await response.aclose()
         except UpstreamError:
@@ -190,7 +206,9 @@ class SafeHttp:
             raise UpstreamError("network") from None
         if status not in ok_statuses:
             raise UpstreamError(
-                "http_status", status=status, oauth_error=_oauth_error_of(raw, content_type)
+                "http_status",
+                status=status,
+                oauth_error=_oauth_error_of(raw, content_type),
             )
         if status == 200:
             if not _is_json_media(content_type):
@@ -226,7 +244,9 @@ class SafeHttp:
         headers: Mapping[str, str] | None = None,
         expect: Literal["object", "array"] = "object",
     ) -> HttpResult:
-        return await self.request("GET", url, max_bytes=max_bytes, headers=headers, expect=expect)
+        return await self.request(
+            "GET", url, max_bytes=max_bytes, headers=headers, expect=expect
+        )
 
     async def post_form(
         self,
@@ -238,7 +258,12 @@ class SafeHttp:
         basic_auth: tuple[str, str] | None = None,
     ) -> HttpResult:
         return await self.request(
-            "POST", url, max_bytes=max_bytes, headers=headers, data=data, basic_auth=basic_auth
+            "POST",
+            url,
+            max_bytes=max_bytes,
+            headers=headers,
+            data=data,
+            basic_auth=basic_auth,
         )
 
 
@@ -251,4 +276,6 @@ def _oauth_error_of(raw: bytes, content_type: str) -> str | None:
     except UpstreamError:
         return None
     value = body.get("error")
-    return value if isinstance(value, str) and _OAUTH_ERROR_RE.fullmatch(value) else None
+    return (
+        value if isinstance(value, str) and _OAUTH_ERROR_RE.fullmatch(value) else None
+    )

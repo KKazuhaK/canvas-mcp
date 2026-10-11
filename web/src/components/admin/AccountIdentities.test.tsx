@@ -91,8 +91,8 @@ describe('Admin accounts: sign-in methods', () => {
             status: 200,
             data: {
               providers: [
-                { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/account/login/entra' },
-                { id: 'github', kind: 'oauth2', name: 'GitHub', icon: 'github', start_url: '/account/login/github' },
+                { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/auth/login/entra' },
+                { id: 'github', kind: 'oauth2', name: 'GitHub', icon: 'github', start_url: '/auth/login/github' },
               ],
               mcp_url: 'https://x.test/mcp',
             },

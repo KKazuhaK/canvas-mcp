@@ -9,7 +9,7 @@ reach a file that was not validated at startup, whatever path it names.
 Every response carries a strict Content Security Policy (scripts and connections
 from this origin only), ``index.html`` is never cached, and the hashed files under
 ``/account/assets/`` are cached for a year. Any other GET below ``/account/`` that is
-not ``/account/api`` answers with ``index.html`` (the client-side router decides what
+not ``/api/v1`` answers with ``index.html`` (the client-side router decides what
 to show); an unknown asset is a plain 404, never ``index.html``.
 
 If the bundle is unusable the caller falls back to the server-rendered pages (see
@@ -28,7 +28,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
-from canvas_mcp.core.selfhost.account_web import any_method_route
+from canvas_mcp.core.selfhost.account_core import any_method_route
 
 ASSETS_PREFIX = "/account/assets/"
 BASE_PATH = "/account"
@@ -68,7 +68,9 @@ CONTENT_TYPES: Mapping[str, str] = {
 }
 
 _ASSET_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-_SCRIPT_RE = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.IGNORECASE | re.DOTALL)
+_SCRIPT_RE = re.compile(
+    r"<script\b([^>]*)>(.*?)</script\s*>", re.IGNORECASE | re.DOTALL
+)
 _TAG_RE = re.compile(r"<(?:script|link|img|source|iframe)\b[^>]*>", re.IGNORECASE)
 _URL_ATTR_RE = re.compile(r'\b(?:src|href)\s*=\s*"([^"]*)"', re.IGNORECASE)
 _TYPE_MODULE_RE = re.compile(r'\btype\s*=\s*"module"', re.IGNORECASE)
@@ -93,7 +95,9 @@ class SpaFile:
 
 
 def _file(body: bytes, content_type: str) -> SpaFile:
-    return SpaFile(body, content_type, '"' + hashlib.sha256(body).hexdigest()[:32] + '"')
+    return SpaFile(
+        body, content_type, '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
+    )
 
 
 @dataclass(frozen=True)
@@ -114,7 +118,9 @@ class SpaBundle:
         if not real_root.is_dir():
             raise SpaBundleError("directory_missing")
 
-        index_bytes = _read_regular(real_root / "index.html", real_root, MAX_INDEX_BYTES, "index")
+        index_bytes = _read_regular(
+            real_root / "index.html", real_root, MAX_INDEX_BYTES, "index"
+        )
         assets = _load_assets(real_root)
         extras: dict[str, SpaFile] = {}
         for name in ROOT_EXTRAS:
@@ -199,7 +205,9 @@ def _check_index(
             if url.startswith(ASSETS_PREFIX):
                 if url[len(ASSETS_PREFIX) :] not in assets:
                     raise SpaBundleError("index_reference_missing")
-            elif url.startswith(BASE_PATH + "/") and url[len(BASE_PATH) + 1 :] in extras:
+            elif (
+                url.startswith(BASE_PATH + "/") and url[len(BASE_PATH) + 1 :] in extras
+            ):
                 continue
             else:
                 raise SpaBundleError("index_reference_not_local")
@@ -231,11 +239,16 @@ class _SpaApp:
             "Not found.",
             status_code=404,
             headers=self._headers(
-                {"Cache-Control": "no-store", "Content-Type": "text/plain; charset=utf-8"}
+                {
+                    "Cache-Control": "no-store",
+                    "Content-Type": "text/plain; charset=utf-8",
+                }
             ),
         )
 
-    def _serve(self, request: Request, file: SpaFile, cache: str, *, etag: bool) -> Response:
+    def _serve(
+        self, request: Request, file: SpaFile, cache: str, *, etag: bool
+    ) -> Response:
         headers = {"Cache-Control": cache, "Content-Type": file.content_type}
         if etag:
             headers["ETag"] = file.etag
@@ -252,7 +265,9 @@ class _SpaApp:
         if request.method not in ("GET", "HEAD"):
             return self._refuse_method()
         path = request.url.path
-        if len(path) > MAX_PATH_CHARS or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in path):
+        if len(path) > MAX_PATH_CHARS or any(
+            ord(ch) < 0x20 or ord(ch) == 0x7F for ch in path
+        ):
             return self.not_found()
         return self._serve(request, self.bundle.index, "no-store", etag=False)
 
@@ -275,13 +290,15 @@ class _SpaApp:
 
 
 def build_spa_routes(bundle: SpaBundle) -> list[Route]:
-    """The routes that serve ``bundle``. Register them after the ``/account/api`` routes."""
+    """The routes that serve ``bundle``. Register them after the ``/api/v1`` routes."""
     app = _SpaApp(bundle)
     routes = [
         any_method_route("/account/assets", app.asset),
         any_method_route("/account/assets/{name:path}", app.asset),
     ]
-    routes.extend(any_method_route(f"/account/{name}", app.extra) for name in bundle.extras)
+    routes.extend(
+        any_method_route(f"/account/{name}", app.extra) for name in bundle.extras
+    )
     routes.append(any_method_route("/account", app.index))
     routes.append(any_method_route("/account/{path:path}", app.index))
     return routes

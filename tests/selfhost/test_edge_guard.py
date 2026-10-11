@@ -14,6 +14,12 @@ from typing import Any
 
 import fastmcp
 import pytest
+from canvas_mcp.core.selfhost.oauth import (
+    DCR_CLIENT_TTL_SECONDS,
+    build_entra_auth_provider,
+    cull_expired_oauth_state,
+    oauth_storage_of,
+)
 from fastmcp import FastMCP
 from starlette.testclient import TestClient
 
@@ -29,12 +35,6 @@ from canvas_mcp.core.selfhost.edge_guard import (
     REGISTRATIONS_PER_DAY,
     SelfhostEdgeGuard,
     TokenBucket,
-)
-from canvas_mcp.core.selfhost.oauth import (
-    DCR_CLIENT_TTL_SECONDS,
-    build_entra_auth_provider,
-    cull_expired_oauth_state,
-    oauth_storage_of,
 )
 from canvas_mcp.core.selfhost.settings import SelfhostSettings
 

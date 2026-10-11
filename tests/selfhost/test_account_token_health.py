@@ -13,7 +13,7 @@ import pytest
 from dbbackend import raw_connection
 
 from canvas_mcp.core import audit
-from canvas_mcp.core.selfhost.account_web import (
+from canvas_mcp.core.selfhost.account_core import (
     ACCOUNT_PATH,
     CanvasCheckError,
     CanvasIdentity,

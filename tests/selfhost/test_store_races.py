@@ -21,7 +21,7 @@ import pytest
 from dbbackend import make_store
 from sqlalchemy import text
 
-from canvas_mcp.core.selfhost.db import migrate
+from canvas_mcp.core.selfhost.db.migrations import runner as migrate
 from canvas_mcp.core.selfhost.token_store import (
     DISABLE_REASON_ADMIN,
     DISABLE_REASON_OPERATOR,

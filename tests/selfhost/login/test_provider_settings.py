@@ -196,7 +196,7 @@ def test_entra_not_listed_loads_with_empty_entra_fields() -> None:
     settings = load_selfhost_settings(
         env(
             SELFHOST_LOGIN_PROVIDERS="google,github", ACCESS_RULES="google:domain:example.edu,github:user:42",
-            SELFHOST_BOOTSTRAP_OWNER="github:42", ENTRA_API_SCOPE="Canvas.Access",
+            SELFHOST_BOOTSTRAP_OWNER="github:42", MCP_SCOPE="Canvas.Access",
             ENTRA_TENANT_ID=None, ENTRA_CLIENT_ID=None, ENTRA_CLIENT_SECRET=None,
             **google(), **github(),
         )

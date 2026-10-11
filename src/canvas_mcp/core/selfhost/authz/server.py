@@ -22,7 +22,7 @@ is the MCP endpoint URL, which must equal the resource URL FastMCP derives (chec
 start-up and again when the MCP path is set).
 
 The sign-in is not here: ``/authorize`` stores the request and sends the browser to
-``/account/login?txn=...``; the user signs in at ``/account``, approves on the consent
+``/auth/login?txn=...``; the user signs in at ``/account``, approves on the consent
 page, and the code is created by :class:`~.consent.ConsentService`.
 """
 
@@ -32,7 +32,6 @@ import re
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
-import anyio.to_thread
 from fastmcp.server.auth import AccessToken, OAuthProvider
 from mcp.server.auth.provider import (
     AuthorizationCode,
@@ -53,6 +52,8 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ...logging import log_info, log_warning
 from ..db.errors import StoreUnavailable
+from ..db.workers import run_store
+from ..mcp_state import MCP_READ, MCP_UNAVAILABLE, McpRead
 from ..settings import SelfhostConfigError, SelfhostSettings
 from . import fastmcp_compat as compat
 from .clients import (
@@ -92,8 +93,14 @@ _BINDING: ContextVar[str | None] = ContextVar("canvas_mcp_authz_binding", defaul
 #: Every route of the local authorization server: ``(path, methods)``. Starlette adds HEAD to GET.
 EXPECTED_ROUTES: frozenset[tuple[str, frozenset[str]]] = frozenset(
     {
-        ("/.well-known/oauth-authorization-server", frozenset({"GET", "HEAD", "OPTIONS"})),
-        ("/.well-known/oauth-protected-resource/mcp", frozenset({"GET", "HEAD", "OPTIONS"})),
+        (
+            "/.well-known/oauth-authorization-server",
+            frozenset({"GET", "HEAD", "OPTIONS"}),
+        ),
+        (
+            "/.well-known/oauth-protected-resource/mcp",
+            frozenset({"GET", "HEAD", "OPTIONS"}),
+        ),
         ("/authorize", frozenset({"GET", "HEAD", "POST"})),
         ("/token", frozenset({"POST", "OPTIONS"})),
         ("/register", frozenset({"POST", "OPTIONS"})),
@@ -159,7 +166,10 @@ class _StoreGuard:
 
 def _unavailable() -> Response:
     return JSONResponse(
-        {"error": "temporarily_unavailable", "error_description": "Try again in a moment."},
+        {
+            "error": "temporarily_unavailable",
+            "error_description": "Try again in a moment.",
+        },
         status_code=503,
         headers={**_NO_STORE, "Retry-After": "5"},
     )
@@ -173,7 +183,12 @@ def _json_error(status: int, error: str, description: str | None = None) -> Resp
 
 
 def _cors(app: ASGIApp, methods: list[str]) -> ASGIApp:
-    return CORSMiddleware(app=app, allow_origins="*", allow_methods=methods, allow_headers=["mcp-protocol-version"])
+    return CORSMiddleware(
+        app=app,
+        allow_origins="*",
+        allow_methods=methods,
+        allow_headers=["mcp-protocol-version"],
+    )
 
 
 class LocalAuthorizationServer(OAuthProvider):
@@ -183,7 +198,9 @@ class LocalAuthorizationServer(OAuthProvider):
         base = settings.public_base_url
         if not is_canonical_base(base):
             raise SelfhostConfigError(
-                ["PUBLIC_BASE_URL must be a canonical origin (lower case, no default port, no trailing slash)"]
+                [
+                    "PUBLIC_BASE_URL must be a canonical origin (lower case, no default port, no trailing slash)"
+                ]
             )
         scope = settings.api_scope
         super().__init__(
@@ -204,7 +221,9 @@ class LocalAuthorizationServer(OAuthProvider):
         #: The one issuer string (with its trailing slash) used everywhere.
         self.issuer = str(self.issuer_url)
         if self.issuer != issuer_of(base) or self.issuer != base + "/":
-            raise SelfhostConfigError(["the issuer is not PUBLIC_BASE_URL with a trailing slash"])
+            raise SelfhostConfigError(
+                ["the issuer is not PUBLIC_BASE_URL with a trailing slash"]
+            )
         self.audience = audience_of(base, settings.mcp_path)
         self._clock = authz.clock
 
@@ -213,9 +232,13 @@ class LocalAuthorizationServer(OAuthProvider):
     def set_mcp_path(self, mcp_path: str | None) -> None:
         super().set_mcp_path(mcp_path)
         resource = compat.resource_url_of(self, mcp_path or "")
-        if not (resource == self.audience == self.authz.audience == self.settings.mcp_url):
+        if not (
+            resource == self.audience == self.authz.audience == self.settings.mcp_url
+        ):
             raise SelfhostConfigError(
-                ["the audience of access tokens is not the MCP resource URL FastMCP advertises"]
+                [
+                    "the audience of access tokens is not the MCP resource URL FastMCP advertises"
+                ]
             )
 
     # -- 1. clients ---------------------------------------------------------------------------
@@ -233,36 +256,56 @@ class LocalAuthorizationServer(OAuthProvider):
         info_json = client_info.model_dump_json(exclude_none=True)
         if len(info_json.encode("utf-8")) > MAX_REGISTRATION_JSON_BYTES:
             raise RegistrationError(
-                error="invalid_client_metadata", error_description="The registration is too large."
+                error="invalid_client_metadata",
+                error_description="The registration is too large.",
             )
         expires_at = int(self._clock()) + DCR_TTL_SECONDS
-        await anyio.to_thread.run_sync(
+        await run_store(
             self.authz.store.put_client,
             client_info.client_id,
             info_json,
             clean_label(client_info.client_name, 200),
             expires_at,
         )
-        log_info("dcr_registered")  # a counter line: nothing from the request reaches the log
+        log_info(
+            "dcr_registered"
+        )  # a counter line: nothing from the request reaches the log
 
     # -- 3. authorize --------------------------------------------------------------------------
 
-    async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
+    async def authorize(
+        self, client: OAuthClientInformationFull, params: AuthorizationParams
+    ) -> str:
         binding = _BINDING.get()
         if not isinstance(client, PublicClient) or binding is None:
-            raise AuthorizeError(error="server_error", error_description="Authorization could not be started.")
+            raise AuthorizeError(
+                error="server_error",
+                error_description="Authorization could not be started.",
+            )
         if params.resource is None:
-            resource = self.audience  # a client that sends no resource is served for ours
+            resource = (
+                self.audience
+            )  # a client that sends no resource is served for ours
         else:
             wanted = normalize_resource(params.resource)
             if wanted is None or wanted != normalize_resource(self.audience):
-                raise AuthorizeError(error="invalid_target", error_description="Unknown resource.")
+                raise AuthorizeError(
+                    error="invalid_target", error_description="Unknown resource."
+                )
             resource = self.audience
-        scopes = list(params.scopes) if params.scopes else (client.scope or self.scope).split()
+        scopes = (
+            list(params.scopes)
+            if params.scopes
+            else (client.scope or self.scope).split()
+        )
         if not scopes or not set(scopes) <= {self.scope}:
-            raise AuthorizeError(error="invalid_scope", error_description="Unknown scope.")
+            raise AuthorizeError(
+                error="invalid_scope", error_description="Unknown scope."
+            )
         if not _CHALLENGE_RE.fullmatch(params.code_challenge):
-            raise AuthorizeError(error="invalid_request", error_description="Invalid code_challenge.")
+            raise AuthorizeError(
+                error="invalid_request", error_description="Invalid code_challenge."
+            )
         pending = PendingAuthorization(
             client_id=client.client_id,
             client_kind=client.kind,
@@ -277,7 +320,9 @@ class LocalAuthorizationServer(OAuthProvider):
         try:
             payload = pending.to_json()
         except ValueError:
-            raise AuthorizeError(error="invalid_request", error_description="The request is too large.") from None
+            raise AuthorizeError(
+                error="invalid_request", error_description="The request is too large."
+            ) from None
         try:
             txn_id = await self.authz.txns.put(
                 TXN_KIND, payload, TXN_TTL_S, binding_hash=binding_hash(binding)
@@ -285,9 +330,10 @@ class LocalAuthorizationServer(OAuthProvider):
         except Exception:  # noqa: BLE001 - the driver text is not for the client
             log_warning("oauth_authorize", reason="store_unavailable")
             raise AuthorizeError(
-                error="temporarily_unavailable", error_description="Try again in a moment."
+                error="temporarily_unavailable",
+                error_description="Try again in a moment.",
             ) from None
-        return f"{self.base}/account/login?txn={txn_id}"
+        return f"{self.base}/auth/login?txn={txn_id}"
 
     # -- 4./5. authorization codes ------------------------------------------------------------
 
@@ -302,7 +348,9 @@ class LocalAuthorizationServer(OAuthProvider):
         """
         if not CODE_RE.fullmatch(authorization_code):
             return None
-        record = await anyio.to_thread.run_sync(self.authz.store.load_code, hash_secret(authorization_code))
+        record = await run_store(
+            self.authz.store.load_code, hash_secret(authorization_code)
+        )
         if record is None or record.client_id != client.client_id:
             return None
         return LocalAuthorizationCode(
@@ -314,7 +362,7 @@ class LocalAuthorizationServer(OAuthProvider):
             redirect_uri=AnyUrl(record.redirect_uri),
             redirect_uri_provided_explicitly=record.redirect_uri_explicit,
             resource=record.resource,
-            subject=f"acct:{record.account_id}",
+            subject=record.account_id,
             account_id=record.account_id,
             code_hash=record.code_hash,
             consumed_at=record.consumed_at,
@@ -325,7 +373,10 @@ class LocalAuthorizationServer(OAuthProvider):
         self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
     ) -> OAuthToken:
         if not isinstance(authorization_code, LocalAuthorizationCode):
-            raise TokenError(error="invalid_grant", error_description="The authorization code is not valid.")
+            raise TokenError(
+                error="invalid_grant",
+                error_description="The authorization code is not valid.",
+            )
         return await self.authz.grants.issue_from_code(client, authorization_code)
 
     # -- 6./7. refresh tokens -----------------------------------------------------------------
@@ -336,7 +387,9 @@ class LocalAuthorizationServer(OAuthProvider):
         """Look a refresh token up without changing anything (a used one is returned: see ``rotate``)."""
         if not REFRESH_RE.fullmatch(refresh_token):
             return None
-        view = await anyio.to_thread.run_sync(self.authz.store.load_refresh, hash_secret(refresh_token))
+        view = await run_store(
+            self.authz.store.load_refresh, hash_secret(refresh_token)
+        )
         if (
             view is None
             or view.client_id != client.client_id
@@ -349,7 +402,7 @@ class LocalAuthorizationServer(OAuthProvider):
             client_id=view.client_id,
             scopes=list(view.scopes),
             expires_at=view.expires_at,
-            subject=f"acct:{view.account_id}",
+            subject=view.account_id,
             resource=view.resource,
             grant_id=view.grant_id,
             token_hash=view.token_hash,
@@ -357,31 +410,46 @@ class LocalAuthorizationServer(OAuthProvider):
         )
 
     async def exchange_refresh_token(
-        self, client: OAuthClientInformationFull, refresh_token: RefreshToken, scopes: list[str]
+        self,
+        client: OAuthClientInformationFull,
+        refresh_token: RefreshToken,
+        scopes: list[str],
     ) -> OAuthToken:
         if not isinstance(refresh_token, LocalRefreshToken):
-            raise TokenError(error="invalid_grant", error_description="The refresh token is not valid.")
+            raise TokenError(
+                error="invalid_grant",
+                error_description="The refresh token is not valid.",
+            )
         if not set(scopes) <= set(refresh_token.scopes):
             # Before anything is written: a rejected request must not consume the token.
-            raise TokenError(error="invalid_scope", error_description="The scope is not permitted.")
+            raise TokenError(
+                error="invalid_scope", error_description="The scope is not permitted."
+            )
         return await self.authz.grants.rotate(client, refresh_token, scopes)
 
     # -- 8. access tokens ---------------------------------------------------------------------
 
     async def load_access_token(self, token: str) -> AccessToken | None:
-        """Verify a bearer token. Returns None for anything wrong, and never raises.
-
-        It is called with arbitrary strings (the ``Authorization`` header of any request,
-        the ``token`` of ``/revoke``). A failure to read the database counts as "not valid"
-        (fail closed); a client that is refused keeps trying with a refresh token.
-        """
+        """Verify first, then read current standing once. Database outages remain 503."""
+        MCP_READ.set(None)
+        MCP_UNAVAILABLE.set(False)
         try:
             if not isinstance(token, str) or len(token) > MAX_ACCESS_TOKEN_CHARS:
                 return None
-            claims = await anyio.to_thread.run_sync(self.authz.codec.decode, token)
-            if not await self.authz.grants.check_access(claims):
+            decoded = self.authz.codec.decode(token)
+            claims = decoded.claims
+            snapshot = await run_store(
+                self.authz.store.read_mcp_snapshot, claims["acct"], claims["grant"]
+            )
+            if (
+                snapshot is None
+                or snapshot.jwt_epoch != decoded.epoch
+                or snapshot.client_id != claims["client_id"]
+                or snapshot.revoked_at is not None
+                or snapshot.grant_expires_at <= int(self.authz.clock())
+            ):
                 return None
-            return AccessToken(
+            result = AccessToken(
                 token=token,
                 client_id=claims["client_id"],
                 scopes=claims["scope"].split(" "),
@@ -390,7 +458,14 @@ class LocalAuthorizationServer(OAuthProvider):
                 subject=claims["acct"],
                 claims=claims,
             )
+            MCP_READ.set(McpRead(claims["acct"], claims["grant"], snapshot))
+            return result
         except AccessTokenInvalid:
+            return None
+        except StoreUnavailable:
+            # The inner request middleware emits 503 before RequireAuth's 401.
+            # Raising here would let Starlette's server-error layer start a 500.
+            MCP_UNAVAILABLE.set(True)
             return None
         except Exception:  # noqa: BLE001 - fail closed on anything, including a database error
             return None
@@ -409,6 +484,7 @@ class LocalAuthorizationServer(OAuthProvider):
 
     def metadata_document(self) -> dict[str, Any]:
         """The authorization server metadata (RFC 8414), built here so the JSON is pinned by a test."""
+
         def url(path: str) -> AnyHttpUrl:
             return AnyHttpUrl(self.base + path)
 
@@ -444,7 +520,13 @@ class LocalAuthorizationServer(OAuthProvider):
             elif path == "/revoke":
                 out.append(self._revoke_route())
             elif path == "/register":
-                out.append(Route(path, endpoint=_StoreGuard(route.endpoint), methods=sorted(methods)))
+                out.append(
+                    Route(
+                        path,
+                        endpoint=_StoreGuard(route.endpoint),
+                        methods=sorted(methods),
+                    )
+                )
             else:
                 out.append(route)
         assert_route_table(out)
@@ -452,7 +534,10 @@ class LocalAuthorizationServer(OAuthProvider):
 
     def _metadata_route(self) -> Route:
         async def metadata(request: Request) -> Response:
-            return JSONResponse(self.metadata_document(), headers={"Cache-Control": METADATA_CACHE_CONTROL})
+            return JSONResponse(
+                self.metadata_document(),
+                headers={"Cache-Control": METADATA_CACHE_CONTROL},
+            )
 
         return Route(
             "/.well-known/oauth-authorization-server",
@@ -461,12 +546,16 @@ class LocalAuthorizationServer(OAuthProvider):
         )
 
     def _authorize_route(self) -> Route:
-        inner = compat.authorization_endpoint(self, base_url=self.base, issuer_url=self.issuer)
-        login_prefix = f"{self.base}/account/login?txn="
+        inner = compat.authorization_endpoint(
+            self, base_url=self.base, issuer_url=self.issuer
+        )
+        login_prefix = f"{self.base}/auth/login?txn="
 
         async def authorize(request: Request) -> Response:
             cookie = request.cookies.get(BINDING_COOKIE)
-            binding = cookie if binding_ok(cookie) and cookie is not None else new_binding()
+            binding = (
+                cookie if binding_ok(cookie) and cookie is not None else new_binding()
+            )
             purpose = LOOKUP_PURPOSE.set(PURPOSE_AUTHORIZE)
             bound = _BINDING.set(binding)
             outage: list[bool] = []
@@ -492,7 +581,11 @@ class LocalAuthorizationServer(OAuthProvider):
                 )
             return response
 
-        return Route("/authorize", endpoint=_StoreGuard(request_response(authorize)), methods=["GET", "POST"])
+        return Route(
+            "/authorize",
+            endpoint=_StoreGuard(request_response(authorize)),
+            methods=["GET", "POST"],
+        )
 
     def _token_route(self) -> Route:
         inner = compat.token_endpoint(self)
@@ -505,7 +598,11 @@ class LocalAuthorizationServer(OAuthProvider):
             try:
                 form = await request.form()
                 resource = form.get("resource")
-                if isinstance(resource, str) and resource != "" and normalize_resource(resource) != audience:
+                if (
+                    isinstance(resource, str)
+                    and resource != ""
+                    and normalize_resource(resource) != audience
+                ):
                     # The SDK handler never looks at this field; this server refuses a token for
                     # any resource but its own, as RFC 8707 asks.
                     return _json_error(400, "invalid_target", "Unknown resource.")
@@ -519,7 +616,11 @@ class LocalAuthorizationServer(OAuthProvider):
                 return _unavailable()
             return response
 
-        return Route("/token", endpoint=_cors(request_response(token), ["POST", "OPTIONS"]), methods=["POST", "OPTIONS"])
+        return Route(
+            "/token",
+            endpoint=_cors(request_response(token), ["POST", "OPTIONS"]),
+            methods=["POST", "OPTIONS"],
+        )
 
     def _revoke_route(self) -> Route:
         async def revoke(request: Request) -> Response:
@@ -529,7 +630,11 @@ class LocalAuthorizationServer(OAuthProvider):
             try:
                 form = await request.form()
                 client_id, token = form.get("client_id"), form.get("token")
-                client = await self.get_client(client_id) if isinstance(client_id, str) and client_id else None
+                client = (
+                    await self.get_client(client_id)
+                    if isinstance(client_id, str) and client_id
+                    else None
+                )
                 if outage:
                     return _unavailable()
                 if client is None or client.token_endpoint_auth_method != "none":
@@ -544,7 +649,11 @@ class LocalAuthorizationServer(OAuthProvider):
                 LOOKUP_PURPOSE.reset(purpose)
             return Response(status_code=200, headers=dict(_NO_STORE))
 
-        return Route("/revoke", endpoint=_cors(request_response(revoke), ["POST", "OPTIONS"]), methods=["POST", "OPTIONS"])
+        return Route(
+            "/revoke",
+            endpoint=_cors(request_response(revoke), ["POST", "OPTIONS"]),
+            methods=["POST", "OPTIONS"],
+        )
 
     async def _revoke_presented(self, client: PublicClient, token: str) -> None:
         """Revoke the grant a presented token belongs to, if it belongs to ``client``.
@@ -557,7 +666,7 @@ class LocalAuthorizationServer(OAuthProvider):
             return
         if token.count(".") == 2:
             try:
-                claims = await anyio.to_thread.run_sync(self.authz.codec.decode, token)
+                claims = self.authz.codec.decode(token).claims
             except AccessTokenInvalid:
                 return
             if claims.get("client_id") == client.client_id:
@@ -566,4 +675,3 @@ class LocalAuthorizationServer(OAuthProvider):
         refresh = await self.load_refresh_token(client, token)
         if refresh is not None:
             await self.authz.grants.revoke_by_client(refresh.grant_id)
-

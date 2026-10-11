@@ -1,3 +1,4 @@
+import LoadMore from '@/components/LoadMore'
 import Box from '@mui/material/Box'
 import Chip from '@mui/material/Chip'
 import MenuItem from '@mui/material/MenuItem'
@@ -211,9 +212,10 @@ export default function AdminEnrollmentsView() {
           label={t('admin:enrollments.title')}
           columns={columns}
           rows={rows}
-          rowKey={(a) => a.id}
+          rowKey={(a) => a.enrollment?.id ?? a.id}
         />
       ) : null}
+      <LoadMore query={query} />
     </>
   )
 }

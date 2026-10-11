@@ -68,7 +68,7 @@ def current_cache_state() -> CourseCacheState:
     and Easy Auth modes) gets a throwaway state that is never registered:
     its course metadata must not outlive the request, so nothing written to
     it can be read by a later request. The same holds for the self-hosted
-    ``entra-oauth`` principals unless the operator opted in to
+    ``selfhost`` principals unless the operator opted in to
     ``SELFHOST_COURSE_STATE=per_principal``. Only stdio (``"local"``) and those
     opted-in principals have a registered, persistent state, keyed by the
     principal, the school and the credential generation (see

@@ -1,10 +1,10 @@
-// Wire types for the same-origin JSON API under /account/api, as the Python server
+// Wire types for the same-origin JSON API under /api/v1, as the Python server
 // (src/canvas_mcp/core/selfhost/account_api.py) answers it. Every response is
 // no-store and every failure is { error: { code, params? } } with a code from the
 // closed ApiErrorCode set; the UI never shows server, IdP or Canvas free text.
 //
 // Timestamps are ISO-8601 UTC strings or null. An account id is the bare lower-case
-// UUID (safe in a path); `key` is the same id with the "acct:" prefix.
+// UUID (safe in a path); `key` is the same id.
 
 /** Codes the JSON API answers with (HTTP status in the comment). */
 export type ApiOnlyErrorCode =
@@ -32,6 +32,9 @@ export type ApiOnlyErrorCode =
   | 'canvas_unavailable' // 503
   | 'identity_change_required' // 409, params: { enrolled_user_name, new_user_name, confirmation }
   | 'recheck_not_allowed' // 409
+  | 'custody_ack_required' // 422
+  | 'custody_notice_outdated' // 409, params: { notice_version }
+  | 'not_enrolled' // 404
   // schools
   | 'school_required' // 422
   | 'school_invalid' // 422
@@ -45,6 +48,8 @@ export type ApiOnlyErrorCode =
   | 'write_tool_not_allowed' // 422, params: { tool }
   | 'write_tools_unavailable' // 503
   // admin
+  | 'settings_conflict' // 409
+  | 'confirmation_required' // 409, params: { affected: { host: count } }
   | 'last_owner' // 409
   | 'cannot_disable_self' // 409
   // linked sign-in methods
@@ -64,7 +69,6 @@ export type SignInErrorCode =
   | 'sign_in_incomplete'
   | 'sign_in_unverified'
   | 'wrong_tenant'
-  | 'wrong_client'
   | 'bad_subject'
   | 'bad_roles'
   | 'access_denied'
@@ -78,7 +82,7 @@ export type SignInErrorCode =
 
 export type ApiErrorCode = ApiOnlyErrorCode | SignInErrorCode
 
-export type ErrorParams = Record<string, string | number>
+export type ErrorParams = Record<string, string | number | Record<string, number>>
 
 export interface ApiErrorBody {
   error: { code: ApiErrorCode; params?: ErrorParams }
@@ -114,6 +118,12 @@ export interface SchoolRef {
 }
 
 export interface CanvasTokenStatus {
+  custody: {
+    notice_version: number
+    acknowledged_version: number | null
+    acknowledged_at: string | null
+    current: boolean
+  }
   state: CanvasTokenState
   /** Canvas user ids are strings, as stored. */
   canvas_user_id: string | null
@@ -135,6 +145,7 @@ export interface CanvasTokenStatus {
 }
 
 export interface CanvasTokenRequest {
+  custody: { acknowledged: true; notice_version: number }
   canvas_token: string
   school?: string | null
   school_sig?: string | null
@@ -150,7 +161,7 @@ export interface RecheckResponse {
 
 // ---- schools ---------------------------------------------------------------------
 
-export type SchoolMode = 'picker' | 'sole' | 'fixed'
+export type SchoolMode = 'picker' | 'sole' | 'none'
 export interface SchoolChoice {
   host: string
   name: string
@@ -206,13 +217,14 @@ export interface Features {
   // Two or more sign-in providers: the Sign-in methods screen.
   identities: boolean
   // The server's own authorization server (SELFHOST_AUTH_MODE=local) only.
-  connected_apps: boolean
-  consent: boolean
+
+
   logout_everywhere: boolean
   role_management: boolean
 }
 
 export interface MeResponse {
+  custody_ack_required: boolean
   account: Account
   csrf_token: string
   session: SessionInfo
@@ -260,13 +272,17 @@ export type LoginReason =
   | 'signups_paused'
   | 'pending_approval'
   | 'identity_linked'
+export interface PageQuery { cursor?: string; limit?: number }
+export interface PageResponse { next_cursor: string | null }
+
 export interface LoginEvent {
+  id: number
   at: string | null
   provider_id: string
   outcome: LoginOutcome
   reason: LoginReason | null
 }
-export interface LoginHistoryResponse {
+export interface LoginHistoryResponse extends PageResponse {
   events: LoginEvent[]
 }
 
@@ -349,7 +365,7 @@ export interface Grant {
   last_used_at: string | null
   expires_at: string | null
 }
-export interface GrantsResponse {
+export interface GrantsResponse extends PageResponse {
   grants: Grant[]
 }
 export interface GrantRevokeResponse {
@@ -369,9 +385,14 @@ export type AdminAction =
   | 'remove_enrollment'
 
 export interface AdminEnrollment {
+  id: string
+  is_primary: boolean
+  custody_notice_version: number
+  custody_ack_at: string | null
+  custody_current: boolean
   canvas_user_name: string
   canvas_user_id: string
-  school: (SchoolRef & { is_default: boolean }) | null
+  school: SchoolRef | null
   state: 'active' | 'invalid'
   invalid_reason: InvalidReason | null
   invalid_since: string | null
@@ -415,13 +436,13 @@ export interface AdminAccount {
 }
 
 export type AdminStatusFilter = 'active' | 'pending' | 'disabled'
-export interface AdminAccountsResponse {
+export interface AdminAccountsResponse extends PageResponse {
   accounts: AdminAccount[]
   counts: { total: number; active: number; pending: number; disabled: number; owners: number }
 }
 
 export type AdminEnrollmentFilter = 'all' | 'needs_reenroll'
-export interface AdminEnrollmentsResponse {
+export interface AdminEnrollmentsResponse extends PageResponse {
   rows: AdminAccount[]
   counts: { needing: number; total_enrollments: number; disabled: number; pending: number }
 }
@@ -444,6 +465,32 @@ export interface AuditEntry {
 }
 export interface AdminAuditResponse {
   entries: AuditEntry[]
-  /** Pass as `before` to get the next (older) page, or null at the end. */
+  /** Pass as `cursor` to get the next (older) page, or null at the end. */
   next_cursor: string | null
+}
+
+export interface AdminSchool {
+  host: string
+  display_name: string
+  rank: number
+  enrollments: number
+  allow_private: boolean
+}
+export interface AdminSettingsResponse {
+  revision: number
+  sign_in_methods: {
+    id: string; protocol: string; icon: ProviderIcon; configured: boolean
+    default_name: string; display_name: string | null; effective_name: string
+  }[]
+  schools: { directory_search: boolean; featured: AdminSchool[]; warnings: string[] }
+  retention: { auth_events_days: number; audit_days: number }
+  affected_enrollments?: Record<string, number>
+}
+export interface FeaturedSchoolsRequest {
+  revision: number
+  featured: { host: string; display_name: string }[]
+  confirm_affected: string[]
+}
+export interface SchoolCheckResponse {
+  valid: boolean; reason?: ApiErrorCode; suggested_name: string | null; in_directory: boolean | null
 }

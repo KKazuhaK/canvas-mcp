@@ -15,7 +15,7 @@ describe('http client', () => {
   })
 
   it('is same-origin, cookie-based and has a 30 s timeout', () => {
-    expect(http.defaults.baseURL).toBe('/account/api')
+    expect(http.defaults.baseURL).toBe('/api/v1')
     expect(http.defaults.withCredentials).toBe(true)
     expect(http.defaults.timeout).toBe(30_000)
   })
@@ -118,7 +118,7 @@ describe('http client', () => {
     const secret = 'secret-canvas-token-value-1234567890'
     scriptAdapter(() => ({ status: 422, data: errorBody('token_rejected') }))
     setCsrfToken('csrf-abc')
-    const error = (await putCanvasToken({ canvas_token: secret }).catch((e: unknown) => e)) as ApiError
+    const error = (await putCanvasToken({ canvas_token: secret, custody: { acknowledged: true, notice_version: 1 } }).catch((e: unknown) => e)) as ApiError
     expect(error).toBeInstanceOf(ApiError)
     expect(error).not.toHaveProperty('config')
     expect(error).not.toHaveProperty('request')

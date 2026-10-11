@@ -82,21 +82,12 @@ class TestAuthorizationServerMetadata:
         assert "offline_access" not in text and "jwt-bearer" not in text
         assert "client_secret" not in text and "private_key_jwt" not in text
 
-    def test_the_stock_oauth_server_metadata_advertised_secrets_and_ours_does_not(self, stack, proxy_stack) -> None:
-        local = stack.client.get("/.well-known/oauth-authorization-server").json()
-        proxy = proxy_stack.client.get("/.well-known/oauth-authorization-server").json()
-        assert local["token_endpoint_auth_methods_supported"] == ["none"]
-        assert "revocation_endpoint" not in proxy  # the proxy has no /revoke at all
 
 
 class TestProtectedResourceMetadata:
     def test_the_document_is_exactly_this(self, stack) -> None:
         assert stack.client.get("/.well-known/oauth-protected-resource/mcp").json() == PRM
 
-    def test_it_is_identical_in_both_modes(self, stack, proxy_stack) -> None:
-        local = stack.client.get("/.well-known/oauth-protected-resource/mcp").json()
-        proxy = proxy_stack.client.get("/.well-known/oauth-protected-resource/mcp").json()
-        assert local == proxy == PRM
 
 
 class TestOneIssuerString:
@@ -123,12 +114,12 @@ class TestOneIssuerString:
             assert len(query["iss"]) == 1 and "error" in query
             redirected.append(query["iss"][0])
         _, tokens = stack.tokens_for(ALICE)
-        claims = stack.authz.codec.decode(tokens["access_token"])
+        claims = stack.authz.codec.decode(tokens["access_token"]).claims
         assert [issuer_metadata, issuer_prm, claims["iss"], *redirected] == [ISSUER] * (3 + len(redirected))
 
     def test_the_audience_is_the_mcp_url_that_fastmcp_advertises(self, stack) -> None:
         _, tokens = stack.tokens_for(ALICE)
-        assert stack.authz.codec.decode(tokens["access_token"])["aud"] == AUDIENCE
+        assert stack.authz.codec.decode(tokens["access_token"]).claims["aud"] == AUDIENCE
         assert stack.client.get("/.well-known/oauth-protected-resource/mcp").json()["resource"] == AUDIENCE
 
 
@@ -148,10 +139,10 @@ class TestRouteTables:
             "/account/admin/grants/revoke": ALL_ACCOUNT_METHODS,
             "/account/admin/invalidate": ALL_ACCOUNT_METHODS,
             "/account/admin/remove": ALL_ACCOUNT_METHODS,
-            "/account/callback": ALL_ACCOUNT_METHODS,
+            "/auth/callback/entra": ALL_ACCOUNT_METHODS,
             "/account/consent": ALL_ACCOUNT_METHODS,
             "/account/grants/revoke": ALL_ACCOUNT_METHODS,
-            "/account/login": ALL_ACCOUNT_METHODS,
+            "/auth/login": ALL_ACCOUNT_METHODS,
             "/account/logout": ALL_ACCOUNT_METHODS,
             "/account/schools": ALL_ACCOUNT_METHODS,
             "/account/token": ALL_ACCOUNT_METHODS,
@@ -166,36 +157,6 @@ class TestRouteTables:
             "/token": ("OPTIONS", "POST"),
         }
 
-    def test_the_proxy_route_table_is_the_one_it_always_was(self, proxy_stack) -> None:
-        table = route_table(proxy_stack)
-        assert table == {
-            "/.well-known/oauth-authorization-server": ("GET", "HEAD", "OPTIONS"),
-            "/.well-known/oauth-protected-resource/mcp": ("GET", "HEAD", "OPTIONS"),
-            "/account": ALL_ACCOUNT_METHODS,
-            "/account/admin": ALL_ACCOUNT_METHODS,
-            "/account/admin/approve": ALL_ACCOUNT_METHODS,
-            "/account/admin/audit": ALL_ACCOUNT_METHODS,
-            "/account/admin/deny": ALL_ACCOUNT_METHODS,
-            "/account/admin/disable": ALL_ACCOUNT_METHODS,
-            "/account/admin/enable": ALL_ACCOUNT_METHODS,
-            "/account/admin/invalidate": ALL_ACCOUNT_METHODS,
-            "/account/admin/remove": ALL_ACCOUNT_METHODS,
-            "/account/callback": ALL_ACCOUNT_METHODS,
-            "/account/login": ALL_ACCOUNT_METHODS,
-            "/account/logout": ALL_ACCOUNT_METHODS,
-            "/account/schools": ALL_ACCOUNT_METHODS,
-            "/account/token": ALL_ACCOUNT_METHODS,
-            "/account/token/delete": ALL_ACCOUNT_METHODS,
-            "/account/token/recheck": ALL_ACCOUNT_METHODS,
-            "/account/write-tools": ALL_ACCOUNT_METHODS,
-            "/auth/callback": ("GET", "HEAD"),
-            "/authorize": ("GET", "HEAD", "POST"),
-            "/consent": ("GET", "HEAD", "POST"),
-            "/healthz": ("GET", "HEAD"),
-            "/mcp": ("DELETE", "POST"),
-            "/register": ("OPTIONS", "POST"),
-            "/token": ("OPTIONS", "POST"),
-        }
 
     def test_the_provider_route_set_is_the_expected_one(self, stack) -> None:
         provider = stack.mcp.auth

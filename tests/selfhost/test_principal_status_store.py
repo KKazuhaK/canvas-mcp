@@ -14,13 +14,13 @@ import threading
 from dataclasses import replace
 
 import pytest
-from dbbackend import make_store, raw_connection
+from dbbackend import make_store
 
+from canvas_mcp.core.selfhost.custody import CustodyAcknowledgement
 from canvas_mcp.core.selfhost.token_store import (
     DISABLE_REASON_ADMIN,
     DISABLE_REASON_OPERATOR,
     OPERATOR,
-    SCHEMA_VERSION,
     STATUS_ACTIVE,
     STATUS_DISABLED,
     AccessActionRefused,
@@ -74,11 +74,17 @@ def enroll(store: TokenStore, key: str = USER) -> None:
         canvas_user_id="7",
         canvas_user_name="Ada",
         canvas_host="canvas.example.test",
+        custody=CustodyAcknowledgement(1, store._now()),
     )
 
 
 def make_owner(store: TokenStore, oid: str) -> str:
     return make_account(store, oid, role="owner")
+
+
+def _events(store: TokenStore, key: str | None = None):
+    actions = {"account_created", "account_created_by_operator", "account_disabled", "account_enabled", "role_changed", "owner_loss_refused_last_owner"}
+    return [e for e in store.iter_audit(account_id=key) if e.action in actions]
 
 
 class TestDefaults:
@@ -92,17 +98,6 @@ class TestDefaults:
         assert st.status == STATUS_ACTIVE and st.active and not st.disabled
         assert st.session_epoch == 0 and st.stored is True and st.is_owner is False
 
-    def test_the_legacy_key_names_the_same_account(self, store: TokenStore) -> None:
-        assert store.resolve_legacy_key(f"entra:{TID}:{OID_USER}") == USER
-        assert store.resolve_legacy_key(f"entra:{TID.upper()}:{OID_USER.upper()}") == USER
-        assert store.resolve_legacy_key(f"entra:{TID}:{OID_OWNER_1}") is None
-        assert store.resolve_legacy_key("google:1") is None
-        store.disable_principal(
-            store.resolve_legacy_key(f"entra:{TID}:{OID_USER}") or "",
-            actor=OPERATOR,
-            reason=DISABLE_REASON_OPERATOR,
-        )
-        assert store.get_principal_status(USER).disabled
 
     def test_an_entra_key_is_not_a_principal_key(self, store: TokenStore) -> None:
         legacy = f"entra:{TID}:{OID_USER}"
@@ -130,7 +125,8 @@ class TestDisableAndEnable:
         assert st.disabled and st.status == STATUS_DISABLED
         assert st.session_epoch == 1
         assert st.disabled_reason == DISABLE_REASON_OPERATOR
-        assert st.disabled_by == "operator" and st.disabled_at == 1_800_000_000
+        assert st.disabled_by is None and st.disabled_at == 1_800_000_000
+        assert _events(store, USER)[0].actor == "operator"
 
     def test_disable_is_idempotent_and_changes_nothing_the_second_time(
         self, store: TokenStore, clock: Clock
@@ -140,7 +136,7 @@ class TestDisableAndEnable:
         assert store.disable_principal(USER, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR) is False
         st = store.get_principal_status(USER)
         assert st.session_epoch == 1 and st.disabled_at == 1_800_000_000
-        assert [e.action for e in store.list_status_events(USER)] == ["disabled", "account_created"]
+        assert [e.action for e in _events(store, USER)] == ["account_disabled", "account_created_by_operator"]
 
     def test_enable_clears_the_disablement_and_bumps_the_epoch_again(self, store: TokenStore) -> None:
         enroll(store)
@@ -156,7 +152,7 @@ class TestDisableAndEnable:
         store.disable_principal(USER, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)
         st = store.get_principal_status(USER)
         assert st.display_name == "Ada Lovelace"
-        (account,) = [a for a in store.list_accounts() if a.principal_key == USER]
+        (account,) = [a for a in list(store.iter_accounts()) if a.principal_key == USER]
         assert account.username == "ada@example.test"
 
     def test_disabling_an_unknown_account_changes_nothing(self, store: TokenStore) -> None:
@@ -357,22 +353,22 @@ class TestSessionEpoch:
 
 class TestOwnerRecord:
     def test_a_refused_sign_in_leaves_no_account(self, store: TokenStore) -> None:
-        before = len(store.list_principal_statuses())
+        before = len(list(store.iter_accounts()))
         out = sign_in(store, OID_OWNER_1, member=False, owner=False)
         assert out.outcome == "deny" and out.status is None
-        assert len(store.list_principal_statuses()) == before
+        assert len(list(store.iter_accounts())) == before
 
-    def test_owner_gain_and_loss_are_recorded_and_in_the_history(
-        self, store: TokenStore, clock: Clock
-    ) -> None:
-        sign_in(store, OID_OWNER_2, owner=True)  # a second owner, so the first can lose the role
+    def test_owner_gain_and_loss_are_recorded_and_in_the_history(self, store: TokenStore, clock: Clock) -> None:
+        sign_in(store, OID_OWNER_2, owner=True)
         sign_in(store, OID_OWNER_1, owner=True)
+        before = _events(store, OWNER_1)
         clock.now += 10
-        sign_in(store, OID_OWNER_1, owner=True)  # unchanged: no event
+        sign_in(store, OID_OWNER_1, owner=True)
+        assert _events(store, OWNER_1) == before
         clock.now += 10
         sign_in(store, OID_OWNER_1, owner=False)
-        actions = [e.action for e in store.list_status_events(OWNER_1)]
-        assert actions == ["owner_lost", "owner_gained", "account_created"]
+        changed = _events(store, OWNER_1)[0]
+        assert changed.action == "role_changed" and changed.detail["role"] == "user"
         assert store.count_active_owners() == 1
 
     def test_a_sign_in_reports_exactly_the_owner_changes_it_made(self, store: TokenStore) -> None:
@@ -392,82 +388,51 @@ class TestOwnerRecord:
         out = sign_in(store, OID_OWNER_1, owner=False)
         assert out.owner_change is None and not out.session_owner
         assert store.get_principal_status(OWNER_1).is_owner
-        assert [e.action for e in store.list_status_events(OWNER_1)][0] == (
+        assert [e.action for e in _events(store, OWNER_1)][0] == (
             "owner_loss_refused_last_owner"
         )
 
-    def test_a_request_token_issued_before_the_last_sign_in_cannot_demote(
-        self, store: TokenStore, clock: Clock
-    ) -> None:
-        sign_in(store, OID_OWNER_2, owner=True)
-        sign_in(store, OID_OWNER_1, owner=True)  # at 1_800_000_000
-        assert store.demote_owner(OWNER_1, evidence_issued_at=1_800_000_000 - 3600) is False
-        assert store.demote_owner(OWNER_1, evidence_issued_at=1_800_000_000) is False
-        assert store.get_principal_status(OWNER_1).is_owner
 
-    def test_a_request_token_issued_after_the_last_sign_in_demotes_once(
-        self, store: TokenStore
-    ) -> None:
-        sign_in(store, OID_OWNER_2, owner=True)
-        sign_in(store, OID_OWNER_1, owner=True)
-        assert store.demote_owner(OWNER_1, evidence_issued_at=1_800_000_500) is True
-        assert not store.get_principal_status(OWNER_1).is_owner
-        assert store.demote_owner(OWNER_1, evidence_issued_at=1_800_000_900) is False
 
-    def test_the_last_owner_is_never_demoted_by_a_request_token(self, store: TokenStore) -> None:
-        sign_in(store, OID_OWNER_1, owner=True)
-        assert store.demote_owner(OWNER_1, evidence_issued_at=1_800_000_500) is False
-        assert store.get_principal_status(OWNER_1).is_owner
 
-    def test_a_bootstrap_or_operator_owner_is_not_demoted_by_a_request_token(
-        self, store: TokenStore
-    ) -> None:
-        make_owner(store, OID_OWNER_1)
-        make_owner(store, OID_OWNER_2)
-        assert store.demote_owner(OWNER_1, evidence_issued_at=1_900_000_000) is False
-        assert store.get_principal_status(OWNER_1).is_owner
 
-    def test_demotion_never_raises_a_role(self, store: TokenStore) -> None:
-        assert store.demote_owner(USER, evidence_issued_at=1_900_000_000) is False
-        assert not store.get_principal_status(USER).is_owner
 
 
 class TestHistory:
-    def test_every_transition_is_recorded_with_actor_and_epoch(
-        self, store: TokenStore, clock: Clock
-    ) -> None:
+    def test_every_transition_is_recorded_with_actor_and_epoch(self, store: TokenStore, clock: Clock) -> None:
         make_owner(store, OID_OWNER_1)
         make_owner(store, OID_OWNER_2)
         store.disable_principal(USER, actor=OWNER_1, reason=DISABLE_REASON_ADMIN)
+        assert store.get_principal_status(USER).session_epoch == 1
         clock.now += 60
         store.enable_principal(USER, actor=OPERATOR)
-        events = store.list_status_events(USER)
-        assert [(e.action, e.actor, e.reason, e.session_epoch) for e in events] == [
-            ("enabled", "operator", None, 2),
-            ("disabled", OWNER_1, DISABLE_REASON_ADMIN, 1),
-            ("account_created", "operator", "operator", 0),
+        assert store.get_principal_status(USER).session_epoch == 2
+        events = _events(store, USER)
+        assert [(e.action, e.actor, e.reason) for e in events[:2]] == [
+            ("account_enabled", "operator", None),
+            ("account_disabled", OWNER_1, DISABLE_REASON_ADMIN),
         ]
         assert events[0].at == 1_800_000_060
-        assert len(store.list_status_events()) == 5  # three accounts created + the two above
+        assert len(_events(store)) == 5
 
     def test_a_refused_change_leaves_no_event(self, store: TokenStore) -> None:
         make_owner(store, OID_OWNER_1)
-        before = len(store.list_status_events())
+        before = len(_events(store))
         with pytest.raises(AccessActionRefused):
             store.disable_principal(OWNER_1, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)
-        assert len(store.list_status_events()) == before
+        assert len(_events(store)) == before
 
     def test_the_audit_log_records_the_change_with_its_actor(self, store: TokenStore) -> None:
         make_owner(store, OID_OWNER_1)
         make_owner(store, OID_OWNER_2)
         store.disable_principal(USER, actor=OWNER_1, reason=DISABLE_REASON_ADMIN)
-        entries = [e for e in store.list_audit() if e.action == "account_disabled"]
+        entries = [e for e in list(store.iter_audit()) if e.action == "account_disabled"]
         assert [(e.actor, e.target, e.reason) for e in entries] == [
             (OWNER_1, USER, DISABLE_REASON_ADMIN)
         ]
 
 
-class TestRestartAndMigration:
+class TestRestart:
     def test_the_decision_survives_a_restart(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
         first = make_store(path, make_ring())
@@ -482,7 +447,7 @@ class TestRestartAndMigration:
         with pytest.raises(PrincipalDisabledError):
             enroll(second)
 
-    def test_the_migration_is_idempotent(self, tmp_path: pathlib.Path) -> None:
+    def test_initialization_is_idempotent(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "t.sqlite3"
         s = make_store(path, make_ring())
         s.initialize()
@@ -492,17 +457,6 @@ class TestRestartAndMigration:
             make_store(path, make_ring()).initialize()
         assert make_store(path, make_ring()).get_principal_status(USER).session_epoch == 1
 
-    def test_an_older_server_refuses_the_new_database(self, tmp_path: pathlib.Path) -> None:
-        # The reason for the version bump: a schema 4 server reads principal_status,
-        # finds nothing and would serve every disabled user. It must refuse the file.
-        path = tmp_path / "t.sqlite3"
-        newest = make_store(path, make_ring())
-        newest.initialize()
-        with raw_connection(newest) as conn:
-            version = int(
-                conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
-            )
-        assert version == SCHEMA_VERSION == 5 > 4
 
 
 class TestConcurrentEnrollmentAndDisable:

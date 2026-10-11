@@ -115,7 +115,10 @@ class JwksCache:
         neither tokens with invented key ids nor a failing provider can make the server
         hammer the key endpoint.
         """
-        if self._last_fetch is not None and now - self._last_fetch < REFETCH_MIN_INTERVAL_S:
+        if (
+            self._last_fetch is not None
+            and now - self._last_fetch < REFETCH_MIN_INTERVAL_S
+        ):
             return False
         if not self._loaded() or now - self._loaded_at >= TTL_S:
             return True

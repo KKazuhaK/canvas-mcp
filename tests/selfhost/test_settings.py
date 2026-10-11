@@ -1,4 +1,4 @@
-"""Tests for the entra-oauth environment contract."""
+"""Tests for the selfhost environment contract."""
 
 import base64
 from dataclasses import fields
@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from canvas_mcp.core.selfhost.settings import (
-    AUTH_MODE_ENTRA,
     AUTH_MODE_ENV,
+    AUTH_MODE_SELFHOST,
     COURSE_STATE_ENV,
     DEFAULT_COURSE_STATE,
     DEFAULT_REDIRECT_URIS,
@@ -80,7 +80,7 @@ class TestValidEnvironment:
 
     def test_overrides_are_honoured(self):
         settings = load_selfhost_settings(_env(
-            ENTRA_API_SCOPE="Mcp.Use", ENTRA_REQUIRED_ROLE="Reader", ENTRA_OWNER_ROLE="Boss",
+            MCP_SCOPE="Mcp.Use", ENTRA_REQUIRED_ROLE="Reader", ENTRA_OWNER_ROLE="Boss",
             ACCOUNT_SESSION_TTL_SECONDS="120", SELFHOST_DATA_DIR="/srv/state",
         ))
         assert (settings.api_scope, settings.required_role, settings.owner_role) == (
@@ -140,7 +140,7 @@ class TestEntraIdentifiers:
 
     @pytest.mark.parametrize("value", ["has space", "x" * 65, "bad/scope", "openid", "Profile", "offline_access", "email"])
     def test_api_scope_rejected(self, value):
-        assert any("ENTRA_API_SCOPE" in p for p in _problems(ENTRA_API_SCOPE=value))
+        assert any("MCP_SCOPE" in p for p in _problems(MCP_SCOPE=value))
 
     def test_roles_validated_and_distinct(self):
         assert any("ENTRA_REQUIRED_ROLE" in p for p in _problems(ENTRA_REQUIRED_ROLE="bad role"))
@@ -245,7 +245,7 @@ class TestAllProblemsAtOnce:
 
     def test_several_malformed_values_are_reported_together(self):
         problems = _problems(
-            PUBLIC_BASE_URL="http://x", ENTRA_TENANT_ID="nope", ENTRA_API_SCOPE="openid",
+            PUBLIC_BASE_URL="http://x", ENTRA_TENANT_ID="nope", MCP_SCOPE="openid",
             ACCOUNT_SESSION_TTL_SECONDS="5",
         )
         assert len(problems) == 4
@@ -258,7 +258,7 @@ class TestAuthMode:
         assert auth_mode(env) == "legacy"
 
     def test_entra(self):
-        assert auth_mode({AUTH_MODE_ENV: AUTH_MODE_ENTRA}) == "entra-oauth"
+        assert auth_mode({AUTH_MODE_ENV: AUTH_MODE_SELFHOST}) == "selfhost"
 
     @pytest.mark.parametrize("value", ["Entra-OAuth", "oauth2", "easyauth", "true", "LEGACY", "entra-id"])
     def test_anything_else_is_refused(self, value):
@@ -268,8 +268,8 @@ class TestAuthMode:
         assert value not in info.value.problems[0]
 
     def test_reads_the_process_environment_by_default(self, monkeypatch):
-        monkeypatch.setenv(AUTH_MODE_ENV, AUTH_MODE_ENTRA)
-        assert auth_mode() == "entra-oauth"
+        monkeypatch.setenv(AUTH_MODE_ENV, AUTH_MODE_SELFHOST)
+        assert auth_mode() == "selfhost"
         monkeypatch.delenv(AUTH_MODE_ENV)
         assert auth_mode() == "legacy"
 

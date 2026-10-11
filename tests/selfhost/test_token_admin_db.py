@@ -10,8 +10,8 @@ import pytest
 from dbbackend import PG_URL, reset_public_schema
 
 from canvas_mcp.core.selfhost import token_admin
-from canvas_mcp.core.selfhost.db import migrate
 from canvas_mcp.core.selfhost.db.engine import Database
+from canvas_mcp.core.selfhost.db.migrations import runner as migrate
 from canvas_mcp.core.selfhost.db.url import parse_database_url
 from canvas_mcp.core.selfhost.token_store import (
     OPERATOR,
@@ -311,7 +311,7 @@ class TestImportIntoPostgres:
             assert k1_only not in err
             assert migrate.current(self._db()).state == migrate.STATE_UNINITIALIZED
         assert source.read_bytes() == before
-        from canvas_mcp.core.selfhost.db import transfer
+        from canvas_mcp.core.selfhost.db.migrations import transfer
 
         assert not transfer.target_holds_rows(self._db())
 
@@ -360,7 +360,7 @@ class TestImportIntoPostgres:
     ) -> None:
         # The copy migrated fine; the PostgreSQL transaction fails after the schema
         # and every row were written. DDL is transactional: all of it is rolled back.
-        from canvas_mcp.core.selfhost.db import transfer
+        from canvas_mcp.core.selfhost.db.migrations import transfer
 
         source = tmp_path / "old.sqlite3"
         legacy.build(source, "v4")

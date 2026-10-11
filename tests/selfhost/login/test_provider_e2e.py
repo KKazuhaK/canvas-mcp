@@ -65,7 +65,7 @@ def test_consent_shortcut_when_already_signed_in_and_a_forced_provider_prompt_fo
     shortcut = person.get(login)  # already signed in: straight to the consent page, no provider
     assert shortcut.status_code == 303 and shortcut.headers["location"].startswith("/account/consent?txn=")
     person.get(login + "&reauth=1")  # "use a different account": the chooser, which carries reauth
-    start = person.get("/account/login/oidc/school", params={"txn": login.split("txn=")[1].split("&")[0], "reauth": "1"})
+    start = person.get("/auth/login/oidc/school", params={"txn": login.split("txn=")[1].split("&")[0], "reauth": "1"})
     assert start.status_code == 302
     ps.school.authorize(start.headers["location"])
     assert ps.school.last_authorize["prompt"] == "login"
@@ -108,7 +108,7 @@ class TestApproval:
             person = ps.person()
             client_id, verifier, login = person.begin_connect()
             txn = login.split("txn=")[1]
-            start = person.get("/account/login/google", params={"txn": txn})
+            start = person.get("/auth/login/google", params={"txn": txn})
             callback = person.get(person.callback_url("google", start))
             assert callback.status_code == 303
             page = person.get(callback.headers["location"])

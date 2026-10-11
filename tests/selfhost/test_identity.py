@@ -1,158 +1,99 @@
-"""Tests for the pure claim-authorization rules."""
+"""Verified Entra ID-token reduction and the separate admission decision."""
 
 import pytest
 
-from canvas_mcp.core.credentials import RequestPrincipal
-from canvas_mcp.core.selfhost.identity import (
-    ClaimsDenied,
-    ClaimsPolicy,
-    authorize_id_token_claims,
-    evaluate_entra_claims,
-    principal_key,
+from canvas_mcp.core.selfhost.accounts import (
+    DENY_BAD_ROLES,
+    DENY_BAD_SUBJECT,
+    DENY_WRONG_TENANT,
+    Denied,
+    EntraClaimsPolicy,
+    ExternalClaims,
+    default_policy,
+    entra_external_claims,
+    entra_issuer,
+    evaluate_admission,
 )
 
-TENANT = "11111111-2222-3333-4444-555555555555"
-CLIENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-OID = "99999999-8888-7777-6666-555555555555"
-POLICY = ClaimsPolicy(tenant_id=TENANT, client_id=CLIENT, required_role="Canvas.User", owner_role="Canvas.Owner")
+TENANT = '11111111-2222-3333-4444-555555555555'
+CLIENT = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+OID = '99999999-8888-7777-6666-555555555555'
+POLICY = EntraClaimsPolicy(TENANT, CLIENT)
 
 
-def _claims(**overrides):
-    claims = {
-        "tid": TENANT, "azp": CLIENT, "oid": OID, "roles": ["Canvas.User"],
-        "name": "Ada Lovelace", "preferred_username": "ada@example.test",
-    }
-    for key, value in overrides.items():
-        if value is None:
-            claims.pop(key, None)
-        else:
-            claims[key] = value
-    return claims
+def claims(**overrides):
+    values = {'tid': TENANT, 'oid': OID, 'roles': ['Canvas.User'],
+              'name': 'Ada Lovelace', 'preferred_username': 'ada@example.test'}
+    values.update(overrides)
+    return {key: value for key, value in values.items() if value is not ...}
 
 
-def _denied(claims, kind="access") -> ClaimsDenied:
-    result = evaluate_entra_claims(claims, POLICY, token_kind=kind)
-    assert isinstance(result, ClaimsDenied), result
+def external(**overrides):
+    result = entra_external_claims(claims(**overrides), POLICY)
+    assert isinstance(result, ExternalClaims)
     return result
 
 
-class TestAccess:
-    def test_valid_user(self):
-        result = evaluate_entra_claims(_claims(), POLICY, token_kind="access")
-        assert isinstance(result, RequestPrincipal)
-        assert result.key == f"entra:{TENANT}:{OID}"
-        assert (result.tenant_id, result.object_id) == (TENANT, OID)
-        assert result.display_name == "Ada Lovelace"
-        assert result.upn == "ada@example.test"
-        assert result.roles == frozenset({"Canvas.User"})
-        assert result.is_owner is False
-
-    def test_owner_role_alone_grants_access_and_marks_owner(self):
-        result = evaluate_entra_claims(_claims(roles=["Canvas.Owner"]), POLICY, token_kind="access")
-        assert isinstance(result, RequestPrincipal)
-        assert result.is_owner is True
-
-    def test_both_roles(self):
-        result = evaluate_entra_claims(_claims(roles=["Canvas.User", "Canvas.Owner", "Other"]), POLICY, token_kind="access")
-        assert isinstance(result, RequestPrincipal)
-        assert result.is_owner is True
-        assert "Other" in result.roles
-
-    def test_other_tenant(self):
-        assert _denied(_claims(tid="00000000-0000-0000-0000-000000000000")).reason == "wrong_tenant"
-
-    @pytest.mark.parametrize("tid", [None, 123, ["x"], ""])
-    def test_tenant_must_be_a_matching_string(self, tid):
-        assert _denied(_claims(tid=tid)).reason == "wrong_tenant"
-
-    def test_other_client(self):
-        assert _denied(_claims(azp="00000000-0000-0000-0000-000000000000")).reason == "wrong_client"
-
-    def test_missing_azp(self):
-        assert _denied(_claims(azp=None)).reason == "wrong_client"
-
-    @pytest.mark.parametrize("oid", [None, "", "not-a-guid", 42, OID + "x"])
-    def test_bad_subject(self, oid):
-        assert _denied(_claims(oid=oid)).reason == "bad_subject"
-
-    def test_missing_roles_claim(self):
-        assert _denied(_claims(roles=None)).reason == "missing_role"
-
-    def test_roles_without_a_granting_role(self):
-        assert _denied(_claims(roles=["Something.Else"])).reason == "missing_role"
-        assert _denied(_claims(roles=[])).reason == "missing_role"
-
-    def test_role_comparison_is_exact(self):
-        assert _denied(_claims(roles=["canvas.user"])).reason == "missing_role"
-
-    @pytest.mark.parametrize("roles", ["Canvas.User", 1, {"Canvas.User": True}, ["Canvas.User", 7], ("Canvas.User",)])
-    def test_roles_of_the_wrong_shape_are_rejected(self, roles):
-        assert _denied(_claims(roles=roles)).reason == "bad_roles"
-
-    def test_a_roles_string_containing_the_role_is_still_rejected(self):
-        # "Canvas.User" in "Canvas.User Canvas.Owner" would be a substring match.
-        assert _denied(_claims(roles="Canvas.User Canvas.Owner")).reason == "bad_roles"
-
-    def test_guids_compare_case_insensitively_and_the_key_is_lower_case(self):
-        result = evaluate_entra_claims(
-            _claims(tid=TENANT.upper(), azp=CLIENT.upper(), oid=OID.upper()), POLICY, token_kind="access"
-        )
-        assert isinstance(result, RequestPrincipal)
-        assert result.key == f"entra:{TENANT}:{OID}"
-        assert result.object_id == OID
-
-    def test_tenant_is_checked_before_everything_else(self):
-        assert _denied(_claims(tid="x", azp="y", oid="z", roles=None)).reason == "wrong_tenant"
-
-    def test_long_names_are_truncated(self):
-        result = evaluate_entra_claims(
-            _claims(name="n" * 500, preferred_username="u" * 500), POLICY, token_kind="access"
-        )
-        assert isinstance(result, RequestPrincipal)
-        assert len(result.display_name) == 200
-        assert len(result.upn) == 254
-
-    def test_upn_falls_back_and_missing_names_are_empty(self):
-        result = evaluate_entra_claims(
-            _claims(name=None, preferred_username=None, upn="u@example.test"), POLICY, token_kind="access"
-        )
-        assert isinstance(result, RequestPrincipal)
-        assert (result.display_name, result.upn) == ("", "u@example.test")
-
-    def test_messages_are_fixed_english(self):
-        message = _denied(_claims(roles=[])).message
-        assert message == (
-            "Your Microsoft account is not allowed to use this server. "
-            "Ask the server owner to add you to the access group."
-        )
-        for reason_claims in (_claims(tid="x"), _claims(azp="x"), _claims(oid="x"), _claims(roles="x")):
-            denied = _denied(reason_claims)
-            assert denied.message and TENANT not in denied.message and OID not in denied.message
+def test_verified_identity_has_stable_provider_key_and_informational_names():
+    result = external()
+    assert result.identity == ('entra', entra_issuer(TENANT), OID)
+    assert result.display_name == 'Ada Lovelace'
+    assert result.username == 'ada@example.test'
+    assert result.roles == frozenset({'Canvas.User'})
 
 
-class TestIdToken:
-    def test_azp_is_not_required_for_id_tokens(self):
-        for azp in (None, "00000000-0000-0000-0000-000000000000"):
-            result = evaluate_entra_claims(_claims(azp=azp), POLICY, token_kind="id")
-            assert isinstance(result, RequestPrincipal)
-
-    def test_other_checks_still_apply(self):
-        assert _denied(_claims(tid="x"), "id").reason == "wrong_tenant"
-        assert _denied(_claims(oid="x"), "id").reason == "bad_subject"
-        assert _denied(_claims(roles=[]), "id").reason == "missing_role"
+@pytest.mark.parametrize('tid', [None, 123, ['x'], '', '00000000-0000-0000-0000-000000000000'])
+def test_wrong_tenant_is_refused_before_subject_or_roles(tid):
+    result = entra_external_claims(claims(tid=tid, oid='bad', roles=3), POLICY)
+    assert isinstance(result, Denied) and result.code == DENY_WRONG_TENANT
+    assert result.message == "Your Microsoft account belongs to a different directory than this server accepts."
 
 
-class TestAdapter:
-    def test_success_shape(self):
-        principal, message = authorize_id_token_claims(POLICY)(_claims(azp=None))
-        assert isinstance(principal, RequestPrincipal)
-        assert message == ""
-
-    def test_denied_shape(self):
-        principal, message = authorize_id_token_claims(POLICY)(_claims(roles=[]))
-        assert principal is None
-        assert "not allowed to use this server" in message
+@pytest.mark.parametrize('oid', [None, '', 'not-a-guid', 42, OID + 'x'])
+def test_bad_subject_is_refused(oid):
+    result = entra_external_claims(claims(oid=oid), POLICY)
+    assert isinstance(result, Denied) and result.code == DENY_BAD_SUBJECT
 
 
-def test_principal_key_is_lower_case():
-    assert principal_key(TENANT.upper(), OID.upper()) == f"entra:{TENANT}:{OID}"
+@pytest.mark.parametrize('roles', ['Canvas.User', 1, {'Canvas.User': True}, ['Canvas.User', 7], ('Canvas.User',), None])
+def test_malformed_role_claim_is_refused(roles):
+    result = entra_external_claims(claims(roles=roles), POLICY)
+    assert isinstance(result, Denied) and result.code == DENY_BAD_ROLES
+
+
+@pytest.mark.parametrize('roles', [[], ..., ['Other'], ['canvas.user']])
+def test_well_formed_identity_without_admission_is_not_a_reduction_error(roles):
+    ext = external(roles=roles)
+    verdict = evaluate_admission(ext, default_policy('Canvas.User', 'Canvas.Owner'))
+    assert not verdict.admitted_by_rule and not verdict.owner_by_rule
+
+
+@pytest.mark.parametrize('roles,admitted,owner', [
+    (['Canvas.User'], True, False), (['Canvas.Owner'], False, True),
+    (['Canvas.User', 'Canvas.Owner'], True, True),
+])
+def test_admission_and_owner_evidence_are_evaluated_separately(roles, admitted, owner):
+    verdict = evaluate_admission(external(roles=roles), default_policy('Canvas.User', 'Canvas.Owner'))
+    assert verdict.admitted_by_rule is admitted and verdict.owner_by_rule is owner
+
+
+@pytest.mark.parametrize('azp', [None, CLIENT, 'another-client'])
+def test_id_tokens_do_not_require_an_access_token_azp_claim(azp):
+    assert external(azp=azp).subject == OID
+
+
+def test_guids_are_canonical_and_names_are_bounded():
+    ext = external(tid=TENANT.upper(), oid=OID.upper(), name='n' * 500, preferred_username='u' * 500)
+    assert ext.tenant_id == TENANT and ext.subject == OID
+    assert len(ext.display_name) == 200 and len(ext.username) == 254
+    assert external(name=None, preferred_username=None, upn='u@example.test').username == 'u@example.test'
+
+
+def test_group_claims_are_optional_and_overage_never_fetches_membership():
+    group = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    ext = entra_external_claims(claims(groups=[group.upper(), 'invalid', 7]), POLICY)
+    assert isinstance(ext, ExternalClaims) and ext.groups == frozenset({group})
+    ext = entra_external_claims(claims(groups=[group]), POLICY, parse_groups=False)
+    assert isinstance(ext, ExternalClaims) and ext.groups == frozenset()
+    ext = external(groups=[group], _claim_names={'groups': 'source'})
+    assert ext.groups_overage and ext.groups == frozenset()

@@ -44,7 +44,7 @@ from typing import Any, Literal
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import URL, Connection, Engine, make_url
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
-from sqlalchemy.pool import NullPool, QueuePool
+from sqlalchemy.pool import QueuePool
 
 from .errors import StoreUnavailable, TokenStoreError
 from .url import DatabaseTarget, sqlite_target
@@ -52,13 +52,13 @@ from .url import DatabaseTarget, sqlite_target
 
 def _advisory_key(label: str) -> int:
     """A signed 64-bit advisory-lock key derived from a fixed label."""
-    return int.from_bytes(hashlib.sha256(label.encode("ascii")).digest()[:8], "big", signed=True)
+    return int.from_bytes(
+        hashlib.sha256(label.encode("ascii")).digest()[:8], "big", signed=True
+    )
 
 
 #: The one lock every PostgreSQL write transaction takes first.
 WRITER_LOCK_KEY = _advisory_key("canvas-mcp/token-store/writer")
-#: Session-level lock that serialises schema migrations across processes.
-MIGRATION_LOCK_KEY = _advisory_key("canvas-mcp/token-store/migrations")
 
 _ADVISORY_XACT_SQL = f"SELECT pg_advisory_xact_lock({WRITER_LOCK_KEY})"
 
@@ -75,7 +75,6 @@ PG_MAX_OVERFLOW = 0
 PG_POOL_TIMEOUT_SECONDS = 10
 PG_POOL_RECYCLE_SECONDS = 1800
 PG_CONNECT_TIMEOUT_SECONDS = 5
-PG_BEST_EFFORT_LOCK_TIMEOUT = "2s"
 
 BEGIN_OPTION = "canvas_begin"
 
@@ -103,14 +102,19 @@ class Database:
         if target.kind == "sqlite":
             assert target.sqlite_path is not None
             if sqlite3.sqlite_version_info < SQLITE_MIN_VERSION:
-                raise TokenStoreError("SQLite 3.37 or newer is required for self-hosted state")
+                raise TokenStoreError(
+                    "SQLite 3.37 or newer is required for self-hosted state"
+                )
             engine = create_engine(
                 URL.create("sqlite+pysqlite", database=str(target.sqlite_path)),
                 poolclass=QueuePool,
                 pool_size=SQLITE_POOL_SIZE,
                 max_overflow=SQLITE_MAX_OVERFLOW,
                 pool_pre_ping=False,
-                connect_args={"timeout": SQLITE_BUSY_TIMEOUT_SECONDS, "check_same_thread": False},
+                connect_args={
+                    "timeout": SQLITE_BUSY_TIMEOUT_SECONDS,
+                    "check_same_thread": False,
+                },
                 hide_parameters=True,
             )
             event.listen(engine, "connect", _sqlite_on_connect)
@@ -188,9 +192,16 @@ class Database:
             os.close(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
         # Bootstrap before the pooled connect enters WAL. Setting auto_vacuum after
         # WAL leaves a new file at NONE, so use this dedicated connection first.
-        raw = sqlite3.connect(path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS, isolation_level=None)
+        raw = sqlite3.connect(
+            path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS, isolation_level=None
+        )
         try:
-            if raw.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone() is None:
+            if (
+                raw.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
+                ).fetchone()
+                is None
+            ):
                 raw.execute("PRAGMA auto_vacuum=INCREMENTAL")
                 raw.execute(f"PRAGMA application_id={SQLITE_APPLICATION_ID}")
         finally:
@@ -264,39 +275,10 @@ class Database:
                 yield from self._pg_tx(lock=False, lock_timeout=None)
 
     @contextmanager
-    def sqlite_migration(self) -> Iterator[Connection]:
-        """Keep foreign-key-disabled DDL connections outside the request pool."""
-        if self.kind != "sqlite":
-            raise TokenStoreError("SQLite migration connection requires a SQLite database")
-        dedicated = create_engine(
-            self._engine.url, poolclass=NullPool, hide_parameters=True,
-            connect_args={"timeout": SQLITE_BUSY_TIMEOUT_SECONDS, "check_same_thread": False},
-        )
-
-        def setup(raw: Any, record: Any) -> None:
-            _sqlite_on_connect(raw, record)
-            raw.execute("PRAGMA foreign_keys=OFF")
-
-        event.listen(dedicated, "connect", setup)
-        event.listen(dedicated, "begin", _sqlite_on_begin)
-        try:
-            with self.guard(), self._write_lock:
-                conn = dedicated.connect().execution_options(**{BEGIN_OPTION: "IMMEDIATE"})
-                try:
-                    trans = conn.begin()
-                    try:
-                        yield conn
-                        if conn.exec_driver_sql("PRAGMA foreign_key_check").first() is not None:
-                            raise TokenStoreError("migration failed foreign key validation")
-                    except BaseException:
-                        with suppress(SQLAlchemyError):
-                            trans.rollback()
-                        raise
-                    trans.commit()
-                finally:
-                    conn.close()
-        finally:
-            dedicated.dispose()
+    def write_gate(self) -> Iterator[None]:
+        """Serialize governance work before it checks out a connection."""
+        with self._write_lock:
+            yield
 
     @contextmanager
     def read(self) -> Iterator[Connection]:
@@ -309,31 +291,20 @@ class Database:
                 conn.close()
 
     @contextmanager
-    def best_effort_write(self, *, lock: bool) -> Iterator[Connection]:
-        """A short write that callers may let fail (``touch``, ``mark_verified``).
-
-        SQLite: one deferred transaction, no Python lock (as the single autocommit
-        statement it replaces). PostgreSQL with ``lock=False``: one autocommit
-        statement, for an update whose correctness does not depend on other writers.
-        PostgreSQL with ``lock=True``: a write transaction that takes the writer lock
-        first, with a short lock timeout, because the statement compares a credential
-        generation that a concurrent enrollment may be changing.
-        """
+    def best_effort_write(self) -> Iterator[Connection]:
+        """Tier zero: one deferred SQLite or autocommit PostgreSQL statement."""
         if self.kind == "sqlite":
             with self.guard():
                 yield from self._sqlite_tx("DEFERRED")
-        elif not lock:
-            # One autocommit statement: no transaction, no extra round trips. This
-            # runs on every MCP request (``touch``), so it has to stay cheap.
+        else:
             with self.guard():
-                conn = self._engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+                conn = self._engine.connect().execution_options(
+                    isolation_level="AUTOCOMMIT"
+                )
                 try:
                     yield conn
                 finally:
                     conn.close()
-        else:
-            with self.guard():
-                yield from self._pg_tx(lock=True, lock_timeout=PG_BEST_EFFORT_LOCK_TIMEOUT)
 
     def _sqlite_tx(self, mode: str) -> Iterator[Connection]:
         conn = self._engine.connect().execution_options(**{BEGIN_OPTION: mode})
@@ -350,7 +321,9 @@ class Database:
             conn.close()
 
     def _pg_tx(self, *, lock: bool, lock_timeout: str | None) -> Iterator[Connection]:
-        conn = self._engine.connect().execution_options(isolation_level="READ COMMITTED")
+        conn = self._engine.connect().execution_options(
+            isolation_level="READ COMMITTED"
+        )
         try:
             trans = conn.begin()
             try:

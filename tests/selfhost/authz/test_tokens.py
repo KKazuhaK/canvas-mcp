@@ -16,7 +16,7 @@ from canvas_mcp.core.selfhost.token_store import Keyring
 
 ISSUER = "https://canvas.example.test/"
 AUDIENCE = "https://canvas.example.test/mcp"
-ACCT = "acct:aaaaaaaa-0000-4000-8000-00000000000a"
+ACCT = "aaaaaaaa-0000-4000-8000-00000000000a"
 GRANT = "11111111-1111-4111-8111-111111111111"
 SCOPE = "Canvas.Access"
 NOW = 1_800_000_000
@@ -30,18 +30,23 @@ class Epoch:
         return self.value
 
 
-@pytest.mark.parametrize("overrides", [
-    {"iss": "https://other.example.test/"},
-    {"aud": "https://other.example.test/mcp"},
-    {"exp": NOW - 1},
-    {"sub": "invalid"},
-    {"scope": "ungranted"},
-])
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"iss": "https://other.example.test/"},
+        {"aud": "https://other.example.test/mcp"},
+        {"exp": NOW - 1},
+        {"sub": "invalid"},
+        {"scope": "ungranted"},
+    ],
+)
 def test_invalid_claims_never_read_server_state(keyring, overrides):
     def forbidden_read():
         pytest.fail("invalid token read authoritative server state")
-    codec = tk.AccessTokenCodec(keyring, forbidden_read, issuer=ISSUER,
-                                audience=AUDIENCE, scopes=[SCOPE], clock=lambda: NOW)
+
+    codec = tk.AccessTokenCodec(
+        keyring, issuer=ISSUER, audience=AUDIENCE, scopes=[SCOPE], clock=lambda: NOW
+    )
     with pytest.raises(tk.AccessTokenInvalid):
         codec.decode(forge(keyring, claims=good_claims(**overrides)))
 
@@ -49,26 +54,32 @@ def test_invalid_claims_never_read_server_state(keyring, overrides):
 def test_bad_signature_never_reads_server_state(keyring):
     def forbidden_read():
         pytest.fail("bad signature read authoritative server state")
-    codec = tk.AccessTokenCodec(keyring, forbidden_read, issuer=ISSUER,
-                                audience=AUDIENCE, scopes=[SCOPE], clock=lambda: NOW)
+
+    codec = tk.AccessTokenCodec(
+        keyring, issuer=ISSUER, audience=AUDIENCE, scopes=[SCOPE], clock=lambda: NOW
+    )
     with pytest.raises(tk.AccessTokenInvalid):
         codec.decode(forge(keyring, key=OctKey.import_key(bytes(32))))
 
 
-def test_overlong_epoch_is_refused_before_key_derivation_or_database(keyring, monkeypatch):
+def test_overlong_epoch_is_refused_before_key_derivation_or_database(
+    keyring, monkeypatch
+):
     def forbidden(*args):
         pytest.fail("overlong epoch reached key derivation or server state")
+
     token = forge(keyring, header={"kid": "k1." + "1" * 11})
-    codec = tk.AccessTokenCodec(keyring, forbidden, issuer=ISSUER,
-                                audience=AUDIENCE, scopes=[SCOPE], clock=lambda: NOW)
-    monkeypatch.setattr(codec, '_key', forbidden)
+    codec = tk.AccessTokenCodec(
+        keyring, issuer=ISSUER, audience=AUDIENCE, scopes=[SCOPE], clock=lambda: NOW
+    )
+    monkeypatch.setattr(codec, "_key", forbidden)
     with pytest.raises(tk.AccessTokenInvalid):
         codec.decode(token)
 
 
 def codec_for(keyring: Keyring, epoch: Epoch, now: float = NOW) -> tk.AccessTokenCodec:
     return tk.AccessTokenCodec(
-        keyring, epoch, issuer=ISSUER, audience=AUDIENCE, scopes=[SCOPE], clock=lambda: now
+        keyring, issuer=ISSUER, audience=AUDIENCE, scopes=[SCOPE], clock=lambda: now
     )
 
 
@@ -89,6 +100,7 @@ def issue(codec: tk.AccessTokenCodec, **kw: Any) -> str:
         "grant_id": GRANT,
         "scopes": [SCOPE],
         "expires_at": NOW + 3600,
+        "epoch": 0,
     }
     args.update(kw)
     return codec.encode(**args).token
@@ -96,8 +108,16 @@ def issue(codec: tk.AccessTokenCodec, **kw: Any) -> str:
 
 def good_claims(**overrides: Any) -> dict[str, Any]:
     claims: dict[str, Any] = {
-        "iss": ISSUER, "aud": AUDIENCE, "sub": ACCT, "acct": ACCT, "client_id": "client-1",
-        "scope": SCOPE, "iat": NOW, "exp": NOW + 3600, "jti": "abc", "grant": GRANT,
+        "iss": ISSUER,
+        "aud": AUDIENCE,
+        "sub": ACCT,
+        "acct": ACCT,
+        "client_id": "client-1",
+        "scope": SCOPE,
+        "iat": NOW,
+        "exp": NOW + 3600,
+        "jti": "abc",
+        "grant": GRANT,
         "token_use": "access",
     }
     claims.update(overrides)
@@ -105,18 +125,30 @@ def good_claims(**overrides: Any) -> dict[str, Any]:
 
 
 def forge(
-    keyring: Keyring, *, kid: str = "k1", epoch: int = 0, header: dict[str, Any] | None = None,
-    claims: dict[str, Any] | None = None, key: OctKey | None = None, alg: str = "HS256",
+    keyring: Keyring,
+    *,
+    kid: str = "k1",
+    epoch: int = 0,
+    header: dict[str, Any] | None = None,
+    claims: dict[str, Any] | None = None,
+    key: OctKey | None = None,
+    alg: str = "HS256",
 ) -> str:
     """A token signed with the real derived key, so only the content is wrong."""
-    key = key or OctKey.import_key(keyring.derive(kid, f"mcp-access-jwt|v1|{kid}|{epoch}"))
+    key = key or OctKey.import_key(
+        keyring.derive(kid, f"mcp-access-jwt|v1|{kid}|{epoch}")
+    )
     head = {"alg": alg, "typ": "at+jwt", "kid": f"{kid}.{epoch}", **(header or {})}
-    return jwt.encode(head, claims if claims is not None else good_claims(), key, algorithms=[alg])
+    return jwt.encode(
+        head, claims if claims is not None else good_claims(), key, algorithms=[alg]
+    )
 
 
 class TestRoundTrip:
-    def test_a_token_verifies_and_carries_the_claims(self, codec: tk.AccessTokenCodec) -> None:
-        claims = codec.decode(issue(codec))
+    def test_a_token_verifies_and_carries_the_claims(
+        self, codec: tk.AccessTokenCodec
+    ) -> None:
+        claims = codec.decode(issue(codec)).claims
         assert claims["iss"] == ISSUER and claims["aud"] == AUDIENCE
         assert claims["sub"] == claims["acct"] == ACCT
         assert claims["client_id"] == "client-1" and claims["grant"] == GRANT
@@ -124,17 +156,26 @@ class TestRoundTrip:
         assert claims["exp"] - claims["iat"] == 3600
         assert len(claims["jti"]) >= 16
 
-    def test_the_header_names_the_ring_key_and_the_epoch(self, codec: tk.AccessTokenCodec) -> None:
+    def test_the_header_names_the_ring_key_and_the_epoch(
+        self, codec: tk.AccessTokenCodec
+    ) -> None:
         header = json.loads(base64.urlsafe_b64decode(issue(codec).split(".")[0] + "=="))
         assert header == {"typ": "at+jwt", "alg": "HS256", "kid": "k1.0"} or header == {
-            "alg": "HS256", "typ": "at+jwt", "kid": "k1.0"
+            "alg": "HS256",
+            "typ": "at+jwt",
+            "kid": "k1.0",
         }
 
     def test_every_token_has_its_own_jti(self, codec: tk.AccessTokenCodec) -> None:
-        assert codec.decode(issue(codec))["jti"] != codec.decode(issue(codec))["jti"]
+        assert (
+            codec.decode(issue(codec)).claims["jti"]
+            != codec.decode(issue(codec)).claims["jti"]
+        )
 
 
-def hand_signed(keyring: Keyring, header: dict[str, Any], claims: dict[str, Any] | None = None) -> str:
+def hand_signed(
+    keyring: Keyring, header: dict[str, Any], claims: dict[str, Any] | None = None
+) -> str:
     """A compact JWS built by hand, signed correctly, for headers joserfc refuses to build."""
     import hashlib
     import hmac
@@ -143,10 +184,16 @@ def hand_signed(keyring: Keyring, header: dict[str, Any], claims: dict[str, Any]
         return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
     signing_input = (
-        b64(json.dumps(header).encode()) + "." + b64(json.dumps(claims or good_claims()).encode())
+        b64(json.dumps(header).encode())
+        + "."
+        + b64(json.dumps(claims or good_claims()).encode())
     )
     key = keyring.derive("k1", "mcp-access-jwt|v1|k1|0")
-    return signing_input + "." + b64(hmac.new(key, signing_input.encode(), hashlib.sha256).digest())
+    return (
+        signing_input
+        + "."
+        + b64(hmac.new(key, signing_input.encode(), hashlib.sha256).digest())
+    )
 
 
 class TestRejections:
@@ -164,16 +211,35 @@ class TestRejections:
             "",
         ],
     )
-    def test_the_audience_must_be_exactly_the_mcp_url(self, codec, keyring, aud) -> None:
+    def test_the_audience_must_be_exactly_the_mcp_url(
+        self, codec, keyring, aud
+    ) -> None:
         with pytest.raises(tk.AccessTokenInvalid):
             codec.decode(forge(keyring, claims=good_claims(aud=aud)))
 
-    @pytest.mark.parametrize("iss", ["https://canvas.example.test", "https://evil.example/", None, 5])
+    @pytest.mark.parametrize(
+        "iss", ["https://canvas.example.test", "https://evil.example/", None, 5]
+    )
     def test_the_issuer_must_be_exact(self, codec, keyring, iss) -> None:
         with pytest.raises(tk.AccessTokenInvalid):
             codec.decode(forge(keyring, claims=good_claims(iss=iss)))
 
-    @pytest.mark.parametrize("missing", ["iss", "aud", "sub", "acct", "client_id", "scope", "iat", "exp", "jti", "grant", "token_use"])
+    @pytest.mark.parametrize(
+        "missing",
+        [
+            "iss",
+            "aud",
+            "sub",
+            "acct",
+            "client_id",
+            "scope",
+            "iat",
+            "exp",
+            "jti",
+            "grant",
+            "token_use",
+        ],
+    )
     def test_every_claim_is_required(self, codec, keyring, missing) -> None:
         with pytest.raises(tk.AccessTokenInvalid):
             codec.decode(forge(keyring, claims=good_claims(**{missing: ...})))
@@ -207,7 +273,10 @@ class TestRejections:
             codec.decode(forge(keyring, claims=good_claims(**overrides)))
 
     def test_a_small_clock_skew_in_iat_is_tolerated(self, codec, keyring) -> None:
-        assert codec.decode(forge(keyring, claims=good_claims(iat=NOW + 60)))["iat"] == NOW + 60
+        assert (
+            codec.decode(forge(keyring, claims=good_claims(iat=NOW + 60))).claims["iat"]
+            == NOW + 60
+        )
 
     def test_an_expired_token_is_refused(self, keyring, epoch) -> None:
         late = codec_for(keyring, epoch, now=NOW + 3601)
@@ -218,14 +287,21 @@ class TestRejections:
     def test_only_hs256_is_accepted(self, codec, keyring, alg) -> None:
         key = OctKey.import_key(keyring.derive("k1", "mcp-access-jwt|v1|k1|0"))
         token = jwt.encode(
-            {"alg": alg, "typ": "at+jwt", "kid": "k1.0"}, good_claims(), key, algorithms=[alg]
+            {"alg": alg, "typ": "at+jwt", "kid": "k1.0"},
+            good_claims(),
+            key,
+            algorithms=[alg],
         )
         with pytest.raises(tk.AccessTokenInvalid):
             codec.decode(token)
 
     def test_alg_none_is_refused(self, codec) -> None:
         def b64(data: dict[str, Any]) -> str:
-            return base64.urlsafe_b64encode(json.dumps(data).encode()).rstrip(b"=").decode()
+            return (
+                base64.urlsafe_b64encode(json.dumps(data).encode())
+                .rstrip(b"=")
+                .decode()
+            )
 
         header = {"alg": "none", "typ": "at+jwt", "kid": "k1.0"}
         for tail in ("", "AAAA"):
@@ -235,7 +311,10 @@ class TestRejections:
     def test_an_rsa_signed_token_is_refused(self, codec) -> None:
         rsa = RSAKey.generate_key(2048)
         token = jwt.encode(
-            {"alg": "RS256", "typ": "at+jwt", "kid": "k1.0"}, good_claims(), rsa, algorithms=["RS256"]
+            {"alg": "RS256", "typ": "at+jwt", "kid": "k1.0"},
+            good_claims(),
+            rsa,
+            algorithms=["RS256"],
         )
         with pytest.raises(tk.AccessTokenInvalid):
             codec.decode(token)
@@ -245,7 +324,12 @@ class TestRejections:
         [
             {"alg": "HS256", "typ": "JWT", "kid": "k1.0"},
             {"alg": "HS256", "kid": "k1.0"},
-            {"alg": "HS256", "typ": "at+jwt", "kid": "k1.0", "jwk": {"kty": "oct", "k": "AA"}},
+            {
+                "alg": "HS256",
+                "typ": "at+jwt",
+                "kid": "k1.0",
+                "jwk": {"kty": "oct", "k": "AA"},
+            },
             {"alg": "HS256", "typ": "at+jwt", "kid": "k1.0", "crit": ["x"], "x": 1},
             {"alg": "HS256", "typ": "at+jwt", "kid": "k1.0", "jku": "https://e/"},
             {"alg": "HS256", "typ": "at+jwt", "kid": "k1.0", "x5u": "https://e/"},
@@ -255,12 +339,18 @@ class TestRejections:
         with pytest.raises(tk.AccessTokenInvalid):
             codec.decode(hand_signed(keyring, header))
 
-    def test_the_hand_signed_helper_makes_a_valid_token_for_a_good_header(self, codec, keyring) -> None:
+    def test_the_hand_signed_helper_makes_a_valid_token_for_a_good_header(
+        self, codec, keyring
+    ) -> None:
         good = {"alg": "HS256", "typ": "at+jwt", "kid": "k1.0"}
-        assert codec.decode(hand_signed(keyring, good))["grant"] == GRANT
+        assert codec.decode(hand_signed(keyring, good)).claims["grant"] == GRANT
 
-    @pytest.mark.parametrize("kid", ["k1", "k1.", ".0", "nope.0", "k1.x", "k1.-1", "k1.0.0", 5, None])
-    def test_the_kid_must_name_a_ring_key_and_an_epoch(self, codec, keyring, kid) -> None:
+    @pytest.mark.parametrize(
+        "kid", ["k1", "k1.", ".0", "nope.0", "k1.x", "k1.-1", "k1.0.0", 5, None]
+    )
+    def test_the_kid_must_name_a_ring_key_and_an_epoch(
+        self, codec, keyring, kid
+    ) -> None:
         header: dict[str, Any] = {"alg": "HS256", "typ": "at+jwt"}
         if kid is not None:
             header["kid"] = kid
@@ -274,17 +364,40 @@ class TestRejections:
 
     def test_a_tampered_payload_or_signature_is_refused(self, codec) -> None:
         head, body, sig = issue(codec).split(".")
-        bad_body = base64.urlsafe_b64encode(
-            json.dumps(good_claims(client_id="someone-else")).encode()
-        ).rstrip(b"=").decode()
-        for token in (f"{head}.{bad_body}.{sig}", f"{head}.{body}.{sig[:-2]}AA", f"{head}.{body}."):
+        bad_body = (
+            base64.urlsafe_b64encode(
+                json.dumps(good_claims(client_id="someone-else")).encode()
+            )
+            .rstrip(b"=")
+            .decode()
+        )
+        for token in (
+            f"{head}.{bad_body}.{sig}",
+            f"{head}.{body}.{sig[:-2]}AA",
+            f"{head}.{body}.",
+        ):
             with pytest.raises(tk.AccessTokenInvalid):
                 codec.decode(token)
 
     @pytest.mark.parametrize(
         "junk",
-        ["", "x", "a.b", "a.b.c", "a.b.c.d", "....", "é.é.é", "Bearer abc", " " * 10, "\x00.\x00.\x00",
-         "x" * 5000, "eyJhbGciOiJIUzI1NiJ9.e30.", None, 12, b"abc"],
+        [
+            "",
+            "x",
+            "a.b",
+            "a.b.c",
+            "a.b.c.d",
+            "....",
+            "é.é.é",
+            "Bearer abc",
+            " " * 10,
+            "\x00.\x00.\x00",
+            "x" * 5000,
+            "eyJhbGciOiJIUzI1NiJ9.e30.",
+            None,
+            12,
+            b"abc",
+        ],
     )
     def test_junk_is_refused_with_one_error_type(self, codec, junk) -> None:
         with pytest.raises(tk.AccessTokenInvalid):
@@ -301,93 +414,62 @@ class TestRejections:
         from joserfc import jws
 
         token = jws.serialize_compact(
-            {"alg": "HS256", "typ": "at+jwt", "kid": "k1.0"}, b"\xff\xfe\x00", key, algorithms=["HS256"]
+            {"alg": "HS256", "typ": "at+jwt", "kid": "k1.0"},
+            b"\xff\xfe\x00",
+            key,
+            algorithms=["HS256"],
         )
         with pytest.raises(tk.AccessTokenInvalid):
             codec.decode(token)
 
 
 class TestEpochAndRotation:
-    def test_bumping_the_epoch_invalidates_every_token(self, keyring, epoch) -> None:
-        codec = codec_for(keyring, epoch)
-        token = issue(codec)
-        epoch.value = 1
-        with pytest.raises(tk.AccessTokenInvalid):
-            codec.decode(token)
-        assert codec.decode(issue(codec))["grant"] == GRANT
+    def test_verification_returns_the_authenticated_signing_epoch(self, codec, keyring):
+        for epoch in (0, 1, 3, 9_999_999_999):
+            decoded = codec.decode(forge(keyring, epoch=epoch))
+            assert decoded.epoch == epoch and decoded.claims["grant"] == GRANT
 
-    def test_a_token_of_a_future_epoch_is_refused(self, codec, keyring) -> None:
-        with pytest.raises(tk.AccessTokenInvalid):
-            codec.decode(forge(keyring, epoch=3))
+    @pytest.mark.parametrize("epoch", [-1, True, "1", 10_000_000_000])
+    def test_encoding_refuses_unrepresentable_epochs(self, codec, epoch):
+        with pytest.raises(ValueError):
+            issue(codec, epoch=epoch)
 
-    def test_rotating_the_ring_keeps_old_tokens_until_the_old_key_is_removed(self) -> None:
+    def test_rotating_the_ring_keeps_old_tokens_until_the_old_key_is_removed(
+        self,
+    ) -> None:
         raw1 = base64.b64encode(bytes([1]) * 32).decode()
         raw2 = base64.b64encode(bytes([2]) * 32).decode()
         epoch = Epoch()
         old = codec_for(Keyring.parse(f"k1:{raw1}"), epoch)
         token = issue(old)
         rotated = codec_for(Keyring.parse(f"k2:{raw2},k1:{raw1}"), epoch)
-        assert rotated.decode(token)["grant"] == GRANT  # k1 is still in the ring
+        assert rotated.decode(token).claims["grant"] == GRANT  # k1 is still in the ring
         fresh = issue(rotated)
-        assert json.loads(base64.urlsafe_b64decode(fresh.split(".")[0] + "=="))["kid"] == "k2.0"
-        assert rotated.decode(fresh)["grant"] == GRANT
+        assert (
+            json.loads(base64.urlsafe_b64decode(fresh.split(".")[0] + "=="))["kid"]
+            == "k2.0"
+        )
+        assert rotated.decode(fresh).claims["grant"] == GRANT
         dropped = codec_for(Keyring.parse(f"k2:{raw2}"), epoch)
         with pytest.raises(tk.AccessTokenInvalid):
             dropped.decode(token)
-        assert dropped.decode(fresh)["grant"] == GRANT
-
-    def test_a_failing_epoch_read_fails_closed(self, keyring) -> None:
-        def broken() -> int:
-            raise RuntimeError("database down")
-
-        codec = tk.AccessTokenCodec(
-            keyring, broken, issuer=ISSUER, audience=AUDIENCE, scopes=[SCOPE], clock=lambda: NOW
-        )
-        epoch = Epoch()
-        token = issue(codec_for(keyring, epoch))
-        with pytest.raises(tk.AccessTokenInvalid):
-            codec.decode(token)
-
-
-class TestEpochSource:
-    def test_the_value_is_cached_and_invalidated(self) -> None:
-        reads: list[int] = []
-        clock = [0.0]
-
-        def read() -> int:
-            reads.append(len(reads))
-            return len(reads) - 1
-
-        source = tk.EpochSource(read, ttl=30, clock=lambda: clock[0])
-        assert [source.get(), source.get()] == [0, 0]
-        clock[0] = 31
-        assert source.get() == 1
-        source.invalidate()
-        assert source.get() == 2
-
-    def test_an_error_is_not_cached(self) -> None:
-        calls = {"n": 0}
-
-        def read() -> int:
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise RuntimeError("down")
-            return 4
-
-        source = tk.EpochSource(read, ttl=30, clock=lambda: 0.0)
-        with pytest.raises(RuntimeError):
-            source.get()
-        assert source.get() == 4 and source.get() == 4 and calls["n"] == 2
+        assert dropped.decode(fresh).claims["grant"] == GRANT
 
 
 class TestOtherIssuersTokens:
     def test_a_fastmcp_proxy_token_never_verifies(self, codec) -> None:
         from fastmcp.server.auth.jwt_issuer import JWTIssuer, derive_jwt_key
 
-        key = derive_jwt_key(low_entropy_material="s" * 48, salt="fastmcp-jwt-signing-key")
+        key = derive_jwt_key(
+            low_entropy_material="s" * 48, salt="fastmcp-jwt-signing-key"
+        )
         issuer = JWTIssuer(issuer=ISSUER, audience=AUDIENCE, signing_key=key)
         token = issuer.issue_access_token(
-            client_id="client-1", scopes=[SCOPE], jti="j", expires_in=3600, subject=ACCT,
+            client_id="client-1",
+            scopes=[SCOPE],
+            jti="j",
+            expires_in=3600,
+            subject=ACCT,
             extra_claims={"grant": GRANT, "acct": ACCT, "token_use": "access"},
         )
         with pytest.raises(tk.AccessTokenInvalid):
@@ -395,11 +477,18 @@ class TestOtherIssuersTokens:
 
     def test_a_token_signed_with_the_raw_ring_key_never_verifies(self, codec) -> None:
         raw = OctKey.import_key(bytes(range(32)))
-        token = jwt.encode({"alg": "HS256", "typ": "at+jwt", "kid": "k1.0"}, good_claims(), raw, algorithms=["HS256"])
+        token = jwt.encode(
+            {"alg": "HS256", "typ": "at+jwt", "kid": "k1.0"},
+            good_claims(),
+            raw,
+            algorithms=["HS256"],
+        )
         with pytest.raises(tk.AccessTokenInvalid):
             codec.decode(token)
 
-    def test_the_signing_key_is_not_the_encryption_key_or_another_purpose(self, keyring) -> None:
+    def test_the_signing_key_is_not_the_encryption_key_or_another_purpose(
+        self, keyring
+    ) -> None:
         a = keyring.derive("k1", "mcp-access-jwt|v1|k1|0")
         assert a != bytes(range(32))
         assert a != keyring.derive("k1", "mcp-access-jwt|v1|k1|1")
@@ -414,7 +503,7 @@ class TestOpaqueSecrets:
         ):
             value = make()
             assert value.startswith(prefix) and pattern.fullmatch(value)
-            assert len(base64.urlsafe_b64decode(value[len(prefix):] + "=")) == 32
+            assert len(base64.urlsafe_b64decode(value[len(prefix) :] + "=")) == 32
             assert len({make() for _ in range(200)}) == 200
 
     def test_the_formats_do_not_cross(self) -> None:
@@ -425,6 +514,8 @@ class TestOpaqueSecrets:
 
     def test_the_hash_is_lowercase_sha256_hex(self) -> None:
         digest = tk.hash_secret("abc")
-        assert digest == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        assert (
+            digest == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
         assert tk.HASH_RE.fullmatch(digest)
         assert re.fullmatch(r"[0-9a-f]{64}", tk.hash_secret(tk.new_refresh_token()))

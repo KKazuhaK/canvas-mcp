@@ -433,10 +433,10 @@ class TestLoginProviders:
         assert token_admin.main(["login-providers"]) == 0
         out = capsys.readouterr().out
         assert out.splitlines() == [
-            "entra\tredirect_uri=https://canvas.example.test/account/callback",
-            "google\tredirect_uri=https://canvas.example.test/account/callback/google",
-            "github\tredirect_uri=https://canvas.example.test/account/callback/github",
-            "oidc:school\tredirect_uri=https://canvas.example.test/account/callback/oidc/school",
+            "entra\tredirect_uri=https://canvas.example.test/auth/callback/entra",
+            "google\tredirect_uri=https://canvas.example.test/auth/callback/google",
+            "github\tredirect_uri=https://canvas.example.test/auth/callback/github",
+            "oidc:school\tredirect_uri=https://canvas.example.test/auth/callback/oidc/school",
         ]
         for secret in (GOOGLE_SECRET, GITHUB_SECRET, OIDC_SECRET):
             assert secret not in out

@@ -9,11 +9,11 @@ here, and the other way round. The header carries ``kid`` as ``<ring key id>.<ep
 * the ring key id selects which ring key the signing key derives from, so rotating
   ``CANVAS_TOKEN_KEYS`` (new key first, old key kept while its tokens live) rotates the
   signing key without invalidating tokens signed under a key that is still in the ring;
-* the epoch (``meta.mcp_jwt_epoch``) is raised by the operator to invalidate every access
+* the epoch (``server_state.jwt_epoch``) is raised by the operator to invalidate every access
   token at once (clients simply refresh).
 
 :meth:`AccessTokenCodec.decode` checks everything before it trusts a claim: size, compact
-form, ``alg`` (HS256 only), ``typ``, a known ``kid`` at the current epoch, the signature,
+form, ``alg`` (HS256 only), ``typ``, a known ring key and a bounded epoch, the signature,
 the exact ``iss`` and ``aud`` strings, ``token_use``, the shape of every identifier and the
 time window. Anything wrong raises :class:`AccessTokenInvalid`, a single error type with no
 detail, so callers cannot distinguish (or leak) why.
@@ -46,7 +46,6 @@ CLOCK_SKEW_SECONDS = 60
 MAX_LIFETIME_SECONDS = 86400 + CLOCK_SKEW_SECONDS
 ACCESS_TOKEN_TYPE = "at+jwt"
 ALGORITHM = "HS256"
-EPOCH_CACHE_SECONDS = 30.0
 _KEY_PURPOSE = "mcp-access-jwt|v1"
 
 REFRESH_PREFIX = "cmcp_rt_"
@@ -77,60 +76,26 @@ def hash_secret(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()
 
 
-class EpochSource:
-    """The current ``mcp_jwt_epoch``, read through ``read`` at most every ``ttl`` seconds.
-
-    A failing read is never cached: the cached value is not served past its lifetime, so
-    verification fails closed when the database is down for longer than the cache.
-    """
-
-    def __init__(
-        self,
-        read: Callable[[], int],
-        *,
-        ttl: float = EPOCH_CACHE_SECONDS,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._read = read
-        self._ttl = ttl
-        self._clock = clock
-        self._lock = threading.Lock()
-        self._value = 0
-        self._expires = float("-inf")
-        self._generation = 0
-
-    def get(self) -> int:
-        with self._lock:
-            if self._clock() < self._expires:
-                return self._value
-            generation = self._generation
-        value = int(self._read())
-        with self._lock:
-            if generation == self._generation:
-                self._value = value
-                self._expires = self._clock() + self._ttl
-        return value
-
-    def invalidate(self) -> None:
-        """Forget the cached epoch (this process just changed it)."""
-        with self._lock:
-            self._generation += 1
-            self._expires = float("-inf")
-
-
 @dataclass(frozen=True)
 class IssuedAccessToken:
     token: str
     claims: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class DecodedAccessToken:
+    """Cryptographically verified claims and the epoch of their signing key."""
+
+    claims: dict[str, Any]
+    epoch: int
+
+
 class AccessTokenCodec:
-    """Issue and verify access tokens. Synchronous; the epoch read may touch the database."""
+    """Issue and verify access tokens without consulting database state."""
 
     def __init__(
         self,
         keyring: Keyring,
-        epoch: Callable[[], int],
         *,
         issuer: str,
         audience: str,
@@ -138,7 +103,6 @@ class AccessTokenCodec:
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._keyring = keyring
-        self._epoch = epoch
         self.issuer = issuer
         self.audience = audience
         self._scopes = frozenset(scopes)
@@ -155,7 +119,9 @@ class AccessTokenCodec:
             raw = self._keyring.derive(kid, f"{_KEY_PURPOSE}|{kid}|{epoch}")
             key = OctKey.import_key(raw)
             with self._lock:
-                if len(self._keys) > 64:  # old epochs and retired ring keys do not pile up
+                if (
+                    len(self._keys) > 64
+                ):  # old epochs and retired ring keys do not pile up
                     self._keys.clear()
                 self._keys[(kid, epoch)] = key
         return key
@@ -170,11 +136,13 @@ class AccessTokenCodec:
         grant_id: str,
         scopes: Collection[str],
         expires_at: int,
+        epoch: int,
     ) -> IssuedAccessToken:
         """A signed access token for ``account_key`` that expires at ``expires_at``."""
         now = int(self._clock())
         kid = self._keyring.active_key_id
-        epoch = self._epoch()
+        if type(epoch) is not int or not 0 <= epoch <= 9_999_999_999:
+            raise ValueError("invalid signing epoch")
         claims: dict[str, Any] = {
             "iss": self.issuer,
             "aud": self.audience,
@@ -189,24 +157,37 @@ class AccessTokenCodec:
             "token_use": "access",
         }
         header = {"alg": ALGORITHM, "typ": ACCESS_TOKEN_TYPE, "kid": f"{kid}.{epoch}"}
-        token = jwt.encode(header, claims, self._key(kid, epoch), algorithms=[ALGORITHM])
+        token = jwt.encode(
+            header, claims, self._key(kid, epoch), algorithms=[ALGORITHM]
+        )
         return IssuedAccessToken(token, claims)
 
     # -- verify ---------------------------------------------------------------------
 
-    def decode(self, token: str) -> dict[str, Any]:
+    def decode(self, token: str) -> DecodedAccessToken:
         """The verified claims of an access token, or :class:`AccessTokenInvalid`."""
         try:
             return self._decode(token)
         except AccessTokenInvalid:
             raise
-        except (JoseError, KeyringError, ValueError, TypeError, KeyError, AttributeError):
+        except (
+            JoseError,
+            KeyringError,
+            ValueError,
+            TypeError,
+            KeyError,
+            AttributeError,
+        ):
             raise AccessTokenInvalid from None
         except Exception:  # noqa: BLE001 - verification fails closed on anything unexpected
             raise AccessTokenInvalid from None
 
-    def _decode(self, token: str) -> dict[str, Any]:
-        if not isinstance(token, str) or not 0 < len(token) <= MAX_TOKEN_CHARS or not token.isascii():
+    def _decode(self, token: str) -> DecodedAccessToken:
+        if (
+            not isinstance(token, str)
+            or not 0 < len(token) <= MAX_TOKEN_CHARS
+            or not token.isascii()
+        ):
             raise AccessTokenInvalid
         if token.count(".") != 2:
             raise AccessTokenInvalid
@@ -233,11 +214,8 @@ class AccessTokenCodec:
         decoded = jwt.decode(token, self._key(kid, epoch), algorithms=[ALGORITHM])
         claims = dict(decoded.claims)
         self._check_claims(claims)
-        # Unauthenticated input must never cause a database checkout. Check the
-        # bounded header, signature and all claims before consulting server state.
-        if epoch != self._epoch():
-            raise AccessTokenInvalid
-        return claims
+        # The request snapshot compares this authenticated epoch with server_state.
+        return DecodedAccessToken(claims, epoch)
 
     def _check_claims(self, claims: dict[str, Any]) -> None:
         def text(name: str, limit: int = 512) -> str:
@@ -254,7 +232,9 @@ class AccessTokenCodec:
 
         if text("iss") != self.issuer:
             raise AccessTokenInvalid
-        if text("aud") != self.audience:  # an exact string: a list or another path is refused
+        if (
+            text("aud") != self.audience
+        ):  # an exact string: a list or another path is refused
             raise AccessTokenInvalid
         if text("token_use", 16) != "access":
             raise AccessTokenInvalid
@@ -270,5 +250,9 @@ class AccessTokenCodec:
             raise AccessTokenInvalid
         now = self._clock()
         iat, exp = number("iat"), number("exp")
-        if exp <= now or iat > now + CLOCK_SKEW_SECONDS or exp - iat > MAX_LIFETIME_SECONDS:
+        if (
+            exp <= now
+            or iat > now + CLOCK_SKEW_SECONDS
+            or exp - iat > MAX_LIFETIME_SECONDS
+        ):
             raise AccessTokenInvalid

@@ -48,15 +48,16 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from sqlalchemy.engine import Connection
 
 from .. import accounts as acc
 from ..db.engine import Database
-from ..db.errors import StoreUnavailable
 from ..db.repos import Repositories
+from ..db.snapshots import McpSnapshot, mcp_snapshot
+from ..pagination import DEFAULT_LIMIT, Page, decode_cursor, make_page, page_limit
 from ..settings import AuthzSettings
 from ..token_store import (
     AUDIT_GRANT_REVOKED,
@@ -95,10 +96,6 @@ from .models import (
 )
 
 LAST_USED_GRANULARITY_SECONDS = 300
-_DAY = 86400
-CULL_CODES_AFTER = 3600
-CULL_REFRESH_REVOKED_AFTER = 7 * _DAY
-CULL_GRANTS_AFTER = 30 * _DAY
 
 
 def _json(detail: dict[str, Any] | None) -> str:
@@ -149,14 +146,28 @@ class AuthzStore:
         now: int,
     ) -> None:
         self._repos.audit.append(
-            conn, now=now, actor=actor, action=action, target=target, reason=reason, detail=_json(detail)
+            conn,
+            now=now,
+            actor=actor,
+            action=action,
+            target=target,
+            reason=reason,
+            detail=detail or {},
         )
 
     def _event(
-        self, conn: Connection, *, now: int, account_id: str | None, outcome: str, reason: str
+        self,
+        conn: Connection,
+        *,
+        now: int,
+        account_id: str | None,
+        outcome: str,
+        reason: str,
     ) -> None:
         """A row of the ``oauth`` surface of ``auth_events`` (not shown in the sign-in history)."""
-        if reason not in acc.AUTH_REASONS:  # pragma: no cover - the callers pass registered reasons
+        if (
+            reason not in acc.AUTH_REASONS
+        ):  # pragma: no cover - the callers pass registered reasons
             reason = acc.REASON_PROVIDER_ERROR
         self._repos.auth_events.append(
             conn,
@@ -166,26 +177,29 @@ class AuthzStore:
             surface=acc.SURFACE_OAUTH,
             outcome=outcome,
             reason=reason,
-            ip="unknown",
             ua_hash=None,
         )
 
     def _account_active(self, conn: Connection, account_id: str) -> bool:
         row = self._repos.accounts.get(conn, account_id)
-        return row is not None and row[1] == acc.STATUS_ACTIVE
+        return row is not None and row.status == acc.STATUS_ACTIVE
 
     def account_is_active(self, account_id: str) -> bool:
         """Whether the account is active right now (a plain read; it decides a message only)."""
         with self._db.read() as conn:
             return self._account_active(conn, account_id)
 
-    def _account_standing_ok(self, conn: Connection, account_id: str, session_epoch: int) -> bool:
+    def _account_standing_ok(
+        self, conn: Connection, account_id: str, session_epoch: int
+    ) -> bool:
         """Active, and still in the session epoch a code was approved in (no row lock)."""
         return _standing_ok(self._repos.accounts.get(conn, account_id), session_epoch)
 
     # -- registered clients ---------------------------------------------------------
 
-    def put_client(self, client_id: str, info_json: str, client_name: str, expires_at: int) -> None:
+    def put_client(
+        self, client_id: str, info_json: str, client_name: str, expires_at: int
+    ) -> None:
         with self._db.row_write() as conn:
             self._repos.clients.insert(
                 conn,
@@ -199,26 +213,32 @@ class AuthzStore:
     def get_client_record(self, client_id: str) -> ClientRecord | None:
         with self._db.read() as conn:
             row = self._repos.clients.get(conn, client_id)
-        return None if row is None else ClientRecord.from_row(row)
+        return row
 
     # -- client metadata documents --------------------------------------------------
 
     def cimd_snapshot(self, url: str) -> CimdSnapshot | None:
         with self._db.read() as conn:
             row = self._repos.cimd.get(conn, url)
-        return None if row is None else CimdSnapshot.from_row(row)
+        return row
 
-    def upsert_cimd(self, url: str, doc_json: str, *, fetched_at: int, fresh_until: int) -> bool:
+    def upsert_cimd(
+        self, url: str, doc_json: str, *, fetched_at: int, fresh_until: int
+    ) -> bool:
         """Store a validated document unless a newer one is stored; True if this call wrote."""
         with self._db.row_write() as conn:
             return self._repos.cimd.upsert(
-                conn, url=url, doc_json=doc_json, fetched_at=fetched_at, fresh_until=max(fresh_until, fetched_at)
+                conn,
+                url=url,
+                doc_json=doc_json,
+                fetched_at=fetched_at,
+                fresh_until=max(fresh_until, fetched_at),
             )
 
     def record_cimd_error(self, url: str, code: str) -> None:
         """Note a failed refresh on the stored document (best effort; never raises)."""
         try:
-            with self._db.best_effort_write(lock=False) as conn:
+            with self._db.best_effort_write() as conn:
                 self._repos.cimd.record_error(conn, url, now=self._now(), code=code)
         except Exception:  # noqa: BLE001 - bookkeeping must never change an answer
             return
@@ -278,14 +298,18 @@ class AuthzStore:
                 expires_at=now + CODE_TTL_SECONDS,
             )
             self._event(
-                conn, now=now, account_id=account_id, outcome="success", reason=acc.REASON_CONSENT_GRANTED
+                conn,
+                now=now,
+                account_id=account_id,
+                outcome="success",
+                reason=acc.REASON_CONSENT_GRANTED,
             )
         return True
 
     def record_consent_denied(self, account_id: str) -> None:
         """Note that a user declined an app (best effort; never raises)."""
         try:
-            with self._db.best_effort_write(lock=False) as conn:
+            with self._db.best_effort_write() as conn:
                 self._event(
                     conn,
                     now=self._now(),
@@ -299,7 +323,7 @@ class AuthzStore:
     def load_code(self, code_hash: str) -> CodeRecord | None:
         with self._db.read() as conn:
             row = self._repos.codes.get(conn, code_hash)
-        return None if row is None else CodeRecord.from_row(row)
+        return row
 
     def exchange_code(
         self, *, code_hash: str, client_id: str, grant_id: str, refresh_hash: str | None
@@ -314,17 +338,23 @@ class AuthzStore:
         policy = self.settings
         now = self._now()
         with self._db.row_write() as conn:
-            won = self._repos.codes.consume(conn, code_hash, client_id, grant_id=grant_id, now=now)
+            won = self._repos.codes.consume(
+                conn, code_hash, client_id, grant_id=grant_id, now=now
+            )
             self._pause("after_code_consume")
             row = self._repos.codes.get(conn, code_hash)
             if row is None:
                 return ExchangeResult(ExchangeOutcome.DEAD)
-            code = CodeRecord.from_row(row)
+            code = row
             if won:
                 return self._first_exchange(conn, code, grant_id, refresh_hash, now)
 
             # Not consumed by this call: unknown for this client, expired, or a replay.
-            if code.consumed_at is None or code.client_id != client_id or code.grant_id is None:
+            if (
+                code.consumed_at is None
+                or code.client_id != client_id
+                or code.grant_id is None
+            ):
                 return ExchangeResult(ExchangeOutcome.DEAD)
             # The grant row lock comes first, as on the refresh path: whether this replay is
             # inside the window depends on whether the family has rotated (``any_used``), and
@@ -336,7 +366,7 @@ class AuthzStore:
             grant_row = self._repos.grants.get(conn, code.grant_id)
             if grant_row is None:  # pragma: no cover - the lock just matched it
                 return ExchangeResult(ExchangeOutcome.DEAD)
-            grant = GrantRecord.from_row(grant_row)
+            grant = grant_row
             inside_window = (
                 policy.refresh_reuse_grace_s > 0
                 and now - code.consumed_at <= policy.refresh_reuse_grace_s
@@ -344,7 +374,11 @@ class AuthzStore:
             )
             if not inside_window:
                 self._revoke_for_replay(
-                    conn, grant, now, reason=REVOKE_CODE_REPLAY, event=acc.REASON_CODE_REPLAY
+                    conn,
+                    grant,
+                    now,
+                    reason=REVOKE_CODE_REPLAY,
+                    event=acc.REASON_CODE_REPLAY,
                 )
                 return ExchangeResult(ExchangeOutcome.REPLAY_REVOKED, grant)
             if not self._repos.codes.bump_grace(conn, code_hash, MAX_GRACE_REPLAYS):
@@ -354,7 +388,9 @@ class AuthzStore:
             # admission_lost) also revokes the grants, so ``lock_live`` above has normally
             # refused already: this is the same rule as the first exchange, kept here so
             # the two paths cannot drift apart.
-            if not self._account_standing_ok(conn, grant.account_id, code.session_epoch):
+            if not self._account_standing_ok(
+                conn, grant.account_id, code.session_epoch
+            ):
                 return ExchangeResult(ExchangeOutcome.INACTIVE, grant)
             if refresh_hash is not None:
                 self._repos.refresh.insert(
@@ -363,9 +399,13 @@ class AuthzStore:
                     grant_id=grant.id,
                     parent_hash=None,
                     now=now,
-                    expires_at=grant.expires_at,
                 )
-            return ExchangeResult(ExchangeOutcome.GRACE, grant, refresh_issued=refresh_hash is not None)
+            return ExchangeResult(
+                ExchangeOutcome.GRACE,
+                grant,
+                refresh_issued=refresh_hash is not None,
+                jwt_epoch=self._repos.jwt_epoch.get(conn),
+            )
 
     def _first_exchange(
         self,
@@ -388,7 +428,10 @@ class AuthzStore:
             return ExchangeResult(ExchangeOutcome.INACTIVE)
         if now - code.upstream_auth_at > policy.max_upstream_auth_age:
             self._event(
-                conn, now=now, account_id=code.account_id, outcome="denied",
+                conn,
+                now=now,
+                account_id=code.account_id,
+                outcome="denied",
                 reason=acc.REASON_REAUTH_REQUIRED,
             )
             return ExchangeResult(ExchangeOutcome.REAUTH)
@@ -416,26 +459,40 @@ class AuthzStore:
                 grant_id=grant_id,
                 parent_hash=None,
                 now=now,
-                expires_at=expires_at,
             )
         self._pause("after_grant_insert")
         if code.client_kind == CLIENT_KIND_DCR:
             # A registration lives as long as the longest connection made with it.
             self._repos.clients.extend(conn, code.client_id, expires_at)
         self._event(
-            conn, now=now, account_id=code.account_id, outcome="success", reason=acc.REASON_GRANT_CREATED
+            conn,
+            now=now,
+            account_id=code.account_id,
+            outcome="success",
+            reason=acc.REASON_GRANT_CREATED,
         )
         row = self._repos.grants.get(conn, grant_id)
         assert row is not None
         return ExchangeResult(
-            ExchangeOutcome.WON, GrantRecord.from_row(row), refresh_issued=refresh_hash is not None
+            ExchangeOutcome.WON,
+            row,
+            refresh_issued=refresh_hash is not None,
+            jwt_epoch=self._repos.jwt_epoch.get(conn),
         )
 
     def _revoke_for_replay(
         self, conn: Connection, grant: GrantRecord, now: int, *, reason: str, event: str
     ) -> None:
-        if self._repos.grants.revoke(conn, grant.id, reason=reason, by=BY_SYSTEM, now=now):
-            self._event(conn, now=now, account_id=grant.account_id, outcome="denied", reason=event)
+        if self._repos.grants.revoke(
+            conn, grant.id, reason=reason, by=BY_SYSTEM, now=now
+        ):
+            self._event(
+                conn,
+                now=now,
+                account_id=grant.account_id,
+                outcome="denied",
+                reason=event,
+            )
 
     # -- refresh tokens -----------------------------------------------------------------
 
@@ -443,7 +500,7 @@ class AuthzStore:
         """A refresh token and its grant's facts, without changing anything."""
         with self._db.read() as conn:
             row = self._repos.refresh.get_with_grant(conn, token_hash)
-        return None if row is None else RefreshView.from_row(row)
+        return row
 
     def rotate_refresh(self, *, token_hash: str, new_hash: str) -> RotateResult:
         """Exchange a refresh token for its successor (``new_hash``). See the module docstring."""
@@ -454,7 +511,7 @@ class AuthzStore:
             row = refresh.get(conn, token_hash)
             if row is None:
                 return RotateResult(RotateOutcome.DEAD)
-            token = _TokenRow(row)
+            token = row
             # The grant row lock comes first: it serialises this family against every
             # other rotation, revocation and disabling.
             if not self._repos.grants.lock_live(conn, token.grant_id, now):
@@ -463,7 +520,7 @@ class AuthzStore:
             grant_row = self._repos.grants.get(conn, token.grant_id)
             if grant_row is None:  # pragma: no cover - the lock just matched it
                 return RotateResult(RotateOutcome.DEAD)
-            grant = GrantRecord.from_row(grant_row)
+            grant = grant_row
             if not self._account_active(conn, grant.account_id):
                 return RotateResult(RotateOutcome.INACTIVE, grant)
             if now - grant.upstream_auth_at > policy.max_upstream_auth_age:
@@ -471,7 +528,10 @@ class AuthzStore:
                     conn, grant.id, reason=REVOKE_REAUTH_REQUIRED, by=BY_SYSTEM, now=now
                 ):
                     self._event(
-                        conn, now=now, account_id=grant.account_id, outcome="denied",
+                        conn,
+                        now=now,
+                        account_id=grant.account_id,
+                        outcome="denied",
                         reason=acc.REASON_REAUTH_REQUIRED,
                     )
                 return RotateResult(RotateOutcome.REAUTH, grant)
@@ -479,7 +539,11 @@ class AuthzStore:
             if refresh.mark_used(conn, token_hash, replaced_by=new_hash, now=now):
                 self._pause("after_refresh_mark")
                 refresh.retire_siblings(
-                    conn, grant_id=grant.id, parent_hash=token.parent_hash, keep=token_hash, now=now
+                    conn,
+                    grant_id=grant.id,
+                    parent_hash=token.parent_hash,
+                    keep=token_hash,
+                    now=now,
                 )
                 refresh.insert(
                     conn,
@@ -487,16 +551,22 @@ class AuthzStore:
                     grant_id=grant.id,
                     parent_hash=token_hash,
                     now=now,
-                    expires_at=token.expires_at,
                 )
-                return RotateResult(RotateOutcome.ROTATED, grant, refresh_issued=True)
+                return RotateResult(
+                    RotateOutcome.ROTATED,
+                    grant,
+                    refresh_issued=True,
+                    jwt_epoch=self._repos.jwt_epoch.get(conn),
+                )
 
             # Used already (by a concurrent call that finished first, or earlier): read it again.
             again = refresh.get(conn, token_hash)
             if again is None:
                 return RotateResult(RotateOutcome.DEAD)
-            used = _TokenRow(again)
-            reuse = used.replaced_by is None or refresh.has_rotated_child(conn, token_hash)
+            used = again
+            reuse = used.replaced_by is None or refresh.has_rotated_child(
+                conn, grant.id, token_hash
+            )
             if not reuse and used.used_at is not None:
                 inside_window = (
                     policy.refresh_reuse_grace_s > 0
@@ -511,11 +581,19 @@ class AuthzStore:
                         grant_id=grant.id,
                         parent_hash=token_hash,
                         now=now,
-                        expires_at=used.expires_at,
                     )
-                    return RotateResult(RotateOutcome.GRACE, grant, refresh_issued=True)
+                    return RotateResult(
+                        RotateOutcome.GRACE,
+                        grant,
+                        refresh_issued=True,
+                        jwt_epoch=self._repos.jwt_epoch.get(conn),
+                    )
             self._revoke_for_replay(
-                conn, grant, now, reason=REVOKE_REFRESH_REUSE, event=acc.REASON_REFRESH_REUSE
+                conn,
+                grant,
+                now,
+                reason=REVOKE_REFRESH_REUSE,
+                event=acc.REASON_REFRESH_REUSE,
             )
             return RotateResult(RotateOutcome.REUSE_REVOKED, grant)
 
@@ -524,56 +602,105 @@ class AuthzStore:
     def get_grant(self, grant_id: str) -> GrantRecord | None:
         with self._db.read() as conn:
             row = self._repos.grants.get(conn, grant_id)
-        return None if row is None else GrantRecord.from_row(row)
+        return row
 
     def grant_status(self, grant_id: str) -> GrantStatus:
         """The grant and its account's status, read together (raises when unreadable)."""
         with self._db.read() as conn:
-            return GrantStatus.from_row(self._repos.grants.status_row(conn, grant_id))
+            return self._repos.grants.status_row(conn, grant_id)
 
     def touch_grant(self, grant_id: str) -> None:
         """Note that a grant is in use (at most every five minutes). Best effort; never raises."""
         now = self._now()
         try:
-            with self._db.best_effort_write(lock=False) as conn:
+            with self._db.best_effort_write() as conn:
                 self._repos.grants.touch_used(
-                    conn, grant_id, now=now, older_than=now - LAST_USED_GRANULARITY_SECONDS
+                    conn,
+                    grant_id,
+                    now=now,
+                    older_than=now - LAST_USED_GRANULARITY_SECONDS,
                 )
         except Exception:  # noqa: BLE001 - last-used bookkeeping must never fail a request
             return
 
-    def list_grants(self, account_key: str) -> list[GrantRecord]:
-        """The live grants of an account, newest first."""
-        account_id = acc.account_id_of(account_key)
-        with self._db.read() as conn:
-            rows = self._repos.grants.list_for_account(conn, account_id, self._now())
-        return [GrantRecord.from_row(r) for r in rows]
-
-    def list_all_grants(
-        self, *, include_inactive: bool = False, limit: int = 500, account_key: str | None = None
-    ) -> list[GrantRecord]:
-        """Newest first; ``account_key`` restricts the query itself to one account (not the page)."""
+    def grants_page(
+        self,
+        *,
+        account_key: str | None = None,
+        cursor: str | None = None,
+        limit: int = DEFAULT_LIMIT,
+        include_inactive: bool = False,
+    ) -> Page[GrantRecord]:
+        limit = page_limit(limit)
         account_id = None if account_key is None else acc.account_id_of(account_key)
+        scope = "grants/" + str(account_id) + "/" + str(include_inactive)
+        before = decode_cursor(cursor, scope)
+        assert before is None or isinstance(before, str)
         with self._db.read() as conn:
             rows = self._repos.grants.list_all(
                 conn,
                 include_inactive=include_inactive,
                 now=self._now(),
-                limit=max(1, min(limit, 2000)),
+                limit=limit + 1,
                 account_id=account_id,
+                before_id=before,
             )
-        return [GrantRecord.from_row(r) for r in rows]
+        return make_page(rows, limit=limit, scope=scope, key=lambda row: row.id)
 
-    def revoke_grant(self, grant_id: str, *, reason: str, by: str = BY_SYSTEM, event: str | None = None) -> bool:
+    def iter_grants(
+        self, *, account_key: str | None = None, include_inactive: bool = False
+    ) -> Iterator[GrantRecord]:
+        cursor = None
+        while True:
+            page = self.grants_page(
+                account_key=account_key,
+                cursor=cursor,
+                limit=200,
+                include_inactive=include_inactive,
+            )
+            yield from page.items
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
+
+    def count_live_grants(self) -> int:
+        from sqlalchemy import func, select
+
+        from ..db import schema as s
+
+        with self._db.read() as conn:
+            return conn.execute(
+                select(func.count())
+                .select_from(s.oauth_grants)
+                .where(
+                    s.oauth_grants.c.revoked_at.is_(None),
+                    s.oauth_grants.c.expires_at > self._now(),
+                )
+            ).scalar_one()
+
+    def revoke_grant(
+        self,
+        grant_id: str,
+        *,
+        reason: str,
+        by: str = BY_SYSTEM,
+        event: str | None = None,
+    ) -> bool:
         """Revoke one grant on behalf of the system (a client's ``/revoke``, a replay)."""
         assert reason in REVOKE_REASONS, reason
         now = self._now()
         with self._db.row_write() as conn:
             row = self._repos.grants.get(conn, grant_id)
-            changed = self._repos.grants.revoke(conn, grant_id, reason=reason, by=by, now=now)
+            changed = self._repos.grants.revoke(
+                conn, grant_id, reason=reason, by=by, now=now
+            )
             if changed and event is not None and row is not None:
                 self._event(
-                    conn, now=now, account_id=str(row[1]), outcome="success", reason=event
+                    conn,
+                    now=now,
+                    account_id=str(row.account_id),
+                    outcome="success",
+                    reason=event,
                 )
             return changed
 
@@ -587,8 +714,13 @@ class AuthzStore:
             )
             if changed:
                 self._audit(
-                    conn, account_key, AUDIT_GRANT_REVOKED, target=account_key, reason=REVOKE_USER,
-                    detail={"via": "account"}, now=now,
+                    conn,
+                    account_key,
+                    AUDIT_GRANT_REVOKED,
+                    target=account_key,
+                    reason=REVOKE_USER,
+                    detail={"via": "account"},
+                    now=now,
                 )
             return changed
 
@@ -598,7 +730,11 @@ class AuthzStore:
         actor_id = acc.account_id_of(actor_key)
         with self._db.write() as conn:
             actor = self._repos.accounts.get(conn, actor_id, for_update=True)
-            if actor is None or actor[1] != acc.STATUS_ACTIVE or actor[2] != acc.ROLE_OWNER:
+            if (
+                actor is None
+                or actor.status != acc.STATUS_ACTIVE
+                or actor.role != acc.ROLE_OWNER
+            ):
                 raise AccessActionRefused(AccessActionRefused.NOT_OWNER)
             row = self._repos.grants.get(conn, grant_id)
             if row is None:
@@ -608,8 +744,13 @@ class AuthzStore:
             )
             if changed:
                 self._audit(
-                    conn, actor_key, AUDIT_GRANT_REVOKED, target=f"acct:{row[1]}", reason=REVOKE_OWNER,
-                    detail={"via": "admin", "client_kind": str(row[3])}, now=now,
+                    conn,
+                    actor_key,
+                    AUDIT_GRANT_REVOKED,
+                    target=row.account_id,
+                    reason=REVOKE_OWNER,
+                    detail={"via": "admin", "client_kind": str(row.client_kind)},
+                    now=now,
                 )
             return changed
 
@@ -625,8 +766,13 @@ class AuthzStore:
             )
             if changed:
                 self._audit(
-                    conn, OPERATOR_ACTOR, AUDIT_GRANT_REVOKED, target=f"acct:{row[1]}",
-                    reason=REVOKE_OPERATOR, detail={"via": "cli", "client_kind": str(row[3])}, now=now,
+                    conn,
+                    OPERATOR_ACTOR,
+                    AUDIT_GRANT_REVOKED,
+                    target=row.account_id,
+                    reason=REVOKE_OPERATOR,
+                    detail={"via": "cli", "client_kind": str(row.client_kind)},
+                    now=now,
                 )
             return changed
 
@@ -654,6 +800,7 @@ class AuthzStore:
             # account row, and no transaction takes them in the other order.
             if lost:
                 self._repos.codes.delete_unconsumed_for_account(conn, account_id)
+                self._pause("after_account_codes_deleted")
             # Serialise with a first code exchange of the account (which reads the row FOR
             # UPDATE) so that a grant created concurrently is seen by the revocation below.
             self._repos.accounts.get(conn, account_id, for_update=True)
@@ -664,15 +811,23 @@ class AuthzStore:
             )
             if count:
                 self._audit(
-                    conn, SYSTEM_ACTOR, AUDIT_GRANTS_REVOKED_FOR_ACCOUNT, target=account_key,
-                    reason=reason, detail={"count": count}, now=now,
+                    conn,
+                    SYSTEM_ACTOR,
+                    AUDIT_GRANTS_REVOKED_FOR_ACCOUNT,
+                    target=account_key,
+                    reason=reason,
+                    detail={"count": count},
+                    now=now,
                 )
             return count
 
     def revoke_client_grant(self, grant_id: str) -> bool:
         """A client's own ``/revoke``: end the connection and note it in the history."""
         return self.revoke_grant(
-            grant_id, reason=REVOKE_CLIENT, by=BY_SYSTEM, event=acc.REASON_CLIENT_REVOKED
+            grant_id,
+            reason=REVOKE_CLIENT,
+            by=BY_SYSTEM,
+            event=acc.REASON_CLIENT_REVOKED,
         )
 
     # -- the JWT epoch ------------------------------------------------------------------
@@ -681,63 +836,32 @@ class AuthzStore:
         with self._db.read() as conn:
             return self._repos.jwt_epoch.get(conn)
 
+    def read_mcp_snapshot(self, account_id: str, grant_id: str) -> McpSnapshot | None:
+        """The authoritative grant, account and credential read for one request."""
+        with self._db.read() as conn:
+            return mcp_snapshot(conn, account_id, grant_id)
+
     def bump_jwt_epoch(self) -> int:
         """Invalidate every access token (running servers notice within 30 seconds)."""
         now = self._now()
         with self._db.write() as conn:
-            epoch = self._repos.jwt_epoch.bump(conn)
+            epoch = self._repos.jwt_epoch.bump(conn, now=now)
             self._audit(
-                conn, OPERATOR_ACTOR, AUDIT_JWT_KEY_ROTATED, detail={"epoch": epoch}, now=now
+                conn,
+                OPERATOR_ACTOR,
+                AUDIT_JWT_KEY_ROTATED,
+                detail={"epoch": epoch},
+                now=now,
             )
             return epoch
 
     # -- housekeeping -------------------------------------------------------------------
 
-    def cull(self, *, stale_max: int | None = None) -> dict[str, int]:
-        """Delete expired rows, each class in its own best-effort transaction."""
-        now = self._now()
-        keep_documents = (self.settings.cimd_stale_max if stale_max is None else stale_max) + _DAY
-        repos = self._repos
-        steps: list[tuple[str, Callable[[Connection], int]]] = [
-            ("login_states", lambda c: repos.login_states.delete_expired(c, now)),
-            ("oauth_codes", lambda c: repos.codes.delete_expired_before(c, now - CULL_CODES_AFTER)),
-            (
-                "oauth_refresh_tokens",
-                lambda c: repos.refresh.delete_dead(
-                    c, now=now, revoked_before=now - CULL_REFRESH_REVOKED_AFTER
-                ),
-            ),
-            ("oauth_grants", lambda c: repos.grants.delete_inactive_before(c, now - CULL_GRANTS_AFTER)),
-            ("oauth_clients", lambda c: repos.clients.delete_expired(c, now)),
-            ("cimd_clients", lambda c: repos.cimd.delete_fetched_before(c, now - keep_documents)),
-        ]
-        removed: dict[str, int] = {}
-        for name, step in steps:
-            try:
-                with self._db.row_write() as conn:
-                    removed[name] = step(conn)
-            except StoreUnavailable:
-                removed[name] = 0
-        return removed
-
 
 def _standing_ok(account: Any, session_epoch: int) -> bool:
     """An account row (``accounts`` column order) that is active and in ``session_epoch``."""
-    return account is not None and account[1] == acc.STATUS_ACTIVE and int(account[16]) == session_epoch
-
-
-class _TokenRow:
-    """Named access to a refresh-token row (see ``REFRESH_COLUMNS``)."""
-
-    __slots__ = ("created_at", "expires_at", "grace_replays", "grant_id", "parent_hash",
-                 "replaced_by", "token_hash", "used_at")
-
-    def __init__(self, row: Any) -> None:
-        self.token_hash = str(row[0])
-        self.grant_id = str(row[1])
-        self.parent_hash = None if row[2] is None else str(row[2])
-        self.created_at = int(row[3])
-        self.expires_at = int(row[4])
-        self.used_at = None if row[5] is None else int(row[5])
-        self.replaced_by = None if row[6] is None else str(row[6])
-        self.grace_replays = int(row[7])
+    return (
+        account is not None
+        and account.status == acc.STATUS_ACTIVE
+        and account.session_epoch == session_epoch
+    )

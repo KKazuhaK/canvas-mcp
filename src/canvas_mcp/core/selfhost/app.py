@@ -1,4 +1,4 @@
-"""Startup validation and wiring of the self-hosted Entra OAuth mode."""
+"""Startup validation and wiring of the self-hosted authorization server."""
 
 from __future__ import annotations
 
@@ -8,30 +8,19 @@ from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urlsplit
 
-import anyio.to_thread
 from fastmcp import FastMCP
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp
 
-from ..config import Config, validate_canvas_url_scheme
-from ..logging import log_info, log_warning
+from ..config import Config
+from ..logging import log_info
 from ..token_health import set_token_health_monitor
 from .accounts import STATUS_DISABLED, EntraClaimsPolicy, bootstrap_sign_in_gives_owner
-from .edge_guard import SelfhostEdgeGuard
 from .identity import IdentityService
 from .limits import RateLimiters, build_rate_limiters
-from .oauth import cull_expired_oauth_state
-from .principal_access import PrincipalAccessCache
-from .request_context import (
-    LocalClaimsResolver,
-    RequestIdentity,
-    SelfhostRequestContextMiddleware,
-)
-from .schools import SchoolPolicy, is_blocked_hostname
 from .settings import SelfhostConfigError, SelfhostSettings
 from .token_health import TokenHealth
 from .tool_gate import SelfhostCredentialGate
@@ -40,11 +29,10 @@ from .tool_prefs import ToolPrefsCache, WriteToolCatalog
 if TYPE_CHECKING:
     from ..tool_policy import ToolPolicy
     from .authz.runtime import AuthzRuntime
+    from .config_snapshot import ConfigSnapshots
     from .token_store import TokenStore
 
 HEALTH_PATH = "/healthz"
-#: How often the sign-in history and the stale pending accounts are pruned.
-STORE_CLEANUP_SECONDS = 3600.0
 
 SSRF_TRUST_PROXY_ENV = "FASTMCP_SSRF_TRUST_PROXY"
 _FALSE_WORDS = frozenset({"", "0", "false", "f", "no", "n", "off"})
@@ -52,14 +40,10 @@ _FALSE_WORDS = frozenset({"", "0", "false", "f", "no", "n", "off"})
 
 @dataclass(frozen=True)
 class SelfhostRuntime:
-    """What the running server shares: settings, token store, identity service, token health.
+    """Runtime services and immutable environment settings.
 
-    ``identity`` turns verified claims into accounts under the admission policy; both the
-    MCP path and ``/account`` use it. ``tool_prefs`` caches each user's write-tool
-    switches for the MCP side; the account page drops a user's entry when they change a
-    switch. ``access`` caches whether each principal is allowed to use the server at all;
-    the account page drops an entry when an owner disables, enables, approves or denies
-    a user.
+    MCP standing comes from one request snapshot. Only versioned preferences
+    and best-effort usage bookkeeping are cached.
     """
 
     settings: SelfhostSettings
@@ -67,10 +51,11 @@ class SelfhostRuntime:
     identity: IdentityService
     health: TokenHealth
     tool_prefs: ToolPrefsCache
-    access: PrincipalAccessCache
-    limiters: RateLimiters = field(default_factory=lambda: build_rate_limiters("memory"))
-    #: The server's own authorization server (``SELFHOST_AUTH_MODE=local``); None in the default mode.
-    authz: AuthzRuntime | None = None
+    authz: AuthzRuntime
+    snapshots: ConfigSnapshots
+    limiters: RateLimiters = field(
+        default_factory=lambda: build_rate_limiters("memory")
+    )
 
 
 def _writable_directory_problem(name: str, path: Path) -> str | None:
@@ -81,47 +66,6 @@ def _writable_directory_problem(name: str, path: Path) -> str | None:
     if not path.is_dir() or not os.access(path, os.W_OK):
         return f"{name} is not a writable directory"
     return None
-
-
-def selfhost_school_policy(settings: SelfhostSettings, config: Config) -> SchoolPolicy:
-    """The schools this server offers: ``CANVAS_API_URL`` plus the featured list.
-
-    Deterministic and free of I/O, so the account pages and the request
-    middleware always agree.
-    """
-    return SchoolPolicy.build(
-        getattr(config, "canvas_api_url", "") or "",
-        settings.featured_schools,
-        settings.school_search,
-    )
-
-
-def _school_problems(config: Config, settings: SelfhostSettings) -> list[str]:
-    """Startup problems with the Canvas schools. Values are never included."""
-    problems: list[str] = []
-    default_host = ""
-    if config.canvas_api_url:
-        if not validate_canvas_url_scheme():
-            problems.append("CANVAS_API_URL must use https")
-        try:
-            default_host = (urlsplit(config.canvas_api_url).hostname or "").lower()
-        except ValueError:
-            default_host = ""
-        if not default_host:
-            problems.append("CANVAS_API_URL must include a host name")
-    elif not settings.featured_schools and not settings.school_search:
-        problems.append(
-            "CANVAS_API_URL is required unless CANVAS_FEATURED_SCHOOLS or "
-            "CANVAS_SCHOOL_SEARCH=true is set"
-        )
-    for index, school in enumerate(settings.featured_schools, start=1):
-        # The default school is the operator's own pin and keeps its exemption.
-        if school.host != default_host and is_blocked_hostname(school.host):
-            problems.append(
-                f"CANVAS_FEATURED_SCHOOLS entry {index} is not a public address "
-                "(local and internal names are refused)"
-            )
-    return problems
 
 
 def _ssrf_trust_proxy_enabled() -> bool:
@@ -149,8 +93,6 @@ def validate_selfhost_startup(config: Config, settings: SelfhostSettings) -> lis
     Messages name settings and never include their values.
     """
     problems: list[str] = []
-
-    problems.extend(_school_problems(config, settings))
 
     if config.canvas_api_token:
         problems.append(
@@ -189,36 +131,18 @@ def validate_selfhost_startup(config: Config, settings: SelfhostSettings) -> lis
             "tokens on the shared host"
         )
 
-    for name, path in (
-        ("FASTMCP_HOME", settings.fastmcp_home),
-        ("SELFHOST_DATA_DIR", settings.data_dir),
-    ):
-        problem = _writable_directory_problem(name, path)
-        if problem:
-            problems.append(problem)
-
-    env_home = os.environ.get("FASTMCP_HOME", "")
-    if not env_home or Path(env_home) != settings.fastmcp_home:
-        problems.append("FASTMCP_HOME must be set in the process environment")
-    else:
-        from fastmcp import settings as fastmcp_settings
-
-        if Path(str(fastmcp_settings.home)) != settings.fastmcp_home:
-            problems.append(
-                "FASTMCP_HOME was not in the process environment when FastMCP "
-                "started (a .env file is read too late); set it in the "
-                "environment so the OAuth state is stored under it"
-            )
+    problem = _writable_directory_problem("SELFHOST_DATA_DIR", settings.data_dir)
+    if problem:
+        problems.append(problem)
 
     return problems
 
 
 def _data_layer_problem(settings: SelfhostSettings) -> str | None:
     """A startup problem if the data layer's optional packages are not installed."""
-    try:
-        import alembic  # noqa: F401
-        import sqlalchemy  # noqa: F401
-    except ImportError:
+    from .db.migrations import dependencies_available
+
+    if not dependencies_available():
         return (
             "the self-hosted mode needs SQLAlchemy and Alembic: "
             "pip install 'canvas-mcp[selfhost]' (the container image includes them)"
@@ -234,7 +158,9 @@ def _data_layer_problem(settings: SelfhostSettings) -> str | None:
     return None
 
 
-def _provider_issuer_problems(settings: SelfhostSettings, store: TokenStore) -> list[str]:
+def _provider_issuer_problems(
+    settings: SelfhostSettings, store: TokenStore
+) -> list[str]:
     """A provider id with enrolled identities cannot be rebound to another issuer.
 
     Owner guards deliberately operate on provider ids. Keep that id bound to its issuer
@@ -247,7 +173,7 @@ def _provider_issuer_problems(settings: SelfhostSettings, store: TokenStore) -> 
         return []
     changed = {
         identity.provider_id
-        for account in store.list_accounts()
+        for account in store.iter_accounts()
         for identity in account.identities
         if identity.provider_id in configured
         and identity.issuer != configured[identity.provider_id]
@@ -328,9 +254,9 @@ def _owner_path_problem(settings: SelfhostSettings, store: TokenStore) -> str | 
 def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
     """Open the encrypted token store and build the identity service.
 
-    A database from before the account model is migrated here (every stored Canvas
-    token is re-encrypted with ``CANVAS_TOKEN_KEYS`` in one transaction; a SQLite file
-    is copied first), unless ``DATABASE_AUTO_MIGRATE=false``.
+    Schema checks and upgrades are delegated to ``db.migrations``. Pre-v1
+    databases are refused; pending v1 revisions require automatic migration or
+    an explicit operator upgrade.
 
     Raises :class:`SelfhostConfigError` when the keyring or the store is
     unusable (a key id missing, a wrong key, an unreadable or newer database,
@@ -348,7 +274,7 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
     if missing:
         raise SelfhostConfigError([missing])
 
-    from .db.transfer import refuse_silent_switch
+    from .db.migrations.transfer import refuse_silent_switch
 
     try:
         keyring = Keyring.parse(settings.canvas_token_keys_raw)
@@ -372,12 +298,16 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
             ) from None
         detail = f" ({exc.kind})" if exc.kind else ""
         raise SelfhostConfigError(
-            [f"the Canvas token database cannot be opened or is not a valid database{detail}"]
+            [
+                f"the Canvas token database cannot be opened or is not a valid database{detail}"
+            ]
         ) from None
     except (TokenStoreError, KeyringError) as exc:
         raise SelfhostConfigError([str(exc)]) from None
     except OSError:
-        raise SelfhostConfigError(["the Canvas token database cannot be opened"]) from None
+        raise SelfhostConfigError(
+            ["the Canvas token database cannot be opened"]
+        ) from None
 
     # token_admin reads this to know which owners are usable (it often runs without the
     # server's variables). It is the configured list, so it is written before the owner-path
@@ -388,8 +318,18 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         issuer_problems = _provider_issuer_problems(settings, store)
         if issuer_problems:
             raise SelfhostConfigError(issuer_problems)
-        store.record_login_providers(settings.login_providers.ids)
+        store.record_login_providers(settings.login_providers.order)
+        from .config_snapshot import ConfigSnapshots
+
+        snapshots = ConfigSnapshots(store.database, settings.login_providers)
         owner_problem = _owner_path_problem(settings, store)
+    except StoreUnavailable:
+        store.close()
+        raise SelfhostConfigError(
+            [
+                "database-managed settings cannot be loaded; check stored values and featured-school DNS with token_admin"
+            ]
+        ) from None
     except BaseException:
         store.close()
         raise
@@ -397,30 +337,25 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         store.close()
         raise SelfhostConfigError([owner_problem])
 
-    access = PrincipalAccessCache(store)
     identity = IdentityService(
         store,
         EntraClaimsPolicy(tenant_id=settings.tenant_id, client_id=settings.client_id),
         settings.access_policy,
-        access=access,
         login_providers=settings.login_providers.ids,
     )
     health = TokenHealth(store, account_url=settings.account_url)
-    authz: AuthzRuntime | None = None
-    if settings.authz_mode == "local":
-        # Imported here: the default mode never loads the authorization server.
-        from .authz.runtime import build_authz_runtime
+    from .authz.runtime import build_authz_runtime
 
-        authz = build_authz_runtime(settings, store, keyring, access)
+    authz = build_authz_runtime(settings, store, keyring)
     return SelfhostRuntime(
         settings=settings,
         store=store,
         identity=identity,
         health=health,
         tool_prefs=ToolPrefsCache(store),
-        access=access,
         limiters=build_rate_limiters(settings.state_backend),
         authz=authz,
+        snapshots=snapshots,
     )
 
 
@@ -444,22 +379,15 @@ async def apply_disabled_tools(mcp: FastMCP, names: Collection[str]) -> list[str
 
 
 def load_account_spa(settings: SelfhostSettings) -> Any:
-    """The built account UI for ``ACCOUNT_UI=react``, or None (after one warning) if unusable.
-
-    A missing, partial or oversized build never reaches a user: the server-rendered
-    pages are served instead, so the account UI always works.
-    """
+    """Load the required React bundle; a missing or invalid build refuses startup."""
     from .account_spa import SpaBundle, SpaBundleError
 
     try:
         return SpaBundle.load(settings.account_web_dist)
     except SpaBundleError as exc:
-        log_warning(
-            "ACCOUNT_UI=react but no usable built account UI at ACCOUNT_WEB_DIST; "
-            "serving the legacy /account pages",
-            reason=exc.reason,
-        )
-        return None
+        raise SelfhostConfigError(
+            [f"ACCOUNT_WEB_DIST must contain a valid built account UI ({exc.reason})"]
+        ) from None
 
 
 def install_selfhost(
@@ -469,7 +397,7 @@ def install_selfhost(
     *,
     tool_policy: ToolPolicy | None = None,
     **account_options: Any,
-) -> Literal["legacy", "react"]:
+) -> Literal["react"]:
     """Add the credential gate, the /account pages and /healthz to the server.
 
     ``tool_policy`` is the operator's resolved ``ALLOWED_WRITE_TOOLS``: the server
@@ -478,28 +406,28 @@ def install_selfhost(
     routes (tests inject the school directory, the host resolver and the HTTP
     client factory there).
 
-    Returns the account UI that is really served: ``"react"`` only when
-    ``ACCOUNT_UI=react`` and the built single-page app loaded, else ``"legacy"``.
+    The required React bundle is loaded before any routes are registered.
     """
-    from .account_web import AccountConfig, register_account_routes
+    from .account_core import AccountConfig, register_account_routes
 
     settings = runtime.settings
-    spa = load_account_spa(settings) if settings.account_ui == "react" else None
-    logins = None
-    login_transport = account_options.pop("login_transport", None)
-    if settings.login_providers.public:
-        # Imported here: an Entra-only deployment never loads the relying-party modules.
-        from .login.registry import build_login_runtime
+    spa = load_account_spa(settings)
+    from .login.registry import build_login_runtime
 
-        assert runtime.authz is not None, "other sign-in providers need SELFHOST_AUTH_MODE=local"
-        logins = build_login_runtime(
-            settings,
-            flow_store=runtime.authz.txns,
-            clock=account_options.get("clock") or time.time,
-            rate_limiters=runtime.limiters,
-            transport=login_transport,
-        )
-    ceiling = tool_policy.allowed if tool_policy is not None and tool_policy.enforced else None
+    login_transport = account_options.pop("login_transport", None)
+    logins = build_login_runtime(
+        settings,
+        flow_store=runtime.authz.txns,
+        clock=account_options.get("clock") or time.time,
+        rate_limiters=runtime.limiters,
+        transport=login_transport,
+        snapshots=runtime.snapshots,
+    )
+    ceiling = (
+        tool_policy.allowed
+        if tool_policy is not None and tool_policy.enforced
+        else None
+    )
 
     async def registered_tool_names() -> list[str]:
         return [tool.name for tool in await mcp.list_tools(run_middleware=False)]
@@ -508,8 +436,6 @@ def install_selfhost(
         SelfhostCredentialGate(
             account_url=settings.account_url,
             write_ceiling=ceiling,
-            access=runtime.access,
-            identity_mode="local" if settings.authz_mode == "local" else "entra",
         )
     )
     # The Canvas client confirms a suspected dead token through this service.
@@ -519,25 +445,22 @@ def install_selfhost(
         mcp,
         AccountConfig(
             public_base_url=settings.public_base_url,
-            tenant_id=settings.tenant_id,
-            client_id=settings.client_id,
-            client_secret=settings.client_secret,
             session_secret=settings.account_session_secret,
-            schools=selfhost_school_policy(settings, config),
             session_ttl_seconds=settings.account_session_ttl_seconds,
         ),
         runtime.store,
         runtime.identity,
         health=runtime.health,
-        write_tools=WriteToolCatalog(ceiling=ceiling, list_registered=registered_tool_names),
+        write_tools=WriteToolCatalog(
+            ceiling=ceiling, list_registered=registered_tool_names
+        ),
         tool_prefs=runtime.tool_prefs,
-        access=runtime.access,
         **{
             "rate_limiters": runtime.limiters,
-            "ui": settings.account_ui,
             "spa": spa,
             "authz": runtime.authz,
             "logins": logins,
+            "snapshots": runtime.snapshots,
             **account_options,
         },
     )
@@ -546,15 +469,8 @@ def install_selfhost(
     async def healthz(request: Request) -> PlainTextResponse:
         return PlainTextResponse("ok", headers={"Cache-Control": "no-store"})
 
-    effective: Literal["legacy", "react"] = "react" if spa is not None else "legacy"
-    if settings.account_ui == "react":
-        log_info(
-            "Account UI: "
-            + ("built single-page app" if spa is not None else "legacy pages (fallback)"),
-            account_ui_requested="react",
-            account_ui=effective,
-        )
-    return effective
+    log_info("Account UI: built single-page app", account_ui="react")
+    return "react"
 
 
 def build_selfhost_asgi_app(
@@ -572,15 +488,11 @@ def build_selfhost_asgi_app(
     the unauthenticated OAuth endpoints and cleans expired OAuth records.
     """
     settings = runtime.settings
-    local = settings.authz_mode == "local"
-    identity: RequestIdentity
-    if local:
-        # The token is ours: its subject is the account. Roles are not in it, so the
-        # owner role changes only at an /account sign-in (never by a request token).
-        assert runtime.authz is not None
-        identity = LocalClaimsResolver(runtime.access, runtime.authz.issuer)
-    else:
-        identity = runtime.identity
+    from .edge_guard import SelfhostEdgeGuard
+    from .maintenance import MaintenanceRunner
+    from .request_context import LocalClaimsResolver, SelfhostRequestContextMiddleware
+
+    identity = LocalClaimsResolver(runtime.authz.issuer)
     app = mcp.http_app(
         stateless_http=True,
         middleware=[
@@ -589,15 +501,13 @@ def build_selfhost_asgi_app(
                 mcp_path=settings.mcp_path,
                 identity=identity,
                 store=runtime.store,
-                schools=selfhost_school_policy(settings, config),
+                snapshots=runtime.snapshots,
                 account_url=settings.account_url,
                 health=runtime.health,
                 tool_prefs=runtime.tool_prefs,
-                access=runtime.access,
-                owners=None if local else runtime.store,
-                login_providers=settings.login_providers.ids,
+                touch_grant=runtime.authz.store.touch_grant,
+                clock=runtime.authz.clock,
                 course_state=settings.course_state,
-                identity_mode="local" if local else "entra",
             )
         ],
         host_origin_protection=True,
@@ -605,43 +515,16 @@ def build_selfhost_asgi_app(
         allowed_origins=[settings.public_base_url],
     )
 
-    provider = mcp.auth
-    last_store_cleanup: list[float] = []
-
-    async def prune_store() -> None:
-        """Drop sign-in events older than 90 days and pending accounts older than 30 days.
-
-        At most once an hour, in a worker thread, and best effort: a failure only means
-        the next pass tries again.
-        """
-        now = time.monotonic()
-        if last_store_cleanup and now - last_store_cleanup[0] < STORE_CLEANUP_SECONDS:
-            return
-        last_store_cleanup[:] = [now]
-        try:
-            await anyio.to_thread.run_sync(runtime.store.prune_auth_events)
-            await anyio.to_thread.run_sync(runtime.store.purge_stale_pending)
-        except Exception:  # noqa: BLE001 - housekeeping must never affect a request
-            log_warning("cleanup of old sign-in records failed")
-
-    async def cull_authz() -> None:
-        """Delete expired codes, login states, grants and registrations (worker thread, best effort)."""
-        if runtime.authz is None:
-            return
-        try:
-            await anyio.to_thread.run_sync(runtime.authz.store.cull)
-        except Exception:  # noqa: BLE001 - housekeeping must never affect a request
-            log_warning("cleanup of expired authorization state failed")
+    runner = MaintenanceRunner(
+        runtime.store.database, cimd_stale_max=settings.authz.cimd_stale_max
+    )
 
     async def maintenance() -> None:
-        await cull_expired_oauth_state(provider)
-        await prune_store()
-        await cull_authz()
+        await runner.run()
 
     return SelfhostEdgeGuard(
         app,
         clock=clock or time.monotonic,
         maintenance=maintenance,
         rate_limiters=runtime.limiters,
-        authz_local=local,
     )

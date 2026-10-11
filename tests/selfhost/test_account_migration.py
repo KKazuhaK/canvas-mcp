@@ -20,14 +20,14 @@ import sys
 from typing import Any
 
 import pytest
+from canvas_mcp.core.selfhost.db.migrations.legacy.accounts_v5 import (
+    AccountMigrationReport,
+    MigrationOptions,
+)
 from dbbackend import IS_POSTGRES, make_store, raw_sql
 
 from canvas_mcp.core.selfhost import accounts as acc
 from canvas_mcp.core.selfhost.db import accounts_v5, baseline_v4, migrate, schema
-from canvas_mcp.core.selfhost.db.accounts_v5 import (
-    AccountMigrationReport,
-    MigrationOptions,
-)
 from canvas_mcp.core.selfhost.db.errors import TokenStoreError
 from canvas_mcp.core.selfhost.token_store import (
     Keyring,

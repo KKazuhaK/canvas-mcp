@@ -5,10 +5,10 @@ from __future__ import annotations
 import pathlib
 
 import pytest
-from dbbackend import make_store, raw_connection
+from dbbackend import make_store
 from sqlalchemy import inspect
 
-from canvas_mcp.core.selfhost.token_store import SCHEMA_VERSION, TokenStore
+from canvas_mcp.core.selfhost.token_store import TokenStore
 
 from .conftest import acct_key, make_account
 from .test_token_store import OID_A, OID_B, Clock, _put, _ring
@@ -48,7 +48,7 @@ class TestDefaultsAndRoundTrip:
         assert got.enabled_write_tools == {"send_message", "submit_assignment"}
         assert got.enabled_at == {"send_message": int(clock.now), "submit_assignment": int(clock.now)}
         assert got.updated_at == int(clock.now)
-        assert got.updated_via == "account_web"
+        assert got.updated_via == "api"
 
     def test_users_are_independent(self, store: TokenStore) -> None:
         store.set_tool_prefs(PK_A, ["send_message"])
@@ -128,7 +128,7 @@ class TestValidation:
         for bad in ("", "x" * 33, "é"):
             with pytest.raises(ValueError):
                 store.set_tool_prefs(PK_A, [], via=bad)
-        store.set_tool_prefs(PK_A, [], via="operator")
+        store.set_tool_prefs(PK_A, ["send_message"], via="operator")
         got = store.get_tool_prefs(PK_A)
         assert got is not None and got.updated_via == "operator"
 
@@ -154,54 +154,37 @@ class TestIndependenceFromTheToken:
         assert store.count() == 0
 
 
-class TestFailClosed:
-    def _corrupt(self, store: TokenStore, tmp_path: pathlib.Path, names: str, at: str) -> None:
+class TestNativeRows:
+    def test_each_enabled_tool_is_one_native_row(self, store: TokenStore, clock: Clock) -> None:
+        from sqlalchemy import select
+
+        from canvas_mcp.core.selfhost.db import schema
+        store.set_tool_prefs(PK_A, ["send_message", "submit_assignment"])
+        with store.database.read() as conn:
+            rows = conn.execute(select(schema.account_write_tools).order_by(schema.account_write_tools.c.tool_name)).mappings().all()
+        assert [(r["account_id"], r["tool_name"], r["enabled_at"], r["enabled_via"]) for r in rows] == [
+            (PK_A, "send_message", int(clock.now), "api"),
+            (PK_A, "submit_assignment", int(clock.now), "api"),
+        ]
+
+    @pytest.mark.parametrize("values", [{"tool_name": ""}, {"enabled_at": "not-an-epoch"}])
+    def test_database_rejects_malformed_native_values(self, store: TokenStore, values) -> None:
+        from sqlalchemy import update
+        from sqlalchemy.exc import DBAPIError
+
+        from canvas_mcp.core.selfhost.db import schema
         store.set_tool_prefs(PK_A, ["send_message"])
-        with raw_connection(store) as conn:
-            conn.execute(
-                "UPDATE user_tool_prefs SET enabled_write_tools = ?, enabled_at = ?",
-                (names, at),
-            )
-
-    @pytest.mark.parametrize("names", ["not json", '{"a": 1}', '"send_message"', '["Bad Name"]', "[1]"])
-    def test_an_unreadable_record_enables_nothing(
-        self, store: TokenStore, tmp_path: pathlib.Path, names: str
-    ) -> None:
-        self._corrupt(store, tmp_path, names, "{}")
-        got = store.get_tool_prefs(PK_A)
-        assert got is not None and got.enabled_write_tools == frozenset()
-
-    def test_a_damaged_time_map_never_adds_names(self, store: TokenStore, tmp_path: pathlib.Path) -> None:
-        self._corrupt(store, tmp_path, '["send_message"]', '{"send_message": "x", "ghost": 5}')
-        got = store.get_tool_prefs(PK_A)
-        assert got is not None
-        assert got.enabled_write_tools == {"send_message"}
-        assert got.enabled_at == {}
+        with pytest.raises(DBAPIError):
+            with store.database.engine.begin() as conn:
+                conn.execute(update(schema.account_write_tools).values(**values))
+        assert store.get_tool_prefs(PK_A).enabled_write_tools == {"send_message"}
 
 
-class TestMigration:
-    def test_a_fresh_database_has_the_table_and_the_same_schema_version(
-        self, store: TokenStore, tmp_path: pathlib.Path
-    ) -> None:
-        assert "user_tool_prefs" in _tables(store)
-        # The table was added without a version change; later versions kept it.
-        assert SCHEMA_VERSION == 5
+class TestInitialization:
+    def test_a_fresh_database_uses_native_rows(self, store: TokenStore) -> None:
+        assert "account_write_tools" in _tables(store)
+        assert "user_tool_prefs" not in _tables(store)
 
-    @pytest.mark.sqlite_only
-
-    def test_opening_a_database_without_the_table_adds_it_and_keeps_the_rows(
-        self, tmp_path: pathlib.Path, clock: Clock
-    ) -> None:
-        from . import legacy_schemas as legacy
-
-        path = tmp_path / "data" / "tokens.sqlite3"
-        seeded = legacy.build(path, "v2b")  # a release that had no preferences table yet
-        reopened = make_store(path, legacy.keyring(), clock=clock)
-        reopened.initialize()
-        assert "user_tool_prefs" in _tables(reopened)
-        assert reopened.count() == len(seeded.plaintexts)
-        migrated = reopened.resolve_legacy_key(legacy.KEY_A)
-        assert migrated is not None and reopened.get_tool_prefs(migrated) is None
 
     def test_opening_twice_keeps_the_saved_switches(
         self, store: TokenStore, tmp_path: pathlib.Path, clock: Clock

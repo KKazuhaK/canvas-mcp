@@ -58,18 +58,21 @@ production build before this checkpoint.
 
 ## Required work still outstanding
 
-1. Replace the live legacy metadata, repository rows, store and Alembic graph
-   with the v1 baseline. The new DDL and readers are tested foundations, but the
-   running store still uses the old schema. Complete bare UUIDs, named rows,
-   credential AAD, custody columns, row-local guards and transaction lock order.
-2. Wire the one-read request snapshot into JWT, session and MCP paths; remove
-   grant, account-standing and JWT-epoch TTL caches. Preserve immediate
-   cross-instance revocation, disable, preference and settings semantics.
-3. Implement provider reconciliation and immutable configuration snapshots;
-   connect settings, schools and provider-name saves to the API, React and CLI.
-4. Complete custody acknowledgement before any outbound enrollment probe and
-   its version checks, audit and bilingual UI.
-5. Finish batch maintenance, deletion, key rotation, transfer, reserved
+1. Finish transaction lock order, pagination and deletion around the ported
+   repositories and stores. Bare UUIDs, frozen named rows, native JSON/hash types,
+   credential AAD, generation guards and custody persistence are implemented.
+2. Keep the single-read MCP and browser-session snapshots covered while
+   finishing lifecycle operations. Their configuration revision now selects an
+   immutable database-owned snapshot; steady requests perform no configuration
+   read beyond that authoritative snapshot.
+3. Complete remaining configuration integration: displayed-name denial messages,
+   per-call Canvas address protection, CLI provenance and deployment examples.
+   Provider order reconciliation, atomic CAS settings/school/name saves, the five
+   admin API endpoints, React settings and headless commands are implemented.
+4. Keep the custody API, single-read MCP check and bilingual required checkbox
+   covered while completing the remaining API and configuration work. The
+   current API, MCP and frontend validations pass, including re-acknowledgement.
+5. Finish batch maintenance, deletion, reserved
    interfaces and keyset pagination; run the prescribed PostgreSQL races.
 6. Port the remaining tests; pass complete SQLite/PostgreSQL and latest/locked
    dependency matrices, lint, typing, frontend and documentation checks.
@@ -80,3 +83,230 @@ production build before this checkpoint.
 The owner will deploy staging and configure the reverse proxy. Real IdP/B2B,
 Claude-client, proxy and multi-day refresh checks require that staging and
 remain gates for the first v1 tag. No v1 release has been published.
+
+## Migration isolation
+
+All upgrades and database transfer tooling now live under
+`src/canvas_mcp/core/selfhost/db/migrations/`, including the dedicated migration
+connections, CLI implementation, frozen DDL and revision graph. Normal engines
+contain no migration connection methods. The package README lists the cleanup
+boundary. Pre-v1 transfer dependencies are deleted. The v1 import snapshots
+the source read-only, upgrades only the private copy and copies tables according
+to lifecycle metadata. One target transaction includes DDL, streaming batches,
+row-count checks and every sealed-value check. Transactional sequence restart
+also rolls back on failure; the target keeps its own database identity.
+
+The real migration graph, schema constraints, baseline and settings suite passed
+63 checks on locked-dependency PostgreSQL. After relocating migration code, the
+SQLite suite including engine and request-snapshot checks passed 71 checks with
+2 PostgreSQL-only skips. The same relocated suite passed all 73 checks on
+PostgreSQL. The built wheel contains the isolated package and byte-identical SQL
+assets, with no modules at the former migration paths. Full runtime validation
+is still outstanding.
+
+## Runtime port and custody checkpoint
+
+- Actual v1 repositories return frozen named records. Entities use bare UUIDv7
+  ids; account generation and write-preference versions live on the account row.
+  Consume-once login states use conditional `DELETE ... RETURNING`.
+- The sealed-column registry covers all three encrypted tables, including
+  reserved provider and Canvas OAuth app secrets. Startup probes and chunked
+  rotation use that registry; custody and lifecycle metadata stay unchanged.
+- The custody API refuses missing, false, non-boolean or stale acknowledgements
+  before directory, DNS or Canvas calls and any write. Re-acknowledgement is
+  idempotent and preserves the credential and its generation. Notice texts have
+  reviewed hash pins for both languages.
+- The combined latest-dependency SQLite foundation, repository, identity,
+  migration, sealed, custody API and login-route suite passed 176 tests with
+  10 PostgreSQL-only skips. The dedicated locked PostgreSQL migration, transfer,
+  sealed and store suite passed all 46 tests. Linux-target mypy passed all 74
+  self-host source files before the final custody wiring.
+- Whole self-host collection still has 27 legacy-interface import errors.
+  The remaining security tests must be ported; full runtime and Docker checks
+  are not complete.
+
+## Authenticated request checkpoint
+
+- JWT verification is entirely independent of database reads. Its decoded
+  result carries the authenticated signing epoch. Code exchange, replay sibling
+  and refresh results carry the epoch read inside their own transaction; signing
+  after commit does not consult a later epoch.
+- `load_access_token` performs one grant/account/primary-credential/server-state
+  query after signature and claim checks. A request-scoped frozen value feeds
+  the account resolver, credential mount and tool gate. Every instance reads
+  committed revocation, disablement and JWT epoch at the next request.
+- A database outage after a previous successful request returns 503. The
+  request context never reuses a previous snapshot. Expired custody notices
+  block before decryption; acknowledgement restores access without replacing
+  the credential or changing its generation.
+- Write-tool preferences use a 4,096-entry LRU keyed by account and version,
+  with one prefix read on a miss. Usage writes are deduplicated and only run
+  when the snapshot's last-use timestamp is stale; steady requests issue one
+  data query and no writes. The following configuration checkpoint completes
+  revision refresh before credential checks.
+- Latest-dependency SQLite: 132 JWT, grant and MCP checks passed; the complete
+  token/refresh/revocation HTTP suite passed all 79 checks. Locked-dependency
+  PostgreSQL: 173 JWT, grant, MCP, login, custody and snapshot checks passed.
+  Before this request wiring, the combined PostgreSQL foundation/store/import
+  suite passed all 186 checks. Source Ruff and Linux-target mypy passed, with
+  76 self-host source files checked by mypy.
+- The complete frontend suite passed 457 tests; type checking, production
+  build and lint passed. Whole self-host collection finds 3,235 tests and 27
+  remaining imports of removed interfaces; this is not a passing full suite.
+
+## Database configuration checkpoint
+
+- MCP requests use the settings revision from the same authoritative read before
+  checking school availability or decrypting a token. Browser sessions use one
+  account/status/role/epoch/revision query. Public routes probe the revision;
+  unknown providers and methods still reject before database access.
+- Configuration bundles are frozen and keyed by revision. A warm hit needs no
+  query, a rebuild uses three joined reads, and mixed PostgreSQL READ COMMITTED
+  revisions retry. DNS validation runs after the read connection is released.
+  Failed validation keeps the previous bundle unmodified but refuses requests
+  requiring the newer revision; a subsequent request retries.
+- Provider reconciliation records the configured order without replacing edited
+  names. Schools have no environment default, implicit picker selection or
+  default-school DNS exemption. Private exceptions are explicit operator changes.
+- The five owner settings endpoints apply recent-session, Origin, CSRF, closed
+  JSON body and size checks. Governance transactions recheck the active owner,
+  perform global revision CAS and record audit actions. Removing a school with
+  search disabled requires confirmation of affected bindings; encrypted rows
+  remain stored. Retention values are operator-only.
+- Admin > Settings has bilingual name, school and search controls, address checks,
+  ordering, reset, affected-binding confirmation, conflict reload and reauth.
+  Headless `providers`, `schools` and `settings` commands share runtime repository
+  methods. See [CONFIGURATION.md](CONFIGURATION.md).
+- Latest SQLite configuration suite: 28 passed, including native CLI commands,
+  immutable refresh, revision races, permission changes during DNS checks,
+  readonly private flags, strict body limits and school-name round trips.
+  API route/error parity is ported to the v1 stack and passes. Previous complete
+  SQLite MCP and token/refresh/revocation run passed 113 checks before the final
+  CLI and additional configuration tests.
+- Locked PostgreSQL configuration/API/MCP/token-flow suite: 154 passed before
+  the final cross-instance school recovery check; the final configuration and
+  API contract suite passes all 30 tests, including that recovery check.
+- Full frontend: 460 passed; the final settings UI suite passes all 5 tests
+  including the added conflict reload interaction. Build/typecheck and lint passed. Source Ruff and
+  Linux-target mypy pass (79 self-host source files).
+- Current whole self-host collection: 3,034 tests collected and 30 imports of
+  removed interfaces still fail. This remains an incomplete full runtime matrix;
+  port those regression tests instead of restoring compatibility adapters.
+
+## Bounded maintenance and deletion checkpoint
+
+- Runtime cleanup now lives in `selfhost/maintenance.py`, separate from the
+  removable `db/migrations/` upgrade/transfer package. The traffic scheduler is
+  hourly and does not overlap a still-running pass. Each job has bounded,
+  independently committed chunks, backend-specific budgets, PostgreSQL advisory
+  try-locks and row selection with `SKIP LOCKED`.
+- Deletion repeats its due predicate. Grants use separate revoked/expired jobs
+  with 200-row chunks; refresh rows leave only by grant cascade. History walks
+  primary keys and tolerates earlier clock-skewed records. Pending purge is a
+  governance operation capped at 100 accounts, codes first, one audit each.
+  SQLite housekeeping commits its vacuum/optimize transaction.
+- Credential enrollment now locks an existing school with an upsert timestamp
+  update. The PostgreSQL race caught the previous `DO NOTHING` parent race; both
+  put-first and cull-first orders now pass. School deletion repeats reference and
+  policy predicates.
+- Disable/deny delete unused codes before account locks. Operator account deletion
+  deletes all codes first, checks last usable/active owner protection, cascades
+  children and records counts in a retained `account_deleted` audit entry.
+  `token_admin accounts delete UUID` is available; the panel shows the new audit
+  action in both languages. Tier-zero writes no longer have a governance variant.
+- Locked PostgreSQL maintenance and first-exchange/school races: 23 passed.
+  The preceding maintenance/store/configuration/race run passed all 63 checks.
+  The broader authorization/edge/store run passed 117 checks before the two
+  maintenance failures were fixed and independently revalidated. No PostgreSQL
+  log entry reported a deadlock during these runs; the test server was stopped.
+- Latest SQLite maintenance/store/configuration/token-flow/edge matrix: 148 passed,
+  10 PostgreSQL-only skips. Frontend admin pages: 20 passed, lint passed. Source
+  Ruff and Linux-target mypy pass (80 self-host files). See
+  [MAINTENANCE.md](MAINTENANCE.md) for retention and operator deletion.
+- Whole self-host collection now finds 3,058 tests with 30 old-interface import
+  errors. This is still not a passing whole runtime matrix.
+
+Next: finish reserved interfaces and the remaining lifecycle/lock audits;
+port the remaining security suites and validate the complete matrix.
+Keep every upgrade and transfer change inside `db/migrations/`. Docker/staging
+and the first v1 tag remain outstanding.
+
+## Pagination and isolated upgrade policy checkpoint
+
+- Native keyset pages replace unbounded account, enrollment, history, audit and
+  grant reads. Limits are 50 by default and at most 200; canonical opaque cursors
+  bind the list/account/filter. Counts are independent SQL aggregates. Prefix
+  lookups for names, identities and primary credentials only cover the current
+  page. Secondary credential rows are visible without primary-token actions.
+- The React lists append pages through Load more. Changing server filters resets
+  pagination; loaded-name search states its scope. The native CLI streams full
+  inventories through bounded reads and exposes history continuation separately
+  from tab-separated output. Retained audit is readable after account deletion.
+  Pre-v1 principal-key adapters and CLI forms/aliases are removed; account targets
+  are canonical bare UUIDs. See [PAGINATION.md](PAGINATION.md).
+- Every upgrade/backup/transfer helper, Alembic dependency probe, frozen baseline,
+  revision template and future DDL policy is under `db/migrations/`. Runtime
+  repositories contain no upgrade DDL. Structural boundary tests enforce that
+  split; [the package README](../../src/canvas_mcp/core/selfhost/db/migrations/README.md)
+  explains how to retire the tooling later.
+- SQLite contract plans automatically back up before changing existing schema.
+  The rebuild helper retains STRICT, WITHOUT ROWID, named checks, partial indexes,
+  AUTOINCREMENT and the sequence high-water mark, even after the largest historical
+  ID was deleted. PostgreSQL DDL uses dedicated NullPool connections; session
+  migration locks remain held separately while flagged concurrent indexes run.
+  INVALID indexes and completed indexes with a failed version update can be
+  recovered. Nontransactional plans refuse dry runs/atomic import before changes.
+  The production revision graph remains one frozen baseline; seeded temporary
+  revision graphs exercise future behavior in tests.
+- Latest-dependency SQLite foundation/configuration/maintenance/pagination/MCP/
+  token-flow/API matrix: 301 passed, 15 backend-specific skips. Locked PostgreSQL
+  equivalent plus native races: 322 passed, 2 SQLite-only skips. The migration,
+  transfer and recovery-focused PostgreSQL run separately passed 29 checks with
+  2 SQLite-only skips. Subsequent boundary/dependency-isolation checks: 11 passed.
+  Those checks also found and fixed premature optional SQLAlchemy imports; base
+  modes and the CLI again give the intended missing-extra behavior.
+- Complete frontend: 468 passed. Production build/typecheck and lint passed.
+  Source Ruff and Linux-target mypy pass (83 self-host source files), including
+  the final dependency-import cleanup. Subsequent API/MCP/configuration/pagination
+  runs passed 125 checks on each backend. Production dist checks passed. The
+  scratch PostgreSQL server was stopped; its log showed no deadlock.
+- Whole self-host collection: 3,100 tests and 30 imports of removed interfaces
+  still fail, before the two additional structural boundary tests. This is not
+  a passing full runtime matrix. Preserve the remaining security coverage while
+  porting fixtures; do not restore deleted adapters to make collection green.
+- Docker, deployment docs, remaining reserved-interface checks, full runtime
+  matrix and the first v1 tag remain outstanding. Real IdP/Claude/multiday staging
+  checks follow the owner's deployment; these local results do not satisfy them.
+
+## Native regression ports and deployment preparation checkpoint
+
+- Ported encrypted-token, credential status, write preferences and account
+  governance suites to the native UUID/schema interfaces. Last-owner and
+  enrollment/disable races remain covered. Known-corrupt credentials no longer
+  prevent ordinary startup key probes, but every referenced key is still required
+  and strict transfer verification still decrypts every value.
+- SQLite native store matrix: 230 passed, 1 skip. Locked PostgreSQL equivalent:
+  227 passed, 4 SQLite-only skips. The PostgreSQL server was stopped and its log
+  had no deadlock. The later custody and authorization-flow matrix passed 55
+  checks, including hashed codes and native retained audit actors.
+- Replaced pre-v1 deployment settings, routes and smoke expectations. Compose
+  requires an explicit reviewed image; a source-build override is available.
+  The real Bash setup script passed 40 checks with 2 platform-specific skips.
+  Docker/Compose structure passed 40 checks. A combined native store/deployment/
+  route/migration-boundary checkpoint passed 378 checks with 4 skips before the
+  final CI-only image-verification assertion was added.
+- Vite's mock login now handles bare and provider-specific native routes. All
+  five redirect variants were exercised over HTTP. Production build/typecheck,
+  dist checks and lint passed. Ruff covers all source and tests; Linux-target
+  mypy passes all 83 self-host source files.
+- Upgrade, backup and transfer instructions and implementation remain together
+  in [db/migrations/](../../src/canvas_mcp/core/selfhost/db/migrations/README.md).
+  The normal deployment guide links to that removable package.
+- Added read-only amd64/arm64 CI image build and smoke jobs with no registry
+  publication. Docker is unavailable on this workstation: actual image build
+  and container smoke must be confirmed by those jobs before Docker is ready.
+- Whole self-host collection currently finds 3,319 tests and 25 removed-interface
+  import errors. Remaining regression ports and the complete runtime matrix are
+  required; this checkpoint is not a release or a passing full test suite.
+  Real IdP, guest, Claude and multiday staging acceptance still follows the
+  owner's deployment, and the first v1 tag remains gated by that acceptance.

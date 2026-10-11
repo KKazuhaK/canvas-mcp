@@ -1,85 +1,24 @@
-"""Accounts and encrypted per-user Canvas tokens for the self-hosted multi-user mode.
+"""Accounts and sealed Canvas credentials for self-hosted deployments.
 
-One database holds the whole state (a SQLite file by default, PostgreSQL when
-``DATABASE_URL`` asks for it; see :mod:`.db`). A principal is an **account**,
-named by one opaque, lower-case key ``acct:<uuid>``; every row of the server that
-belongs to a person is keyed by it. How a person logs in is separate: an account has
-one or more external identities (``provider_id``, ``issuer``, ``subject``), and the
-only login provider today is Entra (issuer ``https://login.microsoftonline.com/<tid>/v2.0``,
-subject = the ``oid`` claim). Who is admitted, and who is an owner, is decided by
-:mod:`.accounts` and applied here, in one transaction.
+Account and credential ownership use canonical bare UUIDs. The current schema
+has enforced foreign keys and immutable named repository results. Credential
+seals bind account, explicit Canvas host, credential kind and key id. Every
+credential put requires the current custody acknowledgement.
 
-The Canvas personal access token is encrypted with AES-256-GCM; the associated
-data binds each ciphertext to its account, Canvas host and key id, so a copied or
-swapped row, or a row whose principal or host was edited in the database, fails to
-decrypt instead of sending the token to another user or school. Metadata columns
-(Canvas name and id, timestamps) are plaintext on purpose: the admin page and the
-operator CLI never need to decrypt.
-
-Associated data (AAD) layouts, joined by ``0x1f``:
-
-* v2 (every row that records a host, written by the account page):
-  ``"canvas-mcp/canvas-token/v2" principal_key host key_id``
-* v3 (a row without a host: it belongs to the operator's default school
-  ``CANVAS_API_URL``): ``"canvas-mcp/canvas-token/v3" principal_key key_id``
-
-Whether a row has a host decides which layout is used, so no version column is
-needed. The principal and host are used exactly as given (the lookup key and the
-stored host), never normalised on read; changing either, removing the host, or
-adding one to a v3 row makes decryption fail. Saving a row through the account page
-always passes a host. The layout v1 of the first releases (bound to the Entra tenant
-and object id) is no longer produced or read at run time: schema 5 re-encrypted
-every such row (see :mod:`.db.accounts_v5`).
-
-Tables, all keyed by ``acct:<uuid>`` (no foreign keys; integrity comes from
-single-transaction writes):
-
-* ``accounts`` and ``external_identities``: who the person is, whether they may use
-  the server (``status``: ``pending``, ``active`` or ``disabled``), their ``role``
-  (``user`` or ``owner``) and the ``session_epoch`` that every ``/account`` session
-  carries. An administrator *disables* an account; deleting the enrollment row never
-  changes that, so a user cannot re-enroll their way back in. Disabling, enabling and
-  denying bump ``session_epoch``, which invalidates every session issued before. A
-  principal with no account row is not provisioned and is refused (fail closed).
-* ``canvas_tokens``: the encrypted enrollments and their health. Saving needs an
-  account that is active at that moment (checked in the same transaction).
-* ``user_tool_prefs``: the write tools each account has switched on (see
-  :mod:`.tool_prefs`).
-* ``principal_status_events``: append-only history of every status transition with
-  the actor, written in the same transaction as the change.
-* ``credential_generations``: a counter raised on every change of the credential
-  lifecycle.
-* ``auth_events``: the sign-in history (90 days), ``audit_log``: administrative and
-  security actions.
-
-Keys come from ``CANVAS_TOKEN_KEYS`` (``kid:base64key[,kid:base64key...]``).
-The first entry encrypts new rows; every entry decrypts. Error messages never
-contain key or token material.
-
-All methods are synchronous and thread-safe (one connection per call). Async
-callers use ``anyio.to_thread.run_sync``.
-
-Persistence is behind the repository interfaces of :mod:`.db.ports`
-(SQLAlchemy Core implementations in :mod:`.db.repos`). Each public method is one
-transaction, opened here and nowhere else, so the race-sensitive reasoning stays
-in this file: a write takes the database's writer serialisation first (SQLite:
-``BEGIN IMMEDIATE``; PostgreSQL: a transaction-scoped advisory lock at
-``READ COMMITTED``), then runs the same checks and conditional updates in the
-same order on both backends. SQLAlchemy is imported lazily, when a store is
-built, so the upstream modes never need it.
+Public methods own the transaction boundary. Governance serializes decisions
+about owners and sets; row-conditional operations use committed account versions.
+Schema upgrades and transfers are isolated in ``db.migrations``.
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
-import json
 import os
 import pathlib
 import re
 import time
-import uuid
-from collections.abc import Callable, Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
@@ -92,8 +31,6 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from ..credentials import note_credential_generation
 from . import accounts as acc
 from .accounts import (
-    AUTH_EVENT_RETENTION_SECONDS,
-    PENDING_RETENTION_SECONDS,
     AccessPolicy,
     AccountFacts,
     Decision,
@@ -102,20 +39,21 @@ from .accounts import (
     ExternalClaims,
     Verdict,
 )
+from .custody import CustodyAcknowledgement
 from .db.errors import StoreUnavailable, TokenStoreError  # noqa: F401 - re-exported
+from .pagination import DEFAULT_LIMIT, Page, decode_cursor, make_page, page_limit
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Connection
 
-    from .db.accounts_v5 import AccountMigrationReport, MigrationOptions
     from .db.engine import Database
     from .db.repos import Repositories
+    from .db.rows import AccountRow, CredentialRow, IdentityRow
+    from .db.snapshots import McpSnapshot, SessionSnapshot
     from .db.url import DatabaseTarget
 
-SCHEMA_VERSION = 5
 
 #: ``meta`` key holding the server's listed sign-in providers (see ``record_login_providers``).
-LOGIN_PROVIDERS_META_KEY = "login_providers"
 _PROVIDER_ID_RE = re.compile(r"[a-z0-9][a-z0-9:_.-]{0,63}")
 
 # Health of a stored token (``canvas_tokens.status``).
@@ -187,7 +125,10 @@ AUDIT_ACCOUNT_APPROVED = "account_approved"
 AUDIT_ACCOUNT_DENIED = "account_denied"
 AUDIT_ACCOUNT_DISABLED = "account_disabled"
 AUDIT_ACCOUNT_ENABLED = "account_enabled"
+AUDIT_ACCOUNT_DELETED = "account_deleted"
 AUDIT_ROLE_CHANGED = "role_changed"
+AUDIT_ROLE_LOSS_REFUSED = "owner_loss_refused_last_owner"
+AUDIT_CUSTODY_ACKNOWLEDGED = "custody_notice_acknowledged"
 AUDIT_TOKEN_ENROLLED = "token_enrolled"
 AUDIT_TOKEN_REPLACED = "token_replaced"
 AUDIT_TOKEN_DELETED = "token_deleted"
@@ -214,7 +155,10 @@ AUDIT_ACTIONS = frozenset(
         AUDIT_ACCOUNT_DENIED,
         AUDIT_ACCOUNT_DISABLED,
         AUDIT_ACCOUNT_ENABLED,
+        AUDIT_ACCOUNT_DELETED,
         AUDIT_ROLE_CHANGED,
+        AUDIT_ROLE_LOSS_REFUSED,
+        AUDIT_CUSTODY_ACKNOWLEDGED,
         AUDIT_TOKEN_ENROLLED,
         AUDIT_TOKEN_REPLACED,
         AUDIT_TOKEN_DELETED,
@@ -242,14 +186,7 @@ UNLINK_LAST_OWNER = "last_owner"
 UNLINK_SESSION_ENDED = "link_session_ended"
 
 _KEY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
-_GUID_RE = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-)
-_AAD_PREFIX_V2 = b"canvas-mcp/canvas-token/v2\x1f"
-_AAD_PREFIX_V3 = b"canvas-mcp/canvas-token/v3\x1f"
-_AAD_SEP = b"\x1f"
 _DERIVE_SALT = b"canvas-mcp/keyring-derive/v1"
-_ENTRA_PREFIX = "entra:"
 _MAX_HOST = 253
 _MAX_PRINCIPAL_KEY = 256
 _KEY_BYTES = 32
@@ -341,6 +278,11 @@ class StoredToken:
     # saved or replaced, removed, found dead, restored, principal disabled or
     # enabled). Read in the same statement as the row, so it describes this token.
     credential_generation: int = 0
+    credential_id: str = ""
+    kind: str = "pat"
+    is_primary: bool = True
+    custody_notice_version: int = 0
+    custody_ack_at: int = 0
 
 
 @dataclass(frozen=True)
@@ -361,6 +303,11 @@ class EnrollmentInfo:
     last_verified_at: int | None = None
     expires_hint_at: int | None = None
     credential_generation: int = 0
+    credential_id: str = ""
+    kind: str = "pat"
+    is_primary: bool = True
+    custody_notice_version: int = 0
+    custody_ack_at: int = 0
 
 
 @dataclass(frozen=True)
@@ -378,6 +325,7 @@ class ToolPrefs:
     enabled_at: dict[str, int]
     updated_at: int
     updated_via: str
+    version: int = 0
 
 
 @dataclass(frozen=True)
@@ -455,31 +403,25 @@ class IdentityInfo:
     email_verified: bool
     linked_at: int
     last_login_at: int | None
-    #: The row id an unlink names (0 when the reader did not select it).
-    id: int = 0
-
-    @property
-    def legacy_key(self) -> str | None:
-        """``entra:<tid>:<oid>`` for an Entra identity (the pre-account-model key), else None."""
-        if self.provider_id != acc.PROVIDER_ENTRA:
-            return None
-        prefix, suffix = acc.ENTRA_ISSUER_PREFIX, "/v2.0"
-        if not (self.issuer.startswith(prefix) and self.issuer.endswith(suffix)):
-            return None
-        tid = self.issuer[len(prefix) : -len(suffix)]
-        return f"{_ENTRA_PREFIX}{tid}:{self.subject}"
+    #: The UUID an unlink names (empty when the reader did not select it).
+    id: str = ""
 
     @property
     def tenant_id(self) -> str:
-        legacy = self.legacy_key
-        return legacy.split(":")[1] if legacy else ""
+        """The tenant in a validated Entra issuer; other providers have no tenant."""
+        if self.provider_id != acc.PROVIDER_ENTRA:
+            return ""
+        prefix, suffix = acc.ENTRA_ISSUER_PREFIX, "/v2.0"
+        if self.issuer.startswith(prefix) and self.issuer.endswith(suffix):
+            return self.issuer[len(prefix) : -len(suffix)]
+        return ""
 
 
 @dataclass(frozen=True)
 class LinkedIdentity:
     """One external identity of an account, with the id an unlink names."""
 
-    id: int
+    id: str
     provider_id: str
     issuer: str
     subject: str
@@ -523,6 +465,7 @@ class AccountInfo:
 
     status: PrincipalStatus
     identities: tuple[IdentityInfo, ...]
+    enrollment: EnrollmentInfo | None = None
 
     @property
     def principal_key(self) -> str:
@@ -532,35 +475,15 @@ class AccountInfo:
     def username(self) -> str:
         return self.identities[0].username if self.identities else ""
 
-    @property
-    def legacy_key(self) -> str | None:
-        return next((i.legacy_key for i in self.identities if i.legacy_key), None)
-
-
-@dataclass(frozen=True)
-class StatusEvent:
-    """One entry of the status history of a principal."""
-
-    id: int
-    principal_key: str
-    action: str
-    actor: str | None
-    reason: str | None
-    session_epoch: int
-    at: int
-
 
 @dataclass(frozen=True)
 class AuthEvent:
-    """One sign-in attempt (see ``auth_events``)."""
-
     id: int
     at: int
     provider_id: str
     surface: str
     outcome: str
     reason: str
-    ip: str
     ua_hash: str | None
 
 
@@ -603,39 +526,54 @@ class Resolution:
         return None if self.status is None else self.status.principal_key
 
 
-def _status_from_row(row: Sequence[Any]) -> PrincipalStatus:
+def _status(row: AccountRow) -> PrincipalStatus:
     return PrincipalStatus(
-        principal_key=acc.account_key_of(row[0]),
-        status=row[1],
-        role=row[2],
-        role_source=row[3],
-        role_seen_at=row[4],
-        admitted_via=row[5],
-        display_name=row[6] or "",
-        created_at=int(row[9]),
-        approved_at=row[10],
-        approved_by=row[11],
-        disabled_reason=row[12],
-        disabled_at=row[13],
-        disabled_by=row[14],
-        last_login_at=row[15],
-        session_epoch=int(row[16]),
-        updated_at=int(row[17]),
+        principal_key=row.id,
+        status=row.status,
+        role=row.role,
+        role_source=row.role_source,
+        role_seen_at=row.role_seen_at,
+        admitted_via=row.admitted_via,
+        display_name=row.display_name,
+        created_at=row.created_at,
+        approved_at=row.approved_at,
+        approved_by=row.approved_by,
+        disabled_reason=row.disabled_reason,
+        disabled_at=row.disabled_at,
+        disabled_by=row.disabled_by,
+        last_login_at=row.last_login_at,
+        session_epoch=row.session_epoch,
+        updated_at=row.updated_at,
         stored=True,
+        credential_generation=row.credential_generation,
     )
 
 
-def _linked_from_row(row: Sequence[Any]) -> LinkedIdentity:
+def _linked(row: IdentityRow) -> LinkedIdentity:
     return LinkedIdentity(
-        id=int(row[0]),
-        provider_id=row[1],
-        issuer=row[2],
-        subject=row[3],
-        username=row[4] or "",
-        email=row[5],
-        email_verified=bool(row[6]),
-        linked_at=int(row[7]),
-        last_login_at=None if row[8] is None else int(row[8]),
+        id=row.id,
+        provider_id=row.provider_id,
+        issuer=row.issuer,
+        subject=row.subject,
+        username=row.username or "",
+        email=row.email,
+        email_verified=row.email_verified,
+        linked_at=row.linked_at,
+        last_login_at=row.last_login_at,
+    )
+
+
+def _identity_info(row: IdentityRow) -> IdentityInfo:
+    return IdentityInfo(
+        provider_id=row.provider_id,
+        issuer=row.issuer,
+        subject=row.subject,
+        username=row.username or "",
+        email=row.email,
+        email_verified=row.email_verified,
+        linked_at=row.linked_at,
+        last_login_at=row.last_login_at,
+        id=row.id,
     )
 
 
@@ -649,29 +587,6 @@ def _validate_tool_names(names: Iterable[str]) -> frozenset[str]:
     if len(result) > _MAX_PREF_TOOLS:
         raise ValueError("too many tool names")
     return frozenset(result)
-
-
-def _decode_tool_prefs(
-    principal_key: str, names_json: str, at_json: str, updated_at: int, via: str
-) -> ToolPrefs:
-    """Read a stored row; anything unreadable counts as "nothing enabled" (fail closed)."""
-    names: frozenset[str] = frozenset()
-    stamps: dict[str, int] = {}
-    try:
-        raw_names = json.loads(names_json)
-        if isinstance(raw_names, list):
-            names = _validate_tool_names(raw_names)
-        raw_at = json.loads(at_json)
-        if isinstance(raw_at, dict):
-            stamps = {
-                key: value
-                for key, value in raw_at.items()
-                if key in names and isinstance(value, int) and not isinstance(value, bool)
-            }
-    except (ValueError, TypeError):
-        names = frozenset()
-        stamps = {}
-    return ToolPrefs(principal_key, names, stamps, int(updated_at), str(via))
 
 
 def _decode_key(text: str) -> bytes | None:
@@ -728,9 +643,7 @@ class Keyring:
                 )
             key = _decode_key(b64)
             if key is None:
-                raise KeyringError(
-                    f"CANVAS_TOKEN_KEYS key {kid} is not valid base64"
-                )
+                raise KeyringError(f"CANVAS_TOKEN_KEYS key {kid} is not valid base64")
             if len(key) != _KEY_BYTES:
                 raise KeyringError(
                     f"CANVAS_TOKEN_KEYS key {kid} must decode to exactly "
@@ -792,63 +705,12 @@ def token_db_path(data_dir: pathlib.Path) -> pathlib.Path:
     return data_dir / "canvas-mcp" / "tokens.sqlite3"
 
 
-def _normalize_guid(value: str, label: str) -> str:
-    if not isinstance(value, str) or not _GUID_RE.fullmatch(value):
-        raise ValueError(f"{label} must be a GUID")
-    return value.lower()
-
-
-def entra_principal_key(tenant_id: str, object_id: str) -> str:
-    """The legacy identity key of an Entra user, ``entra:<tenant id>:<object id>`` in lower case.
-
-    This is not a principal key any more (see :func:`_validate_principal_key`); it is
-    the form the operator CLI still accepts and the form of audit lines written
-    before the account model. Raises ValueError unless both ids are GUIDs.
-    """
-    tid = _normalize_guid(tenant_id, "tenant_id")
-    oid = _normalize_guid(object_id, "object_id")
-    return f"{_ENTRA_PREFIX}{tid}:{oid}"
-
-
-def split_entra_key(principal_key: str) -> tuple[str, str] | None:
-    """``(tenant id, object id)`` of an ``entra:`` identity key, or None for any other string."""
-    if not principal_key.startswith(_ENTRA_PREFIX):
-        return None
-    tid, sep, oid = principal_key[len(_ENTRA_PREFIX) :].partition(":")
-    if not sep or not _GUID_RE.fullmatch(tid) or not _GUID_RE.fullmatch(oid):
-        return None
-    return tid.lower(), oid.lower()
-
-
 def _validate_principal_key(principal_key: str) -> str:
-    """A principal key to store or look up: lower-case printable ASCII, otherwise opaque.
-
-    An ``entra:`` string is refused: since the account model every row is keyed by
-    ``acct:<uuid>``, and a missed call site must fail loudly rather than read an empty
-    row for an old key (which would mean "no restriction").
-    """
-    if (
-        not isinstance(principal_key, str)
-        or not 1 <= len(principal_key) <= _MAX_PRINCIPAL_KEY
-        or not principal_key.isascii()
-        or principal_key != principal_key.lower()
-        or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in principal_key)
-    ):
-        raise ValueError("principal_key must be a lower-case printable ASCII string")
-    if principal_key.startswith(_ENTRA_PREFIX):
-        raise ValueError(
-            "an entra: key is not a principal key; use the account key acct:<uuid> "
-            "(TokenStore.resolve_legacy_key maps the old form)"
-        )
-    return principal_key
+    return acc.account_id_of(principal_key)
 
 
 def _require_account_key(principal_key: str) -> str:
-    """A principal key that names an account (``acct:<uuid>``); raises ValueError otherwise."""
-    key = _validate_principal_key(principal_key)
-    if not acc.valid_account_key(key):
-        raise ValueError("principal_key must be an account key (acct:<uuid>)")
-    return key
+    return acc.account_id_of(principal_key)
 
 
 def valid_principal_key(value: object) -> str | None:
@@ -862,8 +724,7 @@ def valid_principal_key(value: object) -> str | None:
 
 
 def _account_id(principal_key: str) -> str | None:
-    """The account id of a key, or None for an opaque key that cannot name an account."""
-    return principal_key[len(acc.ACCOUNT_KEY_PREFIX) :] if acc.valid_account_key(principal_key) else None
+    return principal_key if acc.valid_account_key(principal_key) else None
 
 
 def _validate_host_value(host: str | None) -> str | None:
@@ -885,62 +746,43 @@ def _validate_host_value(host: str | None) -> str | None:
     return host
 
 
-def _aad_v2(principal_key: str, canvas_host: str, key_id: str) -> bytes:
-    """Associated data of a row that records a host."""
-    return (
-        _AAD_PREFIX_V2
-        + principal_key.encode("utf-8", "surrogatepass")
-        + _AAD_SEP
-        + canvas_host.encode("utf-8", "surrogatepass")
-        + _AAD_SEP
-        + key_id.encode("utf-8", "surrogatepass")
-    )
+def credential_aad(account_id: str, canvas_host: str, kind: str, key_id: str) -> bytes:
+    """The reviewed v1 seal binds ownership, explicit school, credential kind and key."""
+    _require_account_key(account_id)
+    if (
+        not canvas_host
+        or kind not in ("pat", "oauth")
+        or not _KEY_ID_RE.fullmatch(key_id)
+    ):
+        raise ValueError("invalid credential seal fields")
+    fields = ("canvas-mcp/canvas-credential/v1", account_id, canvas_host, kind, key_id)
+    if any("\x1f" in value for value in fields):
+        raise ValueError("invalid credential seal delimiter")
+    return "\x1f".join(fields).encode("utf-8")
 
 
-def _aad_v3(principal_key: str, key_id: str) -> bytes:
-    """Associated data of a row without a host (it belongs to the default school)."""
-    return (
-        _AAD_PREFIX_V3
-        + principal_key.encode("utf-8", "surrogatepass")
-        + _AAD_SEP
-        + key_id.encode("utf-8", "surrogatepass")
-    )
-
-
-def _aad_for_principal(principal_key: str, canvas_host: str | None, key_id: str) -> bytes:
-    """AAD of the row stored under ``principal_key``; the host selects the layout.
-
-    Raises ValueError for a host-less row of a principal that is not an account:
-    such a row cannot exist.
-    """
-    if canvas_host is not None:
-        return _aad_v2(principal_key, canvas_host, key_id)
-    if not acc.valid_account_key(principal_key):
-        raise ValueError("a row without a host needs an account principal")
-    return _aad_v3(principal_key, key_id)
-
-
-def _info_from_row(row: Sequence[Any]) -> EnrollmentInfo:
+def _enrollment(row: CredentialRow) -> EnrollmentInfo:
     return EnrollmentInfo(
-        canvas_user_id=row[0],
-        canvas_user_name=row[1],
-        key_id=row[2],
-        created_at=row[3],
-        updated_at=row[4],
-        last_used_at=row[5],
-        canvas_host=row[6],
-        principal_key=row[7] or "",
-        status=row[8] or STATUS_ACTIVE,
-        invalid_reason=row[9],
-        invalid_since=row[10],
-        last_verified_at=row[11],
-        expires_hint_at=row[12],
-        credential_generation=int(row[13]),
+        canvas_user_id=row.canvas_user_id,
+        canvas_user_name=row.canvas_user_name,
+        key_id=row.key_id,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        last_used_at=row.last_used_at,
+        canvas_host=row.canvas_host,
+        principal_key=row.account_id,
+        status=row.status,
+        invalid_reason=row.invalid_reason,
+        invalid_since=row.invalid_since,
+        last_verified_at=row.last_verified_at,
+        expires_hint_at=row.expires_hint_at,
+        credential_generation=row.generation,
+        credential_id=row.id,
+        kind=row.kind,
+        is_primary=row.is_primary,
+        custody_notice_version=row.custody_notice_version,
+        custody_ack_at=row.custody_ack_at,
     )
-
-
-def _json(detail: dict[str, Any] | None) -> str:
-    return json.dumps(detail or {}, sort_keys=True, separators=(",", ":"))
 
 
 class TokenStore:
@@ -968,7 +810,9 @@ class TokenStore:
                 "pip install 'canvas-mcp[selfhost]'"
             ) from None
 
-        self._db: Database = db if isinstance(db, _Database) else _Database.sqlite(pathlib.Path(db))
+        self._db: Database = (
+            db if isinstance(db, _Database) else _Database.sqlite(pathlib.Path(db))
+        )
         #: The SQLite file, or None on PostgreSQL.
         self._path: pathlib.Path | None = self._db.sqlite_path
         self._repos: Repositories = Repositories(self._db.kind)
@@ -978,7 +822,9 @@ class TokenStore:
         # inside a transaction. None in production.
         self._pause_hook: Callable[[str], None] | None = None
         # Test seam: the id of a newly created account (a random UUID in production).
-        self._new_account_id: Callable[[ExternalClaims], str] = lambda _ext: str(uuid.uuid4())
+        from .db.types import new_id
+
+        self._new_account_id: Callable[[ExternalClaims], str] = lambda _ext: new_id()
 
     @classmethod
     def for_target(
@@ -1021,116 +867,142 @@ class TokenStore:
         self,
         *,
         auto_migrate: bool = True,
-        options: MigrationOptions | None = None,
-        report: AccountMigrationReport | None = None,
     ) -> None:
-        """Create or open the database and prove the keyring matches its data.
-
-        Applies pending schema revisions when ``auto_migrate`` is true (schema 4 -> 5
-        re-encrypts every stored token with this store's keyring); otherwise refuses a
-        database that is not current (run ``token_admin db upgrade``). Refuses, changing
-        nothing, a database written by a newer server.
-        """
-        from .db import migrate
+        """Open a compatible v1 database, upgrading through the isolated runner."""
+        from .db.migrations import runner as migrate
 
         self._db.prepare_storage()
         migrate.ensure_ready(
             self._db,
             auto=auto_migrate,
-            keyring=self._keyring,
-            options=options,
-            report=report,
         )
         self._db.tighten_storage()
 
         self._verify_keyring()
 
     def _verify_keyring(self) -> None:
-        tokens = self._repos.tokens
+        from .db.sealed import verify
+
         with self._db.read() as conn:
-            used = tokens.key_ids_in_use(conn)
-            missing = [kid for kid in used if kid not in self._keyring.key_ids]
-            if missing:
-                raise KeyringError(
-                    "CANVAS_TOKEN_KEYS is missing key id(s): " + ", ".join(missing)
-                )
-            for kid in used:
-                probe = tokens.probe_row(conn, kid)
-                if probe is None:
-                    continue
-                try:
-                    self._keyring.decrypt(
-                        kid,
-                        bytes(probe[1]),
-                        bytes(probe[2]),
-                        _aad_for_principal(probe[0], probe[3], kid),
-                    )
-                except (TokenDecryptionError, ValueError):
-                    raise KeyringError(
-                        f"CANVAS_TOKEN_KEYS key {kid} does not match the stored data"
-                    ) from None
+            verify(conn, self._keyring)
 
     # -- reads -------------------------------------------------------------
 
     def get(self, principal_key: str) -> StoredToken | None:
-        """Return the decrypted enrollment of a principal, or None.
-
-        Raises TokenDecryptionError.
-        """
-        key = _validate_principal_key(principal_key)
+        key = _require_account_key(principal_key)
         with self._db.read() as conn:
-            row = self._repos.tokens.row_for_get(conn, key)
+            row = self._repos.credentials.primary(conn, key)
         if row is None:
             return None
-        # The AAD is built from the key the caller asked for, not from anything
-        # stored next to the row, so a row that was moved to another principal
-        # fails to decrypt.
         try:
-            try:
-                aad = _aad_for_principal(key, row[8], row[0])
-            except ValueError:
-                raise TokenDecryptionError("stored token could not be decrypted") from None
-            plaintext = self._keyring.decrypt(row[0], bytes(row[1]), bytes(row[2]), aad)
+            plaintext = self._keyring.decrypt(
+                row.key_id,
+                row.nonce,
+                row.ciphertext,
+                credential_aad(key, row.canvas_host, row.kind, row.key_id),
+            )
             try:
                 api_token = plaintext.decode("utf-8")
             except UnicodeDecodeError:
-                raise TokenDecryptionError("stored token could not be decrypted") from None
+                raise TokenDecryptionError(
+                    "stored token could not be decrypted"
+                ) from None
         except TokenDecryptionError as exc:
-            exc.updated_at = row[6] if isinstance(row[6], int) else None
-            exc.credential_generation = int(row[14])
+            exc.updated_at = row.updated_at
+            exc.credential_generation = row.generation
             raise
         return StoredToken(
             api_token=api_token,
-            canvas_user_id=row[3],
-            canvas_user_name=row[4],
-            key_id=row[0],
-            created_at=row[5],
-            updated_at=row[6],
-            last_used_at=row[7],
-            canvas_host=row[8],
+            canvas_user_id=row.canvas_user_id,
+            canvas_user_name=row.canvas_user_name,
+            key_id=row.key_id,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            last_used_at=row.last_used_at,
+            canvas_host=row.canvas_host,
             principal_key=key,
-            status=row[9] or STATUS_ACTIVE,
-            invalid_reason=row[10],
-            invalid_since=row[11],
-            last_verified_at=row[12],
-            expires_hint_at=row[13],
-            credential_generation=int(row[14]),
+            status=row.status,
+            invalid_reason=row.invalid_reason,
+            invalid_since=row.invalid_since,
+            last_verified_at=row.last_verified_at,
+            expires_hint_at=row.expires_hint_at,
+            credential_generation=row.generation,
+            credential_id=row.id,
+            kind=row.kind,
+            custody_notice_version=row.custody_notice_version,
+            custody_ack_at=row.custody_ack_at,
         )
+
+    def decrypt_snapshot(self, account_id: str, snapshot: McpSnapshot) -> str:
+        """Decrypt the already authorized primary credential without another read."""
+        if (
+            snapshot.key_id is None
+            or snapshot.nonce is None
+            or snapshot.ciphertext is None
+            or snapshot.canvas_host is None
+            or snapshot.kind is None
+        ):
+            raise TokenDecryptionError("stored token could not be decrypted")
+        try:
+            return self._keyring.decrypt(
+                snapshot.key_id,
+                snapshot.nonce,
+                snapshot.ciphertext,
+                credential_aad(
+                    account_id, snapshot.canvas_host, snapshot.kind, snapshot.key_id
+                ),
+            ).decode("utf-8")
+        except UnicodeDecodeError:
+            raise TokenDecryptionError("stored token could not be decrypted") from None
 
     def info(self, principal_key: str) -> EnrollmentInfo | None:
         key = _validate_principal_key(principal_key)
         with self._db.read() as conn:
-            row = self._repos.tokens.info(conn, key)
-        return None if row is None else _info_from_row(row)
+            row = self._repos.credentials.primary(conn, key)
+        return None if row is None else _enrollment(row)
 
-    def list_enrollments(self) -> list[EnrollmentInfo]:
+    def enrollments_page(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = DEFAULT_LIMIT,
+        invalid_only: bool = False,
+    ) -> Page[EnrollmentInfo]:
+        from .db import lists
+
+        limit = page_limit(limit)
+        scope = "enrollments/" + str(invalid_only)
+        before = decode_cursor(cursor, scope)
+        assert before is None or isinstance(before, str)
         with self._db.read() as conn:
-            rows = self._repos.tokens.list_all(conn)
-        return [_info_from_row(r) for r in rows]
+            rows = lists.credentials(
+                conn, before=before, limit=limit + 1, invalid_only=invalid_only
+            )
+        return make_page(
+            [_enrollment(row) for row in rows],
+            limit=limit,
+            scope=scope,
+            key=lambda row: row.credential_id,
+        )
+
+    def iter_enrollments(self) -> Iterator[EnrollmentInfo]:
+        cursor = None
+        while True:
+            page = self.enrollments_page(cursor=cursor, limit=200)
+            yield from page.items
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
+
+    def enrollment_counts(self) -> dict[str, int]:
+        from .db import lists
+
+        with self._db.read() as conn:
+            return lists.enrollment_counts(conn)
 
     def count(self) -> int:
         with self._db.read() as conn:
-            return self._repos.tokens.count(conn)
+            return self._repos.credentials.count(conn)
 
     # -- writes ------------------------------------------------------------
 
@@ -1141,87 +1013,135 @@ class TokenStore:
         api_token: str,
         canvas_user_id: str,
         canvas_user_name: str,
-        canvas_host: str | None = None,
+        canvas_host: str,
+        custody: CustodyAcknowledgement,
         expires_hint_at: int | None | Literal[_Unset.UNSET] = KEEP_EXPIRY_HINT,
     ) -> EnrollmentInfo:
-        """Insert or replace an account's enrollment, preserving ``created_at``.
-
-        ``principal_key`` must be an account key. ``canvas_host`` is the school the
-        token belongs to (None only for the default school ``CANVAS_API_URL``); it is
-        bound into the encryption together with the principal. Saving marks the row
-        ``active`` and verified now, clears any invalid reason, and raises the
-        principal's credential generation. ``expires_hint_at`` is the optional expiry
-        date the user gave for the token (epoch seconds, used only for a reminder): an
-        integer sets it, ``None`` clears it, and leaving it out keeps the stored value
-        (the account page always passes it, so replacing a token replaces the hint).
-
-        Only an **active** account can enroll: a disabled one raises
-        :class:`PrincipalDisabledError`, one waiting for approval
-        :class:`PrincipalPendingError` and an unknown one :class:`PrincipalMissingError`,
-        all checked in the same transaction as the write.
-        """
+        """Save one acknowledged PAT under an active account in a governance transaction."""
         key = _require_account_key(principal_key)
-        account_id = acc.account_id_of(key)
         host = _validate_host_value(canvas_host)
+        if host is None:
+            raise ValueError("a credential requires an explicit Canvas host")
+        now = self._now()
+        if not isinstance(custody, CustodyAcknowledgement):
+            raise ValueError("a current custody acknowledgement is required")
+        custody.validate(now=now)
         if not isinstance(api_token, str) or not api_token:
             raise ValueError("api_token must be a non-empty string")
-        keep_hint = isinstance(expires_hint_at, _Unset)
-        hint: int | None = None if isinstance(expires_hint_at, _Unset) else expires_hint_at
+        hint = None if isinstance(expires_hint_at, _Unset) else expires_hint_at
         if hint is not None and (
-            not isinstance(hint, int)
-            or isinstance(hint, bool)
-            or not 0 < hint <= _MAX_EXPIRES_HINT
+            type(hint) is not int or not 0 < hint <= _MAX_EXPIRES_HINT
         ):
             raise ValueError("expires_hint_at must be a positive epoch time")
         kid, nonce, ciphertext = self._keyring.encrypt(
             api_token.encode("utf-8"),
-            _aad_for_principal(key, host, self._keyring.active_key_id),
+            credential_aad(key, host, "pat", self._keyring.active_key_id),
         )
-        now = self._now()
-        repos = self._repos
+        from .db.types import new_id
+
         with self._db.write() as conn:
-            # Checked in the same transaction as the write, so an enrollment that
-            # races an administrator's disable (or an approval) either lands first
-            # (and the account is disabled right after) or is refused; it can never
-            # be saved for an account that is not active.
-            account = repos.accounts.get(conn, account_id, for_update=True)
+            account = self._repos.accounts.get(conn, key, for_update=True)
             self._pause("after_gate_read")
             if account is None:
                 raise PrincipalMissingError("there is no account for this principal")
-            if account[1] == STATUS_DISABLED:
+            if account.status == STATUS_DISABLED:
                 raise PrincipalDisabledError("this principal is disabled")
-            if account[1] != STATUS_ACTIVE:
+            if account.status != STATUS_ACTIVE:
                 raise PrincipalPendingError("this account is waiting for approval")
-            replaced = repos.tokens.exists(conn, key)
-            repos.tokens.upsert(
+            previous = self._repos.credentials.primary(conn, key)
+            same_host = self._repos.credentials.at_host(conn, key, host)
+            identifier = same_host.id if same_host is not None else new_id()
+            if isinstance(expires_hint_at, _Unset) and same_host is not None:
+                hint = same_host.expires_hint_at
+            self._repos.credentials.ensure_school(conn, host, account_id=key, now=now)
+            self._pause("after_school_upsert")
+            generation = self._repos.generations.bump(
+                conn, key, GENERATION_ENROLLED, now, writing=identifier
+            )
+            self._repos.credentials.put(
                 conn,
-                principal_key=key,
+                identifier=identifier,
+                account_id=key,
+                canvas_host=host,
+                generation=generation,
                 key_id=kid,
                 nonce=nonce,
                 ciphertext=ciphertext,
                 canvas_user_id=str(canvas_user_id),
                 canvas_user_name=str(canvas_user_name)[:_MAX_CANVAS_NAME],
-                canvas_host=host,
-                status=STATUS_ACTIVE,
                 now=now,
                 expires_hint_at=hint,
-                keep_expiry_hint=keep_hint,
+                custody_notice_version=custody.notice_version,
+                custody_ack_at=custody.acked_at,
             )
-            # Saving a token is always a new credential lifecycle, even for the
-            # same token text: state learned under the old one is not reused.
-            generation = repos.generations.bump(conn, key, GENERATION_ENROLLED, now)
             self._audit(
                 conn,
                 key,
-                AUDIT_TOKEN_REPLACED if replaced else AUDIT_TOKEN_ENROLLED,
+                AUDIT_TOKEN_REPLACED if previous is not None else AUDIT_TOKEN_ENROLLED,
                 target=key,
-                detail={"canvas_host": host or ""},
+                detail={
+                    "canvas_host": host,
+                    "custody_notice_version": custody.notice_version,
+                },
                 now=now,
             )
-            row = repos.tokens.info(conn, key)
+            self._audit(
+                conn,
+                key,
+                AUDIT_CUSTODY_ACKNOWLEDGED,
+                target=identifier,
+                target_kind="credential",
+                subject_account_id=key,
+                detail={
+                    "old": same_host.custody_notice_version if same_host else None,
+                    "new": custody.notice_version,
+                },
+                now=custody.acked_at,
+            )
+            row = self._repos.credentials.primary(conn, key)
         assert row is not None
         self._publish_generation(key, generation)
-        return _info_from_row(row)
+        return _enrollment(row)
+
+    def acknowledge_custody(
+        self, principal_key: str, custody: CustodyAcknowledgement
+    ) -> EnrollmentInfo | None:
+        """Re-acknowledge without decrypting, replacing or changing the generation."""
+        key = _require_account_key(principal_key)
+        now = self._now()
+        custody.validate(now=now)
+        with self._db.write() as conn:
+            account = self._repos.accounts.get(conn, key, for_update=True)
+            if account is None:
+                raise PrincipalMissingError("there is no account for this principal")
+            if account.status == STATUS_DISABLED:
+                raise PrincipalDisabledError("this principal is disabled")
+            if account.status != STATUS_ACTIVE:
+                raise PrincipalPendingError("this account is waiting for approval")
+            row = self._repos.credentials.primary(conn, key)
+            if row is None:
+                return None
+            if row.custody_notice_version == custody.notice_version:
+                return _enrollment(row)
+            self._repos.credentials.acknowledge(
+                conn, key, version=custody.notice_version, now=custody.acked_at
+            )
+            self._audit(
+                conn,
+                key,
+                AUDIT_CUSTODY_ACKNOWLEDGED,
+                target=row.id,
+                target_kind="credential",
+                subject_account_id=key,
+                detail={
+                    "old": row.custody_notice_version,
+                    "new": custody.notice_version,
+                },
+                now=now,
+            )
+            updated = self._repos.credentials.primary(conn, key)
+            assert updated is not None
+            return _enrollment(updated)
 
     def delete(self, principal_key: str, *, actor: Actor | None = None) -> bool:
         """Remove the enrollment row.
@@ -1241,12 +1161,16 @@ class TokenStore:
         with self._db.write() as conn:
             if actor is not None:
                 self._require_owner_actor(conn, actor)
-            removed = self._repos.tokens.delete(conn, key)
+            if self._repos.accounts.get(conn, key, for_update=True) is None:
+                return False
+            removed = self._repos.credentials.delete(conn, key)
             if removed:
                 now = self._now()
                 # The generation outlives the row: a token enrolled afterwards
                 # is a later one, never a reuse of the deleted one's number.
-                generation = self._repos.generations.bump(conn, key, GENERATION_REMOVED, now)
+                generation = self._repos.generations.bump(
+                    conn, key, GENERATION_REMOVED, now
+                )
                 self._audit(conn, by, AUDIT_TOKEN_DELETED, target=key, now=now)
         if generation is not None:
             self._publish_generation(key, generation)
@@ -1259,8 +1183,10 @@ class TokenStore:
             now = self._now()
             # No writer lock on PostgreSQL: the update only sets a timestamp, and
             # nothing else depends on it.
-            with self._db.best_effort_write(lock=False) as conn:
-                self._repos.tokens.touch(conn, key, now, now - max(0, min_interval_seconds))
+            with self._db.best_effort_write() as conn:
+                self._repos.credentials.touch(
+                    conn, key, now, now - max(0, min_interval_seconds)
+                )
         except (TokenStoreError, ValueError, OSError):
             return
 
@@ -1290,10 +1216,12 @@ class TokenStore:
         by = None if actor is None else self._actor_name(actor)
         now = self._now()
         generation: int | None = None
-        with self._db.write() as conn:
+        with self._db.write() if actor is not None else self._db.row_write() as conn:
             if actor is not None:
                 self._require_owner_actor(conn, actor)
-            changed = self._repos.tokens.mark_invalid(
+            if self._repos.accounts.get(conn, key, for_update=True) is None:
+                return False
+            changed = self._repos.credentials.mark_invalid(
                 conn,
                 key,
                 reason=reason,
@@ -1303,10 +1231,17 @@ class TokenStore:
             )
             self._pause("after_conditional_update")
             if changed:
-                generation = self._repos.generations.bump(conn, key, GENERATION_INVALIDATED, now)
+                generation = self._repos.generations.bump(
+                    conn, key, GENERATION_INVALIDATED, now
+                )
                 if by is not None:
                     self._audit(
-                        conn, by, AUDIT_TOKEN_MARKED_INVALID, target=key, reason=reason, now=now
+                        conn,
+                        by,
+                        AUDIT_TOKEN_MARKED_INVALID,
+                        target=key,
+                        reason=reason,
+                        now=now,
                     )
         if generation is not None:
             self._publish_generation(key, generation)
@@ -1327,8 +1262,10 @@ class TokenStore:
         key = _validate_principal_key(principal_key)
         now = self._now()
         generation: int | None = None
-        with self._db.write() as conn:
-            changed = self._repos.tokens.restore_active(
+        with self._db.row_write() as conn:
+            if self._repos.accounts.get(conn, key, for_update=True) is None:
+                return False
+            changed = self._repos.credentials.restore_active(
                 conn,
                 key,
                 now=now,
@@ -1337,7 +1274,9 @@ class TokenStore:
             )
             self._pause("after_conditional_update")
             if changed:
-                generation = self._repos.generations.bump(conn, key, GENERATION_RESTORED, now)
+                generation = self._repos.generations.bump(
+                    conn, key, GENERATION_RESTORED, now
+                )
         if generation is not None:
             self._publish_generation(key, generation)
         return changed
@@ -1359,10 +1298,8 @@ class TokenStore:
         try:
             key = _validate_principal_key(principal_key)
             now = self._now()
-            # Takes the PostgreSQL writer lock: the generation comparison must see
-            # every enrollment that committed before it.
-            with self._db.best_effort_write(lock=True) as conn:
-                self._repos.tokens.mark_verified(
+            with self._db.best_effort_write() as conn:
+                self._repos.credentials.mark_verified(
                     conn,
                     key,
                     now=now,
@@ -1400,6 +1337,8 @@ class TokenStore:
         reason: str | None = None,
         detail: dict[str, Any] | None = None,
         now: int | None = None,
+        target_kind: str = "account",
+        subject_account_id: str | None = None,
     ) -> None:
         assert action in AUDIT_ACTIONS, action
         self._repos.audit.append(
@@ -1409,20 +1348,10 @@ class TokenStore:
             action=action,
             target=target,
             reason=reason,
-            detail=_json(detail),
+            detail=detail or {},
+            target_kind=target_kind,
+            subject_account_id=subject_account_id,
         )
-
-    def _record_event(
-        self,
-        conn: Connection,
-        key: str,
-        action: str,
-        actor: str | None,
-        reason: str | None,
-        epoch: int,
-        now: int,
-    ) -> None:
-        self._repos.events.append(conn, key, action, actor, reason, epoch, now)
 
     @staticmethod
     def _actor_name(actor: Actor) -> str:
@@ -1441,72 +1370,116 @@ class TokenStore:
         """
         if isinstance(actor, _Operator):
             return
-        row = self._repos.accounts.get(conn, acc.account_id_of(self._actor_name(actor)), for_update=True)
-        if row is None or row[1] != STATUS_ACTIVE or row[2] != ROLE_OWNER:
+        row = self._repos.accounts.get(
+            conn, acc.account_id_of(self._actor_name(actor)), for_update=True
+        )
+        if row is None or row.status != STATUS_ACTIVE or row.role != ROLE_OWNER:
             raise AccessActionRefused(AccessActionRefused.NOT_OWNER)
 
     # -- accounts: reading -------------------------------------------------------
 
     def get_principal_status(self, principal_key: str) -> PrincipalStatus:
-        """The account status of a principal; ``missing`` when there is no account.
-
-        Carries the credential generation, read in the same statement as the status.
-        """
-        key = _validate_principal_key(principal_key)
-        account_id = _account_id(key)
-        if account_id is None:
-            with self._db.read() as conn:
-                generation = self._repos.generations.get(conn, key)
-            return PrincipalStatus(key, status=STATUS_MISSING, credential_generation=generation)
+        key = _require_account_key(principal_key)
         with self._db.read() as conn:
-            row, generation = self._repos.accounts.get_with_generation(conn, account_id)
-        if row is None:
-            return PrincipalStatus(key, status=STATUS_MISSING, credential_generation=generation)
-        return replace(_status_from_row(row), credential_generation=generation)
+            row = self._repos.accounts.get(conn, key)
+        return (
+            PrincipalStatus(key, status=STATUS_MISSING) if row is None else _status(row)
+        )
 
-    def list_principal_statuses(self) -> list[PrincipalStatus]:
-        """Every account, oldest first."""
-        with self._db.read() as conn:
-            rows = self._repos.accounts.list_all(conn)
-        return [_status_from_row(r) for r in rows]
+    def _account_infos(
+        self, conn: Connection, rows: Sequence[AccountRow]
+    ) -> list[AccountInfo]:
+        from .db import lists
 
-    def list_accounts(self) -> list[AccountInfo]:
-        """Every account with its identities (admin page, operator CLI)."""
-        with self._db.read() as conn:
-            rows = self._repos.accounts.list_all(conn)
-            identities = self._repos.identities.all(conn)
-        by_account: dict[str, list[tuple[Any, ...]]] = {}
-        for ident in identities:
-            by_account.setdefault(ident[0], []).append(tuple(ident))
-        result: list[AccountInfo] = []
-        for row in rows:
-            infos = tuple(
-                IdentityInfo(
-                    provider_id=i[1],
-                    issuer=i[2],
-                    subject=i[3],
-                    username=i[4] or "",
-                    email=None,
-                    email_verified=False,
-                    linked_at=int(i[5]),
-                    last_login_at=i[6],
-                    id=int(i[7]),
-                )
-                for i in by_account.get(row[0], [])
+        ids = [row.id for row in rows]
+        identities: dict[str, list[IdentityInfo]] = {}
+        for identity in lists.identities(conn, ids):
+            identities.setdefault(identity.account_id, []).append(
+                _identity_info(identity)
             )
-            result.append(AccountInfo(_status_from_row(row), infos))
-        return result
+        primary = {
+            row.account_id: _enrollment(row)
+            for row in lists.primary_credentials(conn, ids)
+        }
+        return [
+            AccountInfo(
+                _status(row), tuple(identities.get(row.id, ())), primary.get(row.id)
+            )
+            for row in rows
+        ]
+
+    def accounts_page(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = DEFAULT_LIMIT,
+        status: str | None = None,
+    ) -> Page[AccountInfo]:
+        from .db import lists
+
+        limit = page_limit(limit)
+        if status is not None and status not in acc.ACCOUNT_STATUSES:
+            raise ValueError("invalid account status")
+        scope = "accounts/" + str(status)
+        before = decode_cursor(cursor, scope)
+        assert before is None or isinstance(before, str)
+        with self._db.read() as conn:
+            rows = lists.accounts(conn, before=before, limit=limit + 1, status=status)
+            infos = self._account_infos(conn, rows)
+        return make_page(
+            infos, limit=limit, scope=scope, key=lambda row: row.principal_key
+        )
+
+    def enrollment_accounts(
+        self, enrollments: Sequence[EnrollmentInfo]
+    ) -> dict[str, AccountInfo]:
+        return self.account_infos([row.principal_key for row in enrollments])
+
+    def account_infos(self, ids: Sequence[str]) -> dict[str, AccountInfo]:
+        from .db import lists
+
+        if len(ids) > 200:
+            raise ValueError("account lookup is bounded to a page")
+        ids = [_require_account_key(key) for key in ids]
+        with self._db.read() as conn:
+            rows = lists.accounts_by_ids(conn, ids)
+            return {row.principal_key: row for row in self._account_infos(conn, rows)}
+
+    def iter_accounts(self) -> Iterator[AccountInfo]:
+        cursor = None
+        while True:
+            page = self.accounts_page(cursor=cursor, limit=200)
+            yield from page.items
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
+
+    def account_counts(self) -> dict[str, int]:
+        from .db import lists
+
+        with self._db.read() as conn:
+            return lists.account_counts(conn)
+
+    def credential_inventory(self) -> tuple[int, int, tuple[str, ...]]:
+        from .db import lists
+
+        with self._db.read() as conn:
+            return lists.credential_inventory(conn)
+
+    def account_names(self, account_ids: Collection[str]) -> dict[str, str]:
+        from .db import lists
+
+        ids = list(dict.fromkeys(account_ids))
+        if len(ids) > 400:
+            raise ValueError("account name lookup is bounded to a page")
+        with self._db.read() as conn:
+            return lists.account_names(conn, ids)
 
     def account_identities(self, principal_key: str) -> list[IdentityInfo]:
-        account_id = _account_id(_validate_principal_key(principal_key))
-        if account_id is None:
-            return []
+        key = _require_account_key(principal_key)
         with self._db.read() as conn:
-            rows = self._repos.identities.for_account(conn, account_id)
-        return [
-            IdentityInfo(r[0], r[1], r[2], r[3] or "", r[4], bool(r[5]), int(r[6]), r[7], int(r[8]))
-            for r in rows
-        ]
+            rows = self._repos.identities.for_account(conn, key)
+        return [_identity_info(row) for row in rows]
 
     def list_identities(self, principal_key: str) -> list[LinkedIdentity]:
         """The identities of an account with their ids, oldest first (unknown account: none)."""
@@ -1514,10 +1487,10 @@ class TokenStore:
         if account_id is None:
             return []
         with self._db.read() as conn:
-            rows = self._repos.identities.list_with_ids(conn, account_id)
-        return [_linked_from_row(r) for r in rows]
+            rows = self._repos.identities.for_account(conn, account_id)
+        return [_linked(r) for r in rows]
 
-    def identity_account(self, identity_id: int) -> str | None:
+    def identity_account(self, identity_id: str) -> str | None:
         """The account key an identity row belongs to (None for an unknown id)."""
         with self._db.read() as conn:
             account_id = self._repos.identities.account_of(conn, identity_id)
@@ -1538,46 +1511,32 @@ class TokenStore:
         with self._db.read() as conn:
             return self._repos.accounts.count_usable_owners(conn, _listed(provider_ids))
 
-    def record_login_providers(self, provider_ids: Iterable[str]) -> None:
-        """Remember the providers of ``SELFHOST_LOGIN_PROVIDERS`` this server runs with.
+    def read_session_snapshot(self, account_id: str) -> SessionSnapshot | None:
+        from .db.snapshots import session_snapshot
 
-        ``token_admin`` is usually run from a shell that lacks the server's variables, and it
-        needs the list to decide which owners are usable; it reads this record first. The
-        server writes it at startup (``meta['login_providers']``, a comma-separated list; an
-        existing value is replaced only when it differs). A deployment with Entra alone and no
-        earlier record writes nothing, so it keeps the database exactly as it was: no record
-        means "Entra alone".
-        """
-        value = ",".join(sorted(set(provider_ids)))
-        with self._db.write() as conn:
-            current = self._repos.meta.get(conn, LOGIN_PROVIDERS_META_KEY)
-            if current == value or (current is None and value == acc.PROVIDER_ENTRA):
-                return
-            self._repos.meta.put(conn, LOGIN_PROVIDERS_META_KEY, value)
-
-    def recorded_login_providers(self) -> frozenset[str] | None:
-        """The providers the server last recorded (None: none recorded, or unreadable)."""
         with self._db.read() as conn:
-            raw = self._repos.meta.get(conn, LOGIN_PROVIDERS_META_KEY)
-        if raw is None:
-            return None
-        ids = [part for part in raw.split(",") if part]
-        if not ids or any(not _PROVIDER_ID_RE.fullmatch(part) for part in ids):
-            return None
-        return frozenset(ids)
+            return session_snapshot(conn, account_id)
 
-    def lookup_identity(self, provider_id: str, issuer: str, subject: str) -> str | None:
+    def record_login_providers(self, provider_ids: Iterable[str]) -> None:
+        """Reconcile env providers under governance, preserving edited public names."""
+        with self._db.write() as conn:
+            self._repos.providers.reconcile(
+                conn, list(dict.fromkeys(provider_ids)), now=self._now()
+            )
+
+    def recorded_login_providers(self) -> frozenset[str]:
+        with self._db.read() as conn:
+            return self._repos.providers.configured(conn)
+
+    def lookup_identity(
+        self, provider_id: str, issuer: str, subject: str
+    ) -> str | None:
         """The account key of an external identity, or None if it is not known."""
         with self._db.read() as conn:
-            account_id = self._repos.identities.lookup(conn, provider_id, issuer, subject)
+            account_id = self._repos.identities.lookup(
+                conn, provider_id, issuer, subject
+            )
         return None if account_id is None else acc.account_key_of(account_id)
-
-    def resolve_legacy_key(self, legacy_key: str) -> str | None:
-        """Map the pre-account form ``entra:<tid>:<oid>`` to the account key, if known."""
-        parts = split_entra_key(legacy_key)
-        if parts is None:
-            return None
-        return self.lookup_identity(acc.PROVIDER_ENTRA, acc.entra_issuer(parts[0]), parts[1])
 
     # -- accounts: sign-in and admission -------------------------------------------
 
@@ -1608,11 +1567,15 @@ class TokenStore:
         """
         now = self._now()
         repos = self._repos
-        surface = acc.SURFACE_ACCOUNT if purpose == "sign_in" else acc.SURFACE_MCP
+        surface = acc.SURFACE_ACCOUNT
         with self._db.write() as conn:
             account_id = repos.identities.lookup(conn, *ext.identity)
-            row = repos.accounts.get(conn, account_id, for_update=True) if account_id else None
-            existing = None if row is None else _status_from_row(row).facts
+            row = (
+                repos.accounts.get(conn, account_id, for_update=True)
+                if account_id
+                else None
+            )
+            existing = None if row is None else _status(row).facts
             active_owners = repos.accounts.count_active_owners(conn)
             listed = _listed(listed_providers)
             usable_owners = repos.accounts.count_usable_owners(conn, listed)
@@ -1622,14 +1585,17 @@ class TokenStore:
                 is_bootstrap
                 and row is not None
                 and account_id is not None
-                and row[1] == STATUS_ACTIVE
-                and row[2] == ROLE_OWNER
+                and row.status == STATUS_ACTIVE
+                and row.role == ROLE_OWNER
             ):
                 # Only the bootstrap identity may re-source an owner: whether this one is usable.
-                held = repos.identities.list_with_ids(conn, account_id)
+                held = repos.identities.for_account(conn, account_id)
                 owner_usable = acc.owner_is_usable(
-                    role=row[2], status=row[1], role_source=row[3],
-                    identity_providers=[r[1] for r in held], listed=listed,
+                    role=row.role,
+                    status=row.status,
+                    role_source=row.role_source,
+                    identity_providers=[r.provider_id for r in held],
+                    listed=listed,
                 )
             facts = DecisionFacts(
                 active_owner_count=active_owners,
@@ -1645,7 +1611,8 @@ class TokenStore:
             unusable_owners = (
                 # The owners this bootstrap overrides: not the account being re-sourced itself.
                 max(0, active_owners - usable_owners - (0 if owner_usable else 1))
-                if decision.role == ROLE_OWNER and decision.role_source == acc.ROLE_SOURCE_BOOTSTRAP
+                if decision.role == ROLE_OWNER
+                and decision.role_source == acc.ROLE_SOURCE_BOOTSTRAP
                 else 0
             )
             if decision.create:
@@ -1653,7 +1620,9 @@ class TokenStore:
                 self._create_account(conn, account_id, ext, decision, now)
                 created = True
                 if unusable_owners > 0:
-                    self._audit_bootstrap_override(conn, account_id, unusable_owners, now)
+                    self._audit_bootstrap_override(
+                        conn, account_id, unusable_owners, now
+                    )
             elif row is not None and account_id is not None:
                 if decision.activate:
                     repos.accounts.activate(
@@ -1664,26 +1633,31 @@ class TokenStore:
                         now=now,
                     )
                     key = acc.account_key_of(account_id)
-                    self._record_event(
-                        conn, key, EVENT_ACTIVATED, None, decision.admitted_via,
-                        int(row[16]), now,
-                    )
                     self._audit(
-                        conn, SYSTEM_ACTOR, AUDIT_ACCOUNT_ACTIVATED, target=key,
-                        detail={"admitted_via": decision.admitted_via or ""}, now=now,
+                        conn,
+                        SYSTEM_ACTOR,
+                        AUDIT_ACCOUNT_ACTIVATED,
+                        target=key,
+                        detail={"admitted_via": decision.admitted_via or ""},
+                        now=now,
                     )
                     activated = True
                 owner_change = self._apply_role(
-                    conn, account_id, row, decision, purpose, verdict, now,
+                    conn,
+                    account_id,
+                    row,
+                    decision,
+                    purpose,
+                    verdict,
+                    now,
                     unusable_owners=unusable_owners,
                 )
-            if (
-                purpose == "sign_in"
-                and account_id is not None
-                and decision.outcome != "deny"
-            ):
+            if account_id is not None and decision.outcome != "deny":
                 repos.accounts.touch_login(
-                    conn, account_id, display_name=ext.display_name[:_MAX_DISPLAY_NAME], now=now
+                    conn,
+                    account_id,
+                    display_name=ext.display_name[:_MAX_DISPLAY_NAME],
+                    now=now,
                 )
                 repos.identities.touch(
                     conn,
@@ -1694,25 +1668,26 @@ class TokenStore:
                     email_verified=ext.email_verified,
                 )
             if created:
-                owner_change = decision.role_event if decision.role == ROLE_OWNER else None
-            if purpose == "sign_in" or created or activated:
-                self._record_auth_event(
-                    conn,
-                    now=now,
-                    account_id=account_id,
-                    provider_id=ext.provider_id,
-                    surface=surface,
-                    outcome={
-                        "allow": acc.OUTCOME_SUCCESS,
-                        "pending": acc.OUTCOME_PENDING,
-                        "deny": acc.OUTCOME_DENIED,
-                    }[decision.outcome],
-                    reason=decision.reason,
-                    ip=ip,
-                    ua_hash=ua_hash,
+                owner_change = (
+                    decision.role_event if decision.role == ROLE_OWNER else None
                 )
+            self._record_auth_event(
+                conn,
+                now=now,
+                account_id=account_id,
+                provider_id=ext.provider_id,
+                surface=surface,
+                outcome={
+                    "allow": acc.OUTCOME_SUCCESS,
+                    "pending": acc.OUTCOME_PENDING,
+                    "deny": acc.OUTCOME_DENIED,
+                }[decision.outcome],
+                reason=decision.reason,
+                ip=ip,
+                ua_hash=ua_hash,
+            )
             final_row = repos.accounts.get(conn, account_id) if account_id else None
-        status = None if final_row is None else _status_from_row(final_row)
+        status = None if final_row is None else _status(final_row)
         if status is not None and owner_change is not None:
             status = replace(status, owner_change=owner_change)
         return Resolution(
@@ -1758,7 +1733,11 @@ class TokenStore:
         provider = ext.provider_id
         with self._db.write() as conn:
             row = repos.accounts.get(conn, account_id, for_update=True)
-            if row is None or row[1] != STATUS_ACTIVE or int(row[16]) != expected_epoch:
+            if (
+                row is None
+                or row.status != STATUS_ACTIVE
+                or int(row.session_epoch) != expected_epoch
+            ):
                 return LinkResult(LINK_SESSION_ENDED, provider)
             owner = repos.identities.lookup(conn, *ext.identity)
             self._pause("after_identity_lookup")
@@ -1769,12 +1748,17 @@ class TokenStore:
                 refusal = LINK_IN_USE
             elif repos.identities.count_for_provider(conn, account_id, provider) > 0:
                 refusal = LINK_PROVIDER_TAKEN
-            elif not acc.link_admissible(_status_from_row(row).facts, verdict, policy):
+            elif not acc.link_admissible(_status(row).facts, verdict, policy):
                 refusal = LINK_DENIED
             if refusal is not None:
                 self._audit(
-                    conn, key, AUDIT_IDENTITY_LINK_REFUSED, target=key, reason=refusal,
-                    detail={"provider": provider[:64]}, now=now,
+                    conn,
+                    key,
+                    AUDIT_IDENTITY_LINK_REFUSED,
+                    target=key,
+                    reason=refusal,
+                    detail={"provider": provider[:64]},
+                    now=now,
                 )
                 return LinkResult(refusal, provider)
             repos.identities.insert(
@@ -1789,8 +1773,12 @@ class TokenStore:
                 now=now,
             )
             self._audit(
-                conn, key, AUDIT_IDENTITY_LINKED, target=key,
-                detail={"provider": provider[:64]}, now=now,
+                conn,
+                key,
+                AUDIT_IDENTITY_LINKED,
+                target=key,
+                detail={"provider": provider[:64]},
+                now=now,
             )
             self._record_auth_event(
                 conn,
@@ -1808,7 +1796,7 @@ class TokenStore:
     def unlink_identity(
         self,
         principal_key: str,
-        identity_id: int,
+        identity_id: str,
         *,
         actor: Actor,
         expected_epoch: int | None = None,
@@ -1848,28 +1836,40 @@ class TokenStore:
             if row is None:
                 return UnlinkResult(UNLINK_NOT_FOUND)
             if self_service and (
-                row[1] != STATUS_ACTIVE
-                or (expected_epoch is not None and int(row[16]) != expected_epoch)
+                row.status != STATUS_ACTIVE
+                or (
+                    expected_epoch is not None
+                    and int(row.session_epoch) != expected_epoch
+                )
             ):
                 return UnlinkResult(UNLINK_SESSION_ENDED)
-            ident = repos.identities.get_for_account(conn, identity_id, account_id, for_update=True)
+            ident = repos.identities.get_for_account(
+                conn, identity_id, account_id, for_update=True
+            )
             if ident is None:
                 return UnlinkResult(UNLINK_NOT_FOUND)
             count = repos.identities.count_for_account(conn, account_id)
             self._pause("after_identity_count")
             if count <= 1:
-                return UnlinkResult(UNLINK_LAST, ident[1])
-            if row[1] == STATUS_ACTIVE and row[2] == ROLE_OWNER:
-                rows = repos.identities.list_with_ids(conn, account_id)
+                return UnlinkResult(UNLINK_LAST, ident.provider_id)
+            if row.status == STATUS_ACTIVE and row.role == ROLE_OWNER:
+                rows = repos.identities.for_account(conn, account_id)
                 for provider_list in (listed_providers, *additional_provider_lists):
                     listed = _listed(provider_list)
                     usable_before = acc.owner_is_usable(
-                        role=row[2], status=row[1], role_source=row[3],
-                        identity_providers=[r[1] for r in rows], listed=listed,
+                        role=row.role,
+                        status=row.status,
+                        role_source=row.role_source,
+                        identity_providers=[r.provider_id for r in rows],
+                        listed=listed,
                     )
                     usable_after = acc.owner_is_usable(
-                        role=row[2], status=row[1], role_source=row[3],
-                        identity_providers=[r[1] for r in rows if int(r[0]) != identity_id],
+                        role=row.role,
+                        status=row.status,
+                        role_source=row.role_source,
+                        identity_providers=[
+                            r.provider_id for r in rows if r.id != identity_id
+                        ],
                         listed=listed,
                     )
                     if usable_before and not usable_after:
@@ -1878,17 +1878,26 @@ class TokenStore:
                         )
                         self._pause("after_owner_count")
                         if not others:
-                            return UnlinkResult(UNLINK_LAST_OWNER, ident[1])
+                            return UnlinkResult(UNLINK_LAST_OWNER, ident.provider_id)
             if not repos.identities.delete_one(conn, identity_id, account_id):
                 return UnlinkResult(UNLINK_NOT_FOUND)
             epoch = repos.accounts.end_sessions(conn, account_id, now)
-            self._record_event(conn, key, EVENT_IDENTITY_UNLINKED, by, ident[1][:64], epoch, now)
-            who = "operator" if isinstance(actor, _Operator) else ("self" if self_service else "owner")
-            self._audit(
-                conn, by, AUDIT_IDENTITY_UNLINKED, target=key,
-                detail={"provider": ident[1][:64], "by": who}, now=now,
+            who = (
+                "operator"
+                if isinstance(actor, _Operator)
+                else ("self" if self_service else "owner")
             )
-        return UnlinkResult(UNLINK_OK, ident[1], ident[2], ident[3], epoch)
+            self._audit(
+                conn,
+                by,
+                AUDIT_IDENTITY_UNLINKED,
+                target=key,
+                detail={"provider": ident.provider_id[:64], "by": who},
+                now=now,
+            )
+        return UnlinkResult(
+            UNLINK_OK, ident.provider_id, ident.issuer, ident.subject, epoch
+        )
 
     def _create_account(
         self,
@@ -1922,11 +1931,6 @@ class TokenStore:
             email_verified=bool(ext.email) and ext.email_verified,
             now=now,
         )
-        self._record_event(
-            conn, key, EVENT_ACCOUNT_CREATED, None, decision.admitted_via, 0, now
-        )
-        if is_owner:
-            self._record_event(conn, key, EVENT_OWNER_GAINED, None, decision.role_source, 0, now)
         self._audit(
             conn,
             SYSTEM_ACTOR,
@@ -1945,9 +1949,14 @@ class TokenStore:
     ) -> None:
         """Audit a bootstrap owner made while the owners the database holds were all unusable."""
         self._audit(
-            conn, SYSTEM_ACTOR, AUDIT_ROLE_CHANGED, target=acc.account_key_of(account_id),
+            conn,
+            SYSTEM_ACTOR,
+            AUDIT_ROLE_CHANGED,
+            target=acc.account_key_of(account_id),
             detail={
-                "role": ROLE_OWNER, "source": acc.ROLE_SOURCE_BOOTSTRAP, "via": "sign_in",
+                "role": ROLE_OWNER,
+                "source": acc.ROLE_SOURCE_BOOTSTRAP,
+                "via": "sign_in",
                 "unusable_owners": unusable_owners,
             },
             now=now,
@@ -1957,7 +1966,7 @@ class TokenStore:
         self,
         conn: Connection,
         account_id: str,
-        row: Sequence[Any],
+        row: AccountRow,
         decision: Decision,
         purpose: acc.Purpose,
         verdict: Verdict,
@@ -1968,18 +1977,21 @@ class TokenStore:
         """Apply the role part of a decision to an existing account; returns the change made."""
         repos = self._repos
         key = acc.account_key_of(account_id)
-        epoch = int(row[16])
         if decision.role is not None:
             repos.accounts.set_role(
                 conn,
                 account_id,
                 role=decision.role,
                 source=decision.role_source,
-                seen_at=now if decision.role == ROLE_OWNER else row[4],
+                seen_at=now if decision.role == ROLE_OWNER else row.role_seen_at,
                 now=now,
             )
             admitted_via = decision.admitted_via
-            if admitted_via is not None and not decision.activate and admitted_via != row[5]:
+            if (
+                admitted_via is not None
+                and not decision.activate
+                and admitted_via != row.admitted_via
+            ):
                 # The bootstrap owner is admitted personally, so the rules it overrode cannot
                 # refuse it at its next sign-in.
                 repos.accounts.set_admitted_via(conn, account_id, admitted_via, now)
@@ -1988,27 +2000,42 @@ class TokenStore:
             event = decision.role_event or (
                 EVENT_OWNER_GAINED if decision.role == ROLE_OWNER else EVENT_OWNER_LOST
             )
-            self._record_event(conn, key, event, None, "sign_in", epoch, now)
             detail: dict[str, Any] = {
-                "role": decision.role, "source": decision.role_source or "", "via": "sign_in",
+                "role": decision.role,
+                "source": decision.role_source or "",
+                "via": "sign_in",
             }
             if unusable_owners > 0:
                 detail["unusable_owners"] = unusable_owners
             if admitted_via is not None:
                 detail["admitted_via"] = admitted_via
-            if row[2] == ROLE_OWNER and decision.role == ROLE_OWNER:
+            if row.role == ROLE_OWNER and decision.role == ROLE_OWNER:
                 # An owner re-sourced at a sign-in (the bootstrap identity took over a role no
                 # sign-in could use): say where it came from.
-                detail["was"] = (row[3] or "")[:32]
-            self._audit(conn, SYSTEM_ACTOR, AUDIT_ROLE_CHANGED, target=key, detail=detail, now=now)
+                detail["was"] = (row.role_source or "")[:32]
+            self._audit(
+                conn,
+                SYSTEM_ACTOR,
+                AUDIT_ROLE_CHANGED,
+                target=key,
+                detail=detail,
+                now=now,
+            )
             return event
         if decision.role_event == EVENT_OWNER_LOSS_REFUSED:
-            self._record_event(conn, key, EVENT_OWNER_LOSS_REFUSED, None, "sign_in", epoch, now)
+            self._audit(
+                conn,
+                SYSTEM_ACTOR,
+                AUDIT_ROLE_LOSS_REFUSED,
+                target=key,
+                reason="last_owner",
+                detail={"via": "sign_in"},
+                now=now,
+            )
             return None
         if (
-            purpose == "sign_in"
-            and row[2] == ROLE_OWNER
-            and row[3] == acc.ROLE_SOURCE_RULES
+            row.role == ROLE_OWNER
+            and row.role_source == acc.ROLE_SOURCE_RULES
             and verdict.owner_by_rule
         ):
             # Fresh evidence that the rules still make this account an owner.
@@ -2040,8 +2067,7 @@ class TokenStore:
             surface=surface,
             outcome=outcome,
             reason=reason,
-            ip=(ip or "unknown")[:64],
-            ua_hash=ua_hash[:32] if ua_hash else None,
+            ua_hash=bytes.fromhex(ua_hash[:16]) if ua_hash else None,
         )
 
     def record_auth_event(
@@ -2058,7 +2084,7 @@ class TokenStore:
         """Record a sign-in outcome that did not go through :meth:`resolve_identity`. Never raises."""
         try:
             account_id = None if account_key is None else _account_id(account_key)
-            with self._db.best_effort_write(lock=False) as conn:
+            with self._db.best_effort_write() as conn:
                 self._record_auth_event(
                     conn,
                     now=self._now(),
@@ -2073,101 +2099,145 @@ class TokenStore:
         except (TokenStoreError, ValueError, OSError):
             return
 
-    def list_auth_events(self, principal_key: str, limit: int = 20) -> list[AuthEvent]:
-        """The newest sign-ins of an account first (default: the last 20)."""
-        account_id = _account_id(_validate_principal_key(principal_key))
-        if account_id is None:
-            return []
-        with self._db.read() as conn:
-            rows = self._repos.auth_events.list_for_account(conn, account_id, max(1, min(limit, 200)))
-        return [AuthEvent(*tuple(r)) for r in rows]
-
-    def prune_auth_events(self, *, retention_seconds: int = AUTH_EVENT_RETENTION_SECONDS) -> int:
-        """Delete sign-in events older than the retention (default 90 days); returns the count."""
-        cutoff = self._now() - retention_seconds
-        with self._db.write() as conn:
-            return self._repos.auth_events.prune_before(conn, cutoff)
-
-    def purge_stale_pending(self, *, retention_seconds: int = PENDING_RETENTION_SECONDS) -> int:
-        """Delete accounts that waited for approval longer than the retention (default 30 days)."""
-        cutoff = self._now() - retention_seconds
-        now = self._now()
-        with self._db.write() as conn:
-            ids = self._repos.accounts.purge_pending(conn, cutoff)
-            if ids:
-                self._repos.identities.delete_for_accounts(conn, ids)
-                self._audit(
-                    conn, SYSTEM_ACTOR, AUDIT_PENDING_PURGED, detail={"count": len(ids)}, now=now
-                )
-            return len(ids)
-
-    def list_audit(self, limit: int = 100, before_id: int | None = None) -> list[AuditEntry]:
-        with self._db.read() as conn:
-            rows = self._repos.audit.list(conn, max(1, min(limit, 500)), before_id)
-        result: list[AuditEntry] = []
-        for r in rows:
-            try:
-                detail = json.loads(r[6])
-            except ValueError:
-                detail = {}
-            result.append(
-                AuditEntry(
-                    r[0], r[1], r[2], r[3], r[4], r[5], detail if isinstance(detail, dict) else {}
-                )
-            )
-        return result
-
-    # -- accounts: administrative changes ------------------------------------------
-
-    def demote_owner(
+    def auth_events_page(
         self,
         principal_key: str,
         *,
-        evidence_issued_at: int,
+        cursor: str | None = None,
+        limit: int = DEFAULT_LIMIT,
+    ) -> Page[AuthEvent]:
+        account_id = _require_account_key(principal_key)
+        limit = page_limit(limit)
+        scope = "auth-events/" + account_id
+        before = decode_cursor(cursor, scope, integer=True)
+        assert before is None or isinstance(before, int)
+        with self._db.read() as conn:
+            rows = self._repos.auth_events.list_for_account(
+                conn, account_id, limit + 1, before_id=before
+            )
+        events = [
+            AuthEvent(
+                row.id,
+                row.at,
+                row.provider_id,
+                row.surface,
+                row.outcome,
+                row.reason,
+                row.ua_hash.hex() if row.ua_hash is not None else None,
+            )
+            for row in rows
+        ]
+        return make_page(events, limit=limit, scope=scope, key=lambda row: row.id)
+
+    def audit_page(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = DEFAULT_LIMIT,
+        account_id: str | None = None,
+    ) -> Page[AuditEntry]:
+        limit = page_limit(limit)
+        if account_id is not None:
+            account_id = _require_account_key(account_id)
+        scope = "audit/" + str(account_id)
+        before = decode_cursor(cursor, scope, integer=True)
+        assert before is None or isinstance(before, int)
+        with self._db.read() as conn:
+            rows = self._repos.audit.list(
+                conn, limit + 1, before, account_id=account_id
+            )
+        entries = [
+            AuditEntry(
+                row.id,
+                row.at,
+                row.actor_id or row.actor_kind,
+                row.action,
+                row.target_id,
+                row.reason,
+                row.detail,
+            )
+            for row in rows
+        ]
+        return make_page(entries, limit=limit, scope=scope, key=lambda row: row.id)
+
+    def iter_audit(self, *, account_id: str | None = None) -> Iterator[AuditEntry]:
+        cursor = None
+        while True:
+            page = self.audit_page(cursor=cursor, limit=200, account_id=account_id)
+            yield from page.items
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
+
+    # -- accounts: administrative changes ------------------------------------------
+
+    def delete_account(
+        self,
+        account_id: str,
+        *,
+        actor: Actor = OPERATOR,
         listed_providers: Collection[str] | None = None,
     ) -> bool:
-        """Lower the stored owner role on evidence from a request token; True if lowered.
+        """Operator-only account deletion, with owner protection and retained history."""
+        from sqlalchemy import delete, func, select
 
-        The evidence is the issue time of a verified access token that carries no
-        owner role. It counts only if it is newer than the last sign-in that showed the
-        role, so a token issued before a promotion cannot undo it. Only a role that
-        rules granted is touched (a bootstrap or operator owner is not), the last
-        *usable* owner is never demoted (an owner no sign-in under ``listed_providers`` can show,
-        see :func:`accounts.owner_is_usable`, is no replacement), and this path can only ever lower the role:
-        raising it needs a fresh sign-in.
-        """
-        key = _require_account_key(principal_key)
-        account_id = acc.account_id_of(key)
+        from .db import schema as s
+
+        if not isinstance(actor, _Operator):
+            raise AccessActionRefused(AccessActionRefused.NOT_OWNER)
+        account_id = _require_account_key(account_id)
         now = self._now()
         with self._db.write() as conn:
+            # Include consumed tombstones: account cascades must not take code
+            # locks after the account lock held by a first exchange.
+            self._repos.codes.delete_for_account(conn, account_id)
+            self._pause("after_account_codes_deleted")
             row = self._repos.accounts.get(conn, account_id, for_update=True)
-            if (
-                row is None
-                or row[2] != ROLE_OWNER
-                or row[3] != acc.ROLE_SOURCE_RULES
-                or row[1] != STATUS_ACTIVE
-            ):
+            if row is None:
                 return False
-            if evidence_issued_at <= (row[4] or 0):
-                return False
-            others = self._repos.accounts.usable_owner_ids(
-                conn, _listed(listed_providers), exclude=account_id, for_update=True
-            )
-            self._pause("after_owner_count")
-            if not others:
-                self._record_event(
-                    conn, key, EVENT_OWNER_LOSS_REFUSED, None, "access_token_roles", int(row[16]), now
+            if row.status == STATUS_ACTIVE and row.role == ROLE_OWNER:
+                listed = _listed(listed_providers)
+                others = self._repos.accounts.usable_owner_ids(
+                    conn, listed, exclude=account_id, for_update=True
                 )
-                return False
-            self._repos.accounts.set_role(
-                conn, account_id, role=ROLE_USER, source=None, seen_at=row[4], now=now
-            )
-            self._record_event(
-                conn, key, EVENT_OWNER_LOST, None, "access_token_roles", int(row[16]), now
-            )
+                if not others:
+                    identities = self._repos.identities.for_account(conn, account_id)
+                    if (
+                        acc.owner_is_usable(
+                            role=row.role,
+                            status=row.status,
+                            role_source=row.role_source,
+                            identity_providers=[
+                                identity.provider_id for identity in identities
+                            ],
+                            listed=listed,
+                        )
+                        or self._repos.accounts.count_active_owners(
+                            conn, exclude=account_id
+                        )
+                        == 0
+                    ):
+                        raise AccessActionRefused(AccessActionRefused.LAST_OWNER)
+            counts = {
+                name: conn.execute(
+                    select(func.count())
+                    .select_from(table)
+                    .where(table.c.account_id == account_id)
+                ).scalar_one()
+                for name, table in (
+                    ("credentials_removed", s.canvas_credentials),
+                    ("identities_removed", s.external_identities),
+                    ("grants_removed", s.oauth_grants),
+                )
+            }
+            conn.execute(delete(s.accounts).where(s.accounts.c.id == account_id))
             self._audit(
-                conn, SYSTEM_ACTOR, AUDIT_ROLE_CHANGED, target=key,
-                detail={"role": ROLE_USER, "via": "access_token_roles"}, now=now,
+                conn,
+                OPERATOR_ACTOR,
+                AUDIT_ACCOUNT_DELETED,
+                target=account_id,
+                detail=counts,
+                now=now,
             )
         return True
 
@@ -2208,13 +2278,25 @@ class TokenStore:
         now = self._now()
         repos = self._repos
         with self._db.write() as conn:
+            current = repos.accounts.get(conn, account_id)
+            if current is None or current.status == STATUS_DISABLED:
+                self._require_owner_actor(conn, actor)
+                return False
+            # An exchange consumes its code before it locks the account.
+            # Governance must delete codes before taking any account lock.
+            self._repos.codes.delete_unconsumed_for_account(conn, account_id)
+            self._pause("after_account_codes_deleted")
             self._require_owner_actor(conn, actor)
             if not isinstance(actor, _Operator) and by == key:
                 raise AccessActionRefused(AccessActionRefused.SELF)
             row = repos.accounts.get(conn, account_id, for_update=True)
-            if row is None or row[1] == STATUS_DISABLED:
+            if row is None or row.status == STATUS_DISABLED:
                 return False
-            if row[1] == STATUS_ACTIVE and row[2] == ROLE_OWNER and not allow_last_owner:
+            if (
+                row.status == STATUS_ACTIVE
+                and row.role == ROLE_OWNER
+                and not allow_last_owner
+            ):
                 for provider_list in (listed_providers, *additional_provider_lists):
                     listed = _listed(provider_list)
                     usable_others = repos.accounts.usable_owner_ids(
@@ -2222,15 +2304,23 @@ class TokenStore:
                     )
                     self._pause("after_owner_count")
                     if not usable_others:
-                        identities = repos.identities.list_with_ids(conn, account_id)
+                        identities = repos.identities.for_account(conn, account_id)
                         target_usable = acc.owner_is_usable(
-                            role=row[2], status=row[1], role_source=row[3],
-                            identity_providers=[r[1] for r in identities], listed=listed,
+                            role=row.role,
+                            status=row.status,
+                            role_source=row.role_source,
+                            identity_providers=[r.provider_id for r in identities],
+                            listed=listed,
                         )
-                        if target_usable or repos.accounts.count_active_owners(conn, exclude=account_id) == 0:
+                        if (
+                            target_usable
+                            or repos.accounts.count_active_owners(
+                                conn, exclude=account_id
+                            )
+                            == 0
+                        ):
                             raise AccessActionRefused(AccessActionRefused.LAST_OWNER)
-            epoch = repos.accounts.disable(conn, account_id, reason=reason, by=by, now=now)
-            self._record_event(conn, key, EVENT_DISABLED, by, reason, epoch, now)
+            repos.accounts.disable(conn, account_id, reason=reason, by=by, now=now)
             generation = repos.generations.bump(conn, key, GENERATION_DISABLED, now)
             # The apps this person connected stop working with the account (the table is
             # empty unless SELFHOST_AUTH_MODE=local has ever issued a grant).
@@ -2264,11 +2354,12 @@ class TokenStore:
         with self._db.write() as conn:
             self._require_owner_actor(conn, actor)
             row = self._repos.accounts.get(conn, account_id, for_update=True)
-            if row is None or row[1] != STATUS_DISABLED:
+            if row is None or row.status != STATUS_DISABLED:
                 return False
-            epoch = self._repos.accounts.enable(conn, account_id, now)
-            self._record_event(conn, key, EVENT_ENABLED, by, None, epoch, now)
-            generation = self._repos.generations.bump(conn, key, GENERATION_ENABLED, now)
+            self._repos.accounts.enable(conn, account_id, now)
+            generation = self._repos.generations.bump(
+                conn, key, GENERATION_ENABLED, now
+            )
             self._audit(conn, by, AUDIT_ACCOUNT_ENABLED, target=key, now=now)
         self._publish_generation(key, generation)
         return True
@@ -2289,12 +2380,15 @@ class TokenStore:
             self._require_owner_actor(conn, actor)
             row = self._repos.accounts.get(conn, account_id, for_update=True)
             self._pause("after_account_read")
-            if row is None or row[1] != STATUS_PENDING:
+            if row is None or row.status != STATUS_PENDING:
                 return False
             self._repos.accounts.activate(
-                conn, account_id, admitted_via=acc.ADMITTED_APPROVAL, approved_by=by, now=now
+                conn,
+                account_id,
+                admitted_via=acc.ADMITTED_APPROVAL,
+                approved_by=by,
+                now=now,
             )
-            self._record_event(conn, key, EVENT_APPROVED, by, None, int(row[16]), now)
             self._audit(conn, by, AUDIT_ACCOUNT_APPROVED, target=key, now=now)
         return True
 
@@ -2309,18 +2403,32 @@ class TokenStore:
         by = self._actor_name(actor)
         now = self._now()
         with self._db.write() as conn:
+            current = self._repos.accounts.get(conn, account_id)
+            if current is None or current.status != STATUS_PENDING:
+                self._require_owner_actor(conn, actor)
+                return False
+            # An exchange consumes its code before it locks the account.
+            # Governance must delete codes before taking any account lock.
+            self._repos.codes.delete_unconsumed_for_account(conn, account_id)
+            self._pause("after_account_codes_deleted")
             self._require_owner_actor(conn, actor)
             row = self._repos.accounts.get(conn, account_id, for_update=True)
             self._pause("after_account_read")
-            if row is None or row[1] != STATUS_PENDING:
+            if row is None or row.status != STATUS_PENDING:
                 return False
-            epoch = self._repos.accounts.disable(
+            self._repos.accounts.disable(
                 conn, account_id, reason=DISABLE_REASON_DENIED, by=by, now=now
             )
-            self._record_event(conn, key, EVENT_DENIED, by, DISABLE_REASON_DENIED, epoch, now)
-            generation = self._repos.generations.bump(conn, key, GENERATION_DISABLED, now)
+            generation = self._repos.generations.bump(
+                conn, key, GENERATION_DISABLED, now
+            )
             self._audit(
-                conn, by, AUDIT_ACCOUNT_DENIED, target=key, reason=DISABLE_REASON_DENIED, now=now
+                conn,
+                by,
+                AUDIT_ACCOUNT_DENIED,
+                target=key,
+                reason=DISABLE_REASON_DENIED,
+                now=now,
             )
         self._publish_generation(key, generation)
         return True
@@ -2355,43 +2463,58 @@ class TokenStore:
         now = self._now()
         with self._db.write() as conn:
             row = self._repos.accounts.get(conn, account_id, for_update=True)
-            if row is None or row[1] != STATUS_ACTIVE:
+            if row is None or row.status != STATUS_ACTIVE:
                 return False
             previous_source: str | None = None
             admitted: str | None = None
-            if row[2] == ROLE_OWNER:
-                held = [r[1] for r in self._repos.identities.list_with_ids(conn, account_id)]
+            if row.role == ROLE_OWNER:
+                held = [
+                    r.provider_id
+                    for r in self._repos.identities.for_account(conn, account_id)
+                ]
                 listed = _listed(listed_providers)
                 usable_now = acc.owner_is_usable(
-                    role=row[2], status=row[1], role_source=row[3],
-                    identity_providers=held, listed=listed,
+                    role=row.role,
+                    status=row.status,
+                    role_source=row.role_source,
+                    identity_providers=held,
+                    listed=listed,
                 )
                 usable_as_operator = acc.owner_is_usable(
-                    role=row[2], status=row[1], role_source=acc.ROLE_SOURCE_OPERATOR,
-                    identity_providers=held, listed=listed,
+                    role=row.role,
+                    status=row.status,
+                    role_source=acc.ROLE_SOURCE_OPERATOR,
+                    identity_providers=held,
+                    listed=listed,
                 )
                 if usable_now or not usable_as_operator:
                     return False
-                previous_source = row[3] or ""
+                previous_source = row.role_source or ""
             # Every operator promotion is a personal admission. The rules must not lock
             # out the resulting owner, including a user promoted for the first time.
-            if row[5] not in acc.PERSONAL_ADMISSION:
+            if row.admitted_via not in acc.PERSONAL_ADMISSION:
                 admitted = acc.ADMITTED_OPERATOR
             self._repos.accounts.set_role(
-                conn, account_id, role=ROLE_OWNER, source=acc.ROLE_SOURCE_OPERATOR,
-                seen_at=now, now=now,
+                conn,
+                account_id,
+                role=ROLE_OWNER,
+                source=acc.ROLE_SOURCE_OPERATOR,
+                seen_at=now,
+                now=now,
             )
             if admitted is not None:
                 self._repos.accounts.set_admitted_via(conn, account_id, admitted, now)
-            self._record_event(
-                conn, key, EVENT_OWNER_GAINED, OPERATOR_ACTOR, "operator", int(row[16]), now
-            )
             self._audit(
-                conn, OPERATOR_ACTOR, AUDIT_ROLE_CHANGED, target=key,
+                conn,
+                OPERATOR_ACTOR,
+                AUDIT_ROLE_CHANGED,
+                target=key,
                 detail={
                     "role": ROLE_OWNER,
                     "source": acc.ROLE_SOURCE_OPERATOR,
-                    **({} if previous_source is None else {"was": previous_source[:32]}),
+                    **(
+                        {} if previous_source is None else {"was": previous_source[:32]}
+                    ),
                     **({} if admitted is None else {"admitted_via": admitted}),
                 },
                 now=now,
@@ -2433,7 +2556,9 @@ class TokenStore:
             existing = repos.identities.lookup(conn, provider_id, issuer, subject)
             if existing is not None:
                 return acc.account_key_of(existing)
-            account_id = account_id or str(uuid.uuid4())
+            from .db.types import new_id
+
+            account_id = account_id or new_id()
             key = acc.account_key_of(account_id)
             if not acc.valid_account_key(key):
                 raise ValueError("account_id must be a lower-case UUID")
@@ -2444,7 +2569,9 @@ class TokenStore:
                 role=role,
                 role_source=acc.ROLE_SOURCE_OPERATOR if role == ROLE_OWNER else None,
                 admitted_via=(
-                    acc.ADMITTED_OPERATOR if status == STATUS_ACTIVE else acc.ADMITTED_RULES
+                    acc.ADMITTED_OPERATOR
+                    if status == STATUS_ACTIVE
+                    else acc.ADMITTED_RULES
                 ),
                 display_name=display_name[:_MAX_DISPLAY_NAME],
                 now=now,
@@ -2463,87 +2590,92 @@ class TokenStore:
                 email_verified=False,
                 now=now,
             )
-            epoch = 1 if status == STATUS_DISABLED else 0
-            self._record_event(conn, key, EVENT_ACCOUNT_CREATED, OPERATOR_ACTOR, "operator", 0, now)
             if status == STATUS_DISABLED:
-                self._record_event(conn, key, EVENT_DISABLED, OPERATOR_ACTOR, reason, epoch, now)
                 generation = repos.generations.bump(conn, key, GENERATION_DISABLED, now)
             else:
                 generation = 0
             self._audit(
-                conn, OPERATOR_ACTOR, AUDIT_ACCOUNT_CREATED_BY_OPERATOR, target=key,
-                detail={"status": status, "role": role, "provider": provider_id}, now=now,
+                conn,
+                OPERATOR_ACTOR,
+                AUDIT_ACCOUNT_CREATED_BY_OPERATOR,
+                target=key,
+                detail={"status": status, "role": role, "provider": provider_id},
+                now=now,
             )
         if generation:
             self._publish_generation(key, generation)
         return key
 
-    def list_status_events(
-        self,
-        principal_key: str | None = None,
-        *,
-        limit: int = 50,
-    ) -> list[StatusEvent]:
-        """The newest status transitions first, for one principal or for all."""
-        key = None if principal_key is None else _validate_principal_key(principal_key)
-        with self._db.read() as conn:
-            rows = self._repos.events.list_events(conn, key, max(1, min(int(limit), 1000)))
-        return [StatusEvent(*tuple(r)) for r in rows]
-
     # -- per-user write-tool preferences -------------------------------------
 
     def get_tool_prefs(self, principal_key: str) -> ToolPrefs | None:
-        """The stored write-tool preferences of a principal, or None if never saved."""
-        key = _validate_principal_key(principal_key)
+        from sqlalchemy import select
+
+        from .db import schema as s
+
+        key = _require_account_key(principal_key)
+        a, p = s.accounts, s.account_write_tools
         with self._db.read() as conn:
-            row = self._repos.prefs.get(conn, key)
-        if row is None:
+            rows = (
+                conn.execute(
+                    select(
+                        a.c.write_tools_version,
+                        a.c.updated_at,
+                        p.c.tool_name,
+                        p.c.enabled_at,
+                        p.c.enabled_via,
+                    )
+                    .select_from(a.outerjoin(p, p.c.account_id == a.c.id))
+                    .where(a.c.id == key)
+                    .order_by(p.c.tool_name)
+                )
+                .mappings()
+                .all()
+            )
+        if not rows or rows[0]["write_tools_version"] == 0:
             return None
-        return _decode_tool_prefs(key, row[0], row[1], row[2], row[3])
+        stamps = {
+            row["tool_name"]: row["enabled_at"]
+            for row in rows
+            if row["tool_name"] is not None
+        }
+        return ToolPrefs(
+            key,
+            frozenset(stamps),
+            stamps,
+            rows[0]["updated_at"],
+            rows[0]["enabled_via"] or "api",
+            rows[0]["write_tools_version"],
+        )
 
     def set_tool_prefs(
         self,
         principal_key: str,
         enabled_write_tools: Iterable[str],
         *,
-        via: str = "account_web",
+        via: str = "api",
     ) -> ToolPrefs:
-        """Replace an account's switched-on write tools with exactly these names.
-
-        Only explicit names are stored, and only for an **active** account (checked in
-        the same transaction). A name that was already on keeps its ``enabled_at``; a new
-        one gets the current time. Raises ValueError for a malformed name or an oversized
-        list.
-        """
         key = _require_account_key(principal_key)
         names = _validate_tool_names(enabled_write_tools)
-        if not isinstance(via, str) or not 1 <= len(via) <= _MAX_PREF_VIA or not via.isascii():
-            raise ValueError("via must be a short ASCII label")
-        account_id = acc.account_id_of(key)
+        if via not in ("account_web", "api", "operator"):
+            raise ValueError("unknown preference writer")
         now = self._now()
         with self._db.write() as conn:
-            account = self._repos.accounts.get(conn, account_id, for_update=True)
+            account = self._repos.accounts.get(conn, key, for_update=True)
             if account is None:
                 raise PrincipalMissingError("there is no account for this principal")
-            if account[1] == STATUS_DISABLED:
+            if account.status == STATUS_DISABLED:
                 raise PrincipalDisabledError("this principal is disabled")
-            if account[1] != STATUS_ACTIVE:
+            if account.status != STATUS_ACTIVE:
                 raise PrincipalPendingError("this account is waiting for approval")
-            row = self._repos.prefs.get(conn, key)
-            previous = (
-                _decode_tool_prefs(key, row[0], row[1], row[2], row[3])
-                if row is not None
-                else None
-            )
-            before = previous.enabled_write_tools if previous is not None else frozenset()
-            stamps = {name: (previous.enabled_at.get(name, now) if previous else now) for name in names}
-            self._repos.prefs.upsert(
-                conn,
-                key,
-                names_json=json.dumps(sorted(names)),
-                stamps_json=json.dumps(stamps, sort_keys=True),
-                now=now,
-                via=via,
+            previous = {
+                row.tool_name: row.enabled_at
+                for row in self._repos.prefs.get(conn, key)
+            }
+            before = frozenset(previous)
+            stamps = {name: previous.get(name, now) for name in names}
+            version = self._repos.prefs.replace(
+                conn, key, stamps=stamps, now=now, via=via
             )
             if names != before:
                 self._audit(
@@ -2551,32 +2683,16 @@ class TokenStore:
                     key,
                     AUDIT_WRITE_TOOLS_CHANGED,
                     target=key,
-                    detail={"enabled": sorted(names - before), "disabled": sorted(before - names)},
+                    detail={
+                        "enabled": sorted(names - before),
+                        "disabled": sorted(before - names),
+                    },
                     now=now,
                 )
-        return ToolPrefs(key, names, stamps, now, via)
+        return ToolPrefs(key, names, stamps, now, via, version)
 
     def rotate(self) -> int:
-        """Re-encrypt every row not under the active key; returns rows changed."""
-        active = self._keyring.active_key_id
-        changed = 0
-        with self._db.write() as conn:
-            rows = self._repos.tokens.rows_not_under_key(conn, active)
-            for pkey, kid, nonce, ciphertext, host in rows:
-                # Each row keeps its own principal and host, so its AAD layout
-                # (v2 or v3) is preserved.
-                plaintext = self._keyring.decrypt(
-                    kid, bytes(nonce), bytes(ciphertext), _aad_for_principal(pkey, host, kid)
-                )
-                new_kid, new_nonce, new_ct = self._keyring.encrypt(
-                    plaintext, _aad_for_principal(pkey, host, active)
-                )
-                self._repos.tokens.reseal(
-                    conn,
-                    principal_key=pkey,
-                    key_id=new_kid,
-                    nonce=new_nonce,
-                    ciphertext=new_ct,
-                )
-                changed += 1
-        return changed
+        """Re-seal all registered values without changing lifecycle or custody."""
+        from .db.sealed import rotate
+
+        return rotate(self._db, self._keyring)

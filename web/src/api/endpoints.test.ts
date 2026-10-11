@@ -32,6 +32,7 @@ import {
   startLink,
   unlinkIdentity,
   adminUnlinkIdentity,
+  acknowledgeCanvasToken,
   getIdentities,
 } from './endpoints'
 import { meFixture, scriptAdapter } from '@/test/fixtures'
@@ -89,6 +90,7 @@ describe('the wire shape of every endpoint', () => {
     setCsrfToken('c')
     await putCanvasToken({
       canvas_token: 'tok',
+      custody: { acknowledged: true, notice_version: 1 },
       school: 'canvas.example.edu',
       school_sig: 'sig',
       expires_on: '2027-01-31',
@@ -98,6 +100,7 @@ describe('the wire shape of every endpoint', () => {
     expect(seen[0].url).toBe('/me/canvas-token')
     expect(JSON.parse(seen[0].data as string)).toEqual({
       canvas_token: 'tok',
+      custody: { acknowledged: true, notice_version: 1 },
       school: 'canvas.example.edu',
       school_sig: 'sig',
       expires_on: '2027-01-31',
@@ -105,6 +108,14 @@ describe('the wire shape of every endpoint', () => {
     })
     expect(seen[0].headers['x-csrf-token']).toBe('c')
     expect(seen[0].headers['content-type']).toContain('application/json')
+  })
+
+  it('acknowledges a notice without sending a token or a client timestamp', async () => {
+    const seen = scriptAdapter(() => ({ status: 200, data: {} }))
+    await acknowledgeCanvasToken(1)
+    expect(seen[0].method).toBe('POST')
+    expect(seen[0].url).toBe('/me/canvas-token/acknowledge')
+    expect(JSON.parse(seen[0].data as string)).toEqual({ notice_version: 1 })
   })
 
   it('the school search is a GET with the query in params and the CSRF header', async () => {
@@ -164,7 +175,7 @@ describe('the wire shape of every endpoint', () => {
       ['/admin/accounts', { status: 'pending' }],
       ['/admin/enrollments', { filter: 'needs_reenroll' }],
       ['/admin/audit', {}],
-      ['/admin/audit', { before: '120' }],
+      ['/admin/audit', { cursor: '120' }],
     ])
   })
 
@@ -177,25 +188,25 @@ describe('the wire shape of every endpoint', () => {
 
 describe('signInUrl', () => {
   it('is the server-side redirect, with a return_to only when there is one', () => {
-    expect(LOGIN_PATH).toBe('/account/login')
-    expect(signInUrl('/account/login')).toBe('/account/login')
-    expect(signInUrl('/account/login', null)).toBe('/account/login')
-    expect(signInUrl('/account/login', '/account/write-tools?x=1')).toBe(
-      '/account/login?return_to=%2Faccount%2Fwrite-tools%3Fx%3D1',
+    expect(LOGIN_PATH).toBe('/auth/login')
+    expect(signInUrl('/auth/login')).toBe('/auth/login')
+    expect(signInUrl('/auth/login', null)).toBe('/auth/login')
+    expect(signInUrl('/auth/login', '/account/write-tools?x=1')).toBe(
+      '/auth/login?return_to=%2Faccount%2Fwrite-tools%3Fx%3D1',
     )
   })
 
   it('carries a waiting app and the request for another account to a provider start', () => {
-    expect(signInUrl('/account/login/google', { txn: TXN, reauth: true })).toBe(
-      `/account/login/google?txn=${TXN}&reauth=1`,
+    expect(signInUrl('/auth/login/google', { txn: TXN, reauth: true })).toBe(
+      `/auth/login/google?txn=${TXN}&reauth=1`,
     )
-    expect(signInUrl('/account/login/github', { returnTo: '/account/activity', reauth: true })).toBe(
-      '/account/login/github?reauth=1&return_to=%2Faccount%2Factivity',
+    expect(signInUrl('/auth/login/github', { returnTo: '/account/activity', reauth: true })).toBe(
+      '/auth/login/github?reauth=1&return_to=%2Faccount%2Factivity',
     )
-    expect(signInUrl('/account/login/github', { txn: null, reauth: false, returnTo: null })).toBe(
-      '/account/login/github',
+    expect(signInUrl('/auth/login/github', { txn: null, reauth: false, returnTo: null })).toBe(
+      '/auth/login/github',
     )
-    expect(signInUrl('/account/login/github', {})).toBe('/account/login/github')
+    expect(signInUrl('/auth/login/github', {})).toBe('/auth/login/github')
   })
 })
 

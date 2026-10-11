@@ -26,16 +26,18 @@ with a body as a full request). Without it nothing about these paths changes.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from typing import Any
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from ..logging import log_warning
+from .config_snapshot import CURRENT_CONFIG
+from .db.errors import StoreUnavailable
 from .limits import InMemoryTokenBucket, RateLimiters, build_rate_limiters
+from .maintenance import MAINTENANCE_INTERVAL_SECONDS, Maintenance, MaintenanceScheduler
+from .mcp_state import MCP_READ, MCP_UNAVAILABLE
 
 REGISTER_PATH = "/register"
 AUTHORIZE_PATH = "/authorize"
@@ -56,9 +58,6 @@ TOKEN_REQUESTS_PER_MINUTE = 120
 REVOKE_REQUESTS_PER_MINUTE = 30
 # The form bodies of /token, /revoke and POST /authorize are a few hundred bytes.
 MAX_OAUTH_FORM_BYTES = 16 * 1024
-MAINTENANCE_INTERVAL_SECONDS = 3600
-
-Maintenance = Callable[[], Awaitable[None]]
 
 
 #: The in-process token bucket (moved to :mod:`.limits`; the name is kept).
@@ -76,34 +75,50 @@ class SelfhostEdgeGuard:
         maintenance: Maintenance | None = None,
         maintenance_interval: float = MAINTENANCE_INTERVAL_SECONDS,
         rate_limiters: RateLimiters | None = None,
-        authz_local: bool = False,
     ) -> None:
         self.app = app
-        self._authz_local = authz_local
         self._clock = clock
         make = (rate_limiters or build_rate_limiters("memory")).token_bucket
         per_second = PUBLIC_REQUESTS_PER_MINUTE / 60.0
         self._register = make(PUBLIC_REQUESTS_PER_MINUTE, per_second, clock)
-        self._register_daily = make(REGISTRATIONS_PER_DAY, REGISTRATIONS_PER_DAY / 86400.0, clock)
+        self._register_daily = make(
+            REGISTRATIONS_PER_DAY, REGISTRATIONS_PER_DAY / 86400.0, clock
+        )
         self._authorize = make(PUBLIC_REQUESTS_PER_MINUTE, per_second, clock)
-        # Only the local authorization server has these two endpoints (nothing else is built
-        # in the default mode, so its behaviour is exactly what it always was).
-        self._token = (
-            make(TOKEN_REQUESTS_PER_MINUTE, TOKEN_REQUESTS_PER_MINUTE / 60.0, clock)
-            if authz_local
-            else None
+        self._token = make(
+            TOKEN_REQUESTS_PER_MINUTE, TOKEN_REQUESTS_PER_MINUTE / 60.0, clock
         )
-        self._revoke = (
-            make(REVOKE_REQUESTS_PER_MINUTE, REVOKE_REQUESTS_PER_MINUTE / 60.0, clock)
-            if authz_local
-            else None
+        self._revoke = make(
+            REVOKE_REQUESTS_PER_MINUTE, REVOKE_REQUESTS_PER_MINUTE / 60.0, clock
         )
-        self._maintenance = maintenance
-        self._maintenance_interval = maintenance_interval
-        self._last_maintenance: float | None = None
-        self._background: set[asyncio.Task[None]] = set()
+        self._maintenance = MaintenanceScheduler(
+            maintenance, clock=clock, interval=maintenance_interval
+        )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        config_marker = CURRENT_CONFIG.set(None)
+        marker = MCP_READ.set(None)
+        unavailable_marker = MCP_UNAVAILABLE.set(False)
+        started = False
+
+        async def record_send(message: Message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self._dispatch(scope, receive, record_send)
+        except StoreUnavailable:
+            if scope["type"] != "http" or started:
+                raise
+            await _respond(send, 503, {"error": "temporarily_unavailable"})
+        finally:
+            CURRENT_CONFIG.reset(config_marker)
+            MCP_READ.reset(marker)
+            MCP_UNAVAILABLE.reset(unavailable_marker)
+
+    async def _dispatch(self, scope: Scope, receive: Receive, send: Send) -> None:
         scope_type = scope["type"]
         if scope_type not in ("http", "websocket"):
             await self.app(scope, receive, send)
@@ -119,7 +134,7 @@ class SelfhostEdgeGuard:
             if path == REGISTER_PATH and method == "POST":
                 await self._guarded_register(scope, receive, send)
                 return
-            if self._authz_local and path == AUTHORIZE_PATH and method == "HEAD":
+            if path == AUTHORIZE_PATH and method == "HEAD":
                 # Starlette serves HEAD wherever GET is routed, and the SDK handler reads the
                 # form of every non-GET request, so a HEAD with a body would be a whole
                 # /authorize request (a transaction row, a metadata fetch) outside the
@@ -135,37 +150,41 @@ class SelfhostEdgeGuard:
                 if retry > 0:
                     await _too_many_requests(send, retry)
                     return
-                self._schedule_maintenance()
-                if self._authz_local and method == "POST":
+                self._maintenance.schedule()
+                if method == "POST":
                     await self._capped_oauth_form(scope, receive, send)
                     return
-            elif (
-                self._token is not None
-                and self._revoke is not None
-                and method == "POST"
-                and path in (TOKEN_PATH, REVOKE_PATH)
-            ):
+            elif method == "POST" and path in (TOKEN_PATH, REVOKE_PATH):
                 bucket = self._token if path == TOKEN_PATH else self._revoke
                 retry = bucket.take()
                 if retry > 0:
                     await _too_many_requests(send, retry)
                     return
-                self._schedule_maintenance()
+                self._maintenance.schedule()
                 await self._capped_oauth_form(scope, receive, send)
                 return
         await self.app(scope, receive, send)
 
-    async def _capped_oauth_form(self, scope: Scope, receive: Receive, send: Send) -> None:
+    async def _capped_oauth_form(
+        self, scope: Scope, receive: Receive, send: Send
+    ) -> None:
         """Pass the request on with its (small) form body read and replayed, or refuse it with 413."""
         body = await _read_capped_body(scope, receive, MAX_OAUTH_FORM_BYTES)
         if body is None:
             await _respond(
-                send, 413, {"error": "invalid_request", "error_description": "request is too large"}
+                send,
+                413,
+                {
+                    "error": "invalid_request",
+                    "error_description": "request is too large",
+                },
             )
             return
         await self.app(scope, _replaying(body, receive), send)
 
-    async def _guarded_register(self, scope: Scope, receive: Receive, send: Send) -> None:
+    async def _guarded_register(
+        self, scope: Scope, receive: Receive, send: Send
+    ) -> None:
         retry = self._register.take()
         if retry == 0.0:
             retry = self._register_daily.take()
@@ -177,30 +196,17 @@ class SelfhostEdgeGuard:
 
         body = await _read_capped_body(scope, receive, MAX_REGISTER_BODY_BYTES)
         if body is None:
-            await _respond(send, 413, {"error": "invalid_client_metadata",
-                                       "error_description": "registration request is too large"})
+            await _respond(
+                send,
+                413,
+                {
+                    "error": "invalid_client_metadata",
+                    "error_description": "registration request is too large",
+                },
+            )
             return
-        self._schedule_maintenance()
+        self._maintenance.schedule()
         await self.app(scope, _replaying(body, receive), send)
-
-    def _schedule_maintenance(self) -> None:
-        if self._maintenance is None:
-            return
-        now = self._clock()
-        if self._last_maintenance is not None and now - self._last_maintenance < self._maintenance_interval:
-            return
-        self._last_maintenance = now
-        task = asyncio.ensure_future(self._run_maintenance(self._maintenance))
-        self._background.add(task)
-        task.add_done_callback(self._background.discard)
-
-    @staticmethod
-    async def _run_maintenance(maintenance: Maintenance) -> None:
-        try:
-            await maintenance()
-        except Exception:
-            # The exception text can carry file paths; the reason is enough.
-            log_warning("cleanup of expired OAuth records failed")
 
 
 def _replaying(body: bytes, receive: Receive) -> Receive:
@@ -231,7 +237,9 @@ async def _read_capped_body(scope: Scope, receive: Receive, limit: int) -> bytes
     while True:
         message = await receive()
         if message["type"] != "http.request":
-            return b"".join(chunks)  # disconnect: let the app see an empty or short body
+            return b"".join(
+                chunks
+            )  # disconnect: let the app see an empty or short body
         chunk = message.get("body", b"")
         total += len(chunk)
         if total > limit:
@@ -241,7 +249,9 @@ async def _read_capped_body(scope: Scope, receive: Receive, limit: int) -> bytes
             return b"".join(chunks)
 
 
-async def _respond(send: Send, status: int, payload: dict[str, Any], *, retry_after: int | None = None) -> None:
+async def _respond(
+    send: Send, status: int, payload: dict[str, Any], *, retry_after: int | None = None
+) -> None:
     body = json.dumps(payload).encode()
     headers = [
         (b"content-type", b"application/json"),
@@ -269,6 +279,9 @@ async def _too_many_requests(send: Send, retry_after_seconds: float) -> None:
     await _respond(
         send,
         429,
-        {"error": "temporarily_unavailable", "error_description": "too many requests, try again later"},
+        {
+            "error": "temporarily_unavailable",
+            "error_description": "too many requests, try again later",
+        },
         retry_after=seconds,
     )

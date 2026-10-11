@@ -23,22 +23,21 @@ from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from starlette.testclient import TestClient
 
 from canvas_mcp.core.selfhost import account_spa
-from canvas_mcp.core.selfhost.account_spa import CSP, SpaBundle, SpaBundleError
-from canvas_mcp.core.selfhost.account_web import (
+from canvas_mcp.core.selfhost.account_core import (
     ACCOUNT_CALLBACK_PATH,
     LOGIN_COOKIE,
     SESSION_COOKIE,
     SIGN_IN_ERROR_CODES,
-    _AccountApp,
+    AccountCore,
     sanitize_return_to,
 )
+from canvas_mcp.core.selfhost.account_spa import CSP, SpaBundle, SpaBundleError
 from canvas_mcp.core.selfhost.accounts import (
     DENY_ACCESS_DENIED,
     DENY_ACCESS_DISABLED,
     DENY_BAD_ROLES,
     DENY_BAD_SUBJECT,
     DENY_SIGNUPS_PAUSED,
-    DENY_WRONG_CLIENT,
     DENY_WRONG_TENANT,
     Denied,
 )
@@ -399,16 +398,16 @@ class TestServing:
             assert response.status_code == 405
 
     def test_api_paths_never_fall_through_to_the_index(self, spa: Harness) -> None:
-        for path in ("/account/api", "/account/api/", "/account/api/nope", "/account/api/me/identities"):
+        for path in ("/api/v1", "/api/v1/", "/api/v1/nope", "/api/v1/me/identities"):
             response = spa.client.get(path)
             assert response.status_code == 404
             assert response.headers["content-type"] == "application/json; charset=utf-8"
             assert response.json() == {"error": {"code": "not_found"}}
-        assert spa.client.get("/account/api/providers").status_code == 200
-        assert spa.client.get("/account/api/me").status_code == 401
+        assert spa.client.get("/api/v1/providers").status_code == 200
+        assert spa.client.get("/api/v1/me").status_code == 401
 
     def test_the_sign_in_routes_stay_server_side(self, spa: Harness) -> None:
-        response = spa.client.get("/account/login")
+        response = spa.client.get("/auth/login")
         assert response.status_code == 302
         assert urlparse(response.headers["location"]).netloc == "login.microsoftonline.com"
         assert spa.client.get(ACCOUNT_CALLBACK_PATH).status_code == 303
@@ -422,7 +421,7 @@ def sign_in_returning(h: Harness, return_to: str | None, **claims: Any) -> httpx
     params: dict[str, str] = {}
     if return_to is not None:
         params["return_to"] = return_to
-    started = h.client.get("/account/login", params=params)
+    started = h.client.get("/auth/login", params=params)
     assert started.status_code == 302
     query = {k: v[0] for k, v in parse_qs(urlparse(started.headers["location"]).query).items()}
     h.claims = {
@@ -478,13 +477,13 @@ class TestSignInReturn:
             "https://evil.example/account",
             "http://evil.example",
             "javascript:alert(1)",
-            "/account/api/me",
-            "/account/api",
+            "/api/v1/me",
+            "/api/v1",
             "/account/API/me",
-            "/account/login",
-            "/account/login?return_to=/account",
-            "/account/callback",
-            "/account/callback/x",
+            "/auth/login",
+            "/auth/login?return_to=/account",
+            "/auth/callback/entra",
+            "/auth/callback/entra/x",
             "/account/../x",
             "/account/./x",
             "/account/x/../y",
@@ -506,7 +505,7 @@ class TestSignInReturn:
         assert response.headers["location"] == "/account/"
 
     def test_the_target_is_sealed_in_the_login_cookie_only(self, spa: Harness) -> None:
-        started = spa.client.get("/account/login", params={"return_to": "/account/token"})
+        started = spa.client.get("/auth/login", params={"return_to": "/account/token"})
         assert "token" not in started.headers["location"]
         assert LOGIN_COOKIE in "".join(started.headers.get_list("set-cookie"))
 
@@ -529,8 +528,8 @@ class TestSignInReturn:
             ("//x", False),
             (None, False),
             ("", False),
-            ("/account/api", False),
-            ("/account/apix", True),
+            ("/api/v1", False),
+            ("/api/v1x", True),
         ],
     )
     def test_the_function_itself(self, value: str | None, expected: bool) -> None:
@@ -615,7 +614,6 @@ class TestSignInFailures:
     @pytest.mark.parametrize(
         ("denied", "expected"),
         [
-            (DENY_WRONG_CLIENT, "wrong_client"),
             (DENY_WRONG_TENANT, "wrong_tenant"),
             (DENY_BAD_SUBJECT, "bad_subject"),
             (DENY_BAD_ROLES, "bad_roles"),
@@ -676,10 +674,8 @@ def stack_factory(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> An
                 "ENTRA_TENANT_ID": TENANT,
                 "ENTRA_CLIENT_ID": CLIENT,
                 "ENTRA_CLIENT_SECRET": "entra-client-secret-0123456789",
-                "OAUTH_JWT_SIGNING_KEY": "jwt-signing-key-" + "z" * 40,
                 "ACCOUNT_SESSION_SECRET": base64.b64encode(bytes(range(32))).decode(),
                 "CANVAS_TOKEN_KEYS": "k1:" + base64.b64encode(bytes(32)).decode(),
-                "FASTMCP_HOME": str(tmp_path / "fastmcp"),
                 "SELFHOST_DATA_DIR": str(tmp_path / "data"),
                 **stack_env(),
                 **extra,
@@ -705,7 +701,7 @@ class TestWholeServer:
     def test_react_with_a_build_serves_it_beside_the_rest_of_the_server(
         self, stack_factory: Any, dist: pathlib.Path
     ) -> None:
-        s = stack_factory({"ACCOUNT_UI": "react", "ACCOUNT_WEB_DIST": str(dist)})
+        s = stack_factory({ "ACCOUNT_WEB_DIST": str(dist)})
         assert s.effective == "react"
         page = s.client.get("/account/")
         assert page.status_code == 200 and page.text == INDEX
@@ -719,19 +715,19 @@ class TestWholeServer:
         assert s.client.get("/.well-known/oauth-authorization-server").status_code in (200, 404)
         assert s.client.get("/nothing-here").status_code == 404
         # The API, the sign-in start and the HTML forms.
-        assert s.client.get("/account/api/providers").json()["providers"][0]["id"] == "entra"
-        error = s.client.get("/account/api/me")
+        assert s.client.get("/api/v1/providers").json()["providers"][0]["id"] == "entra"
+        error = s.client.get("/api/v1/me")
         assert error.status_code == 401 and error.headers["cache-control"] == "no-store"
         assert error.json() == {"error": {"code": "not_authenticated"}}
-        assert s.client.get("/account/login").status_code == 302
+        assert s.client.get("/auth/login").status_code == 302
         assert s.client.post("/account/token").status_code == 405
 
     @pytest.mark.parametrize("method", ["PROPFIND", "TRACE"])
     def test_an_unlisted_verb_keeps_the_headers_through_the_real_registration(
         self, stack_factory: Any, dist: pathlib.Path, method: str
     ) -> None:
-        s = stack_factory({"ACCOUNT_UI": "react", "ACCOUNT_WEB_DIST": str(dist)})
-        api = s.client.request(method, "/account/api/me")
+        s = stack_factory({ "ACCOUNT_WEB_DIST": str(dist)})
+        api = s.client.request(method, "/api/v1/me")
         assert api.status_code == 405
         assert api.json() == {"error": {"code": "method_not_allowed"}}
         assert api.headers["cache-control"] == "no-store"
@@ -746,9 +742,9 @@ class TestWholeServer:
     def test_a_foreign_origin_is_stopped_by_the_outer_guard(
         self, stack_factory: Any, dist: pathlib.Path
     ) -> None:
-        s = stack_factory({"ACCOUNT_UI": "react", "ACCOUNT_WEB_DIST": str(dist)})
+        s = stack_factory({ "ACCOUNT_WEB_DIST": str(dist)})
         response = s.client.put(
-            "/account/api/me/ui-locale",
+            "/api/v1/me/ui-locale",
             json={"locale": "zh"},
             headers={"Origin": "https://evil.example"},
         )
@@ -760,14 +756,14 @@ class TestWholeServer:
         page = s.client.get("/account")
         assert page.status_code == 200 and "Sign in with Microsoft" in page.text
         assert page.headers["content-security-policy"].startswith("default-src 'none'; style-src")
-        assert s.client.get("/account/api/providers").status_code == 404
-        assert s.client.get("/account/api/me").status_code == 404
+        assert s.client.get("/api/v1/providers").status_code == 404
+        assert s.client.get("/api/v1/me").status_code == 404
         assert s.client.post("/account/token").status_code == 303  # signed out: back to /account
 
     def test_legacy_is_also_what_an_explicit_value_gives(
         self, stack_factory: Any, dist: pathlib.Path
     ) -> None:
-        s = stack_factory({"ACCOUNT_UI": "legacy", "ACCOUNT_WEB_DIST": str(dist)})
+        s = stack_factory({ "ACCOUNT_WEB_DIST": str(dist)})
         assert s.effective == "legacy"
         assert "Sign in with Microsoft" in s.client.get("/account").text
         assert s.client.get("/account/assets/index-abc123.js").status_code == 404
@@ -794,7 +790,7 @@ class TestWholeServer:
         else:
             (root / "assets" / "evil name.js").write_text("x", encoding="utf-8")
         caplog.set_level(logging.WARNING)
-        s = stack_factory({"ACCOUNT_UI": "react", "ACCOUNT_WEB_DIST": str(target)})
+        s = stack_factory({ "ACCOUNT_WEB_DIST": str(target)})
         assert s.effective == "legacy"
         warnings = [r.getMessage() for r in caplog.records if "ACCOUNT_UI=react" in r.getMessage()]
         assert len(warnings) == 1
@@ -805,11 +801,11 @@ class TestWholeServer:
         assert page.headers["content-security-policy"].startswith("default-src 'none'; style-src")
         assert "Content-Security-Policy" not in INDEX
         # The sign-in is the HTML one, and the pages work in full.
-        assert s.client.get("/account/callback").status_code == 400
+        assert s.client.get("/auth/callback/entra").status_code == 400
         assert s.client.post("/account/token").status_code == 303
         # The API is still there (for a Vite dev proxy), protected like any other.
-        assert s.client.get("/account/api/providers").status_code == 200
-        assert s.client.get("/account/api/me").status_code == 401
+        assert s.client.get("/api/v1/providers").status_code == 200
+        assert s.client.get("/api/v1/me").status_code == 401
         # And never a half-served page.
         assert s.client.get("/account/assets/index-abc123.js").status_code == 404
         assert s.client.get("/account/token").status_code == 405
@@ -821,10 +817,8 @@ class TestWholeServer:
                 "ENTRA_TENANT_ID": TENANT,
                 "ENTRA_CLIENT_ID": CLIENT,
                 "ENTRA_CLIENT_SECRET": "entra-client-secret-0123456789",
-                "OAUTH_JWT_SIGNING_KEY": "jwt-signing-key-" + "z" * 40,
                 "ACCOUNT_SESSION_SECRET": base64.b64encode(bytes(range(32))).decode(),
                 "CANVAS_TOKEN_KEYS": "k1:" + base64.b64encode(bytes(32)).decode(),
-                "FASTMCP_HOME": "/tmp/fastmcp",
             }
         )
         assert settings.account_ui == "legacy"
@@ -836,7 +830,7 @@ class TestWholeServer:
 def test_the_react_routes_keep_only_the_sign_in_halves_of_the_pages(
     tmp_path: pathlib.Path, bundle: SpaBundle
 ) -> None:
-    from canvas_mcp.core.selfhost.account_web import build_account_routes
+    from canvas_mcp.core.selfhost.account_core import build_account_routes
 
     h = build_harness(tmp_path, ui="react", spa=bundle)
     routes = build_account_routes(
@@ -847,14 +841,14 @@ def test_the_react_routes_keep_only_the_sign_in_halves_of_the_pages(
         spa=bundle,
     )
     paths = [r.path for r in routes]
-    assert "/account/login" in paths and "/account/callback" in paths
+    assert "/auth/login" in paths and "/auth/callback/entra" in paths
     assert "/account/token" not in paths and "/account/admin" not in paths
     # The API (and its JSON 404) come before the single-page fallback.
-    assert paths.index("/account/api") < paths.index("/account/{path:path}")
-    assert paths.index("/account/api/{rest:path}") < paths.index("/account/{path:path}")
+    assert paths.index("/api/v1") < paths.index("/account/{path:path}")
+    assert paths.index("/api/v1/{rest:path}") < paths.index("/account/{path:path}")
     assert paths.index("/account/assets/{name:path}") < paths.index("/account/{path:path}")
     # The legacy composition has no API and no fallback at all.
     legacy = build_account_routes(make_cfg(), h.store, h.identity)  # type: ignore[arg-type]
-    assert not [r.path for r in legacy if r.path.startswith("/account/api")]
+    assert not [r.path for r in legacy if r.path.startswith("/api/v1")]
     assert "/account/{path:path}" not in [r.path for r in legacy]
-    assert len(_AccountApp.route_table(_AccountApp.__new__(_AccountApp))) >= 17
+    assert len(AccountCore.route_table(AccountCore.__new__(AccountCore))) >= 17

@@ -1,65 +1,21 @@
-"""Per-request identity and Canvas credentials for the self-hosted mode.
-
-A pure ASGI middleware that runs inside FastMCP's authentication, so
-``scope['user']`` already holds the outcome of verifying the bearer token. For
-the MCP endpoint it hands the verified Entra claims to the identity service
-(:class:`~.identity.IdentityService`), which maps them to the caller's account
-``acct:<uuid>`` under the operator's admission policy, looks up the caller's own
-Canvas token in the encrypted store, and publishes both through the request
-ContextVars that the Canvas client reads. Nothing here trusts a request header,
-and nothing outlives the request.
-
-A row whose token is marked invalid (Canvas rejected it, it could not be
-decrypted, or an administrator revoked it) gets no credentials at all: the
-request carries the re-enroll message instead, so not one Canvas request is made
-with that token. Each request also starts a shared token-health object, so a
-token found dead part-way through (see :mod:`canvas_mcp.core.token_health`) stops
-the rest of that request's Canvas calls.
-
-The account's status is part of that decision (read through the cache of
-:mod:`.principal_access`): an account an administrator disabled, one still waiting
-for approval and a principal without an account all get a 403 for every MCP request,
-whatever token they present, so an already issued or freshly refreshed token buys
-nothing. If the decision cannot be made (the database is unavailable), the request is
-refused (503) rather than let through. The status is cached for a few seconds, so a
-change made by another process is noticed within that time; a request already past
-the check is not interrupted.
-
-The credential generation the token was read under (see
-:func:`canvas_mcp.core.credentials.note_credential_generation`) travels with the
-request: every cache, health verdict and pending write confirmation is keyed by it,
-so state learned under one stored token is never used under another, and a request
-still running on a token that has since been replaced cannot publish into the
-state of the new one.
-
-The caller's own write-tool switches (what they turned on at ``/account``) are
-loaded into the request too, for the credential gate; if they cannot be read,
-no write tool is enabled for that request.
-
-The Canvas school comes only from the caller's own stored row, mapped through
-the operator's :class:`SchoolPolicy`. A host the current settings no longer
-allow is treated as "not enrolled": no Canvas call is ever made for it, and
-nothing falls back to the server's default school.
-"""
+"""Publish identity and credentials from the authenticated request snapshot."""
 
 from __future__ import annotations
 
-import functools
 import json
-import re
-from collections.abc import Collection, Mapping
+import time
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
-import anyio.to_thread
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from .. import audit
 from ..credentials import (
     RequestCredentials,
     RequestPrincipal,
     RequestTokenState,
     RequestToolPrefs,
     clear_http_request_context,
+    get_request_credentials,
     note_credential_generation,
     run_pending_credential_purges,
     set_http_request_active,
@@ -72,6 +28,7 @@ from ..credentials import (
     set_request_tool_prefs,
 )
 from ..logging import log_error, log_warning
+from . import custody
 from .accounts import (
     DENY_ACCESS_DENIED,
     DENY_ACCESS_DISABLED,
@@ -83,20 +40,18 @@ from .accounts import (
     valid_account_key,
 )
 from .authz.fastmcp_compat import AuthenticatedUser
-from .principal_access import access_unavailable_message
-from .schools import SchoolPolicy
+from .config_snapshot import CURRENT_CONFIG, ConfigSnapshots
+from .db.snapshots import McpSnapshot
+from .db.workers import run_store
+from .mcp_state import MCP_READ, MCP_UNAVAILABLE, McpRead
+from .principal_access import access_unavailable_message, snapshot_status
 from .settings import COURSE_STATE_PER_PRINCIPAL, COURSE_STATE_REQUEST_LOCAL
 from .token_store import (
     REASON_DECRYPT_FAILED,
     REASON_REVOKED_BY_ADMIN,
     STATUS_INVALID,
-    PrincipalStatus,
-    TokenDecryptionError,
 )
-
-_GUID_RE = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-)
+from .usage import USAGE_INTERVAL_SECONDS, UsageDeduplicator
 
 _NO_CLAIMS_MESSAGE = "Your sign-in carries no identity claims. Reconnect the connector."
 
@@ -104,22 +59,15 @@ _NO_CLAIMS_MESSAGE = "Your sign-in carries no identity claims. Reconnect the con
 class RequestIdentity(Protocol):
     """The slice of the identity service the middleware uses (synchronous)."""
 
-    def resolve_request(self, claims: Mapping[str, Any]) -> RequestPrincipal | Denied: ...
+    def resolve_request(
+        self, claims: Mapping[str, Any]
+    ) -> RequestPrincipal | Denied: ...
 
 
 class LocalClaimsResolver:
-    """Turns the claims of an access token this server issued into the account behind it.
+    """Resolve verified local claims from this request's account snapshot."""
 
-    Used when ``SELFHOST_AUTH_MODE=local``. The JWT was verified (signature, issuer,
-    audience, expiry) and its grant checked before it got here; this adds the account:
-    the subject must be a well-formed ``acct:<uuid>`` that is the ``acct`` claim, and the
-    account must be active **now** (read through the access cache, so a disabling
-    reaches every request within its TTL whatever token the client holds). A database
-    error propagates and the caller answers 503.
-    """
-
-    def __init__(self, access: AccessChecker, issuer: str) -> None:
-        self._access = access
+    def __init__(self, issuer: str) -> None:
         self._issuer = issuer
 
     def resolve_request(self, claims: Mapping[str, Any]) -> RequestPrincipal | Denied:
@@ -132,7 +80,14 @@ class LocalClaimsResolver:
             or not valid_account_key(acct)
         ):
             return denied(DENY_BAD_SUBJECT)
-        status = self._access.status(acct)
+        read = MCP_READ.get()
+        if (
+            read is None
+            or read.account_id != acct
+            or read.grant_id != claims.get("grant")
+        ):
+            return denied(DENY_BAD_SUBJECT)
+        status = snapshot_status(read)
         if status.disabled:
             return denied(DENY_ACCESS_DISABLED)
         if status.pending:
@@ -141,30 +96,13 @@ class LocalClaimsResolver:
             return denied(DENY_ACCESS_DENIED)
         return RequestPrincipal(
             key=acct,
-            tenant_id="",
-            object_id="",
             display_name=status.display_name,
-            upn="",
-            roles=frozenset(),
             is_owner=status.is_owner,
             provider_id="local",
             issuer=self._issuer,
             subject=acct,
             account_id=account_id_of(acct),
         )
-
-
-class StoredTokenLike(Protocol):
-    """What the middleware needs from a stored row: the Canvas token and its school."""
-
-    @property
-    def api_token(self) -> str: ...
-
-    @property
-    def canvas_host(self) -> str | None: ...
-
-    @property
-    def credential_generation(self) -> int: ...
 
 
 class TokenInvalidator(Protocol):
@@ -183,42 +121,27 @@ class TokenInvalidator(Protocol):
 class ToolPrefsReader(Protocol):
     """The slice of the preferences cache the middleware uses (synchronous)."""
 
-    def enabled(self, principal_key: str) -> frozenset[str]: ...
-
-
-class AccessChecker(Protocol):
-    """The slice of the access cache the middleware uses (synchronous)."""
-
-    def status(self, principal_key: str) -> PrincipalStatus: ...
-
-    def invalidate(self, principal_key: str | None = None) -> None: ...
-
-
-class OwnerLedger(Protocol):
-    """The slice of the token store that records an owner role seen to be gone."""
-
-    def demote_owner(
-        self,
-        principal_key: str,
-        *,
-        evidence_issued_at: int,
-        listed_providers: Collection[str] | None = None,
-    ) -> bool: ...
+    def enabled(self, principal_key: str, version: int) -> frozenset[str]: ...
 
 
 class CanvasTokenReader(Protocol):
-    """The slice of the token store the middleware uses (synchronous methods)."""
-
-    def get(self, principal_key: str) -> StoredTokenLike | None: ...
+    def decrypt_snapshot(self, account_id: str, snapshot: McpSnapshot) -> str: ...
 
     def touch(self, principal_key: str, *, min_interval_seconds: int = 300) -> None: ...
 
 
 def not_enrolled_message(account_url: str) -> str:
     return (
-        "No Canvas access token is enrolled for your Microsoft account on this server. "
-        f"Open {account_url} in a browser, sign in with Microsoft, and add your Canvas "
+        "No Canvas access token is enrolled for your account on this server. "
+        f"Open {account_url} in a browser, sign in, and add your Canvas "
         "access token there (never paste it into this chat). Then try again."
+    )
+
+
+def school_not_offered_message(account_url: str) -> str:
+    return (
+        "Your Canvas school is no longer offered by this server. "
+        f"Choose an offered school at {account_url}/token or contact the server owner."
     )
 
 
@@ -258,15 +181,17 @@ def invalid_token_message(account_url: str, reason: str | None) -> str:
 
 async def _send_json(send: Send, status: int, message: str) -> None:
     body = json.dumps({"error": message}).encode("utf-8")
-    await send({
-        "type": "http.response.start",
-        "status": status,
-        "headers": [
-            (b"content-type", b"application/json"),
-            (b"content-length", str(len(body)).encode("ascii")),
-            (b"cache-control", b"no-store"),
-        ],
-    })
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+                (b"cache-control", b"no-store"),
+            ],
+        }
+    )
     await send({"type": "http.response.body", "body": body})
 
 
@@ -284,33 +209,30 @@ class SelfhostRequestContextMiddleware:
         mcp_path: str,
         identity: RequestIdentity,
         store: CanvasTokenReader,
-        schools: SchoolPolicy,
+        snapshots: ConfigSnapshots,
         account_url: str,
         health: TokenInvalidator | None = None,
         tool_prefs: ToolPrefsReader | None = None,
-        access: AccessChecker | None = None,
-        owners: OwnerLedger | None = None,
-        login_providers: Collection[str] | None = None,
+        touch_grant: Callable[[str], None],
+        clock: Callable[[], float] = time.time,
         course_state: str = COURSE_STATE_REQUEST_LOCAL,
-        identity_mode: str = "entra",
     ) -> None:
         self.app = app
         # What identifies the caller in the log when a request is refused: the Entra
         # object id (``entra``) or the account key of our own token (``local``).
-        self.local_identity = identity_mode == "local"
         # Anything but the explicit opt-in keeps the course state request-local.
         self.request_local_state = course_state != COURSE_STATE_PER_PRINCIPAL
         self.mcp_path = mcp_path
         self.identity = identity
         self.store = store
-        self.schools = schools
+        self.snapshots = snapshots
         self.account_url = account_url
         self.health = health
         self.tool_prefs = tool_prefs
-        self.access = access
-        self.owners = owners
+        self.touch_grant = touch_grant
+        self.clock = clock
+        self.usage = UsageDeduplicator(clock=clock)
         # SELFHOST_LOGIN_PROVIDERS: which owners count as usable when a role is taken back.
-        self.login_providers = login_providers
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -325,6 +247,9 @@ class SelfhostRequestContextMiddleware:
                 await self.app(scope, receive, send)
                 return
 
+            if MCP_UNAVAILABLE.get():
+                await _send_json(send, 503, access_unavailable_message())
+                return
             user = scope.get("user")
             if not isinstance(user, AuthenticatedUser):
                 # Not authenticated: FastMCP's RequireAuthMiddleware answers
@@ -339,150 +264,136 @@ class SelfhostRequestContextMiddleware:
                 return
 
             try:
-                resolved = await anyio.to_thread.run_sync(self.identity.resolve_request, claims)
+                resolved = await run_store(self.identity.resolve_request, claims)
             except Exception:  # noqa: BLE001 - fail closed; the error text is not logged
                 log_error("principal access check failed")
                 await _send_json(send, 503, access_unavailable_message())
                 return
             if isinstance(resolved, Denied):
-                if self.local_identity:
-                    acct = claims.get("acct")
-                    # Only a well-formed account key is ever logged.
-                    log_warning(
-                        "MCP request denied",
-                        reason=resolved.code,
-                        account=acct if isinstance(acct, str) and valid_account_key(acct) else None,
-                    )
-                    await _send_json(send, 403, resolved.message)
-                    return
-                oid = claims.get("oid")
+                acct = claims.get("acct")
                 log_warning(
                     "MCP request denied",
                     reason=resolved.code,
-                    # Only a well-formed object id is ever logged: it is how an operator
-                    # finds the person; no name, e-mail address or free text is.
-                    entra_oid=oid.lower() if isinstance(oid, str) and _GUID_RE.match(oid) else None,
+                    account=acct
+                    if isinstance(acct, str) and valid_account_key(acct)
+                    else None,
                 )
                 await _send_json(send, 403, resolved.message)
                 return
             principal = resolved
 
-            await self._note_owner_role_gone(principal, claims)
-
             set_request_principal(principal)
             set_request_local_principal_state(self.request_local_state)
             set_request_token_state(RequestTokenState())
-            set_request_tool_prefs(await self._load_tool_prefs(principal.key))
-            await self._attach_canvas_credentials(principal.key)
+            read = MCP_READ.get()
+            if read is None or read.account_id != principal.key:
+                await _send_json(send, 503, access_unavailable_message())
+                return
+            snapshot = read.snapshot
+            try:
+                CURRENT_CONFIG.set(
+                    await run_store(self.snapshots.get, snapshot.settings_revision)
+                )
+            except Exception:
+                await _send_json(send, 503, access_unavailable_message())
+                return
+            self._publish_generation(principal.key, snapshot.credential_generation)
+            if not await self._attach_canvas_credentials(principal.key, snapshot):
+                await _send_json(send, 503, unreadable_token_message(self.account_url))
+                return
+            set_request_tool_prefs(
+                await self._load_tool_prefs(principal.key, snapshot.write_tools_version)
+            )
             await self.app(scope, receive, send)
+            try:
+                await self._touch_usage(read)
+            except Exception:
+                pass  # last-use bookkeeping never changes a completed response
         finally:
             clear_http_request_context()
 
-    async def _note_owner_role_gone(
-        self, principal: RequestPrincipal, claims: Mapping[str, Any]
-    ) -> None:
-        """Lower the stored owner role when a verified token proves the rule no longer holds.
-
-        Only ever lowers it, and only on a token issued after the last recorded
-        sign-in (see ``TokenStore.demote_owner``). Never raises.
-        """
-        if self.owners is None or self.access is None or principal.is_owner:
-            return
-        issued = claims.get("iat")
-        if not isinstance(issued, int | float) or isinstance(issued, bool):
-            return
-        try:
-            status = await anyio.to_thread.run_sync(self.access.status, principal.key)
-            if not status.is_owner:
-                return
-            changed = await anyio.to_thread.run_sync(
-                functools.partial(
-                    self.owners.demote_owner,
-                    principal.key,
-                    evidence_issued_at=int(issued),
-                    listed_providers=self.login_providers,
-                )
-            )
-            if changed:
-                audit.log_principal_event(
-                    "owner_lost", principal.key, reason="access_token_roles"
-                )
-                self.access.invalidate(principal.key)
-        except Exception:  # noqa: BLE001 - bookkeeping must never change the answer
-            pass
-
-    async def _load_tool_prefs(self, principal_key: str) -> RequestToolPrefs:
+    async def _load_tool_prefs(
+        self, principal_key: str, version: int
+    ) -> RequestToolPrefs:
         """The write tools this caller switched on; nothing enabled when they cannot be read."""
         if self.tool_prefs is None:
             return RequestToolPrefs()
         try:
-            enabled = await anyio.to_thread.run_sync(self.tool_prefs.enabled, principal_key)
+            enabled = await run_store(self.tool_prefs.enabled, principal_key, version)
         except Exception:  # noqa: BLE001 - fail closed; the error text is not logged
             log_error("write-tool preferences unreadable")
             return RequestToolPrefs(readable=False)
         return RequestToolPrefs(enabled=enabled)
 
-    async def _attach_canvas_credentials(self, principal_key: str) -> None:
-        try:
-            row: Any = await anyio.to_thread.run_sync(self.store.get, principal_key)
-        except Exception as exc:
-            # The exception text is never logged: it can sit next to key or
-            # token material.
-            log_error("stored Canvas token unreadable", account=principal_key)
-            generation: int | None = None
-            if isinstance(exc, TokenDecryptionError):
-                # Only a failed decryption invalidates the row; a locked or
-                # failing database says nothing about the token.
-                generation = self._publish_generation(principal_key, exc.credential_generation)
-                await self._record_unreadable(
-                    principal_key, exc.updated_at, exc.credential_generation
-                )
-            message = unreadable_token_message(self.account_url)
-            set_missing_credentials_message(message)
-            self._mark_request_dead(message, generation)
-            return
-
-        if row is None:
-            set_missing_credentials_message(not_enrolled_message(self.account_url))
-            return
-
-        generation = self._publish_generation(
-            principal_key, getattr(row, "credential_generation", None)
-        )
-        if getattr(row, "status", None) == STATUS_INVALID:
-            # Canvas rejected this token, an administrator revoked it, or it
-            # could not be decrypted before: mount no credentials, so this
-            # request makes no Canvas call, and say how to fix it.
-            message = invalid_token_message(
-                self.account_url, getattr(row, "invalid_reason", None)
+    async def _touch_usage(self, read: McpRead) -> None:
+        snapshot, stale = read.snapshot, int(self.clock()) - USAGE_INTERVAL_SECONDS
+        if (
+            snapshot.grant_used_at is None or snapshot.grant_used_at < stale
+        ) and self.usage.take("grant", read.grant_id):
+            await run_store(self.touch_grant, read.grant_id)
+        if (
+            get_request_credentials() is not None
+            and snapshot.credential_id is not None
+            and (
+                snapshot.credential_used_at is None
+                or snapshot.credential_used_at < stale
             )
+            and self.usage.take("credential", snapshot.credential_id)
+        ):
+            await run_store(self.store.touch, read.account_id)
+
+    async def _attach_canvas_credentials(
+        self, principal_key: str, snapshot: McpSnapshot
+    ) -> bool:
+        generation = snapshot.credential_generation
+        if snapshot.credential_id is None:
+            set_missing_credentials_message(not_enrolled_message(self.account_url))
+            return True
+        if snapshot.credential_status == STATUS_INVALID:
+            message = invalid_token_message(self.account_url, snapshot.invalid_reason)
             set_missing_credentials_message(message)
             self._mark_request_dead(message, generation)
-            return
-
-        school = self.schools.resolve_stored(getattr(row, "canvas_host", None))
-        if school is None:
-            # The settings no longer offer this user's school (or a legacy row
-            # has no default school to belong to): fail closed. The host is
-            # not logged, and touch() is deliberately not called.
-            log_warning("stored Canvas school not allowed", account=principal_key)
-            set_missing_credentials_message(not_enrolled_message(self.account_url))
-            return
-
-        set_request_credentials(
-            RequestCredentials(api_token=row.api_token, api_url=school.api_url)
+            return True
+        config = CURRENT_CONFIG.get()
+        school = (
+            None
+            if config is None
+            else config.schools.resolve_stored(snapshot.canvas_host)
         )
-        version = getattr(row, "updated_at", None)
+        if school is None:
+            set_missing_credentials_message(
+                school_not_offered_message(self.account_url)
+            )
+            return True
+        if (
+            snapshot.custody_notice_version is None
+            or snapshot.custody_notice_version < custody.CUSTODY_NOTICE_VERSION
+        ):
+            set_missing_credentials_message(
+                custody.custody_ack_required_message(self.account_url)
+            )
+            return True
+        if snapshot.generation != generation:
+            log_error("stored Canvas credential generation mismatch")
+            return False
+        try:
+            token = self.store.decrypt_snapshot(principal_key, snapshot)
+        except Exception:
+            log_error("stored Canvas token unreadable", account=principal_key)
+            await self._record_unreadable(
+                principal_key, snapshot.credential_updated_at, generation
+            )
+            return False
+        set_request_credentials(
+            RequestCredentials(api_token=token, api_url=school.api_url)
+        )
         set_request_token_state(
             RequestTokenState(
-                token_version=version if isinstance(version, int) else None,
+                token_version=snapshot.credential_updated_at,
                 credential_generation=generation,
             )
         )
-        try:
-            await anyio.to_thread.run_sync(self.store.touch, principal_key)
-        except Exception:
-            pass  # last-used bookkeeping must never fail a request
+        return True
 
     @staticmethod
     def _publish_generation(principal_key: str, value: object) -> int | None:
@@ -524,5 +435,7 @@ class SelfhostRequestContextMiddleware:
     @staticmethod
     def _mark_request_dead(message: str, generation: int | None = None) -> None:
         set_request_token_state(
-            RequestTokenState(dead=True, message=message, credential_generation=generation)
+            RequestTokenState(
+                dead=True, message=message, credential_generation=generation
+            )
         )

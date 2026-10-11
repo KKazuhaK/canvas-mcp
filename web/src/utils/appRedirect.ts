@@ -36,5 +36,5 @@ export const TXN_PATTERN = /^[A-Za-z0-9_-]{43}$/
 export function consentLoginPath(txn: string, options: { reauth?: boolean } = {}): string {
   const query = new URLSearchParams({ txn })
   if (options.reauth) query.set('reauth', '1')
-  return `/account/login?${query.toString()}`
+  return `/auth/login?${query.toString()}`
 }

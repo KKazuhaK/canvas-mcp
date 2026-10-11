@@ -6,9 +6,10 @@ import pytest
 from dbbackend import IS_POSTGRES, pg_available, pg_database
 from sqlalchemy import inspect
 
-from canvas_mcp.core.selfhost.db import baseline_v1
 from canvas_mcp.core.selfhost.db.engine import Database
 from canvas_mcp.core.selfhost.db.errors import TokenStoreError
+from canvas_mcp.core.selfhost.db.migrations import baseline_v1
+from canvas_mcp.core.selfhost.db.migrations.connections import sqlite_migration
 
 TABLES = {
     "server_state",
@@ -43,7 +44,7 @@ def test_alembics_empty_version_table_is_allowed_but_an_existing_revision_is_not
         else Database.sqlite(tmp_path / "version.sqlite3")
     )
     db.prepare_storage()
-    transaction = db.write if IS_POSTGRES else db.sqlite_migration
+    transaction = db.write if IS_POSTGRES else lambda: sqlite_migration(db)
     try:
         with transaction() as conn:
             conn.exec_driver_sql(
@@ -74,9 +75,9 @@ def test_frozen_baseline_creates_strict_schema_and_only_server_state(tmp_path):
     db = Database.sqlite(tmp_path / "v1.sqlite3")
     try:
         db.prepare_storage()
-        with db.sqlite_migration() as conn:
+        with sqlite_migration(db) as conn:
             identifier = baseline_v1.create(conn, now=100)
-            assert uuid.UUID(identifier).version == 7
+            assert uuid.UUID(identifier).version == 4
             assert set(inspect(conn).get_table_names()) == TABLES
             assert (
                 conn.exec_driver_sql(
@@ -99,7 +100,7 @@ def test_frozen_baseline_creates_strict_schema_and_only_server_state(tmp_path):
             assert sum(row[4] for row in ordinary) == 7
             assert conn.exec_driver_sql("PRAGMA foreign_key_check").all() == []
         with pytest.raises(TokenStoreError, match="empty database"):
-            with db.sqlite_migration() as conn:
+            with sqlite_migration(db) as conn:
                 baseline_v1.create(conn, now=200)
         with db.read() as conn:
             assert (
@@ -117,7 +118,7 @@ def test_baseline_transaction_is_atomic(tmp_path):
     try:
         db.prepare_storage()
         with pytest.raises(RuntimeError):
-            with db.sqlite_migration() as conn:
+            with sqlite_migration(db) as conn:
                 baseline_v1.create(conn, now=100)
                 raise RuntimeError("interrupted baseline")
         with db.read() as conn:
@@ -134,7 +135,7 @@ def test_postgres_baseline_uses_native_types_and_reviewed_storage_policy(tmp_pat
     try:
         with db.write() as conn:
             identifier = baseline_v1.create(conn, now=100)
-            assert uuid.UUID(identifier).version == 7
+            assert uuid.UUID(identifier).version == 4
             assert set(inspect(conn).get_table_names()) == TABLES
             account_columns = {
                 c["name"]: c["type"] for c in inspect(conn).get_columns("accounts")

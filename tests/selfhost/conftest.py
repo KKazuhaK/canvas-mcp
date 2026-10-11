@@ -35,23 +35,19 @@ def acct_key(oid: str, *, tenant: str = TENANT) -> str:
     Derived from the tenant and object id, so a principal built without a database
     and an account created in a store agree on the key.
     """
-    return f"acct:{uuid.uuid5(_NAMESPACE, f'{tenant}:{oid}'.lower())}"
+    return str(uuid.uuid5(_NAMESPACE, f'{tenant}:{oid}'.lower()))
 
 
 def make_principal(oid: str, *, tenant: str = TENANT, owner: bool = False) -> RequestPrincipal:
     key = acct_key(oid, tenant=tenant)
     return RequestPrincipal(
         key=key,
-        tenant_id=tenant,
-        object_id=oid.lower(),
         display_name="",
-        upn="",
-        roles=frozenset({"Canvas.Owner" if owner else "Canvas.User"}),
         is_owner=owner,
-        provider_id="entra",
-        issuer=entra_issuer(tenant),
-        subject=oid.lower(),
-        account_id=key.removeprefix("acct:"),
+        provider_id="local",
+        issuer="https://canvas.example.test",
+        subject=key,
+        account_id=key,
     )
 
 
@@ -82,7 +78,7 @@ def make_account(
             status=status,
             role=role,
             reason=reason,
-            account_id=acct_key(oid, tenant=tenant).removeprefix("acct:"),
+            account_id=acct_key(oid, tenant=tenant),
         )
     )
 
@@ -91,7 +87,7 @@ def ensure_account(
     store: Any, key: str, *, status: str = "active", role: str = "user", reason: str | None = None
 ) -> str:
     """Create the account behind a given account key (its identity is made up) and return the key."""
-    account_id = key.removeprefix("acct:")
+    account_id = key
     if status == "disabled" and reason is None:
         reason = "operator_disabled"
     return str(
@@ -124,6 +120,13 @@ def store_put(
     key = make_account(
         store, object_id, tenant=tenant_id, name=entra_display_name, username=entra_upn
     )
+    from canvas_mcp.core.selfhost.custody import (
+        CUSTODY_NOTICE_VERSION,
+        CustodyAcknowledgement,
+    )
+
+    put_kwargs.setdefault("canvas_host", "canvas.example.edu")
+    put_kwargs.setdefault("custody", CustodyAcknowledgement(CUSTODY_NOTICE_VERSION, store._now()))
     return store.put(principal_key=key, **put_kwargs)
 
 
@@ -147,7 +150,6 @@ def external(
         display_name=name,
         username=username,
         roles=frozenset(roles),
-        tenant_id=tenant,
     )
 
 
@@ -172,13 +174,13 @@ def sign_in(
     ext = external(oid, tenant=tenant, name=name, roles=roles)
     verdict = Verdict(admitted_by_rule=member or owner, owner_by_rule=owner)
     # A new account gets the same key as make_account / make_principal would give it.
-    store._new_account_id = lambda e: acct_key(e.subject, tenant=tenant).removeprefix("acct:")
+    store._new_account_id = lambda e: acct_key(e.subject, tenant=tenant)
     return store.resolve_identity(ext, verdict, policy, purpose=purpose, ip=ip, ua_hash=ua_hash)
 
 
 def identity_service(store: Any, *, access: Any = None, policy: Any = POLICY) -> IdentityService:
     """The identity service the server builds, over ``store`` (real or a fake with the same methods)."""
-    return IdentityService(store, EntraClaimsPolicy(TENANT, CLIENT), policy, access=access)
+    return IdentityService(store, EntraClaimsPolicy(TENANT, CLIENT), policy)
 
 
 class FakeAccounts:

@@ -1,1280 +1,144 @@
-"""The deployment docs stay complete: every required setting is documented."""
+"""Validate deployable v1 configuration and operator/security documentation."""
 
 from __future__ import annotations
 
+import base64
 import re
 from pathlib import Path
 
 import pytest
+from dotenv import dotenv_values
 
-SELFHOST = Path(__file__).resolve().parents[1] / "deploy" / "selfhost"
-
-# Settings the server refuses to start without in entra-oauth mode. Mirrors the
-# env_contract entries marked required.
-REQUIRED_VARS = (
-    "MCP_AUTH_MODE",
-    "PUBLIC_BASE_URL",
-    "ENTRA_TENANT_ID",
-    "ENTRA_CLIENT_ID",
-    "ENTRA_CLIENT_SECRET",
-    "OAUTH_JWT_SIGNING_KEY",
-    "ACCOUNT_SESSION_SECRET",
-    "CANVAS_TOKEN_KEYS",
-    "FASTMCP_HOME",
-    "CANVAS_API_URL",
+from canvas_mcp.core.config import STUDENT_WRITE_TOOL_NAMES
+from canvas_mcp.core.selfhost.settings import (
+    REMOVED_SETTINGS,
+    SelfhostConfigError,
+    load_selfhost_settings,
 )
 
-# Settings that must stay unset in this mode: they may appear in comments only.
-MUST_BE_UNSET = (
-    "CANVAS_API_TOKEN",
-    "MCP_ACCESS_KEYS",
-    "ENTRA_AUTH_ENABLED",
-    "MCP_ALLOW_UNAUTHENTICATED",
-    "ACCESS_REQUEST_ENABLED",
-    "FASTMCP_SSRF_TRUST_PROXY",
-)
-
-STUDENT_WRITE_TOOLS = (
-    "submit_assignment",
-    "comment_on_my_submission",
-    "mark_module_item_done",
-    "create_planner_note",
-    "update_planner_note",
-    "delete_planner_note",
-    "mark_planner_item_complete",
-    "create_personal_calendar_event",
-    "delete_personal_calendar_event",
-    "send_message",
-    "reply_to_conversation",
-)
+ROOT = Path(__file__).resolve().parents[1]
+SELFHOST = ROOT / "deploy/selfhost"
 
 
-@pytest.fixture(scope="module")
-def env_text() -> str:
-    return (SELFHOST / "env.example").read_text(encoding="utf-8")
+def text(name):
+    return (SELFHOST / name).read_text(encoding="utf-8")
 
 
-@pytest.fixture(scope="module")
-def readme() -> str:
-    return (SELFHOST / "README.md").read_text(encoding="utf-8")
+def assignments():
+    return {key: value or "" for key, value in dotenv_values(SELFHOST / "env.example").items()}
 
 
-def _assignments(text: str) -> dict[str, str]:
-    values = {}
-    for line in text.splitlines():
-        match = re.match(r"([A-Z][A-Z0-9_]*)=(.*)$", line)
-        if match:
-            values[match.group(1)] = match.group(2)
-    return values
+@pytest.mark.parametrize("name", ["CANVAS_MCP_IMAGE", "MCP_AUTH_MODE", "PUBLIC_BASE_URL", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "ENTRA_CLIENT_SECRET", "ACCOUNT_SESSION_SECRET", "CANVAS_TOKEN_KEYS"])
+def test_required_active_template_values_exist_without_live_secrets(name):
+    values = assignments()
+    assert name in values
+    assert values[name] == ("selfhost" if name == "MCP_AUTH_MODE" else "")
 
 
-@pytest.mark.parametrize("name", REQUIRED_VARS)
-def test_env_example_sets_every_required_variable(env_text, name):
-    assert re.search(rf"^{name}=", env_text, re.MULTILINE), f"{name} is not set in env.example"
+@pytest.mark.parametrize("name", tuple(REMOVED_SETTINGS))
+def test_removed_settings_cannot_be_uncommented_from_the_template(name):
+    template = text("env.example")
+    assert not re.search(rf"^#? *{name}=", template, re.M)
 
 
-@pytest.mark.parametrize("name", REQUIRED_VARS)
-def test_required_variables_are_marked_required(env_text, name):
-    lines = env_text.splitlines()
-    index = next(i for i, line in enumerate(lines) if line.startswith(f"{name}="))
-    block = "\n".join(lines[max(0, index - 8) : index])
-    assert "Required." in block, f"{name} is not marked Required."
-
-
-def test_must_be_unset_variables_appear_only_in_comments(env_text):
-    assignments = _assignments(env_text)
-    for name in MUST_BE_UNSET:
-        assert name not in assignments, f"{name} must stay unset"
-        assert name in env_text, f"{name} should be documented in a comment"
-    assert assignments.get("EXECUTE_TYPESCRIPT_ENABLED", "false") != "true"
-
-
-def _commented_assignments(text: str) -> dict[str, str]:
-    """``# NAME=value`` lines: settings that ship switched off."""
-    values = {}
-    for line in text.splitlines():
-        match = re.match(r"#\s*([A-Z][A-Z0-9_]*)=(.*)$", line)
-        if match:
-            values[match.group(1)] = match.group(2)
-    return values
-
-
-def test_recommended_student_values(env_text):
-    values = _assignments(env_text)
-    assert values["MCP_AUTH_MODE"] == "entra-oauth"
+def test_template_has_safe_read_only_defaults():
+    values = assignments()
     assert values["CANVAS_ROLE"] == "student"
-    assert values["TIMEZONE"] == "America/Los_Angeles"
     assert values["MCP_MAX_RESULT_CHARS"] == "140000"
-
-
-def test_the_template_is_read_only_until_the_operator_opts_in(env_text):
-    """On a public multi-user server a secure setup must be opt-in, not opt-out:
-    classmates and instructors can write Canvas content that carries prompt
-    injection, and the confirmation tokens can be redeemed by the model itself."""
-    values = _assignments(env_text)
-    assert values.get("ALLOWED_WRITE_TOOLS", "") in ("", "none")
-    assert values.get("COURSE_AGENT_POLICY_DEFAULT", "deny") != "allow"
-    enabled = set(values.get("STUDENT_WRITE_TOOLS", "").split(","))
-    for risky in ("send_message", "reply_to_conversation", "submit_assignment"):
-        assert risky not in enabled, f"{risky} must not be enabled by default"
-    assert not enabled - {""}, "no student write tool should be registered by default"
-
-
-def test_the_opt_in_values_are_shown_commented_out_next_to_the_warning(env_text):
-    commented = _commented_assignments(env_text)
-    assert commented["ALLOWED_WRITE_TOOLS"] == "all"
-    assert commented["COURSE_AGENT_POLICY_DEFAULT"] == "allow"
-    assert tuple(commented["STUDENT_WRITE_TOOLS"].split(",")) == STUDENT_WRITE_TOOLS
-    block = env_text[env_text.index("prompt injection") : env_text.index("# ALLOWED_WRITE_TOOLS=all")]
-    assert "opt-in" in block
-
-
-def test_the_template_ships_no_host_specific_live_values(env_text):
-    """Copying the template and forgetting a value must fail closed, not point the
-    server at somebody else's domain or Canvas."""
-    values = _assignments(env_text)
-    assert values["PUBLIC_BASE_URL"] == ""
-    assert values["CANVAS_API_URL"] == ""
-    assert "kazuhahub" not in env_text
-    assert "uci.edu" not in env_text
-
-
-def test_an_unedited_template_is_refused_at_startup(env_text):
-    from canvas_mcp.core.selfhost.settings import (
-        SelfhostConfigError,
-        load_selfhost_settings,
-    )
-
-    env = dict(_assignments(env_text).items())
-    with pytest.raises(SelfhostConfigError) as info:
-        load_selfhost_settings(env)
-    text = " ".join(info.value.problems)
-    for name in ("PUBLIC_BASE_URL", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "OAUTH_JWT_SIGNING_KEY"):
-        assert name in text
-
-
-def test_the_audit_log_is_documented_as_opt_in(env_text, readme):
-    block = env_text[env_text.index("The audit log is off by default") :]
-    assert "LOG_ACCESS_EVENTS=true" in block
-    assert "/account" in block and "does not write an audit log entry" in block
-    assert "The audit log is **off by default**" in readme
-    assert "does not write an audit log entry" in readme
-
-
-def test_env_example_ships_no_secret_values(env_text):
-    values = _assignments(env_text)
-    for name in (
-        "ENTRA_CLIENT_SECRET",
-        "OAUTH_JWT_SIGNING_KEY",
-        "ACCOUNT_SESSION_SECRET",
-        "CANVAS_TOKEN_KEYS",
-        "ENTRA_TENANT_ID",
-        "ENTRA_CLIENT_ID",
-    ):
-        assert values[name] == "", f"{name} must be blank in the template"
-
-
-def test_readme_covers_the_entra_and_edge_setup(readme):
-    for needle in (
-        "https://canvas.mcp.kazuhahub.com/auth/callback",
-        "https://canvas.mcp.kazuhahub.com/account/callback",
-        "160.79.104.0/21",
-        "requestedAccessTokenVersion",
-        "accessTokenAcceptedVersion",
-        "Assignment required",
-        "Ask before using",
-        "api://",
-        "Canvas.Access",
-        "Canvas.User",
-        "Canvas.Owner",
-        "https://canvas.mcp.kazuhahub.com/mcp",
-        "claude mcp add --transport http canvas",
-        "token_admin rotate",
-        "Revoke sessions",
-        "/account/admin",
-    ):
-        assert needle in readme, f"README.md is missing {needle!r}"
-
-
-def test_proxy_examples_forward_the_host_header_and_do_not_buffer():
-    nginx = (SELFHOST / "nginx.conf.example").read_text(encoding="utf-8")
-    for directive in (
-        "proxy_pass http://127.0.0.1:8819;",
-        "proxy_set_header Host $host;",
-        "proxy_buffering off;",
-        "proxy_cache off;",
-        "proxy_read_timeout 300s;",
-        "client_max_body_size 10m;",
-        "Strict-Transport-Security",
-    ):
-        assert directive in nginx
-    caddy = (SELFHOST / "Caddyfile.example").read_text(encoding="utf-8")
-    assert "reverse_proxy 127.0.0.1:8819" in caddy
-    assert "flush_interval -1" in caddy
-
-
-def test_smoke_test_script_is_wired_for_the_documented_contract():
-    script = (SELFHOST / "smoke-test.sh").read_text(encoding="utf-8")
-    for needle in (
-        "set -euo pipefail",
-        "trap cleanup EXIT",
-        "MCP_AUTH_MODE=entra-oauth",
-        "resource_metadata=",
-        "oauth-protected-resource/mcp",
-        "client_id_metadata_document_supported",
-        "frame-ancestors 'none'",
-        "Host: evil.example",
-        "421",
-        "MCP_ACCESS_KEYS",
-        # The React account UI boot: the strict CSP, caching, deep link and API checks.
-        "ACCOUNT_UI=react",
-        "script-src 'self'",
-        "/account/assets/",
-        "immutable",
-        "/account/token",
-        "/account/api/providers",
-        "not_authenticated",
-        # ...and the fallback to the legacy pages when the build is not usable.
-        "ACCOUNT_WEB_DIST=/nonexistent",
-        "serving the legacy /account pages",
-        # SELFHOST_AUTH_MODE=local: the server's own authorization server.
-        "SELFHOST_AUTH_MODE=local",
-        "token_endpoint_auth_methods_supported",
-        "authorization_response_iss_parameter_supported",
-        "revocation_endpoint",
-        "/revoke",
-        "invalid_client",
-        "invalid_redirect_uri",
-        "/account/login?txn=bogus",
-        "authorization_invalid",
-        "SELFHOST_AUTH_MODE=bogus",
-        "CIMD_ENABLED=false",
-    ):
-        assert needle in script, f"smoke-test.sh is missing {needle!r}"
-    # the new containers are cleaned up and their logs dumped on failure
-    for name in ("LOCAL", "LOCAL_REACT"):
-        assert f'"${name}"' in script.split("dump_logs()", 1)[1].split("fail()", 1)[0]
-        assert f'"${name}"' in script.split("cleanup()", 1)[1].split("trap cleanup", 1)[0]
-
-
-def test_smoke_test_frees_the_published_port_between_sections():
-    """Every section shares one host port, so a container must be removed before the next starts."""
-    lines = (SELFHOST / "smoke-test.sh").read_text(encoding="utf-8").splitlines()
-    running: str | None = None
-    started = 0
-    for number, line in enumerate(lines):
-        remove = re.search(r'docker rm -f "\$(\w+)"\s*>/dev/null', line)
-        if remove and remove.group(1) == running:
-            running = None
-        run = re.search(r'docker run -d --name "\$(\w+)"', line)
-        if not run:
-            continue
-        end = number
-        while lines[end].rstrip().endswith("\\"):
-            end += 1
-        if '-p "127.0.0.1:${PORT}:8819"' not in "\n".join(lines[number : end + 1]):
-            continue
-        assert running is None, (
-            f"smoke-test.sh line {number + 1} starts {run.group(1)} on the shared port "
-            f"while {running} is still running"
-        )
-        running = run.group(1)
-        started += 1
-    assert started >= 7
-
-
-
-# --- drift guards: the docs and packaging must match what the code really reads/serves ---
-
-SRC = Path(__file__).resolve().parents[1] / "src" / "canvas_mcp"
-REPO = Path(__file__).resolve().parents[1]
-
-
-def test_every_variable_the_selfhost_settings_read_is_documented(env_text):
-    source = (SRC / "core" / "selfhost" / "settings.py").read_text(encoding="utf-8")
-    read = set(re.findall(r'get\("([A-Z][A-Z0-9_]+)"\)', source))
-    read |= {
-        "ACCOUNT_SESSION_TTL_SECONDS", "OAUTH_ALLOWED_REDIRECT_URIS", "MCP_AUTH_MODE", "SELFHOST_COURSE_STATE",
-        "SELFHOST_DISABLED_TOOLS", "ACCOUNT_UI", "ACCOUNT_WEB_DIST", "SELFHOST_AUTH_MODE",
-    }
-    # The admission settings are read by the pure module (settings.py hands it the environment).
-    accounts_source = (SRC / "core" / "selfhost" / "accounts.py").read_text(encoding="utf-8")
-    read |= set(re.findall(r'^[A-Z_]+_ENV = "([A-Z][A-Z0-9_]+)"$', accounts_source, re.MULTILINE))
-    assert {"ACCESS_POLICY", "ACCESS_RULES", "OWNER_RULES", "SELFHOST_BOOTSTRAP_OWNER"} <= read
-    assert len(read) >= 12  # the regex still finds the settings
-    for name in sorted(read):
-        assert re.search(rf"^#? ?{name}=", env_text, re.MULTILINE), f"{name} is not in env.example"
-
-
-def test_the_account_ui_settings_are_documented_with_their_default_and_fallback(env_text, readme):
-    commented = _commented_assignments(env_text)
-    assert commented["ACCOUNT_UI"] == "legacy"
-    assert commented["ACCOUNT_WEB_DIST"] == "/app/web-dist"
-    assert "ACCOUNT_UI" not in _assignments(env_text)
-    section = readme[readme.index("## Account UI (React or legacy)") : readme.index("## Accounts and admission")]
-    for needle in (
-        "ACCOUNT_UI",
-        "ACCOUNT_WEB_DIST",
-        "legacy",
-        "serving the legacy /account pages",
-        "script-src 'self'",
-        "Cache-Control: no-store",
-        "immutable",
-        "/account/api",
-        "X-CSRF-Token",
-        "Origin",
-        "Never cache",
-    ):
-        assert needle in section, needle
-    assert "(#account-ui-react-or-legacy)" in readme
-
-
-def test_student_write_tools_match_the_registered_allowlist(env_text):
-    from canvas_mcp.core.config import STUDENT_WRITE_TOOL_NAMES
-
-    values = _commented_assignments(env_text)
-    assert set(values["STUDENT_WRITE_TOOLS"].split(",")) == set(STUDENT_WRITE_TOOL_NAMES)
-
-
-def test_documented_redirect_uris_are_the_code_defaults(env_text):
-    from canvas_mcp.core.selfhost.settings import DEFAULT_REDIRECT_URIS
-
-    for uri in DEFAULT_REDIRECT_URIS:
-        assert uri in env_text
-
-
-def test_container_port_health_path_and_mcp_path_match_the_code():
-    from canvas_mcp.core.selfhost.app import HEALTH_PATH
-    from canvas_mcp.core.selfhost.settings import SelfhostSettings
-
-    dockerfile = (REPO / "Dockerfile.selfhost").read_text(encoding="utf-8")
-    compose = (SELFHOST / "docker-compose.yml").read_text(encoding="utf-8")
-    assert "EXPOSE 8819" in dockerfile and '"--port", "8819"' in dockerfile
-    healthcheck = next(line for line in dockerfile.splitlines() if line.lstrip().startswith("CMD [\"python\""))
-    assert HEALTH_PATH in healthcheck and "127.0.0.1" in healthcheck and "8819" in healthcheck
-    assert "127.0.0.1:8819:8819" in compose
-    assert SelfhostSettings.mcp_path == "/mcp"
-    readme = (SELFHOST / "README.md").read_text(encoding="utf-8")
-    for route in ("/mcp", "/account", "/account/admin", "/auth/callback", "/account/callback", HEALTH_PATH):
-        assert route in readme, f"README.md does not mention {route}"
-
-
-def test_token_admin_commands_in_the_docs_exist():
-    readme = (SELFHOST / "README.md").read_text(encoding="utf-8")
-    source = (SRC / "core" / "selfhost" / "token_admin.py").read_text(encoding="utf-8")
-    for command in set(re.findall(r"token_admin (check|list-grants|revoke-grant|rotate-jwt-key|list|accounts|approve|promote-owner|revoke|remove|disable|enable|access|history|rotate|db)\b", readme)):
-        assert re.search(rf'add_parser\(\s*"{command}"', source), command
-    for command in ("list-grants", "revoke-grant", "rotate-jwt-key"):
-        assert f"token_admin {command}" in readme, command
-
-
-# --- findings from the integration review ---
-
-
-def test_proxy_examples_rate_limit_the_unauthenticated_oauth_endpoints(readme):
-    nginx = (SELFHOST / "nginx.conf.example").read_text(encoding="utf-8")
-    assert "limit_req_zone $binary_remote_addr zone=canvas_oauth:10m rate=10r/m;" in nginx
-    for path in ("/register", "/authorize"):
-        block = nginx[nginx.index(f"location = {path} {{") :]
-        block = block[: block.index("}")]
-        assert "limit_req zone=canvas_oauth burst=5 nodelay;" in block
-        assert "proxy_set_header Host $host;" in block
-    assert "limit_req_zone" in readme and "location = /register" in readme
-    caddy = (SELFHOST / "Caddyfile.example").read_text(encoding="utf-8")
-    assert "caddy-ratelimit" in caddy
-    assert "Disk and abuse protection" in readme and "Cloudflare" in readme
-
-
-def test_http2_directive_comes_with_the_nginx_version_note(readme):
-    nginx = (SELFHOST / "nginx.conf.example").read_text(encoding="utf-8")
-    assert "1.25.1" in nginx and "listen 443 ssl http2;" in nginx
-    assert "1.25.1" in readme and "listen 443 ssl http2;" in readme
-
-
-def test_backup_commands_use_the_volume_name_compose_really_creates(readme):
-    yaml = pytest.importorskip("yaml")
-    compose = yaml.safe_load((SELFHOST / "docker-compose.yml").read_text(encoding="utf-8"))
-    volume_name = compose["volumes"]["canvas-mcp-data"]["name"]
-    used = set(re.findall(r"-v ([A-Za-z0-9_.-]+):/data", readme))
-    assert used == {volume_name}, "backup/restore must name the volume compose creates"
-    assert "docker volume inspect canvas-mcp-data" in readme
-
-
-def test_readme_never_tells_the_operator_to_just_restart_after_editing_env(readme):
-    """`docker compose restart` does not re-read env_file."""
-    assert "docker compose restart" in readme  # ...only to warn against it
-    for line in readme.splitlines():
-        if "docker compose restart" in line:
-            assert "does not re-read" in line or "do not use" in line, line
-    secrets_table = readme[readme.index("### Other secrets") : readme.index("## Backup and restore")]
-    for name in ("ENTRA_CLIENT_SECRET", "ACCOUNT_SESSION_SECRET", "OAUTH_JWT_SIGNING_KEY"):
-        row = next(line for line in secrets_table.splitlines() if f"`{name}`" in line)
-        assert "docker compose up -d" in row, row
-    rotation = readme[readme.index("### Canvas token key ring") : readme.index("### Other secrets")]
-    assert rotation.count("docker compose up -d") >= 2
-
-
-def test_readme_explains_the_first_stable_tag_the_default_image_needs(readme):
-    yaml = pytest.importorskip("yaml")
-    compose_text = (SELFHOST / "docker-compose.yml").read_text(encoding="utf-8")
-    compose = yaml.safe_load(compose_text)
-    assert compose["services"]["canvas-mcp"]["image"].endswith(":latest")
-    assert "manifest unknown" in readme and "manifest unknown" in compose_text
-    assert "git tag v1.13.0-uci.1" in readme
-    assert ":edge" in readme
-
-
-def test_setup_script_is_documented_generic_and_secret_safe(readme):
-    script = (SELFHOST / "setup-env.sh").read_text(encoding="utf-8")
-    assert "\r" not in script, "setup-env.sh must use LF line endings"
-    assert script.startswith("#!/usr/bin/env bash\n")
-    assert "set -euo pipefail" in script
-    # Generic: the operator's host and Canvas come from prompts or the environment.
-    assert "kazuhahub" not in script
-    assert "uci.edu" not in script
-    # The client secret is only read from the terminal, never from argv or env.
-    assert 'read -r -s -p' in script
-    assert "ENTRA_CLIENT_SECRET=\"\"" in script
-    assert "set -o noclobber" in script and "umask 077" in script
-    # The README points operators at it, with both opt-in flags.
-    assert "setup-env.sh" in readme
-    for flag in ("--enable-writes", "--real-names"):
-        assert flag in readme and flag in script
-    smoke = (SELFHOST / "smoke-test.sh").read_text(encoding="utf-8")
-    assert "setup-env.sh" in smoke and "--env-file" in smoke
-
-
-# --- multiple schools ---
-
-
-def test_the_school_settings_ship_switched_off_and_documented(env_text):
-    commented = _commented_assignments(env_text)
-    assert "CANVAS_FEATURED_SCHOOLS" in commented
-    assert commented["CANVAS_SCHOOL_SEARCH"] == "true"
-    values = _assignments(env_text)
-    assert "CANVAS_FEATURED_SCHOOLS" not in values
-    assert "CANVAS_SCHOOL_SEARCH" not in values
-    block = env_text[env_text.index("# CANVAS_FEATURED_SCHOOLS=") :]
-    assert "canvas.instructure.com" in block and "Instructure" in block
-
-
-def test_the_documented_featured_example_parses(env_text):
-    from canvas_mcp.core.selfhost.settings import (
-        SelfhostConfigError,
-        load_selfhost_settings,
-    )
-
-    example = _commented_assignments(env_text)["CANVAS_FEATURED_SCHOOLS"]
-    env = {"CANVAS_FEATURED_SCHOOLS": example}
-    with pytest.raises(SelfhostConfigError) as info:
-        load_selfhost_settings(env)
-    # Only the unrelated required settings are missing; the example itself is valid.
-    assert "CANVAS_FEATURED_SCHOOLS" not in " ".join(info.value.problems)
-
-
-def test_readme_documents_the_school_settings_and_the_privacy_note(readme):
-    for needle in (
-        "CANVAS_FEATURED_SCHOOLS",
-        "CANVAS_SCHOOL_SEARCH",
-        "canvas.instructure.com",
-        "--school-search",
-        "schema version 2",
-    ):
-        assert needle in readme, f"README.md is missing {needle!r}"
-    assert "sent to Instructure" in readme
-
-
-def test_the_setup_script_has_the_school_search_flag_and_the_readme_names_it(readme):
-    script = (SELFHOST / "setup-env.sh").read_text(encoding="utf-8")
-    assert "--school-search" in script and "--school-search" in readme
-    assert "CANVAS_SCHOOL_SEARCH=true" in script and "CANVAS_FEATURED_SCHOOLS=" in script
-
-
-def test_the_dns_recheck_limit_is_described_accurately() -> None:
-    text = (SELFHOST / "README.md").read_text(encoding="utf-8")
-    assert "does not re-resolve the school on every request" not in text
-    assert "Addresses are checked only when a user enrolls" in text
-
-
-def test_the_root_readme_does_not_call_the_selfhost_guide_chinese() -> None:
-    text = (SELFHOST.parents[1] / "README.md").read_text(encoding="utf-8")
-    assert "written in Chinese" not in text
-
-
-def test_the_canvas_api_url_comment_does_not_contradict_itself() -> None:
-    text = (SELFHOST / "env.example").read_text(encoding="utf-8")
-    assert "All users can reach only this one Canvas" not in text
-
-
-def test_every_operator_facing_write_tool_text_mentions_the_per_user_opt_in(readme) -> None:
-    """ALLOWED_WRITE_TOOLS is a ceiling: no text may read as if it turns the tools on for users."""
-    script = (SELFHOST / "setup-env.sh").read_text(encoding="utf-8")
-    assert "ceiling" in script and '"Write tools" section of /account' in script
-    assert script.count("/account") >= 2  # the --help text and the generated .env comment
-    flat = " ".join(readme.split())
-    for needle in (
-        "`--enable-writes`: allow all the student write tools on the server. This is only the ceiling",
-        "even after you enable tools here, each user still has to turn them on",
-        "Once the operator has enabled them and a user has turned them on for themselves",
-    ):
-        assert needle in flat, f"README.md is missing {needle!r}"
-    assert "Once enabled, the AI can do these things" not in flat
-    assert flat.count("#write-tools-each-user-opts-in") >= 3
-
-
-def test_readme_documents_the_credential_lifecycle(readme):
-    assert "(#canvas-credential-lifecycle)" in readme
-    section = readme.split("## Canvas credential lifecycle", 1)[1].split("\n## ", 1)[0]
-    for needle in (
-        "credential generation",
-        "never confers any Canvas permission",
-        "Pending write confirmations",
-        "already dispatched",
-        "never cancelled",
-        "X-Canvas-Token",
-    ):
-        assert needle in section, f"credential lifecycle section is missing {needle!r}"
-    assert "schema version 4" in readme
-    assert "restart the server after a restore" in readme.lower()
-
-
-def _custody_section(readme: str) -> str:
-    return readme.split("## Custody and privacy boundary", 1)[1].split("\n## ", 1)[0]
-
-
-def test_readme_inventories_every_secret_the_mode_holds(readme):
-    section = _custody_section(readme)
-    for item in (
-        "Canvas personal access tokens",
-        "CANVAS_TOKEN_KEYS",
-        "Upstream Entra tokens",
-        "OAUTH_JWT_SIGNING_KEY",
-        "ACCOUNT_SESSION_SECRET",
-        "ENTRA_CLIENT_SECRET",
-        "Audit log",
-    ):
-        assert item in section, f"{item} is missing from the custody inventory"
-    for column in (
-        "Where it lives",
-        "Who can read it",
-        "Rotation",
-        "Backup and restore",
-        "Deletion and retention",
-    ):
-        assert column in section
-
-
-def test_readme_states_the_real_privacy_boundary(readme):
-    section = _custody_section(readme)
-    assert "database-only leak" in section
-    assert "compromised runtime" in section
-    assert "operator" in section
-    assert "not a cryptographic one" in section
-
-
-def test_the_root_readme_states_the_opt_in_exception() -> None:
-    root = (SELFHOST.parents[1] / "README.md").read_text(encoding="utf-8")
-    assert "explicit opt-in" in root
-    assert "deploy/selfhost/README.md#custody-and-privacy-boundary" in root
-    assert "compromised runtime" in root
-
-
-def test_nginx_example_logs_the_path_without_the_query_string():
-    conf = (SELFHOST / "nginx.conf.example").read_text(encoding="utf-8")
-    format_line = next(
-        line for line in conf.splitlines() if line.startswith("log_format canvas_safe")
-    )
-    assert "$uri" in format_line
-    for leaky in (
-        "$request ",
-        '$request"',
-        "$request_uri",
-        "$args",
-        "$query_string",
-        "$http_authorization",
-        "$http_cookie",
-        "$http_referer",
-    ):
-        assert leaky not in format_line
-    assert re.search(r"^\s*access_log\s+\S+\s+canvas_safe;", conf, re.MULTILINE)
-
-
-def test_caddy_example_blanks_oauth_query_values_and_credential_headers():
-    conf = (SELFHOST / "Caddyfile.example").read_text(encoding="utf-8")
-    active = "\n".join(
-        line for line in conf.splitlines() if not line.lstrip().startswith("#")
-    )
-    assert "format filter" in active
-    for needle in (
-        "request>uri query",
-        "replace code REDACTED",
-        "replace state REDACTED",
-        "request>headers>Authorization delete",
-        "request>headers>Cookie delete",
-    ):
-        assert needle in active
-
-
-def test_readme_documents_the_proxy_log_redaction(readme):
-    assert "### Keep OAuth codes out of proxy logs" in readme
-    assert "canvas_safe" in readme
-    assert "replace code REDACTED" in readme
-
-
-def test_env_example_no_longer_offers_revoking_enrollments():
-    text = (SELFHOST / "env.example").read_text(encoding="utf-8")
-    assert "revoke enrollments" not in text
-    owner_line = next(line for line in text.splitlines() if "Operator role" in line)
-    assert "disable" in owner_line and "remove" in owner_line
-
-
-def test_readme_states_what_the_scrub_and_the_guards_do_not_cover(readme):
-    # Third-party (FastMCP) log lines are scrubbed by shape only.
-    assert "bare OAuth transaction id" in readme
-    # The last-owner guard counts stored owner flags, which can be stale.
-    assert "never comes back therefore still counts" in readme
-    assert "owner_seen_at" in readme
-    # Audit endpoints mask names, not only numbers.
-    assert "page slugs" in readme
-
-
-def test_readme_lists_every_setting_that_must_stay_unset(readme):
-    marker = "Settings that must stay unset"
-    assert marker in readme
-    section = readme[readme.index(marker) : readme.index(marker) + 1500]
-    for name in MUST_BE_UNSET:
-        assert name in section, f"README does not list {name} among the settings that must stay unset"
-
-
-def test_the_course_state_setting_ships_at_its_default_and_is_documented(env_text, readme):
-    from canvas_mcp.core.selfhost.settings import COURSE_STATES, DEFAULT_COURSE_STATE
-
-    assert _commented_assignments(env_text)["SELFHOST_COURSE_STATE"] == DEFAULT_COURSE_STATE
-    assert "SELFHOST_COURSE_STATE" not in _assignments(env_text)
-    for value in COURSE_STATES:
-        assert value in env_text, f"env.example does not explain {value}"
-    assert "## Course state: request-local or per user" in readme
-    section = readme[readme.index("## Course state: request-local or per user") :]
-    section = section[: section.index("\n## ", 5)]
-    assert "SELFHOST_COURSE_STATE" in section
-    for value in COURSE_STATES:
-        assert f"`{value}`" in section, f"README does not explain {value}"
-    assert "default" in section.lower() and "opt-in" in section.lower()
-
-
-def test_the_disabled_tools_setting_ships_off_and_is_documented(env_text, readme):
-    from canvas_mcp.core.selfhost.settings import DISABLED_TOOLS_ENV
-
-    assert DISABLED_TOOLS_ENV == "SELFHOST_DISABLED_TOOLS"
-    assert _commented_assignments(env_text)[DISABLED_TOOLS_ENV] == ""
-    assert DISABLED_TOOLS_ENV not in _assignments(env_text)
-    assert "## Disabling tools" in readme
-    section = readme[readme.index("## Disabling tools") :]
-    section = section[: section.index(chr(10) + "## ", 5)]
-    assert DISABLED_TOOLS_ENV in section
-    for text in ("read_course_file_text", "unknown", "only remove", "--config", "restart"):
-        assert text in section, f"README no longer mentions {text!r} for disabling tools"
-
-
-def test_readme_records_what_the_oauth_proxy_does_with_replayed_codes_and_refresh_tokens(readme):
-    heading = "### How the OAuth proxy treats replayed codes and refresh tokens"
-    assert heading in readme
-    section = readme[readme.index(heading) :]
-    section = section[: section.index("\n## ", 5)]
-    for text in ("invalid_grant", "code_challenge", "S256", "family", "not** revoked", "Revoking a user"):
-        assert text in section, f"the OAuth notes no longer mention {text!r}"
-
-
-def test_the_docs_do_not_claim_request_local_equals_upstream_for_every_kind_of_state(env_text, readme):
-    # Upstream keeps policy decisions, pseudonyms and discussion hints in process-wide
-    # maps shared by all callers (keyed by course, user or topic id, not by caller);
-    # only the course list and aliases are request-local there. request_local is
-    # stricter, and the text may be quoted upstream, so it must not misdescribe upstream.
-    root = Path(__file__).resolve().parents[1]
-    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-    settings_py = (root / "src" / "canvas_mcp" / "core" / "selfhost" / "settings.py").read_text(encoding="utf-8")
-    assert "This is how the upstream HTTP modes work." not in env_text
-    assert "already work" not in readme[readme.index("`request_local` (default)") :][:1500]
-    assert "like the upstream HTTP modes; tools" not in changelog
-    assert "the default, like the upstream HTTP modes" not in settings_py
-    for text in (env_text, readme, settings_py):
-        flat = " ".join(text.replace("#", " ").split())
-        assert "stricter than" in flat and "shared by all callers" in flat
-        # Upstream does not key these caches by a token hash; never say it does.
-        assert "process-wide by token hash" not in flat
-    assert "stricter than upstream" in changelog
-
-
-def test_the_credential_lifecycle_names_the_rows_that_follow_the_course_state_setting(readme):
-    heading = "What is bound to the generation"
-    sentence = readme[readme.index(heading) :].split("\n", 1)[0]
-    assert "first three rows" in sentence and "first four rows" not in sentence
-    table = readme[readme.index(heading) :].split("\n\n", 2)[1].splitlines()
-    rows = [line for line in table if line.startswith("| ") and not line.startswith(("| State", "|---"))]
-    # Rows 1-3 are course state; row 4 is the pending write confirmations, which
-    # stay process-wide in every mode.
-    assert rows[3].startswith("| Pending write confirmations")
-
-
-def test_the_ssrf_proxy_refusal_lists_exactly_the_words_the_code_accepts_as_false(readme):
-    from canvas_mcp.core.selfhost.app import _FALSE_WORDS
-
-    paragraph = readme[readme.index("**Settings that must stay unset.**") :].split("\n", 1)[0]
-    listed = re.search(r"explicit false \(([^)]*)\)", paragraph)
-    assert listed, "README no longer lists the accepted false values"
-    words = set(re.findall(r"`([^`]*)`", listed.group(1)))
-    assert words == _FALSE_WORDS - {""}
-
-
-def test_the_database_section_documents_every_database_setting_and_command(readme):
-    section = readme[readme.index("\n## Database\n") :]
-    section = section[: section.index("\n## Secret rotation\n")]
-    for needle in (
-        "DATABASE_URL",
-        "DATABASE_AUTO_MIGRATE",
-        "DATABASE_ALLOW_SQLITE_OUTSIDE_DATA_DIR",
-        "SELFHOST_STATE_BACKEND",
-        "postgresql+psycopg://",
-        "docker-compose.postgres.yml",
-        "token_admin db current",
-        "token_admin db upgrade",
-        "db import-sqlite",
-        "pg_advisory_xact_lock",
-        "READ COMMITTED",
-        "FASTMCP_HOME",
-        "Alembic",
-        "reserved",
-        "No downgrade",
-        "sslmode=verify-full",
-        "pgbouncer",
-    ):
-        assert needle in section, f"the Database section is missing {needle!r}"
-    assert "[Database](#database)" in readme
-
-
-def test_the_database_commands_in_the_docs_exist_in_the_cli():
-    source = (SRC / "core" / "selfhost" / "token_admin.py").read_text(encoding="utf-8")
-    for command in ("current", "upgrade", "import-sqlite"):
-        assert re.search(rf'add_parser\(\s*"{command}"', source), command
-
-
-# --- the account model ---
-
-
-def test_the_readme_documents_accounts_admission_and_the_upgrade(readme):
-    for needle in (
-        "## Accounts and admission",
-        "### Upgrading to the account model",
-        "acct:<uuid>",
-        "https://login.microsoftonline.com/<tenant id>/v2.0",
-        "ACCESS_POLICY",
-        "ACCESS_RULES",
-        "ACCESS_FALLBACK",
-        "OWNER_RULES",
-        "SELFHOST_BOOTSTRAP_OWNER",
-        "TRUSTED_PROXY_CIDRS",
-        "/account/admin/audit",
-        "db upgrade --dry-run",
-        "pre-0002-accounts",
-        "pg_dump",
-        "token_admin approve",
-        "token_admin promote-owner",
-    ):
-        assert needle in readme, f"README.md is missing {needle!r}"
-
-
-def test_the_changelog_announces_the_account_model():
-    changelog = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
-    unreleased = changelog[changelog.index("## [Unreleased]") :].split("\n## [")[0]
-    assert "acct:<uuid>" in unreleased and "0002_accounts" in unreleased
-
-
-def test_the_documented_rule_kinds_are_the_ones_the_parser_accepts():
-    from canvas_mcp.core.selfhost import accounts
-
-    problems: list[str] = []
-    tenant = "11111111-2222-3333-4444-555555555555"
-    for rule in (
-        "entra:role:Canvas.User",
-        "entra:group:99999999-0000-4000-8000-000000000001",
-        f"entra:tenant:{tenant}",
-    ):
-        accounts.parse_access_settings(
-            {"ACCESS_RULES": rule}, tenant_id=tenant, required_role="Canvas.User",
-            owner_role="Canvas.Owner", problems=problems,
-        )
-    assert problems == []
-    for rule in ("google:role:x", "github:role:x", "oidc:role:x", "entra:magic:x", "other:role:x"):
-        refused: list[str] = []
-        accounts.parse_access_settings(
-            {"ACCESS_RULES": rule}, tenant_id=tenant, required_role="Canvas.User",
-            owner_role="Canvas.Owner", problems=refused,
-        )
-        assert refused, rule
-
-
-# --- the server's own MCP authorization server (SELFHOST_AUTH_MODE=local) ---
-
-AUTHZ_HEADING = "## MCP authorization: entra_proxy (default) or local"
-
-
-def _authz_section(readme: str) -> str:
-    return readme.split(AUTHZ_HEADING, 1)[1].split("\n## ", 1)[0]
-
-
-def _documented_duration(seconds: int) -> str:
-    return f"{seconds // 86400}d" if seconds >= 86400 and seconds % 86400 == 0 else str(seconds)
-
-
-def _authz_defaults() -> dict[str, str]:
-    from canvas_mcp.core.selfhost.settings import AuthzSettings
-
-    d = AuthzSettings()
-    return {
-        "SELFHOST_AUTH_MODE": "entra_proxy",
-        "ACCESS_TOKEN_TTL": _documented_duration(d.access_token_ttl),
-        "REFRESH_ABSOLUTE_TTL": _documented_duration(d.refresh_absolute_ttl),
-        "REFRESH_REUSE_GRACE_S": str(d.refresh_reuse_grace_s),
-        "GRANT_STATUS_CACHE_S": str(d.grant_status_cache_s),
-        "CIMD_ENABLED": "true" if d.cimd_enabled else "false",
-        "CIMD_FETCH_TIMEOUT_S": str(d.cimd_fetch_timeout_s),
-        "CIMD_STALE_MAX": _documented_duration(d.cimd_stale_max),
-        "MAX_UPSTREAM_AUTH_AGE": _documented_duration(d.max_upstream_auth_age),
-    }
-
-
-def test_the_authorization_modes_are_documented_and_linked(readme):
-    assert "(#mcp-authorization-entra_proxy-default-or-local)" in readme
-    section = _authz_section(readme)
-    for needle in (
-        "`entra_proxy`",
-        "`local`",
-        "opt-in",
-        "does not change with this release",
-        "Every user has to reconnect",
-        "FASTMCP_HOME",
-        "OAUTH_JWT_SIGNING_KEY",
-        "/account/callback",
-        "/auth/callback",
-        "0003_oauth_authz",
-        "Connected apps",
-        "token_admin list-grants",
-        "token_admin revoke-grant",
-        "token_admin rotate-jwt-key",
-        "client_kind",
-        "OAUTH_ALLOWED_REDIRECT_URIS",
-        "CANVAS_TOKEN_KEYS",
-        "FASTMCP_SSRF_TRUST_PROXY",
-        "160.79.104.0/21",
-        "invalid_grant",
-        "invalid_target",
-        "HTTP 401",
-        "challenge",
-        "txn",
-        "restoring the backup",
-    ):
-        assert needle in section, f"the MCP authorization section is missing {needle!r}"
-
-
-def test_the_staging_checklist_covers_every_client(readme):
-    section = _authz_section(readme)
-    checklist = section[section.index("### First deployment and staging checklist") :]
-    checklist = checklist[: checklist.index("\n### ", 5)]
-    for needle in (
-        "staging hostname",
-        "**claude.ai on the web**",
-        "**Claude Desktop**",
-        "**Claude mobile**",
-        "**Claude Code**",
-        "Add custom connector",
-        "client id and secret empty",
-        "token_admin list-grants",
-        "cimd",
-        "dcr",
-        "rotate-jwt-key",
-        "/revoke",
-        "Connected apps",
-        "claude://",
-        "opened in another browser",
-        "claude mcp add --transport http canvas",
-        "localhost",
-        "127.0.0.1",
-        "--callback-port",
-    ):
-        assert needle in checklist, f"the staging checklist is missing {needle!r}"
-
-
-def test_the_authorization_settings_are_documented_with_the_defaults_the_code_has(readme, env_text):
-    section = _authz_section(readme)
-    commented = _commented_assignments(env_text)
-    for name, default in _authz_defaults().items():
-        row = re.search(rf"^\| `{name}` \| `([^`]*)` \|", section, re.MULTILINE)
-        assert row, f"the settings table has no row for {name}"
-        assert row.group(1) == default, f"{name}: the table says {row.group(1)!r}, the code {default!r}"
-        assert commented[name] == default, f"env.example documents {name}={commented[name]!r}, the code {default!r}"
-        assert name not in _assignments(env_text), f"{name} must stay commented out in env.example"
-
-
-def test_the_authorization_setting_ranges_in_the_docs_are_the_ones_the_code_enforces(readme):
-    # Each documented range is exercised at and just outside its edges.
-    import base64
-
-    from canvas_mcp.core.selfhost.settings import (
-        SelfhostConfigError,
-        load_selfhost_settings,
-    )
-
-    def good_env() -> dict[str, str]:
-        return {
-            "PUBLIC_BASE_URL": "https://canvas.example.test",
-            "ENTRA_TENANT_ID": "11111111-2222-3333-4444-555555555555",
-            "ENTRA_CLIENT_ID": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-            "ENTRA_CLIENT_SECRET": "s3cret-value-of-entra-client",
-            "OAUTH_JWT_SIGNING_KEY": "k" * 48,
-            "ACCOUNT_SESSION_SECRET": base64.b64encode(bytes(range(32))).decode(),
-            "CANVAS_TOKEN_KEYS": "k1:" + base64.b64encode(bytes(32)).decode(),
-            "FASTMCP_HOME": "/data/fastmcp",
-            "CANVAS_API_URL": "https://canvas.example.edu",
-        }
-
-    cases = {
-        "ACCESS_TOKEN_TTL": (("5m", "24h"), ("4m", "25h")),
-        "REFRESH_ABSOLUTE_TTL": (("2h", "90d"), ("59m", "91d")),
-        "REFRESH_REUSE_GRACE_S": (("0", "120"), ("-1", "121")),
-        "GRANT_STATUS_CACHE_S": (("0", "60"), ("-1", "61")),
-        "CIMD_FETCH_TIMEOUT_S": (("1", "5"), ("0", "6")),
-        "CIMD_STALE_MAX": (("0", "30d"), ("31d", "99d")),
-        "MAX_UPSTREAM_AUTH_AGE": (("1h", "90d"), ("59m", "91d")),
-    }
-    for name, (inside, outside) in cases.items():
-        for value in inside:
-            load_selfhost_settings({**good_env(), name: value})
-        for value in outside:
-            with pytest.raises(SelfhostConfigError):
-                load_selfhost_settings({**good_env(), name: value})
-    section = _authz_section(readme)
-    for text in ("5 minutes to 24 hours", "1 hour to 90 days", "0 to 120", "0 to 60", "1 to 5", "0 to 30 days"):
-        assert text in section, text
-
-
-def test_the_replay_rules_of_the_local_server_are_documented(readme):
-    heading = "### How the local authorization server treats replayed codes and refresh tokens"
-    assert heading in readme
-    assert "(#how-the-local-authorization-server-treats-replayed-codes-and-refresh-tokens)" in readme
-    section = readme[readme.index(heading) :]
-    section = section[: section.index("\n### ", 5)]
-    for needle in (
-        "code_replay",
-        "refresh_reuse",
-        "reauth_required",
-        "REFRESH_REUSE_GRACE_S",
-        "MAX_UPSTREAM_AUTH_AGE",
-        "sibling",
-        "invalid_grant",
-        "HTTP 401",
-        "S256",
-        "atomic",
-        "REFRESH_REUSE_GRACE_S=0",
-    ):
-        assert needle in section, f"the replay notes no longer mention {needle!r}"
-    from canvas_mcp.core.selfhost.authz.models import (
-        REVOKE_CODE_REPLAY,
-        REVOKE_REAUTH_REQUIRED,
-        REVOKE_REFRESH_REUSE,
-    )
-
-    for reason in (REVOKE_CODE_REPLAY, REVOKE_REFRESH_REUSE, REVOKE_REAUTH_REQUIRED):
-        assert reason in section
-
-
-def test_the_change_speeds_of_the_local_server_are_documented(readme):
-    section = readme.split("### How fast each change takes effect", 1)[1].split("\n## ", 1)[0]
-    for needle in (
-        "SELFHOST_AUTH_MODE=local",
-        "GRANT_STATUS_CACHE_S",
-        "rotate-jwt-key",
-        "MAX_UPSTREAM_AUTH_AGE",
-        "Slower than `entra_proxy`",
-    ):
-        assert needle in section, f"the change-speed table is missing {needle!r}"
-
-
-def test_the_inventory_names_what_the_local_server_adds(readme):
-    section = _custody_section(readme)
-    for needle in ("MCP access-token key and refresh tokens", "derived (HKDF) from `CANVAS_TOKEN_KEYS`", "SHA-256 hashes", "oauth_refresh_tokens"):
-        assert needle in section, needle
-
-
-def test_the_readme_states_the_dependency_ranges_pyproject_declares(readme):
-    pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
-    section = _authz_section(readme)
-    for name in ("fastmcp", "mcp", "joserfc"):
-        declared = re.search(rf'"{name}(>=[0-9.]+,<[0-9]+)"', pyproject)
-        assert declared, f"pyproject.toml has no range for {name}"
-        assert f"`{name}` `{declared.group(1)}`" in section, f"the README does not state {name}{declared.group(1)}"
-
-
-def test_the_proxy_examples_limit_and_redact_the_local_servers_endpoints():
-    nginx = (SELFHOST / "nginx.conf.example").read_text(encoding="utf-8")
-    assert "limit_req_zone $canvas_token_key zone=canvas_token:10m rate=120r/m;" in nginx
-    assert "160.79.104.0/21" in nginx
-    for path in ("/token", "/revoke"):
-        block = nginx[nginx.index(f"location = {path} {{") :]
-        block = block[: block.index("}")]
-        assert "limit_req zone=canvas_token burst=60 nodelay;" in block
-        assert "proxy_set_header Host $host;" in block
-        assert "client_max_body_size 16k;" in block
-    # the existing entry points keep their own zone
-    assert "limit_req zone=canvas_oauth burst=5 nodelay;" in nginx
-    caddy = (SELFHOST / "Caddyfile.example").read_text(encoding="utf-8")
-    active = "\n".join(line for line in caddy.splitlines() if not line.lstrip().startswith("#"))
-    assert "replace txn REDACTED" in active
-    assert "path /token /revoke" in caddy and "160.79.104.0/21" in caddy
-    assert "replace txn REDACTED" in (SELFHOST / "README.md").read_text(encoding="utf-8")
-
-
-def test_the_changelog_announces_the_local_authorization_server():
-    changelog = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
-    unreleased = changelog[changelog.index("## [Unreleased]") :].split("\n## [")[0]
-    added = unreleased.split("### Added", 1)[1].split("\n### ", 1)[0]
-    for needle in (
-        "SELFHOST_AUTH_MODE=local",
-        "opt-in",
-        "0003_oauth_authz",
-        "Switching modes makes every user reconnect",
-        "list-grants",
-        "revoke-grant",
-        "rotate-jwt-key",
-        "Connected apps",
-        "REFRESH_REUSE_GRACE_S",
-        "MAX_UPSTREAM_AUTH_AGE",
-        "staging checklist",
-    ):
-        assert needle in added, f"the changelog entry is missing {needle!r}"
-    security = unreleased.split("### Security", 1)[1].split("\n### ", 1)[0]
-    assert "form-action" in security and "grace window" in security
-
-
-# --- the extra sign-in providers (SELFHOST_LOGIN_PROVIDERS) ---
-
-PROVIDERS_HEADING = "## Sign-in providers (Google, GitHub, OIDC)"
-
-
-def _providers_section(readme: str) -> str:
-    return readme.split(PROVIDERS_HEADING, 1)[1].split("\n## ", 1)[0]
-
-
-def test_the_providers_section_is_linked_from_the_contents_and_the_root_readme(readme):
-    assert "(#sign-in-providers-google-github-oidc)" in readme
-    assert PROVIDERS_HEADING in readme
-    root = (REPO / "README.md").read_text(encoding="utf-8")
-    assert "deploy/selfhost/README.md#sign-in-providers-google-github-oidc" in root
-
-
-def test_every_variable_login_config_reads_is_documented(env_text, readme):
-    source = (SRC / "core" / "selfhost" / "login" / "config.py").read_text(encoding="utf-8")
-    names = set(re.findall(r'^[A-Z_]+_ENV = "([A-Z][A-Z0-9_]+)"$', source, re.MULTILINE))
-    assert {
-        "SELFHOST_LOGIN_PROVIDERS", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GITHUB_CLIENT_ID",
-        "GITHUB_CLIENT_SECRET",
-    } <= names
-    section = _providers_section(readme)
-    for name in sorted(names):
-        assert re.search(rf"^#? ?{name}=", env_text, re.MULTILINE), f"{name} is not in env.example"
-        assert f"`{name}`" in section, f"{name} is not documented in the providers section"
-    # The generic provider's variables are documented by suffix, with their <SLUG> prefix.
-    block = source[source.index("_OIDC_SUFFIXES = (") :].split(")", 1)[0]
-    suffixes = re.findall(r'"([A-Z_]+)"', block)
-    assert set(suffixes) == {
-        "ISSUER", "CLIENT_ID", "CLIENT_SECRET", "DISPLAY_NAME", "SCOPES", "TOKEN_AUTH_METHOD", "USERINFO",
-    }
-    for suffix in suffixes:
-        assert f"OIDC_<SLUG>_{suffix}" in section, suffix
-        assert re.search(rf"^#? ?OIDC_SCHOOL_{suffix}=", env_text, re.MULTILINE), suffix
-    assert "ACCOUNT_LINK_BY_VERIFIED_EMAIL" in section and "reserved" in section
-
-
-def test_the_redirect_uri_table_is_the_one_the_registry_serves(readme):
-    from canvas_mcp.core.selfhost import token_admin
-    from canvas_mcp.core.selfhost.login.entra import (
-        ENTRA_ALIAS_START_PATH,
-        ENTRA_CALLBACK_PATH,
-        ENTRA_START_PATH,
-    )
-    from canvas_mcp.core.selfhost.login.github import (
-        GITHUB_CALLBACK_PATH,
-        GITHUB_START_PATH,
-    )
-    from canvas_mcp.core.selfhost.login.google import (
-        GOOGLE_CALLBACK_PATH,
-        GOOGLE_START_PATH,
-    )
-
-    section = _providers_section(readme)
-    table = section[section.index("### Redirect URIs to register") :].split("\n### ", 1)[0]
-    rows = {}
-    for line in table.splitlines():
-        if line.startswith("|") and not line.startswith("|---"):
-            cells = [c.strip() for c in line.strip("|").split("|")]
-            rows[cells[0]] = cells
-    assert f"`{ENTRA_START_PATH}`" in rows["Entra"][1] and ENTRA_ALIAS_START_PATH in rows["Entra"][1]
-    assert rows["Entra"][2] == f"`https://<host>{ENTRA_CALLBACK_PATH}`"
-    assert rows["Google"][1] == f"`{GOOGLE_START_PATH}`"
-    assert rows["Google"][2] == f"`https://<host>{GOOGLE_CALLBACK_PATH}`"
-    assert rows["GitHub"][1] == f"`{GITHUB_START_PATH}`"
-    assert rows["GitHub"][2] == f"`https://<host>{GITHUB_CALLBACK_PATH}`"
-    oidc = rows["Generic OIDC"]
-    assert oidc[1] == "`/account/login/oidc/<slug>`"
-    assert oidc[2] == "`https://<host>/account/callback/oidc/<slug>`"
-    # The token_admin listing prints the same URIs.
-    assert token_admin._redirect_uri("https://h", "entra") == "https://h" + ENTRA_CALLBACK_PATH
-    assert token_admin._redirect_uri("https://h", "google") == "https://h" + GOOGLE_CALLBACK_PATH
-    assert token_admin._redirect_uri("https://h", "github") == "https://h" + GITHUB_CALLBACK_PATH
-    assert token_admin._redirect_uri("https://h", "oidc:school") == "https://h/account/callback/oidc/school"
-    # The Entra redirect URI registered in an existing app is, and stays, /account/callback.
-    assert ENTRA_CALLBACK_PATH == "/account/callback"
-
-
-def test_the_documented_provider_rule_kinds_are_the_ones_the_parser_accepts(readme):
-    from canvas_mcp.core.selfhost import accounts
-
-    section = _providers_section(readme)
-    table = section[section.index("### Who is admitted with these providers") :].split("\n### ", 1)[0]
-    documented = re.findall(r"^\| `((?:google|github|oidc)[^`]*)` \|", table, re.MULTILINE)
-    examples = {
-        "google:domain:<hd>": "google:domain:example.edu",
-        "google:email:<address>": "google:email:ada@example.edu",
-        "github:user:<numeric id>": "github:user:583231",
-        "github:org:<org>": "github:org:acme",
-        "github:team:<org>/<team slug>": "github:team:acme/core",
-        "oidc:<slug>:claim:<name>=<value>": "oidc:school:claim:groups=canvas-users",
-        "oidc:<slug>:email:<address>": "oidc:school:email:ada@example.edu",
-        "oidc:<slug>:any": "oidc:school:any",
-    }
-    assert set(documented) == set(examples), set(documented) ^ set(examples)
-    providers = ("entra", "google", "github", "oidc:school")
-    for example in examples.values():
-        parsed = accounts.parse_rule(example, providers=providers)
-        assert not isinstance(parsed, str), (example, parsed)
-    # Every kind the parser knows is documented (one row each), and nothing else is accepted.
-    assert accounts._GOOGLE_KINDS == {"domain", "email"}
-    assert accounts._GITHUB_KINDS == {"user", "org", "team"}
-    assert accounts._OIDC_KINDS == {"claim", "email", "any"}
-    for refused in (
-        "google:role:x", "github:email:a@b.test", "oidc:school:role:x", "google:domain:",
-        "github:user:octocat", "oidc:school:claim:email=a",
-    ):
-        assert isinstance(accounts.parse_rule(refused, providers=providers), str), refused
-    # OWNER_RULES stay Entra-only, as documented.
-    for rule in ("google:email:ada@example.edu", "github:user:1", "oidc:school:any"):
-        assert isinstance(accounts.parse_rule(rule, owner=True, providers=providers), str), rule
-    assert "`OWNER_RULES` stay Entra-only" in section
-    assert "At most 10 `github:org` and `github:team` rules" in section
-    assert accounts.MAX_GITHUB_MEMBERSHIP_RULES == 10
-
-
-def test_the_documented_bootstrap_owner_forms_are_in_the_template_too(readme, env_text):
-    section = _providers_section(readme)
-    for form in ("google:<subject>", "github:<numeric user id>", "oidc:<slug>:<subject>", "token_admin"):
-        assert form in section, form
-        assert form in env_text, form
-
-
-def test_the_new_token_admin_commands_are_documented_and_exist(readme):
-    source = (SRC / "core" / "selfhost" / "token_admin.py").read_text(encoding="utf-8")
-    usage = source.split('"""', 2)[1]
-    for command in ("identities", "unlink-identity", "login-providers"):
-        assert re.search(rf'add_parser\(\s*"{command}"', source), command
-        assert f"token_admin {command}" in readme, command
-        assert f"token_admin {command}" in usage, f"{command} is missing from the usage text"
-    assert "--check" in readme and "google:<subject>" in readme
-
-
-def test_the_proxy_examples_limit_the_sign_in_paths():
-    nginx = (SELFHOST / "nginx.conf.example").read_text(encoding="utf-8")
-    assert "limit_req_zone $binary_remote_addr zone=canvas_signin:10m rate=30r/m;" in nginx
-    for prefix in ("/account/login", "/account/callback"):
-        block = nginx[nginx.index(f"location ^~ {prefix} {{") :]
-        block = block[: block.index("}")]
-        assert "limit_req zone=canvas_signin burst=20 nodelay;" in block
-        assert "proxy_set_header Host $host;" in block
-    assert "campus NAT" in nginx
-    caddy = (SELFHOST / "Caddyfile.example").read_text(encoding="utf-8")
-    assert "path /account/login* /account/callback*" in caddy and "events 30" in caddy
-    active = "\n".join(line for line in caddy.splitlines() if not line.lstrip().startswith("#"))
-    assert "rate_limit" not in active  # like the other limits, it needs the optional module
-    readme_text = (SELFHOST / "README.md").read_text(encoding="utf-8")
-    assert "canvas_signin" in readme_text and "/account/login*" in readme_text
-
-
-def test_the_readme_updates_the_places_the_providers_change(readme):
-    # Accounts and admission no longer claims Entra is the only provider.
-    assert "Entra is the only login provider" not in readme
-    assert "those providers are not enabled" not in readme
-    assert "accepted and reserved for login providers" not in readme
-    # The inventory names the new secrets, the proxy-log section the new callbacks, revoking the new advice.
-    assert "Sign-in provider client secrets" in readme and "OIDC_<SLUG>_CLIENT_SECRET" in readme
-    assert "/account/callback/<provider>" in readme
-    assert "**disable first**" in readme and "Unlink a sign-in method" in readme
-    section = _providers_section(readme)
-    for needle in (
-        "SMOKE_EXPECT_PROVIDERS",
-        "Authorization callback URL",
-        "OAuth app access restrictions",
-        "signing key",
-        "https://authentik.example/application/o/<application slug>/",
-        "https://<keycloak host>/realms/<realm>",
-        "oidc:authentik:claim:groups=canvas-users",
-        "`ACCOUNT_LINK_BY_VERIFIED_EMAIL`",
-        "identity_in_use",
-        "Connected apps stay connected",
-        "setup-env.sh",
-    ):
-        assert needle in section, needle
-
-
-def test_the_changelog_announces_the_extra_sign_in_providers():
-    changelog = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
-    unreleased = changelog[changelog.index("## [Unreleased]") :].split("\n## [")[0]
-    added = unreleased.split("### Added", 1)[1].split("\n### ", 1)[0]
-    for needle in (
-        "SELFHOST_LOGIN_PROVIDERS",
-        "/account/callback/google",
-        "/account/callback/oidc/<slug>",
-        "`OWNER_RULES` stay Entra-only",
-        "never linked by e-mail",
-        "No schema change",
-    ):
-        assert needle in added, f"the changelog entry is missing {needle!r}"
-
-
-def test_local_mode_text_does_not_say_the_sign_in_is_always_microsoft(readme):
-    env_text = (SELFHOST / "env.example").read_text(encoding="utf-8")
-    for stale in (
-        "last Microsoft sign-in is older",
-        "You are sent to the Microsoft sign-in",
-        "The sign-in is the `/account` Microsoft sign-in",
-        "a fresh Microsoft sign-in otherwise",
-    ):
-        assert stale not in readme, stale
-    for stale in ("the sign-in is the /account Microsoft sign-in", "their last Microsoft sign-in"):
-        assert stale not in env_text, stale
-
-
-def test_the_google_notes_match_what_the_server_asks_for(readme):
-    # Google exempts an app that asks only for basic identity scopes from the Testing limits.
-    assert "publish it (**In production**)" not in readme
-    assert "https://support.google.com/cloud/answer/15549945" in readme
-    assert "scopes the server asks for are only `openid`, `email` and `profile`" in readme
-
-
-def test_the_proxy_example_keeps_the_per_ip_rate_below_the_service_backstop():
-    from canvas_mcp.core.selfhost.login.registry import (
-        START_BURST,
-        START_REFILL_PER_SECOND,
-    )
-
-    nginx = (SELFHOST / "nginx.conf.example").read_text(encoding="utf-8")
-    per_ip = int(re.search(r"zone=canvas_signin:\w+ rate=(\d+)r/m", nginx).group(1))
-    assert START_BURST >= 10 * per_ip and START_REFILL_PER_SECOND * 60 >= 10 * per_ip
-    assert f"a burst of {START_BURST}" in nginx
+    assert not {"ALLOWED_WRITE_TOOLS", "STUDENT_WRITE_TOOLS", "COURSE_AGENT_POLICY_DEFAULT", "CANVAS_API_TOKEN", "MCP_ACCESS_KEYS", "ENTRA_AUTH_ENABLED", "MCP_ALLOW_UNAUTHENTICATED", "ACCESS_REQUEST_ENABLED", "FASTMCP_SSRF_TRUST_PROXY"} & values.keys()
+    assert values.get("EXECUTE_TYPESCRIPT_ENABLED", "false") == "false"
+
+
+def test_unedited_template_is_refused():
+    with pytest.raises(SelfhostConfigError):
+        load_selfhost_settings(assignments())
+
+
+def test_filled_template_is_accepted_by_current_settings(tmp_path):
+    values = assignments()
+    secret = base64.b64encode(bytes(range(32))).decode()
+    values.update(PUBLIC_BASE_URL="https://canvas.example.test", ENTRA_TENANT_ID="11111111-2222-3333-4444-555555555555", ENTRA_CLIENT_ID="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", ENTRA_CLIENT_SECRET="not-a-real-secret-0123456789", ACCOUNT_SESSION_SECRET=secret, CANVAS_TOKEN_KEYS="k1:" + secret, SELFHOST_DATA_DIR=str(tmp_path), CANVAS_MCP_IMAGE="canvas-mcp:selfhost-v1-local")
+    settings = load_selfhost_settings(values)
+    assert settings.public_base_url == values["PUBLIC_BASE_URL"]
+    assert settings.course_state == "request_local"
+
+
+def test_commented_student_write_tools_match_the_server_allowlist():
+    names = re.search(r"^# STUDENT_WRITE_TOOLS=(.*)$", text("env.example"), re.M).group(1).split(',')
+    assert set(names) == set(STUDENT_WRITE_TOOL_NAMES)
+
+
+def test_all_current_settings_reads_are_documented():
+    source = (ROOT / "src/canvas_mcp/core/selfhost/settings.py").read_text(encoding="utf-8")
+    account_source = (ROOT / "src/canvas_mcp/core/selfhost/accounts.py").read_text(encoding="utf-8")
+    names = set(re.findall(r'get\("([A-Z][A-Z0-9_]+)"\)', source))
+    names |= set(re.findall(r'^\w+_ENV = "([A-Z][A-Z0-9_]+)"', account_source, re.M))
+    documented = text("env.example")
+    assert len(names) >= 12
+    assert not names - set(re.findall(r"\b[A-Z][A-Z0-9_]+\b", documented))
+
+
+def test_deployment_examples_are_neutral_and_english():
+    for name in ("README.md", "env.example", "nginx.conf.example", "Caddyfile.example"):
+        content = text(name)
+        assert not re.search(r"[\u4e00-\u9fff]", content)
+        assert "kazuhahub.com" not in content.lower()
+        assert "canvas.mcp.kazuhahub" not in content.lower()
+
+
+def test_readme_explains_image_selection_and_recreation():
+    content = text("README.md")
+    for expected in ("CANVAS_MCP_IMAGE", "docker-compose.build.yml", "config --quiet", "up -d --build", "recreate", "Dockerfile.selfhost", "UID/GID", "10001", "one replica"):
+        assert expected in content
+    assert "default `latest`" not in content
+
+
+def test_upgrade_and_transfer_instructions_link_to_the_isolated_package():
+    content = text("README.md")
+    assert "db/migrations/README.md" in content
+    assert "Pre-v1 files are refused" in content
+    assert "DATABASE_URL" in content and "keyring" in content
+    assert "pg_advisory_xact_lock" not in content
+
+
+def test_operator_guide_covers_security_and_staging_limits():
+    content = text("README.md")
+    for expected in ("custody", "Admin > Settings", "directory search", "Instructure", "write tools", "course policy", "approval", "anonym", "last usable", "key rotation", "B2B", "consecutive", "staging", "Local unit tests", "logs", "cookies", "without buffering"):
+        assert expected.lower() in content.lower()
+
+
+def test_setup_and_smoke_scripts_disable_tracing_and_preserve_secrets():
+    setup, smoke = text("setup-env.sh"), text("smoke-test.sh")
+    assert "set +x" in setup and "set +x" in smoke
+    assert "umask 077" in setup and "set -o noclobber" in setup
+    assert 'read -r -s -p' in setup
+    assert "OAUTH_JWT_SIGNING_KEY=" not in setup
+    assert "CANVAS_API_URL=" not in setup
+    assert "ACCOUNT_SESSION_SECRET" in setup and "CANVAS_TOKEN_KEYS" in setup
+    assert "--read-only" in smoke and "--cap-drop ALL" in smoke
+    assert "trap cleanup EXIT" in smoke
+    assert "no code exchange or real sign-in" in smoke
+
+
+def test_nginx_logs_paths_not_oauth_query_headers_or_cookies():
+    content = text("nginx.conf.example")
+    log = next(line for line in content.splitlines() if line.startswith("log_format "))
+    assert "$uri" in log
+    assert not any(name in log for name in ("$request_uri", "$request ", "$args", "$http_authorization", "$http_cookie"))
+    assert "proxy_buffering off" in content and "proxy_set_header Host $host" in content
+
+
+def test_caddy_redacts_oauth_and_credential_values():
+    content = text("Caddyfile.example")
+    for expected in ("replace code", "replace state", "replace txn", "Authorization delete", "Cookie delete", "Set-Cookie delete", "Location delete", "flush_interval -1"):
+        assert expected in content
+
+
+def test_custody_documentation_explains_the_operator_decryption_boundary():
+    content = text("README.md")
+    assert "## Custody and privacy boundary" in content
+    assert "decrypt every" in content and "compromised" in content
+    assert "plaintext SQL" in content and "audit history" in content
+    assert "ACCOUNT_SESSION_SECRET" in content and "AES-256-GCM" in content
+    root = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "README.md#custody-and-privacy-boundary" in root

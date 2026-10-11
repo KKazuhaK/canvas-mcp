@@ -15,7 +15,6 @@ const SIGN_IN_CODES = [
   'sign_in_incomplete',
   'sign_in_unverified',
   'wrong_tenant',
-  'wrong_client',
   'bad_subject',
   'bad_roles',
   'access_denied',
@@ -36,7 +35,7 @@ describe('SignInView', () => {
   it('offers the server-side sign-in as a plain link, one per provider', async () => {
     await renderApp('/sign-in', 'signed-out')
     const microsoft = await screen.findByRole('link', { name: /Sign in with Microsoft/ })
-    expect(microsoft).toHaveAttribute('href', '/account/login')
+    expect(microsoft).toHaveAttribute('href', '/auth/login')
     expect(screen.getAllByRole('link', { name: /Sign in with/ })).toHaveLength(1)
     expect(screen.getByRole('heading', { name: 'Canvas account' })).toBeInTheDocument()
     expect(hardNavigate).not.toHaveBeenCalled()
@@ -45,7 +44,7 @@ describe('SignInView', () => {
   it('passes a valid return_to through to the server redirect', async () => {
     await renderApp('/sign-in?return_to=%2Faccount%2Fwrite-tools', 'signed-out')
     const link = await screen.findByRole('link', { name: /Sign in with Microsoft/ })
-    expect(link).toHaveAttribute('href', '/account/login?return_to=%2Faccount%2Fwrite-tools')
+    expect(link).toHaveAttribute('href', '/auth/login?return_to=%2Faccount%2Fwrite-tools')
   })
 
   it.each([
@@ -53,13 +52,13 @@ describe('SignInView', () => {
     ['https://evil.example/account'],
     ['/\\evil.example'],
     ['javascript:alert(1)'],
-    ['/account/login'],
-    ['/account/api/me'],
+    ['/auth/login'],
+    ['/api/v1/me'],
     ['/account//x'],
   ])('drops an unsafe return_to (%s)', async (bad) => {
     await renderApp(`/sign-in?return_to=${encodeURIComponent(bad)}`, 'signed-out')
     const link = await screen.findByRole('link', { name: /Sign in with Microsoft/ })
-    expect(link).toHaveAttribute('href', '/account/login')
+    expect(link).toHaveAttribute('href', '/auth/login')
   })
 
   it('never redirects on its own, even with a single provider', async () => {
@@ -120,7 +119,7 @@ describe('SignInView', () => {
                 providers: [
                   { id: 'evil', kind: 'oidc', name: 'Evil', icon: 'key', start_url: 'https://evil.example/start' },
                   { id: 'evil2', kind: 'oidc', name: 'Evil Two', icon: 'key', start_url: '//evil.example/start' },
-                  { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/account/login' },
+                  { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/auth/login' },
                 ],
                 mcp_url: 'https://x.test/mcp',
               },
@@ -163,7 +162,7 @@ function endSession(): void {
           status: 200,
           data: {
             providers: [
-              { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/account/login' },
+              { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/auth/login' },
             ],
             mcp_url: 'https://x.test/mcp',
           },
