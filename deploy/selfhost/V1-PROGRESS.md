@@ -449,3 +449,45 @@ and the first v1 tag remain outstanding.
   account-interface import errors. Port their applicable lifecycle/security
   coverage to the native API; keep the complete CI matrix and staging gates
   outstanding. This checkpoint does not complete the full handoff.
+
+## Native account APIs, lifecycle and audit checkpoint
+
+- All eight removed-account-interface collection errors are eliminated. Native
+  account fixtures use the actual authorization server, verified offline Entra
+  callbacks, required React bundle and database-owned school configuration.
+  Credential saves explicitly acknowledge custody; no HTML, old verifier,
+  account-key or schema adapter is added to the runtime.
+- Account/API, lifecycle, default Canvas HTTP checker and health-verdict
+  regression: 321 passed on locked PostgreSQL. The scratch server was stopped.
+  The selected account/rule/identity/race/audit/English/boundary checkpoint
+  passes locked SQLite: 545 passed, 2 PostgreSQL-specific skips. Latest SQLite
+  account/race/rule/boundary groups: 468 passed, 2 backend skips; native identity
+  and audit groups: 77 passed. Additional locked PostgreSQL identity, audit,
+  transaction races, rule, fixture and boundary checks: 223 passed.
+- The production audit emitter now attributes a native bare account UUID from
+  verified request identity. It preserves an explicitly named target of an
+  owner action, excludes token cache keys and never appends school or credential
+  data. Audit regressions cover these boundaries.
+- Applicable legacy security coverage now uses the native API: real-CSRF
+  disabled-session replay, disable/enable epochs, cookie claim validation,
+  owner rechecks inside writes, admission, per-user rate budgets, school DNS
+  rebinding and signed search choices, token identity-change confirmation,
+  health-verdict invalidation, audit/history pagination and default HTTP token
+  validation without redirect following. The old HTML-form parity test instead
+  proves those retired POST paths cannot mutate a native account. HTML layout,
+  radio/form and language-toggle assertions retire with that removed UI;
+  localized rendering remains in the React suite.
+- Concurrent approval/deny, sign-up limits, credential replacement, key rotation
+  and last-owner role loss use real separate connections on both backends.
+  PostgreSQL's row-conditional health write may finish against the old credential
+  before a replacement locks that row; the regression verifies neither ordering
+  can write a stale verdict to the replacement.
+- Source/tests Ruff, changed-file formatting, Linux-target mypy (84 source
+  files including the audit emitter) and whitespace checks pass. Upgrade,
+  compatibility, backup and transfer tooling remains confined to
+  `db/migrations/`; all four structural boundary checks pass.
+- Full runtime/CI validation remains outstanding. Broader collection now works,
+  but legacy repository-statement, startup, disabled-tool and whole-stack fixtures
+  still need their native ports. Focused results do not complete the handoff;
+  real IdP/guest/Claude/reverse-proxy/multiday gates follow the owner's staging
+  deployment. No registry image or release was published.

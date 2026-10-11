@@ -10,7 +10,6 @@ content) add it to the matching allowlist entry with a reason.
 
 from __future__ import annotations
 
-import ast
 import re
 import subprocess
 from pathlib import Path
@@ -26,19 +25,6 @@ CJK = re.compile(r"[\u3400-\u9fff\u3000-\u303f\uff00-\uffef]")
 # The one place an English locale file may name Chinese: the language's own name.
 ZH_ENDONYM = "\u4e2d\u6587"
 
-# (1) The server-rendered account pages carry both languages in one module.
-ACCOUNT_WEB = "src/canvas_mcp/core/selfhost/account_web.py"
-# Module-level names whose string constants are Chinese translation tables or
-# translation constants. Anything else must be English, except the first argument
-# of a ``_bi(zh, en)`` call.
-ACCOUNT_WEB_TRANSLATION_NAMES = frozenset(
-    {
-        "_DENIAL_ZH",  # Chinese renderings of the identity layer's refusal messages
-        "_DENIAL_ZH_FALLBACK",  # Chinese line for a refusal message with no entry above
-        "_ZH_ENDONYM",  # the language switcher shows Chinese by its own name
-    }
-)
-
 # (2) Whole directories that are Chinese translation content.
 TRANSLATION_PREFIXES = (
     "web/src/locales/zh/",  # the React UI's Chinese string tables
@@ -51,9 +37,7 @@ ENDONYM_ONLY_FILES = (
 
 # (4) Tests that assert the Chinese rendering of the translations above.
 ZH_RENDERING_TESTS = {
-    "tests/selfhost/test_account_web.py": "asserts the Chinese rendering of the server-rendered pages",
-    "tests/selfhost/test_account_schools.py": "asserts the Chinese rendering of the school picker",
-    "tests/selfhost/test_account_access_lifecycle.py": "asserts the Chinese rendering of the admin disable and enable actions",
+    "web/src/components/CustodyNotice.test.tsx": "asserts the Chinese custody notice translation",
     "web/src/i18n/i18n.test.ts": "asserts the Chinese strings the i18n setup loads",
     "web/src/router/documentTitle.test.tsx": "asserts the Chinese document title",
     "web/src/router/routing.test.tsx": "asserts the Chinese UI after switching language",
@@ -75,9 +59,7 @@ BINARY_SUFFIXES = frozenset(
     }
 )  # fmt: skip
 
-WHOLE_FILE_ALLOWED = (
-    set(ZH_RENDERING_TESTS) | set(UPSTREAM_TEST_DATA)
-)
+WHOLE_FILE_ALLOWED = set(ZH_RENDERING_TESTS) | set(UPSTREAM_TEST_DATA)
 
 
 def _tracked_files() -> list[str]:
@@ -105,53 +87,13 @@ def _read_text(relative: str) -> str | None:
 
 
 def _cjk_lines(text: str) -> list[int]:
-    return [number for number, line in enumerate(text.splitlines(), 1) if CJK.search(line)]
+    return [
+        number for number, line in enumerate(text.splitlines(), 1) if CJK.search(line)
+    ]
 
 
 def _is_translation_prefix(relative: str) -> bool:
     return relative.startswith(TRANSLATION_PREFIXES)
-
-
-def _account_web_violations(text: str) -> list[int]:
-    """Lines of account_web.py with Chinese outside the allowed translation spots."""
-    tree = ast.parse(text)
-    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-
-    def allowed(node: ast.Constant) -> bool:
-        current: ast.AST = node
-        while current in parents:
-            parent = parents[current]
-            if (
-                isinstance(parent, ast.Call)
-                and isinstance(parent.func, ast.Name)
-                and parent.func.id == "_bi"
-                and parent.args
-                and parent.args[0] is current
-            ):
-                return True
-            if isinstance(parent, ast.Assign | ast.AnnAssign) and isinstance(parents.get(parent), ast.Module):
-                target = parent.targets[0] if isinstance(parent, ast.Assign) else parent.target
-                return isinstance(target, ast.Name) and target.id in ACCOUNT_WEB_TRANSLATION_NAMES
-            current = parent
-        return False
-
-    bad: set[int] = set()
-    covered: set[int] = set()  # lines whose Chinese all sits in string constants
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if CJK.search(node.value):
-                start = node.lineno
-                end = node.end_lineno or start
-                covered.update(range(start, end + 1))
-                if not allowed(node):
-                    bad.update(
-                        number
-                        for number in range(start, end + 1)
-                        if CJK.search(text.splitlines()[number - 1])
-                    )
-    # Chinese outside any string constant: comments, identifiers.
-    bad.update(number for number in _cjk_lines(text) if number not in covered)
-    return sorted(bad)
 
 
 def find_violations() -> list[str]:
@@ -167,12 +109,11 @@ def find_violations() -> list[str]:
                 if CJK.search(line.replace(ZH_ENDONYM, "")):
                     found.append(f"{relative}:{number}: {line.strip()}")
             continue
-        if relative == ACCOUNT_WEB:
-            lines = text.splitlines()
-            found.extend(f"{relative}:{number}: {lines[number - 1].strip()}" for number in _account_web_violations(text))
-            continue
         lines = text.splitlines()
-        found.extend(f"{relative}:{number}: {lines[number - 1].strip()}" for number in _cjk_lines(text))
+        found.extend(
+            f"{relative}:{number}: {lines[number - 1].strip()}"
+            for number in _cjk_lines(text)
+        )
     return found
 
 
@@ -185,39 +126,20 @@ def test_tracked_text_files_are_english_outside_the_i18n_allowlist():
     )
 
 
-def test_account_web_keeps_chinese_only_in_translation_spots():
-    text = (REPO / ACCOUNT_WEB).read_text(encoding="utf-8")
-    assert CJK.search(text), "account_web.py is expected to carry the Chinese translations"
-    lines = text.splitlines()
-    assert _account_web_violations(text) == [], "\n".join(
-        f"{ACCOUNT_WEB}:{n}: {lines[n - 1].strip()}" for n in _account_web_violations(text)
-    )
-
-
-def test_the_checker_flags_chinese_in_account_web_comments_code_and_plain_strings():
-    zh = "\u4f60\u597d"
-    source = (
-        f"# comment {zh}\n"
-        f'_DENIAL_ZH = {{"a": "{zh}"}}\n'
-        f'_OTHER = "{zh}"\n'
-        f'x = _bi("{zh}", "{zh}")\n'
-        f'y = _bi("{zh}", "en")\n'
-    )
-    assert _account_web_violations(source) == [1, 3, 4]
-
-
 @pytest.mark.parametrize("relative", sorted(WHOLE_FILE_ALLOWED))
 def test_every_whole_file_allowance_still_contains_chinese(relative):
     """A stale allowance hides future violations: drop it when the Chinese is gone."""
     text = _read_text(relative)
     assert text is not None, f"{relative} is missing or binary"
-    assert CJK.search(text), f"{relative} no longer contains Chinese; remove it from the allowlist"
+    assert CJK.search(text), (
+        f"{relative} no longer contains Chinese; remove it from the allowlist"
+    )
 
 
 def test_allowlisted_translation_content_and_endonym_files_exist():
     tracked = set(_tracked_files())
     assert any(name.startswith(TRANSLATION_PREFIXES) for name in tracked)
-    for relative in (*ENDONYM_ONLY_FILES, ACCOUNT_WEB):
+    for relative in ENDONYM_ONLY_FILES:
         assert relative in tracked, f"{relative} is not tracked"
     for relative in ENDONYM_ONLY_FILES:
         text = _read_text(relative)

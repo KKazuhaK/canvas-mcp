@@ -68,6 +68,7 @@ def init_audit_logging() -> None:
         return
 
     from .config import get_config
+
     config = get_config()
 
     _access_events_enabled = config.log_access_events
@@ -119,7 +120,11 @@ def _emit(event: dict[str, Any]) -> None:
     # UPNs) in the self-hosted multi-user mode.
     # The identity only: current_principal_key() also carries the school.
     principal = get_request_principal()
-    if principal is not None and principal.key.startswith(("acct:", "entra:")):
+    if (
+        principal is not None
+        and principal.account_id
+        and principal.key == principal.account_id
+    ):
         # An event that names its own subject (an admin acting on someone else's
         # enrollment) keeps it.
         event.setdefault("principal", principal.key)
@@ -127,7 +132,9 @@ def _emit(event: dict[str, Any]) -> None:
     # caller passed in (an exception message that quotes a URL, a header).
     scrubbed = scrub_event(event)
     if isinstance(scrubbed.get("error"), str):
-        scrubbed["error"] = scrub_secrets(scrubbed["error"], emails=True)[:_MAX_ERROR_CHARS]
+        scrubbed["error"] = scrub_secrets(scrubbed["error"], emails=True)[
+            :_MAX_ERROR_CHARS
+        ]
     _audit_logger.info(json.dumps(scrubbed, default=str))
 
 

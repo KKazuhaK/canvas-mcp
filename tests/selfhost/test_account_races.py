@@ -18,6 +18,10 @@ from dbbackend import make_store, raw_sql
 
 from canvas_mcp.core.selfhost import accounts as acc
 from canvas_mcp.core.selfhost.accounts import AccessPolicy, AccessRule
+from canvas_mcp.core.selfhost.custody import (
+    CUSTODY_NOTICE_VERSION,
+    CustodyAcknowledgement,
+)
 from canvas_mcp.core.selfhost.token_store import (
     DISABLE_REASON_OPERATOR,
     OPERATOR,
@@ -47,9 +51,14 @@ def _ring() -> Keyring:
 
 def claims(oid: str, *roles: str) -> dict[str, Any]:
     return {
-        "tid": TENANT, "azp": "11111111-aaaa-4bbb-8ccc-222222222222", "oid": oid,
-        "roles": list(roles), "name": "N", "preferred_username": f"{oid[:2]}@example.test",
-        "iat": 1_800_000_000, "exp": 1_800_003_600,
+        "tid": TENANT,
+        "azp": "11111111-aaaa-4bbb-8ccc-222222222222",
+        "oid": oid,
+        "roles": list(roles),
+        "name": "N",
+        "preferred_username": f"{oid[:2]}@example.test",
+        "iat": 1_800_000_000,
+        "exp": 1_800_003_600,
     }
 
 
@@ -65,19 +74,32 @@ def pair(tmp_path: pathlib.Path) -> tuple[TokenStore, TokenStore, Clock]:
 
 def _owner(store: TokenStore) -> str:
     return store.create_operator_account(
-        provider_id="entra", issuer=acc.entra_issuer(TENANT), subject=OID_OWNER,
-        status="active", role="owner",
+        provider_id="entra",
+        issuer=acc.entra_issuer(TENANT),
+        subject=OID_OWNER,
+        status="active",
+        role="owner",
     )
 
 
 def _pending(store: TokenStore, oid: str = OID_A) -> str:
     return store.create_operator_account(
-        provider_id="entra", issuer=acc.entra_issuer(TENANT), subject=oid, status="pending"
+        provider_id="entra",
+        issuer=acc.entra_issuer(TENANT),
+        subject=oid,
+        status="pending",
     )
 
 
 def _put(store: TokenStore, key: str) -> Any:
-    return store.put(principal_key=key, api_token=TOKEN, canvas_user_id="1", canvas_user_name="Ada")
+    return store.put(
+        principal_key=key,
+        api_token=TOKEN,
+        canvas_user_id="1",
+        canvas_user_name="Ada",
+        canvas_host="canvas.example.edu",
+        custody=CustodyAcknowledgement(CUSTODY_NOTICE_VERSION, store._now()),
+    )
 
 
 class TestApprovalVersusEnrollment:
@@ -96,7 +118,9 @@ class TestApprovalVersusEnrollment:
         assert put.join().credential_generation == 1
         assert enroller.get_principal_status(key).active
 
-    def test_an_enrollment_that_read_pending_is_refused_and_the_approval_follows(self, pair) -> None:
+    def test_an_enrollment_that_read_pending_is_refused_and_the_approval_follows(
+        self, pair
+    ) -> None:
         approver, enroller, _ = pair
         owner = _owner(approver)
         key = _pending(approver)
@@ -124,11 +148,15 @@ class TestApprovalVersusEnrollment:
         assert deny.still_blocked()
         gate.release.set()
         assert approve.join() is True
-        assert deny.join() is False  # it re-read the row after the approval and found nothing pending
+        assert (
+            deny.join() is False
+        )  # it re-read the row after the approval and found nothing pending
         st = one.get_principal_status(key)
         assert st.active and st.session_epoch == 0
-        actions = [e.action for e in one.list_status_events(key)]
-        assert actions.count("approved") == 1 and "denied" not in actions
+        actions = [e.action for e in one.iter_audit(account_id=key)]
+        assert (
+            actions.count("account_approved") == 1 and "account_denied" not in actions
+        )
 
     def test_deny_first_then_approve_changes_nothing(self, pair) -> None:
         one, two, _ = pair
@@ -150,12 +178,17 @@ class TestApprovalVersusEnrollment:
         denier, enroller, _ = pair
         owner = _owner(denier)
         key = denier.create_operator_account(  # an owner, so the disable reaches the last-owner count
-            provider_id="entra", issuer=acc.entra_issuer(TENANT), subject=OID_B,
-            status="active", role="owner",
+            provider_id="entra",
+            issuer=acc.entra_issuer(TENANT),
+            subject=OID_B,
+            status="active",
+            role="owner",
         )
         gate = Gate("after_owner_count")
         denier._pause_hook = gate
-        deny = Runner(lambda: denier.disable_principal(key, actor=owner, reason="admin_disabled"))
+        deny = Runner(
+            lambda: denier.disable_principal(key, actor=owner, reason="admin_disabled")
+        )
         assert gate.reached.wait(WAIT)
         put = Runner(lambda: _put(enroller, key))
         assert put.still_blocked()
@@ -165,19 +198,26 @@ class TestApprovalVersusEnrollment:
             put.join()
         assert enroller.info(key) is None
 
-    def test_an_approval_by_an_owner_disabled_in_the_meantime_is_refused(self, pair) -> None:
+    def test_an_approval_by_an_owner_disabled_in_the_meantime_is_refused(
+        self, pair
+    ) -> None:
         from canvas_mcp.core.selfhost.token_store import AccessActionRefused
 
         one, two, _ = pair
         boss = _owner(one)
         other = one.create_operator_account(
-            provider_id="entra", issuer=acc.entra_issuer(TENANT), subject=OID_B,
-            status="active", role="owner",
+            provider_id="entra",
+            issuer=acc.entra_issuer(TENANT),
+            subject=OID_B,
+            status="active",
+            role="owner",
         )
         key = _pending(one)
         gate = Gate("after_owner_count")
         one._pause_hook = gate
-        disable = Runner(lambda: one.disable_principal(other, actor=boss, reason="admin_disabled"))
+        disable = Runner(
+            lambda: one.disable_principal(other, actor=boss, reason="admin_disabled")
+        )
         assert gate.reached.wait(WAIT)
         approve = Runner(lambda: two.approve_account(key, actor=other))
         assert approve.still_blocked()
@@ -189,7 +229,9 @@ class TestApprovalVersusEnrollment:
 
 
 class TestFirstSight:
-    def test_two_concurrent_sign_ups_of_one_identity_make_one_account(self, tmp_path: pathlib.Path) -> None:
+    def test_two_concurrent_sign_ups_of_one_identity_make_one_account(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         for round_ in range(6):
             path = tmp_path / f"s{round_}.sqlite3"
             one = make_store(path, _ring())
@@ -205,10 +247,12 @@ class TestFirstSight:
             runners = [Runner(lambda s=s: go(s)) for s in (one, two)]
             results = [r.join() for r in runners]
             assert results[0].principal_key == results[1].principal_key
-            assert len(one.list_accounts()) == 1
+            assert sum(1 for _ in one.iter_accounts()) == 1
             assert raw_sql(one, "SELECT COUNT(*) FROM external_identities")[0][0] == 1
 
-    def test_a_sign_up_decided_before_a_disable_does_not_resurrect_the_account(self, pair) -> None:
+    def test_a_sign_up_decided_before_a_disable_does_not_resurrect_the_account(
+        self, pair
+    ) -> None:
         creator, admin, _ = pair
         key = _pending(admin)  # the operator pre-provisioned it ...
         gate = Gate("after_decision")
@@ -217,7 +261,9 @@ class TestFirstSight:
         sign_in = Runner(lambda: svc.sign_in(claims(OID_A, "Canvas.User")))
         assert gate.reached.wait(WAIT)
         disable = Runner(
-            lambda: admin.disable_principal(key, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)
+            lambda: admin.disable_principal(
+                key, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR
+            )
         )
         assert disable.still_blocked()
         gate.release.set()
@@ -226,19 +272,26 @@ class TestFirstSight:
         assert disable.join() is True  # ... and the disable then landed on it
         assert admin.get_principal_status(key).disabled
         denied = svc.sign_in(claims(OID_A, "Canvas.User"))
-        assert isinstance(denied, acc.Denied) and denied.code == acc.DENY_ACCESS_DISABLED
+        assert (
+            isinstance(denied, acc.Denied) and denied.code == acc.DENY_ACCESS_DISABLED
+        )
 
     def test_a_disable_before_the_sign_in_wins_and_is_kept(self, pair) -> None:
         admin, creator, _ = pair
         _owner(admin)  # a second owner, so the disable is allowed
         key = admin.create_operator_account(
-            provider_id="entra", issuer=acc.entra_issuer(TENANT), subject=OID_A,
-            status="active", role="owner",
+            provider_id="entra",
+            issuer=acc.entra_issuer(TENANT),
+            subject=OID_A,
+            status="active",
+            role="owner",
         )
         gate = Gate("after_owner_count")
         admin._pause_hook = gate
         disable = Runner(
-            lambda: admin.disable_principal(key, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)
+            lambda: admin.disable_principal(
+                key, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR
+            )
         )
         assert gate.reached.wait(WAIT)
         svc = identity_service(creator, policy=RULES)
@@ -249,9 +302,13 @@ class TestFirstSight:
         out = sign_in.join()
         assert isinstance(out, acc.Denied) and out.code == acc.DENY_ACCESS_DISABLED
         st = admin.get_principal_status(key)
-        assert st.disabled and st.session_epoch == 1 and st.role_source == "operator"  # nothing changed
+        assert (
+            st.disabled and st.session_epoch == 1 and st.role_source == "operator"
+        )  # nothing changed
 
-    def test_the_pending_cap_holds_under_concurrency(self, tmp_path: pathlib.Path) -> None:
+    def test_the_pending_cap_holds_under_concurrency(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         capped = AccessPolicy(mode="approval", pending_limit=1)
         for round_ in range(4):
             path = tmp_path / f"c{round_}.sqlite3"
@@ -260,7 +317,9 @@ class TestFirstSight:
             two = make_store(path, _ring())
             barrier = threading.Barrier(2)
 
-            def go(store: TokenStore, oid: str, barrier: threading.Barrier = barrier) -> Any:
+            def go(
+                store: TokenStore, oid: str, barrier: threading.Barrier = barrier
+            ) -> Any:
                 svc = identity_service(store, policy=capped)
                 barrier.wait()
                 return svc.sign_in(claims(oid))
@@ -268,11 +327,13 @@ class TestFirstSight:
             runners = [Runner(partial(go, one, OID_A)), Runner(partial(go, two, OID_B))]
             results = [r.join() for r in runners]
             assert sum(isinstance(r, acc.Denied) for r in results) == 1
-            assert len(one.list_accounts()) == 1
+            assert sum(1 for _ in one.iter_accounts()) == 1
 
 
 class TestRolesAtOnce:
-    def test_two_idp_demotions_keep_an_owner(self, tmp_path: pathlib.Path) -> None:
+    def test_two_verified_sign_in_demotions_keep_an_owner(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         for round_ in range(6):
             path = tmp_path / f"d{round_}.sqlite3"
             clock = Clock()
@@ -280,41 +341,50 @@ class TestRolesAtOnce:
             one.initialize()
             two = make_store(path, _ring(), clock=clock)
             svc = identity_service(one, policy=RULES)
-            key_a = svc.sign_in(claims(OID_A, "Canvas.Owner")).principal_key
-            key_b = svc.sign_in(claims(OID_B, "Canvas.Owner")).principal_key
+            svc.sign_in(claims(OID_A, "Canvas.Owner"))
+            svc.sign_in(claims(OID_B, "Canvas.Owner"))
             barrier = threading.Barrier(2)
 
             def demote(
-                store: TokenStore,
-                key: str,
-                evidence: int = int(clock.now) + 500,
-                barrier: threading.Barrier = barrier,
+                store: TokenStore, oid: str, barrier: threading.Barrier = barrier
             ) -> Any:
                 barrier.wait()
-                return store.demote_owner(key, evidence_issued_at=evidence)
+                return identity_service(store, policy=RULES).sign_in(
+                    claims(oid, "Canvas.User")
+                )
 
-            results = [
-                r.join()
-                for r in (
-                    Runner(partial(demote, one, key_a)),
-                    Runner(partial(demote, two, key_b)),
+            outcomes = [
+                runner.join()
+                for runner in (
+                    Runner(partial(demote, one, OID_A)),
+                    Runner(partial(demote, two, OID_B)),
                 )
             ]
-            assert sorted(results) == [False, True]
+            assert all(
+                not isinstance(outcome, acc.Denied) and not outcome.owner
+                for outcome in outcomes
+            )
             assert one.count_active_owners() == 1
+            actions = [entry.action for entry in one.iter_audit()]
+            assert actions.count("owner_loss_refused_last_owner") == 1
 
-    def test_an_owner_sign_in_racing_the_last_owner_demotion_never_leaves_none(self, pair) -> None:
-        one, two, clock = pair
-        key_a = identity_service(one, policy=RULES).sign_in(claims(OID_A, "Canvas.Owner")).principal_key
-        gate = Gate("after_owner_count")
+    def test_owner_sign_in_racing_last_owner_demotion_never_leaves_none(
+        self, pair
+    ) -> None:
+        one, two, _ = pair
+        svc = identity_service(one, policy=RULES)
+        svc.sign_in(claims(OID_A, "Canvas.Owner"))
+        gate = Gate("after_decision")
         one._pause_hook = gate
-        demote = Runner(lambda: one.demote_owner(key_a, evidence_issued_at=int(clock.now) + 500))
+        demote = Runner(lambda: svc.sign_in(claims(OID_A, "Canvas.User")))
         assert gate.reached.wait(WAIT)
-        svc = identity_service(two, policy=RULES)
-        again = Runner(lambda: svc.sign_in(claims(OID_A, "Canvas.Owner")))
+        again = Runner(
+            lambda: identity_service(two, policy=RULES).sign_in(
+                claims(OID_A, "Canvas.Owner")
+            )
+        )
         assert again.still_blocked()
         gate.release.set()
-        assert demote.join() is False  # sole owner: refused
-        out = again.join()
-        assert out.owner  # type: ignore[union-attr]
+        assert not demote.join().owner
+        assert again.join().owner
         assert one.count_active_owners() == 1
