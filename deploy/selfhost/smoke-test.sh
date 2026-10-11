@@ -155,7 +155,7 @@ ok "public-client registration and refusal semantics"
 
 # (e) startup refuses removed settings and unusable React build
 expect_refusal() {
-  local label="$1" result; shift
+  local label="$1" result marker; shift
   set +e
   timeout 30 docker run --rm --name "$REFUSAL" --read-only --tmpfs /tmp \
     "${ENV[@]}" "$@" "$IMAGE" >"$WORKDIR/refusal" 2>&1
@@ -163,7 +163,12 @@ expect_refusal() {
   set -e
   docker rm -f "$REFUSAL" >/dev/null 2>&1 || true
   [ "$result" != 0 ] && [ "$result" != 124 ] || fail "$label did not refuse startup"
-  grep -qiE 'configuration|requires|refus|missing|invalid|removed|renamed|unusable' "$WORKDIR/refusal" || fail "$label had an unexpected failure"
+  case "$label" in
+    "missing React build") marker='Account UI';;
+    "reserved state backend") marker='SELFHOST_STATE_BACKEND';;
+    *) marker="$label";;
+  esac
+  grep -qiF "$marker" "$WORKDIR/refusal" || fail "$label had an unexpected failure"
   ok "$label refuses startup"
 }
 for removed in SELFHOST_AUTH_MODE OAUTH_JWT_SIGNING_KEY GRANT_STATUS_CACHE_S CANVAS_API_URL CANVAS_FEATURED_SCHOOLS CANVAS_SCHOOL_SEARCH ACCOUNT_UI ENTRA_API_SCOPE; do
