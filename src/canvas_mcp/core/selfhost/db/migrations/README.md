@@ -77,6 +77,28 @@ nontransactional plan, completed earlier revisions remain committed on failure;
 repair the cause and rerun rather than implying the whole plan was rolled back.
 No upgrade re-encrypts stored secrets and no downgrade is supported.
 
+## Moving from a pre-v1 deployment
+
+Start a fresh v1 database, re-enroll Canvas credentials and reconnect clients.
+Pre-v1 database files are refused; this package does not convert them. Keep the
+old database and its matching keyring for recovery with the old image.
+
+| Former setting | v1 action |
+| --- | --- |
+| `MCP_AUTH_MODE=entra-oauth` | Use `MCP_AUTH_MODE=selfhost` |
+| `ENTRA_API_SCOPE` | Use `MCP_SCOPE`, default `Canvas.Access` |
+| `SELFHOST_AUTH_MODE` | Delete; the built-in authorization server is always used |
+| `ACCOUNT_UI` | Delete; the built React account UI is required |
+| `OAUTH_JWT_SIGNING_KEY` | Delete; JWT keys derive from `CANVAS_TOKEN_KEYS` |
+| `GRANT_STATUS_CACHE_S` | Delete; committed authorization state is read per request |
+| `CANVAS_API_URL` | Delete in selfhost mode; each account selects a school |
+| `CANVAS_FEATURED_SCHOOLS`, `CANVAS_SCHOOL_SEARCH` | Delete; configure schools/search in Admin > Settings or `token_admin` |
+| `OIDC_<SLUG>_DISPLAY_NAME` | Delete; configure the public sign-in name in Admin > Settings or `token_admin providers` |
+
+These removals apply to selfhost mode; the separate legacy stdio/Canvas-token
+HTTP configurations retain their own contract. Do not copy old switches or
+environment-owned school defaults into the v1 environment template.
+
 ## Operator commands
 
 Run these with the server's database and matching `CANVAS_TOKEN_KEYS`. The
