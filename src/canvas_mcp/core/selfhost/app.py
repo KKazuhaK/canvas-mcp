@@ -354,13 +354,20 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
     except OSError:
         raise SelfhostConfigError(["the Canvas token database cannot be opened"]) from None
 
-    owner_problem = _owner_path_problem(settings, store)
+    # token_admin reads this to know which owners are usable (it often runs without the
+    # server's variables). It is the configured list, so it is written before the owner-path
+    # check: when that refuses the start, the operator's next step is a token_admin command,
+    # and it must judge owners by the list that was refused, not by an older one. An
+    # Entra-only server with no earlier record writes nothing.
+    try:
+        store.record_login_providers(settings.login_providers.ids)
+        owner_problem = _owner_path_problem(settings, store)
+    except BaseException:
+        store.close()
+        raise
     if owner_problem is not None:
         store.close()
         raise SelfhostConfigError([owner_problem])
-    # token_admin reads this to know which owners are usable (it often runs without the
-    # server's variables). An Entra-only server with no earlier record writes nothing.
-    store.record_login_providers(settings.login_providers.ids)
 
     access = PrincipalAccessCache(store)
     identity = IdentityService(

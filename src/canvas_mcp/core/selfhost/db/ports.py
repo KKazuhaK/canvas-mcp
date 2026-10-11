@@ -210,6 +210,11 @@ class AccountRepo(Protocol):
         now: int,
     ) -> None: ...
 
+    def set_admitted_via(
+        self, conn: Connection, account_id: str, admitted_via: str, now: int
+    ) -> None:
+        """Change how the account was admitted (a personal admission replaces the rules)."""
+
     def mark_role_seen(self, conn: Connection, account_id: str, now: int) -> None:
         """Record fresh evidence of the role (a sign-in)."""
 

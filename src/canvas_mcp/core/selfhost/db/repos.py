@@ -594,6 +594,13 @@ class SqlAccountRepo:
             .values(role=role, role_source=source, role_seen_at=seen_at, updated_at=now)
         )
 
+    def set_admitted_via(
+        self, conn: Connection, account_id: str, admitted_via: str, now: int
+    ) -> None:
+        conn.execute(
+            update(_a).where(_a.c.id == account_id).values(admitted_via=admitted_via, updated_at=now)
+        )
+
     def mark_role_seen(self, conn: Connection, account_id: str, now: int) -> None:
         conn.execute(
             update(_a).where(_a.c.id == account_id).values(role_seen_at=now, updated_at=now)

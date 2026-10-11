@@ -271,12 +271,68 @@ class TestRecordedLoginProviders:
         assert "last usable owner" in err and "note:" not in err
         assert store.get_principal_status(c).status == "active"
 
-    def test_the_record_beats_a_different_variable_in_the_shell(self, store, monkeypatch, capsys) -> None:
+    def test_a_variable_that_shares_no_provider_with_the_record_leaves_the_record_in_force(
+        self, store, monkeypatch, capsys
+    ) -> None:
         c = self.google_only_world(store)
         store.record_login_providers({"google"})
         monkeypatch.setenv("SELFHOST_LOGIN_PROVIDERS", "entra")
         assert token_admin.main(["disable", c]) == 3
         assert store.get_principal_status(c).status == "active"
+        assert "differs from the list the server last recorded" in capsys.readouterr().err
+
+    def test_a_different_variable_is_noted_and_an_owner_must_be_usable_under_both_lists(
+        self, store, monkeypatch, capsys
+    ) -> None:
+        # The operator moves the server from entra,google to google. S (an Entra-rule owner) is
+        # usable under the record, not under the new list; C (a Google-only operator owner) is
+        # the only owner usable under both, so it must not be disabled.
+        c = self.google_only_world(store)
+        store.record_login_providers({"entra", "google"})
+        monkeypatch.setenv("SELFHOST_LOGIN_PROVIDERS", "google")
+        assert token_admin.main(["disable", c]) == 3
+        err = capsys.readouterr().err
+        assert "differs from the list the server last recorded" in err
+        assert "entra, google" in err and "last usable owner" in err
+        assert store.get_principal_status(c).status == "active"
+
+    def test_the_same_list_in_the_shell_and_the_record_says_nothing(
+        self, store, monkeypatch, capsys
+    ) -> None:
+        c = self.google_only_world(store)
+        store.record_login_providers({"google"})
+        monkeypatch.setenv("SELFHOST_LOGIN_PROVIDERS", "google")
+        assert token_admin.main(["disable", c]) == 3
+        err = capsys.readouterr().err
+        assert "note:" not in err and "last usable owner" in err
+
+    def test_promote_owner_follows_the_list_a_refused_start_was_refused_for(
+        self, store, monkeypatch, capsys
+    ) -> None:
+        # The server last recorded entra,google; X holds an Entra-rule role and a Google identity.
+        sign_in(store, OID_A, owner=True)
+        link(store, KEY_A, ExternalClaims(
+            provider_id="google", issuer=acc.GOOGLE_ISSUER, subject="1234567890",
+            email="a@example.test", email_verified=True,
+        ))
+        store.record_login_providers({"entra", "google"})
+        assert token_admin.main(["promote-owner", KEY_A]) == 1  # usable under that list
+        capsys.readouterr()
+        # The shell now names google alone: X is not usable under it, so it is promoted.
+        monkeypatch.setenv("SELFHOST_LOGIN_PROVIDERS", "google")
+        assert token_admin.main(["promote-owner", KEY_A]) == 0
+        captured = capsys.readouterr()
+        assert captured.out.strip() == "promoted 1 account to owner"
+        assert "differs from the list the server last recorded" in captured.err
+        assert store.get_principal_status(KEY_A).role_source == "operator"
+
+    def test_promote_owner_says_why_an_owner_cannot_be_made_usable(self, store, capsys) -> None:
+        sign_in(store, OID_A, owner=True)  # an Entra identity only
+        store.record_login_providers({"google"})
+        assert token_admin.main(["promote-owner", KEY_A]) == 1
+        out = capsys.readouterr().out
+        assert "cannot be made usable" in out and "no sign-in method at a listed provider" in out
+        assert store.get_principal_status(KEY_A).role_source == "rules"
 
     def test_nothing_recorded_and_nothing_set_assumes_entra_and_says_so(self, store, capsys) -> None:
         c = self.google_only_world(store)

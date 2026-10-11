@@ -275,9 +275,9 @@ def log_principal_event(
     covers the operator CLI.
 
     Args:
-        action: "disabled", "enabled", "owner_gained", "owner_lost" (state
-            transitions), "refused" (an access change that was not made),
-            "sign_in_refused", "enroll_refused" (a disabled principal tried),
+        action: "disabled", "enabled", "owner_gained", "owner_lost",
+            "owner_re_sourced" (state transitions), "refused" (an access change that was
+            not made), "sign_in_refused", "enroll_refused" (a disabled principal tried),
             "self_disconnected" (a user deleted their own token) or
             "enrollment_removed" (an owner removed an enrollment row).
         principal_key: The subject.

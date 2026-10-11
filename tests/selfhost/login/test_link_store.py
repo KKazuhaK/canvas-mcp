@@ -751,13 +751,24 @@ class TestStrandedOwnerAndTheBootstrapIdentity:
         assert (status.role, status.role_source) == ("owner", "bootstrap")
         assert store.count_usable_owners(self.GOOGLE_ONLY) == 1
         entry = next(e for e in actions(store, "role_changed") if e.target == KEY_A)
+        # The account itself is not "an owner this overrides": nothing else was stranded.
         assert entry.detail == {
-            "role": "owner", "source": "bootstrap", "via": "sign_in", "unusable_owners": 1, "was": "rules",
+            "role": "owner", "source": "bootstrap", "via": "sign_in", "was": "rules",
         }
+        # It was an owner already: the history says it was re-sourced, not that it gained the role.
+        assert resolution.owner_change == acc.EVENT_OWNER_RESOURCED
+        assert store.list_status_events(KEY_A)[0].action == acc.EVENT_OWNER_RESOURCED
         # A second sign-in changes nothing more and is still an owner session.
         before = len(store.list_audit(200))
         again = self.sign(store, google("boot-1"), self.GOOGLE_ONLY)
         assert again.session_owner and len(store.list_audit(200)) == before
+
+    def test_other_stranded_owners_are_counted_but_the_account_itself_is_not(self, store: TokenStore) -> None:
+        self.stranded(store)
+        sign_in(store, OID_B, owner=True, policy=RULES_OWNER)  # a second owner nobody can use
+        self.sign(store, google("boot-1"), self.GOOGLE_ONLY)
+        entry = next(e for e in actions(store, "role_changed") if e.target == KEY_A)
+        assert entry.detail["unusable_owners"] == 1 and entry.detail["was"] == "rules"
 
     def test_it_is_left_alone_while_a_usable_owner_exists(self, store: TokenStore) -> None:
         self.stranded(store)
@@ -783,7 +794,7 @@ class TestStrandedOwnerAndTheBootstrapIdentity:
         assert (status.role, status.role_source) == ("owner", "operator")
         assert store.count_usable_owners(self.GOOGLE_ONLY) == 1
         entry = next(e for e in actions(store, "role_changed") if e.target == KEY_A and e.actor == "operator")
-        assert entry.detail == {"role": "owner", "source": "operator", "was": "rules"}
+        assert entry.detail == {"role": "owner", "source": "operator", "was": "rules"}  # A was already personal
         assert store.promote_owner(KEY_A, listed_providers=self.GOOGLE_ONLY) is False  # nothing left to do
 
     def test_promote_owner_leaves_a_usable_owner_alone(self, store: TokenStore) -> None:
@@ -818,6 +829,84 @@ class TestStrandedOwnerAndTheBootstrapIdentity:
         assert store.get_principal_status(key).role_source == "bootstrap"
         # Another account of the same rules stays refused.
         assert self.sign(store, google("someone"), self.GOOGLE_ONLY, domain("other.edu")).outcome == "deny"
+
+    def test_the_bootstrap_owner_the_rules_do_not_admit_can_sign_in_again(self, store: TokenStore) -> None:
+        domain = lambda d: AccessPolicy(  # noqa: E731
+            mode="rules", rules=(acc.AccessRule("google", "domain", d),), owner_rules=(),
+            bootstrap_owner=self.BOOT.bootstrap_owner, ack_public=True,
+        )
+        sign_in(store, OID_A, owner=True, policy=RULES_OWNER)
+        created = self.sign(store, google("boot-1"), self.BOTH, domain("example.test"))
+        key = created.principal_key
+        assert key is not None and store.get_principal_status(key).admitted_via == "rules"
+        first = self.sign(store, google("boot-1"), self.GOOGLE_ONLY, domain("other.edu"))
+        assert first.session_owner
+        status = store.get_principal_status(key)
+        assert (status.role_source, status.admitted_via) == ("bootstrap", "bootstrap")
+        entry = next(e for e in actions(store, "role_changed") if e.target == key)
+        assert entry.detail["admitted_via"] == "bootstrap"
+        # It is a usable owner now, so the bootstrap no longer applies, and the rules must not
+        # lock it out: every later sign-in is an owner session.
+        assert store.count_usable_owners(self.GOOGLE_ONLY) == 1
+        for _ in range(2):
+            again = self.sign(store, google("boot-1"), self.GOOGLE_ONLY, domain("other.edu"))
+            assert again.outcome == "allow" and again.session_owner
+        # Another account of the same rules is still refused.
+        assert self.sign(store, google("someone"), self.GOOGLE_ONLY, domain("other.edu")).outcome == "deny"
+
+    def stranded_by_rules(self, store: TokenStore) -> str:
+        """Like :meth:`stranded`, for a new account the owner rule admitted (``admitted_via='rules'``)."""
+        sign_in(store, OID_C, owner=True, policy=RULES_OWNER)
+        status = store.get_principal_status(KEY_C)
+        assert (status.role_source, status.admitted_via) == ("rules", "rules")
+        assert link(store, KEY_C, google("boot-1")).ok
+        return KEY_C
+
+    OTHER_DOMAIN = AccessPolicy(
+        mode="rules", rules=(acc.AccessRule("google", "domain", "other.edu"),), owner_rules=(),
+        bootstrap_owner=BOOT.bootstrap_owner, ack_public=True,
+    )
+
+    def test_a_re_sourced_owner_the_rules_do_not_admit_can_sign_in_again(self, store: TokenStore) -> None:
+        # The stranded Entra-rule owner (admitted by the owner rule) links Google, the rules move
+        # on, and the bootstrap sign-in must not be the owner's last.
+        key = self.stranded_by_rules(store)
+        first = self.sign(store, google("boot-1"), self.GOOGLE_ONLY, self.OTHER_DOMAIN)
+        assert first.outcome == "allow" and first.session_owner
+        assert store.get_principal_status(key).admitted_via == "bootstrap"
+        entry = next(e for e in actions(store, "role_changed") if e.target == key)
+        assert entry.detail["admitted_via"] == "bootstrap"
+        for _ in range(2):
+            again = self.sign(store, google("boot-1"), self.GOOGLE_ONLY, self.OTHER_DOMAIN)
+            assert again.outcome == "allow" and again.session_owner
+
+    def test_promoting_a_user_does_not_change_how_it_was_admitted(self, store: TokenStore) -> None:
+        # Only a re-sourced owner becomes a personal admission; a plain promotion is as before.
+        sign_in(store, OID_B)
+        before = store.get_principal_status(KEY_B)
+        assert before.role == "user"
+        assert store.promote_owner(KEY_B, listed_providers=self.BOTH) is True
+        after = store.get_principal_status(KEY_B)
+        assert (after.role, after.role_source) == ("owner", "operator")
+        assert after.admitted_via == before.admitted_via
+        entry = next(e for e in actions(store, "role_changed") if e.target == KEY_B)
+        assert entry.detail == {"role": "owner", "source": "operator"}
+
+    def test_a_promoted_owner_the_rules_do_not_admit_can_sign_in_again(self, store: TokenStore) -> None:
+        key = self.stranded_by_rules(store)
+        no_bootstrap = AccessPolicy(
+            mode="rules", rules=(acc.AccessRule("google", "domain", "other.edu"),), owner_rules=(),
+            ack_public=True,
+        )
+        assert self.sign(store, google("boot-1"), self.GOOGLE_ONLY, no_bootstrap).outcome == "deny"
+        assert store.promote_owner(key, listed_providers=self.GOOGLE_ONLY) is True
+        assert store.get_principal_status(key).admitted_via == "operator"
+        entry = next(e for e in actions(store, "role_changed") if e.target == key and e.actor == "operator")
+        assert entry.detail == {
+            "role": "owner", "source": "operator", "was": "rules", "admitted_via": "operator",
+        }
+        again = self.sign(store, google("boot-1"), self.GOOGLE_ONLY, no_bootstrap)
+        assert again.outcome == "allow"
 
 
 class TestUsableOwnerGuards:

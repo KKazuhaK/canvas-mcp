@@ -94,7 +94,7 @@ ADMITTED_VIA = (
     ADMITTED_OPERATOR,
     ADMITTED_BOOTSTRAP,
 )
-_PERSONAL_ADMISSION = frozenset({ADMITTED_APPROVAL, ADMITTED_OPERATOR, ADMITTED_BOOTSTRAP})
+PERSONAL_ADMISSION = frozenset({ADMITTED_APPROVAL, ADMITTED_OPERATOR, ADMITTED_BOOTSTRAP})
 
 POLICY_OPEN = "open"
 POLICY_RULES = "rules"
@@ -193,6 +193,9 @@ EVENT_ACTIVATED = "activated"
 EVENT_OWNER_GAINED = "owner_gained"
 EVENT_OWNER_LOST = "owner_lost"
 EVENT_OWNER_LOSS_REFUSED = "owner_loss_refused_last_owner"
+#: An owner whose role no sign-in could use was re-sourced to ``bootstrap`` (it was an owner
+#: already, so this is not ``owner_gained``).
+EVENT_OWNER_RESOURCED = "owner_re_sourced"
 
 DENIAL_MESSAGES: dict[str, str] = {
     DENY_WRONG_TENANT: (
@@ -1158,9 +1161,23 @@ def decide(
         )
     effective_role = new_role if new_role is not None else existing.role
     effective_source = new_source if new_role is not None else existing.role_source
+    # The bootstrap owner is a personal admission, as for a new or pending account of the same
+    # identity: if it stayed "rules" (or "open") the very rules that were overridden here would
+    # refuse the owner at its next sign-in, and the server would be left with an owner who can
+    # sign in once.
+    admitted_via = (
+        ADMITTED_BOOTSTRAP
+        if (
+            new_role == ROLE_OWNER
+            and new_source == ROLE_SOURCE_BOOTSTRAP
+            and existing.admitted_via not in PERSONAL_ADMISSION
+        )
+        else None
+    )
     return Decision(
         outcome="allow",
         reason=REASON_OK,
+        admitted_via=admitted_via,
         role=new_role,
         role_source=new_source,
         role_event=new_event,
@@ -1195,7 +1212,7 @@ def link_admissible(existing: AccountFacts, verdict: Verdict, policy: AccessPoli
         policy.mode in (POLICY_OPEN, POLICY_APPROVAL)
         or verdict.owner_by_rule
         or (policy.mode == POLICY_RULES and verdict.admitted_by_rule)
-        or existing.admitted_via in _PERSONAL_ADMISSION
+        or existing.admitted_via in PERSONAL_ADMISSION
     )
 
 
@@ -1227,7 +1244,7 @@ def _recompute_role(
         and not facts.existing_owner_usable
         and existing.role_source != ROLE_SOURCE_BOOTSTRAP
     ):
-        return ROLE_OWNER, ROLE_SOURCE_BOOTSTRAP, EVENT_OWNER_GAINED
+        return ROLE_OWNER, ROLE_SOURCE_BOOTSTRAP, EVENT_OWNER_RESOURCED
     # Only a role that rules granted is taken back by rules.
     if existing.role_source == ROLE_SOURCE_RULES and not owner_match and owner_evidence:
         # Stranded owners (no sign-in can show their role) do not count as a replacement: the

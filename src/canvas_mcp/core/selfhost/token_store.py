@@ -1643,7 +1643,8 @@ class TokenStore:
             created = activated = False
             owner_change: str | None = None
             unusable_owners = (
-                active_owners - usable_owners
+                # The owners this bootstrap overrides: not the account being re-sourced itself.
+                max(0, active_owners - usable_owners - (0 if owner_usable else 1))
                 if decision.role == ROLE_OWNER and decision.role_source == acc.ROLE_SOURCE_BOOTSTRAP
                 else 0
             )
@@ -1975,6 +1976,13 @@ class TokenStore:
                 seen_at=now if decision.role == ROLE_OWNER else row[4],
                 now=now,
             )
+            admitted_via = decision.admitted_via
+            if admitted_via is not None and not decision.activate and admitted_via != row[5]:
+                # The bootstrap owner is admitted personally, so the rules it overrode cannot
+                # refuse it at its next sign-in.
+                repos.accounts.set_admitted_via(conn, account_id, admitted_via, now)
+            else:
+                admitted_via = None
             event = decision.role_event or (
                 EVENT_OWNER_GAINED if decision.role == ROLE_OWNER else EVENT_OWNER_LOST
             )
@@ -1984,6 +1992,8 @@ class TokenStore:
             }
             if unusable_owners > 0:
                 detail["unusable_owners"] = unusable_owners
+            if admitted_via is not None:
+                detail["admitted_via"] = admitted_via
             if row[2] == ROLE_OWNER and decision.role == ROLE_OWNER:
                 # An owner re-sourced at a sign-in (the bootstrap identity took over a role no
                 # sign-in could use): say where it came from.
@@ -2329,9 +2339,11 @@ class TokenStore:
         under ``listed_providers`` (the providers of ``SELFHOST_LOGIN_PROVIDERS``; None: all;
         see :func:`accounts.owner_is_usable`) and the operator's say-so would make it one: an
         owner whose role the Entra owner rules granted keeps that source after Entra is
-        delisted, and no sign-in can show it, so it is re-sourced to ``operator`` (audited).
+        delisted, and no sign-in can show it, so it is re-sourced to ``operator`` (audited) and,
+        when the access rules were what admitted it, becomes a personal admission
+        (``admitted_via`` ``operator``) so that the rules cannot refuse it at its next sign-in.
         Returns False when the account is not active, or is already an owner that needs no
-        change.
+        change (a usable owner, or one that no change of source could make usable).
         """
         if not isinstance(actor, _Operator):
             raise AccessActionRefused(AccessActionRefused.NOT_OWNER)
@@ -2343,6 +2355,7 @@ class TokenStore:
             if row is None or row[1] != STATUS_ACTIVE:
                 return False
             previous_source: str | None = None
+            admitted: str | None = None
             if row[2] == ROLE_OWNER:
                 held = [r[1] for r in self._repos.identities.list_with_ids(conn, account_id)]
                 listed = _listed(listed_providers)
@@ -2357,23 +2370,28 @@ class TokenStore:
                 if usable_now or not usable_as_operator:
                     return False
                 previous_source = row[3] or ""
+                # A re-sourced owner is the operator's personal admission: the rules, which
+                # may no longer admit this account, must not lock the owner out of its next
+                # sign-in. (A plain promotion of a user changes nothing else, as before.)
+                if row[5] not in acc.PERSONAL_ADMISSION:
+                    admitted = acc.ADMITTED_OPERATOR
             self._repos.accounts.set_role(
                 conn, account_id, role=ROLE_OWNER, source=acc.ROLE_SOURCE_OPERATOR,
                 seen_at=now, now=now,
             )
+            if admitted is not None:
+                self._repos.accounts.set_admitted_via(conn, account_id, admitted, now)
             self._record_event(
                 conn, key, EVENT_OWNER_GAINED, OPERATOR_ACTOR, "operator", int(row[16]), now
             )
             self._audit(
                 conn, OPERATOR_ACTOR, AUDIT_ROLE_CHANGED, target=key,
-                detail=(
-                    {"role": ROLE_OWNER, "source": acc.ROLE_SOURCE_OPERATOR}
-                    if previous_source is None
-                    else {
-                        "role": ROLE_OWNER, "source": acc.ROLE_SOURCE_OPERATOR,
-                        "was": previous_source[:32],
-                    }
-                ),
+                detail={
+                    "role": ROLE_OWNER,
+                    "source": acc.ROLE_SOURCE_OPERATOR,
+                    **({} if previous_source is None else {"was": previous_source[:32]}),
+                    **({} if admitted is None else {"admitted_via": admitted}),
+                },
                 now=now,
             )
         return True

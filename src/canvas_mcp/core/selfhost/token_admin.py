@@ -840,7 +840,11 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
             key, actor=OPERATOR, listed_providers=_listed_providers(store)
         )
         if not changed:
-            print("nothing to do: no such active account, or it is already an owner")
+            print(
+                "nothing to do: no such active account, it is already a usable owner, or it is "
+                "an owner that cannot be made usable (it has no sign-in method at a listed "
+                "provider: link one first, or list the provider it uses)"
+            )
             return EXIT_NOT_FOUND
         print("promoted 1 account to owner")
         return EXIT_OK
@@ -937,14 +941,61 @@ def _listed_providers(store: TokenStore) -> frozenset[str] | None:
     They decide which owners are usable, so they must be the server's. In this order:
 
     1. the list the server recorded in the database at its last startup (``meta``): an operator
-       shell often lacks the server's variables, and this does not depend on them;
+       shell often lacks the server's variables, and this does not depend on them. The server
+       records the configured list before it decides whether it may start, so this is also the
+       list a refused start was refused for;
     2. this environment: the full settings, else ``SELFHOST_LOGIN_PROVIDERS`` alone.
 
-    A note on stderr says so when the answer had to be assumed: the list is unreadable (every
-    provider is then counted as listed, which is more permissive than the server), or nothing
-    names it (no record, no variable) while the database holds sign-in methods at providers other
-    than Entra (Entra alone is then assumed). A deployment with Entra alone gets no note.
+    When the environment names the list and it differs from the record, the operator is changing
+    the providers (or running with another file): a note on stderr says so and the owners must be
+    usable under *both* lists (the intersection of the two: the stricter reading for ``disable``
+    and ``unlink-identity``, and one that lets ``promote-owner`` re-source an owner that is
+    unusable under either); lists with nothing in common leave the record in force.
+
+    A note on stderr also says so when the answer had to be assumed: the list is unreadable
+    (every provider is then counted as listed, which is more permissive than the server), or
+    nothing names it (no record, no variable) while the database holds sign-in methods at
+    providers other than Entra (Entra alone is then assumed). A deployment with Entra alone gets
+    no note.
     """
+    from canvas_mcp.core.selfhost.login.config import LOGIN_PROVIDERS_ENV
+
+    recorded = store.recorded_login_providers()
+    named = bool((os.environ.get(LOGIN_PROVIDERS_ENV) or "").strip())
+    if recorded is not None and not named:
+        return recorded
+    from_env = _environment_providers()
+    if recorded is not None:
+        if from_env is None or from_env == recorded:
+            return recorded
+        both = recorded & from_env
+        print(
+            f"note: {LOGIN_PROVIDERS_ENV} in this environment ({', '.join(sorted(from_env))}) "
+            f"differs from the list the server last recorded ({', '.join(sorted(recorded))}); "
+            + (
+                "an owner counts as usable only under both lists"
+                if both
+                else "they share no provider, so the recorded list is used"
+            ),
+            file=sys.stderr,
+        )
+        # No provider in common: an intersection would make every owner unusable and so take
+        # every guard away, so the server's own record stands.
+        return both or recorded
+    if from_env is not None:
+        if not named:
+            _note_assumed_entra_only(store)
+        return from_env
+    print(
+        "note: SELFHOST_LOGIN_PROVIDERS is not readable in this environment; every provider is "
+        "assumed to be listed, so the usable-owner check is more permissive than the server's",
+        file=sys.stderr,
+    )
+    return None
+
+
+def _environment_providers() -> frozenset[str] | None:
+    """The provider ids this environment's settings name; None when they cannot be read."""
     from canvas_mcp.core.selfhost.login.config import (
         LOGIN_PROVIDERS_ENV,
         parse_login_providers,
@@ -954,36 +1005,21 @@ def _listed_providers(store: TokenStore) -> frozenset[str] | None:
         load_selfhost_settings,
     )
 
-    recorded = store.recorded_login_providers()
-    if recorded is not None:
-        return recorded
-    named = bool((os.environ.get(LOGIN_PROVIDERS_ENV) or "").strip())
     try:
         with _quiet_login_config():
-            loaded = load_selfhost_settings().login_providers.ids
+            return load_selfhost_settings().login_providers.ids
     except SelfhostConfigError:
         pass
-    else:
-        if not named:
-            _note_assumed_entra_only(store)
-        return loaded
     ignored: list[str] = []
     try:
         # authz_mode "local": the mode of the other settings is not known here, and this reads
         # the list alone.
         with _quiet_login_config():
             ids = parse_login_providers(os.environ, ignored, authz_mode="local").ids
-    except Exception:  # noqa: BLE001 - an unreadable list falls back to "all listed"
-        ids = frozenset()
+    except Exception:  # noqa: BLE001 - an unreadable list is reported by the caller
+        return None
     if ids and not any(p.startswith(LOGIN_PROVIDERS_ENV) for p in ignored):
-        if not named:
-            _note_assumed_entra_only(store)
         return ids
-    print(
-        "note: SELFHOST_LOGIN_PROVIDERS is not readable in this environment; every provider is "
-        "assumed to be listed, so the usable-owner check is more permissive than the server's",
-        file=sys.stderr,
-    )
     return None
 
 

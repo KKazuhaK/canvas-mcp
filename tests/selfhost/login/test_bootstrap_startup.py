@@ -89,7 +89,8 @@ def test_a_stranded_rules_owner_named_as_the_bootstrap_identity_signs_in_as_an_o
         entry = next(
             e for e in runtime.store.list_audit(100) if e.action == "role_changed" and e.target == key
         )
-        assert entry.detail["unusable_owners"] == 1 and entry.detail["was"] == "rules"
+        assert entry.detail["was"] == "rules" and "unusable_owners" not in entry.detail
+        assert runtime.store.list_status_events(key)[0].action == "owner_re_sourced"
     finally:
         runtime.store.close()
     # With a usable owner the startup check is satisfied without the bootstrap identity.
@@ -144,6 +145,84 @@ def test_a_bootstrap_account_the_rules_no_longer_admit_does_not_stop_the_server(
         assert not isinstance(signed, acc.Denied) and signed.owner
         assert runtime.store.get_principal_status(xkey).role_source == "bootstrap"
         assert runtime.store.count_usable_owners(listed) == 1
+        entry = next(
+            e for e in runtime.store.list_audit(100) if e.action == "role_changed" and e.target == xkey
+        )
+        assert entry.detail["unusable_owners"] == 1  # the Entra-only owner, not X itself
+    finally:
+        runtime.store.close()
+    # The rules still do not admit X, but the owner is a personal admission now: it can sign in
+    # again, also after a restart (the bootstrap no longer applies, so only that admission holds).
+    for _ in range(2):
+        restarted = prepare_selfhost(load_selfhost_settings(moved))
+        try:
+            assert restarted.store.get_principal_status(xkey).admitted_via == "bootstrap"
+            signed = restarted.identity.sign_in_external(gext())
+            assert not isinstance(signed, acc.Denied) and signed.owner
+            again = restarted.identity.sign_in_external(gext())
+            assert not isinstance(again, acc.Denied) and again.owner
+        finally:
+            restarted.store.close()
+
+
+def test_a_re_sourced_owner_the_rules_do_not_admit_keeps_signing_in_after_a_restart(
+    tmp_path: pathlib.Path,
+) -> None:
+    # X: an Entra-rule owner (admitted by the owner rule while the policy was open) who linked Google.
+    base_env = default_env(tmp_path, **BOTH)
+    first = prepare_selfhost(load_selfhost_settings(base_env))
+    sign_in(first.store, OID_A, owner=True)
+    key = acct_key(OID_A)
+    link_google(first.store, key)
+    assert first.store.get_principal_status(key).admitted_via == "rules"
+    first.store.close()
+    # Entra is delisted, the policy becomes rules that do not admit Google, and the operator
+    # names X's Google identity as the bootstrap owner.
+    named = {
+        **base_env, **NO_ENTRA, "ACCESS_POLICY": "rules", "ACCESS_RULES": "google:domain:other.edu",
+        "SELFHOST_BOOTSTRAP_OWNER": f"google:{GSUB}",
+    }
+    for _ in range(3):  # three starts, each followed by a sign-in
+        runtime = prepare_selfhost(load_selfhost_settings(named))
+        try:
+            signed = runtime.identity.sign_in_external(gext())
+            assert not isinstance(signed, acc.Denied) and signed.owner, signed
+            status = runtime.store.get_principal_status(key)
+            assert (status.role_source, status.admitted_via) == ("bootstrap", "bootstrap")
+        finally:
+            runtime.store.close()
+
+
+def test_the_record_of_a_refused_start_is_the_list_it_was_refused_for(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from canvas_mcp.core.selfhost import token_admin
+
+    base_env = default_env(tmp_path, **BOTH)
+    first = prepare_selfhost(load_selfhost_settings(base_env))
+    sign_in(first.store, OID_A, owner=True)
+    key = acct_key(OID_A)
+    link_google(first.store, key)
+    assert first.store.recorded_login_providers() == frozenset({"entra", "google"})
+    first.store.close()
+    # Entra is delisted and nobody is named: startup refuses and recommends token_admin.
+    google_only = {**base_env, **NO_ENTRA}
+    with pytest.raises(SelfhostConfigError) as info:
+        prepare_selfhost(load_selfhost_settings(google_only))
+    assert "promote-owner ACCOUNT" in info.value.problems[0]
+    # The operator follows it from a shell with the new variables: the stale list ("entra,google")
+    # must not make X look usable ("nothing to do ... already an owner").
+    for name, value in google_only.items():
+        monkeypatch.setenv(name, value)
+    capsys.readouterr()
+    assert token_admin.main(["promote-owner", key]) == 0
+    assert "promoted 1 account to owner" in capsys.readouterr().out
+    runtime = prepare_selfhost(load_selfhost_settings(google_only))
+    try:
+        assert runtime.store.recorded_login_providers() == frozenset({"google"})
+        assert runtime.store.get_principal_status(key).role_source == "operator"
+        # And an operator owner is not locked out by the rules either.
+        assert runtime.store.get_principal_status(key).admitted_via == "operator"
     finally:
         runtime.store.close()
 
@@ -172,6 +251,41 @@ class TestBootstrapSignInGivesOwner:
         assert not self.answer(AccountFacts("disabled"))
         assert not self.answer(AccountFacts("disabled", "owner", "bootstrap"))
         assert not self.answer(None, AccessPolicy(mode="rules"))  # no bootstrap identity named
+
+
+class TestBootstrapAdmissionIsPersonal:
+    """``decide`` marks the account the bootstrap admits or promotes as personally admitted."""
+
+    POLICY = TestBootstrapSignInGivesOwner.POLICY
+    FACTS = acc.DecisionFacts(
+        active_owner_count=1, usable_owner_count=0, is_bootstrap_identity=True,
+        existing_owner_usable=False,
+    )
+    VERDICT = acc.Verdict(admitted_by_rule=False, owner_by_rule=False, owner_evidence=False)
+
+    def decision(self, existing: AccountFacts, *, purpose: str = "sign_in") -> acc.Decision:
+        return acc.decide(existing, self.VERDICT, self.POLICY, self.FACTS, purpose)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("via", ["rules", "open"])
+    def test_a_rules_or_open_admission_becomes_bootstrap(self, via: str) -> None:
+        for existing in (
+            AccountFacts("active", "user", None, via),
+            AccountFacts("active", "owner", "rules", via),
+        ):
+            decision = self.decision(existing)
+            assert decision.outcome == "allow" and decision.session_owner
+            assert (decision.role, decision.role_source) == ("owner", "bootstrap")
+            assert decision.admitted_via == "bootstrap"
+
+    @pytest.mark.parametrize("via", ["operator", "approval", "bootstrap"])
+    def test_a_personal_admission_is_kept(self, via: str) -> None:
+        decision = self.decision(AccountFacts("active", "owner", "rules", via))
+        assert decision.session_owner and decision.admitted_via is None
+
+    def test_the_request_path_changes_nothing(self) -> None:
+        decision = self.decision(AccountFacts("active", "user", None, "rules"), purpose="request")
+        assert decision.outcome == "allow" and decision.role is None and decision.admitted_via is None
+        assert not decision.writes
 
 
 def test_the_server_records_the_providers_it_runs_with(tmp_path: pathlib.Path) -> None:
