@@ -8,8 +8,11 @@ We take the security of Canvas MCP seriously. If you discover a security vulnera
 
 **DO NOT** open a public GitHub issue for security vulnerabilities. Instead:
 
-1. **Email**: Send details to the maintainer at the email listed in the repository
-2. **GitHub Security Advisory**: Use [GitHub's Security Advisory feature](https://github.com/vishalsachdev/canvas-mcp/security/advisories/new) (preferred)
+1. **Fork additions**: Report vulnerabilities in this independent fork's
+   self-hosted authentication, account UI, persistence or deployment additions
+   privately through [the fork's security advisories](https://github.com/KKazuhaK/canvas-mcp/security/advisories/new).
+2. **Upstream code**: Report vulnerabilities present in the upstream code
+   privately through [upstream's security advisories](https://github.com/vishalsachdev/canvas-mcp/security/advisories/new).
 
 ### What to Include
 
