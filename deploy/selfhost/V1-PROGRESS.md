@@ -560,3 +560,25 @@ and the first v1 tag remain outstanding.
   passed both Docker architectures, Linux Python 3.11-3.14, locked dependencies,
   lint, frontend, code API, both PostgreSQL dependency sets and formal confirmation
   checks; Windows is still running. Live staging and release gates remain open.
+
+## Foreground SQL observation reliability
+
+- Complete CI at `7292fad` passed, including Windows, both PostgreSQL dependency
+  sets and both Docker architectures, in run `38158443958`. The later reserved/
+  operator additions at `876a535` passed all Linux interpreters, locked SQLite,
+  frontend, lint, code API, formal confirmation and both Docker image checks;
+  PostgreSQL and Windows were still running at the time of this note.
+- The local locked PostgreSQL full collection ran 4,203 checks: 4,184 passed,
+  14 skipped and 5 failed test assertions. Four observers counted concurrent
+  housekeeping statements in foreground request SQL; the actual disable,
+  pending, revocation and JWT epoch refusals were correct. The fifth asserted
+  a workstation-dependent 100ms read deadline and observed 101.7ms. This run
+  is recorded as failing, not as a complete passing local matrix.
+- Hot-read query accounting now disables housekeeping scheduling only in that
+  observer fixture. Real housekeeping remains covered by its own runner tests.
+  The pool test proves a normal read completes while the governance writer still
+  holds its lock, without a sub-100ms performance threshold. No production
+  authorization or database behavior changed for these corrections.
+- Corrected hot-read/pool/reserved/maintenance checks: 40 passed on locked
+  PostgreSQL, with the scratch server stopped; latest SQLite: 38 passed and
+  2 PostgreSQL-only skips. The new exact-head full CI run remains required.

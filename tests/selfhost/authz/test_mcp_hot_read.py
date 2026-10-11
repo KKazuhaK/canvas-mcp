@@ -10,13 +10,17 @@ from canvas_mcp.core.selfhost import custody
 from canvas_mcp.core.selfhost.authz.store import AuthzStore
 from canvas_mcp.core.selfhost.db import schema as s
 from canvas_mcp.core.selfhost.db.errors import StoreUnavailable
+from canvas_mcp.core.selfhost.maintenance import MaintenanceScheduler
 from canvas_mcp.core.selfhost.mcp_state import MCP_READ
 
 from .stack import ALICE
 
 
 @pytest.fixture
-def connection(stack):
+def connection(stack, monkeypatch):
+    # This engine-wide observer measures foreground requests. Concurrent
+    # housekeeping has its own real-runner suite and cannot enter these counts.
+    monkeypatch.setattr(MaintenanceScheduler, "schedule", lambda self: None)
     account = stack.enroll(ALICE)
     client_id, tokens = stack.tokens_for(ALICE)
     assert stack.mcp_status(tokens["access_token"]) == 200

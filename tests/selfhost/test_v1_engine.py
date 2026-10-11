@@ -115,7 +115,6 @@ def test_migration_rebuild_preserves_children_and_never_leaks_foreign_keys_off(
 def test_governance_waiters_queue_before_pool_checkout(tmp_path):
     from pathlib import Path
     from threading import Event
-    from time import monotonic
 
     from dbbackend import PG_URL
 
@@ -139,10 +138,11 @@ def test_governance_waiters_queue_before_pool_checkout(tmp_path):
             queued = [workers.submit(governance, n) for n in range(1, 9)]
             try:
                 assert db.engine.pool.checkedout() == 1
-                started = monotonic()
                 with db.read() as conn:
                     assert conn.exec_driver_sql("SELECT 1").scalar_one() == 1
-                assert monotonic() - started < 0.1
+                # The read completes while governance still holds its lock;
+                # correctness must not depend on a workstation's sub-100ms latency.
+                assert not first.done() and not release.is_set()
             finally:
                 release.set()
             assert first.result(timeout=2) == 1
