@@ -436,7 +436,9 @@ class GrantRepo(Protocol):
 class AuthCodeRepo(Protocol):
     def insert(self, conn: Connection, **fields: Any) -> None: ...
 
-    def get(self, conn: Connection, code_hash: str) -> CodeRecord | None: ...
+    def get(
+        self, conn: Connection, code_hash: str, *, for_update: bool = False
+    ) -> CodeRecord | None: ...
 
     def consume(
         self,

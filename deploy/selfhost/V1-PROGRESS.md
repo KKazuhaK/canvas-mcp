@@ -665,3 +665,27 @@ and the first v1 tag remain outstanding.
   checks pass 294 tests on each of latest and locked SQLite. This changes the
   contract fixture only; all production pilot constraints remain unchanged.
 - The next exact-head full matrix is required before merging the fork PR.
+
+## PostgreSQL authorization-code replay lock order
+
+- The PR full matrix at `af2a371` passed every job in run `38162626262`.
+  Its independent push matrix `38162623339` failed locked PostgreSQL: one
+  six-thread authorization-code exchange raised `DeadlockDetected`, alongside
+  4,202 passes and 11 skips. A passing duplicate matrix did not justify merge.
+- The former design exception (grant before code in a replay) was incorrect.
+  A consume waiter can retain a PostgreSQL tuple lock while rechecking a used
+  code. A replay holding the grant and then incrementing the code counter can
+  cycle with that waiter. The exchange now explicitly locks the code record
+  `FOR NO KEY UPDATE` after conditional consume and before any grant lock,
+  including the replay path. Loading a code for validation remains read-only.
+- A deterministic PostgreSQL regression pauses the replay before the grant lock
+  and probes its code with NOWAIT. It failed on the old implementation because
+  a competing writer could take the code; after the repair the probe gets
+  `55P03`, proving code ownership before attempting the grant. The six-thread
+  one-winner/grace-cap test now runs eight rounds; refresh families, disablement,
+  code epoch and account deletion assertions remain intact.
+- Corrected locked PostgreSQL races/epoch/deletion checks: 65 passed; scratch
+  server stopped. Complete latest and locked SQLite authorization checks: each 990 passed,
+  5 backend/network skips. Docs/English/closing/migration/SQL compilation:
+  120 passed. Ruff, changed-source formatting and Linux-target mypy for all
+  150 source files passed. A new complete exact-head matrix is required.

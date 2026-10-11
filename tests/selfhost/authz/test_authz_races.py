@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 from dbbackend import IS_POSTGRES, make_store, raw_sql
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from canvas_mcp.core.selfhost.authz import tokens as tk
 from canvas_mcp.core.selfhost.authz.models import ExchangeOutcome as X
@@ -254,6 +255,40 @@ class TestLoginStates:
 
 
 class TestAuthorizationCode:
+    @pytest.mark.skipif(not IS_POSTGRES, reason="PostgreSQL row-lock inspection")
+    def test_replay_holds_its_code_before_attempting_the_grant_lock(
+        self, world, monkeypatch
+    ):
+        raw = world.code()
+        assert world.exchange(world.a, raw).outcome is X.WON
+        gate = Gate("before_grant")
+        original = world.a.authz._repos.grants.lock_live
+
+        def guarded(*args, **kwargs):
+            gate("before_grant")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(world.a.authz._repos.grants, "lock_live", guarded)
+        replay = Runner(lambda: world.exchange(world.a, raw))
+        try:
+            assert gate.reached.wait(WAIT)
+            # The replay will update this code's counter after locking the grant.
+            # It must already own the code, so a competing code writer cannot
+            # take that row and then wait for the replay's grant.
+            with world.b.tokens.database.engine.begin() as conn:
+                with pytest.raises(DBAPIError) as caught:
+                    conn.execute(
+                        text(
+                            "SELECT code_hash FROM oauth_codes WHERE code_hash = :code FOR NO KEY UPDATE NOWAIT"
+                        ),
+                        {"code": bytes.fromhex(tk.hash_secret(raw))},
+                    )
+                assert caught.value.orig.sqlstate == "55P03"
+        finally:
+            gate.release.set()
+            result = replay.join()
+        assert result.outcome is X.GRACE
+
     def test_the_second_exchange_waits_and_then_gets_a_sibling_not_the_death_of_the_grant(
         self, world: World
     ) -> None:
@@ -274,8 +309,9 @@ class TestAuthorizationCode:
             grant_row(world, winner.grant.id)[0] is None
         )  # the winner's grant survives
 
+    @pytest.mark.parametrize("round_number", range(8))
     def test_many_threads_exactly_one_winner_and_the_grant_lives(
-        self, world: World, tmp_path
+        self, world: World, tmp_path, round_number
     ) -> None:
         keyring = Keyring.parse(KEYS_RAW)
         sides = [world.new_side(tmp_path, keyring, AuthzSettings()) for _ in range(5)]

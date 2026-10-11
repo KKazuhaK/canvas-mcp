@@ -11,7 +11,10 @@ The hot transactions run in :meth:`Database.row_write` (no global PostgreSQL wri
 What makes that safe is the order inside them:
 
 * **Authorization code**: the first statement is the conditional ``UPDATE`` that consumes
-  the row. A second exchange blocks on the row, then finds it already consumed.
+  the row. The following read locks the code even when that update matched nothing,
+  before any account or grant lock. Replays keep this lock while updating the counter;
+  otherwise a concurrent consume can wait on the code while holding a tuple lock and
+  form a cycle with a replay that holds the grant and then updates the code.
 * **Refresh token**: the first statement locks the *grant* row (``lock_live``, an
   ``UPDATE`` of ``last_used_at`` that matches only a live grant). Every rotation of a
   family, every revocation of the grant and every disabling of the account write that
@@ -342,7 +345,7 @@ class AuthzStore:
                 conn, code_hash, client_id, grant_id=grant_id, now=now
             )
             self._pause("after_code_consume")
-            row = self._repos.codes.get(conn, code_hash)
+            row = self._repos.codes.get(conn, code_hash, for_update=True)
             if row is None:
                 return ExchangeResult(ExchangeOutcome.DEAD)
             code = row
@@ -356,8 +359,8 @@ class AuthzStore:
                 or code.grant_id is None
             ):
                 return ExchangeResult(ExchangeOutcome.DEAD)
-            # The grant row lock comes first, as on the refresh path: whether this replay is
-            # inside the window depends on whether the family has rotated (``any_used``), and
+            # With the code already locked, lock the grant before reading the family:
+            # the replay window depends on whether the family has rotated (``any_used``), and
             # a rotation (which also writes this row) must not slip in between that read and
             # the sibling insert below, or the family would end with two live branches.
             if not self._repos.grants.lock_live(conn, code.grant_id, now):

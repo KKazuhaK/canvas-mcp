@@ -357,12 +357,13 @@ class SqlAuthCodeRepo:
         fields["code_hash"] = _hash(fields["code_hash"])
         conn.execute(insert(_c).values(**fields))
 
-    def get(self, conn: Connection, code_hash: str) -> CodeRecord | None:
-        return _code(
-            conn.execute(select(_c).where(_c.c.code_hash == _hash(code_hash)))
-            .mappings()
-            .one_or_none()
-        )
+    def get(
+        self, conn: Connection, code_hash: str, *, for_update: bool = False
+    ) -> CodeRecord | None:
+        stmt = select(_c).where(_c.c.code_hash == _hash(code_hash))
+        if for_update:
+            stmt = stmt.with_for_update(key_share=True)
+        return _code(conn.execute(stmt).mappings().one_or_none())
 
     def consume(
         self,
