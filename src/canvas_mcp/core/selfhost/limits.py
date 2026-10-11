@@ -20,6 +20,15 @@ from typing import Literal, Protocol
 Clock = Callable[[], float]
 
 
+class QuotaPolicy(Protocol):
+    """Reserved account override; None keeps the process-wide limiter default.
+
+    v1 has no quota implementation and never writes account_quotas.
+    """
+
+    def limit_for(self, account_id: str, key: str) -> int | None: ...
+
+
 class SlidingWindowLimiter(Protocol):
     """At most ``limit`` attempts per key in a rolling window."""
 

@@ -10,7 +10,7 @@ set -euo pipefail
 IMAGE="${1:?usage: smoke-test.sh IMAGE}"
 PORT="${SMOKE_PORT:-18819}"
 BASE="http://127.0.0.1:${PORT}"
-PUBLIC="https://canvas.example.test"
+PUBLIC="https://mcp.example.com"
 MAIN="canvas-mcp-smoke-$$"
 REFUSAL="canvas-mcp-smoke-refusal-$$"
 PROVIDERS_C="canvas-mcp-smoke-providers-$$"

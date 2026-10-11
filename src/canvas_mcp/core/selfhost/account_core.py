@@ -15,7 +15,7 @@ import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta, tzinfo
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import httpx
 from cryptography.hazmat.primitives import hashes
@@ -310,6 +310,24 @@ class _Session:
     ep: int = 0
     pid: str = PROVIDER_ENTRA
     pending: bool = False
+
+
+class SessionStore(Protocol):
+    """Reserved server-side session contract, with the same account epoch rule.
+
+    v1 uses sealed cookies and authoritative account snapshots. It has no
+    server-side store implementation and never inserts web_sessions rows.
+    """
+
+    async def create(self, session: _Session) -> str: ...
+
+    async def get(self, handle: str) -> _Session | None: ...
+
+    async def touch(self, handle: str, now: int) -> None: ...
+
+    async def revoke(self, handle: str) -> bool: ...
+
+    async def revoke_all(self, account_id: str) -> int: ...
 
 
 class _StoreUnavailable(Exception):

@@ -21,6 +21,7 @@ from .rows import (
     AccountRow,
     AuditRow,
     AuthEventRow,
+    CanvasOAuthAppRow,
     CredentialRow,
     IdentityRow,
     WriteToolRow,
@@ -50,7 +51,6 @@ class AccountRepo(Protocol):
     def get(
         self, conn: Connection, account_id: str, *, for_update: bool = False
     ) -> AccountRow | None: ...
-
 
     def count_active_owners(
         self, conn: Connection, *, exclude: str | None = None
@@ -254,6 +254,16 @@ class PrefsRepo(Protocol):
     ) -> int: ...
 
 
+class CanvasOAuthAppRepo(Protocol):
+    """Reserved Developer Key repository; no implementation is wired in v1."""
+
+    def get(self, conn: Connection, canvas_host: str) -> CanvasOAuthAppRow | None: ...
+
+    def put(self, conn: Connection, row: CanvasOAuthAppRow) -> None: ...
+
+    def delete(self, conn: Connection, identifier: str) -> bool: ...
+
+
 class CanvasCredentialRepo(Protocol):
     def acknowledge(
         self, conn: Connection, account_id: str, *, version: int, now: int
@@ -264,7 +274,6 @@ class CanvasCredentialRepo(Protocol):
     def at_host(
         self, conn: Connection, account_id: str, host: str
     ) -> CredentialRow | None: ...
-
 
     def count(self, conn: Connection) -> int: ...
 

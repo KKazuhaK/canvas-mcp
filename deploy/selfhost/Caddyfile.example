@@ -18,7 +18,7 @@
 # /auth/callback?code=...&state=..., and the request id in
 # /auth/login?txn=... and /account/consent?txn=...). The log block below blanks them, and the headers that
 # carry credentials, before anything is written. Keep it when you add log outputs or sinks.
-canvas.example.com {
+mcp.example.com {
 	log {
 		output file /var/log/caddy/canvas-mcp.access.log
 		format filter {

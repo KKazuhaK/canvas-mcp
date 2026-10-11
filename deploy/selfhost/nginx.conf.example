@@ -1,4 +1,4 @@
-# nginx reverse proxy example: canvas.example.com -> 127.0.0.1:8819
+# nginx reverse proxy example: mcp.example.com -> 127.0.0.1:8819
 # Replace the certificate paths with your own (certbot / acme.sh / a Cloudflare Origin certificate all work).
 # Put this file in conf.d/ or sites-enabled/ (it is included inside the http block),
 # so the limit_req_zone at the top can sit at the top level of the file.
@@ -51,7 +51,7 @@ log_format canvas_safe '$remote_addr [$time_local] "$request_method $uri" $statu
 server {
     listen 80;
     listen [::]:80;
-    server_name canvas.example.com;
+    server_name mcp.example.com;
 
     # If ACME validation uses HTTP-01, add a location /.well-known/acme-challenge/ here
     location / {
@@ -68,13 +68,13 @@ server {
     # `listen 443 ssl http2;` and `listen [::]:443 ssl http2;`.
     # HTTP/2 is not required; if you do not want the hassle, just delete the line.
     http2 on;
-    server_name canvas.example.com;
+    server_name mcp.example.com;
 
     access_log /var/log/nginx/canvas-mcp.access.log canvas_safe;
     error_log  /var/log/nginx/canvas-mcp.error.log error;
 
-    ssl_certificate     /etc/letsencrypt/live/canvas.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/canvas.example.com/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/mcp.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mcp.example.com/privkey.pem;
     ssl_protocols       TLSv1.2 TLSv1.3;
 
     add_header Strict-Transport-Security "max-age=31536000" always;

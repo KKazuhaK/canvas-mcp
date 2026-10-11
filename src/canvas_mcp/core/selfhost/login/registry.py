@@ -7,9 +7,10 @@ same safe HTTP client, cookie binding, one-time state store and start-rate bucke
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ..accounts import PROVIDER_ENTRA, PROVIDER_GITHUB, PROVIDER_GOOGLE
 from ..limits import RateLimiters, TokenBucketLimiter, build_rate_limiters
@@ -35,6 +36,34 @@ if TYPE_CHECKING:
 #: minutes, so a refill of 10 a second bounds the table at about 6000 live rows per provider.
 START_BURST = 600
 START_REFILL_PER_SECOND = 10.0
+
+
+class ProviderConfigSource(Protocol):
+    """Resolve a configured provider per lookup; DB-owned secrets stay reserved."""
+
+    def resolve(self, provider_id: str) -> LoginProvider | None: ...
+
+
+class EnvProviderConfigSource(Mapping[str, LoginProvider]):
+    """Read-only providers built from this process's validated environment."""
+
+    def __init__(self, providers: Mapping[str, LoginProvider]) -> None:
+        self._providers = MappingProxyType(dict(providers))
+
+    def resolve(self, provider_id: str) -> LoginProvider | None:
+        return self._providers.get(provider_id)
+
+    def __getitem__(self, provider_id: str) -> LoginProvider:
+        provider = self.resolve(provider_id)
+        if provider is None:
+            raise KeyError(provider_id)
+        return provider
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._providers)
+
+    def __len__(self) -> int:
+        return len(self._providers)
 
 
 @dataclass(frozen=True)
@@ -165,7 +194,7 @@ def build_login_runtime(
         providers[provider_id] = built
     return LoginRuntime(
         config=config,
-        providers=providers,
+        providers=EnvProviderConfigSource(providers),
         flow_store=flow_store,
         http=http,
         snapshots=snapshots,
@@ -182,6 +211,8 @@ __all__ = [
     "ENTRA_CALLBACK_PATH",
     "ENTRA_START_PATH",
     "LoginRuntime",
+    "ProviderConfigSource",
+    "EnvProviderConfigSource",
     "ProviderEntry",
     "build_login_runtime",
 ]

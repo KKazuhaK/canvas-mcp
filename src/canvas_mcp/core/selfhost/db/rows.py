@@ -7,6 +7,23 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class CanvasOAuthAppRow:
+    """Reserved sealed Developer Key record; v1 does not configure or use it."""
+
+    id: str
+    canvas_host: str
+    client_id: str
+    scopes: str
+    enabled: bool
+    secret_key_id: str
+    secret_nonce: bytes = field(repr=False)
+    secret_ciphertext: bytes = field(repr=False)
+    created_at: int
+    updated_at: int
+    updated_by: str | None
+
+
+@dataclass(frozen=True)
 class AccountRow:
     id: str
     status: str

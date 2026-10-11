@@ -1,5 +1,9 @@
 # Canvas MCP v1 self-host deployment
 
+This is an independent fork of [vishalsachdev/canvas-mcp](https://github.com/vishalsachdev/canvas-mcp),
+not endorsed by upstream. The project keeps the name `canvas-mcp`; only small
+core improvements are offered upstream. The fork's hosting stack stays here.
+
 This fork provides a multi-user Canvas MCP service with a built-in OAuth
 authorization server, explicit per-user Canvas credentials and a mandatory React
 account panel. All account, grant and protocol state lives in one SQL database.
@@ -11,11 +15,13 @@ instructions are kept separately in [the migration package](../../src/canvas_mcp
 
 ## Prepare an external sign-in provider
 
-Use a public HTTPS origin such as `https://canvas.example.com`. Replace this
+For the owner's deployment sequence, follow [OPERATOR.md](OPERATOR.md).
+
+Use a public HTTPS origin such as `https://mcp.example.com`. Replace this
 example everywhere, including provider callback registrations and the proxy.
 
 For Microsoft Entra, create a single-tenant Web app registration and register
-`https://canvas.example.com/auth/callback/entra`. Record the tenant ID, client ID
+`https://mcp.example.com/auth/callback/entra`. Record the tenant ID, client ID
 and client secret **Value**. Define enabled user/group app roles `Canvas.User`
 and `Canvas.Owner`, then assign trusted users and the operator in Enterprise
 applications. Assigned roles are included in the app's ID token; see
@@ -120,7 +126,7 @@ just changing `DATABASE_URL`; use [the isolated transfer tooling](../../src/canv
 
 Compose publishes only `127.0.0.1:8819`. Terminate HTTPS at nginx or Caddy, using
 [nginx.conf.example](nginx.conf.example) or [Caddyfile.example](Caddyfile.example).
-Replace `canvas.example.com` and certificate paths. Preserve the Host header,
+Replace `mcp.example.com` and certificate paths. Preserve the Host header,
 stream MCP responses without buffering and allow a suitable stream timeout.
 Use per-IP rate limits at the proxy; the server's limits are process-wide.
 
@@ -151,7 +157,7 @@ for your deployment; an address list is not an authentication boundary.
 
 ## Enroll and connect a client
 
-1. Open `https://canvas.example.com/account`, sign in as an admitted owner and
+1. Open `https://mcp.example.com/account`, sign in as an admitted owner and
    check the Admin panel. Pending accounts need approval before enrollment.
 2. Use Admin > Settings to rename sign-in buttons, add featured schools or turn
    directory search off. A new database has no featured school and directory
@@ -160,7 +166,7 @@ for your deployment; an address list is not an authentication boundary.
    and submits their own Canvas API token in `/account/token`. Never paste a token
    into an assistant chat. Removing a school from the offered set can stop its
    bindings; encrypted tokens remain stored and can be used if offered again.
-4. Configure the MCP client with `https://canvas.example.com/mcp`, finish browser
+4. Configure the MCP client with `https://mcp.example.com/mcp`, finish browser
    sign-in and approve its consent request. The connected app appears in the
    user's Apps page and can be revoked there.
 
@@ -239,6 +245,21 @@ Use the dedicated migration/backup guide for database copying and schema changes
 do not copy a live SQLite file without its WAL or the SQLite backup API.
 
 ## Validate before publishing a v1 release
+
+### Tested clients
+
+Only `Passed` rows are compatibility claims. Unit and simulated SDK checks do
+not establish a real client result; mobile support requires its own passing row.
+Fill in versions, date, tester and a secret-free evidence reference during staging.
+
+| Client/surface | Client version | Server version/image digest | Date | Tester | Result | Evidence | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| claude.ai web | - | - | - | - | Not tested | - | Requires deployed HTTPS and live consent/refresh |
+| Claude Desktop | - | - | - | - | Not tested | - | Record platform and build |
+| Claude Code | - | - | - | - | Not tested | - | Record version and transport |
+| Claude mobile | - | - | - | - | Not tested | - | Support is not claimed |
+
+### Staging acceptance
 
 Build the reviewed source and run `bash deploy/selfhost/smoke-test.sh IMAGE` on a
 Docker host. The smoke test uses throwaway credentials and volumes, exercises the

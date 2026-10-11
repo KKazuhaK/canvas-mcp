@@ -119,9 +119,9 @@ GUID_RE='^[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}$'
 HOST_RE='[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?'
 # https, a host name and an optional port; no path, query string or trailing slash.
 BASE_URL_RE="^https://${HOST_RE}\$"
-ask PUBLIC_BASE_URL "Public address of the service (for example https://canvas.example.com, no trailing slash)"
+ask PUBLIC_BASE_URL "Public address of the service (for example https://mcp.example.com, no trailing slash)"
 [[ "$PUBLIC_BASE_URL" =~ $BASE_URL_RE ]] \
-  || die "PUBLIC_BASE_URL must be https://host-name with no path, query string or trailing slash"
+  || die "PUBLIC_BASE_URL must be https://mcp.example.com with no path, query string or trailing slash"
 check_port PUBLIC_BASE_URL "$PUBLIC_BASE_URL"
 
 ask ENTRA_TENANT_ID "Entra directory (tenant) ID"

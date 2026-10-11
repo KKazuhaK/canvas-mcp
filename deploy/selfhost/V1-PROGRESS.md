@@ -531,3 +531,32 @@ and the first v1 tag remain outstanding.
 - The complete repository and CI matrix, and the new Docker image checks, remain
   pending at this checkpoint. Real IdP/B2B, Claude, reverse-proxy and multiday
   acceptance follow the owner's staging deployment. No release was published.
+
+## Reserved contracts and owner deployment walkthrough checkpoint
+
+- Added the remaining declared seams from design 4.14: a frozen sealed
+  Developer Key row and `CanvasOAuthAppRepo`, `ProviderConfigSource` with the
+  immutable environment mapping used by the registry, `SessionStore` and
+  `QuotaPolicy`. No Canvas OAuth, database provider-secret configuration,
+  server-side session or quota implementation is activated. A real sign-in,
+  PAT enrollment and local grant ceremony leave all three reserved tables empty;
+  the reserved Canvas routes remain absent. Repository audits reject reserved
+  inserts/updates outside transfer and seal rotation tooling.
+- Added `OPERATOR.md`, linking the configuration and dedicated upgrade guides.
+  It covers fresh Docker startup, Entra owner/B2B admission, proxy setup,
+  database-owned schools, custody, offboarding, recovery and separate encryption/
+  JWT rotation. The README and root README explicitly identify the independent,
+  unendorsed fork. The four client rows start `Not tested`; version, date, tester
+  and evidence are required for a recorded result.
+- Public deployment and smoke examples now use `mcp.example.com`. The host test
+  scans deployment files and the web guide against example domains, loopback
+  addresses and an explicit public-service list without naming any owner's host.
+- Latest SQLite login/reserved/migration checks: 923 passed, 1 external-network
+  skip. Locked SQLite complete authorization/login/reserved checks: 1,902 passed,
+  5 platform/network skips. Documentation/English/reserved checks: 41 passed.
+  All 149 source files pass Linux-target mypy. The complete repository remainder
+  at the preceding checkpoint passed 3,844 tests with 20 environment skips.
+- Exact-head CI must rerun after these additions. Previous `7292fad` CI has
+  passed both Docker architectures, Linux Python 3.11-3.14, locked dependencies,
+  lint, frontend, code API, both PostgreSQL dependency sets and formal confirmation
+  checks; Windows is still running. Live staging and release gates remain open.
