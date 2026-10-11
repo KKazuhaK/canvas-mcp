@@ -108,6 +108,14 @@ class TestSectionM:
     def test_the_proxys_routes_are_not_served(self, local, path: str) -> None:
         assert local.client.get(f"{BASE}{path}").status_code == 404
 
+    @pytest.mark.parametrize("path", ["/account/api/me", "/account/login", "/account/callback"])
+    def test_unknown_account_paths_only_serve_the_react_not_found_shell(self, local, path):
+        response = local.client.get(f"{BASE}{path}")
+        assert response.status_code == 200 and 'id="root"' in response.text
+        assert response.headers["content-type"].startswith("text/html")
+        assert "location" not in response.headers
+        assert local.client.post(f"{BASE}{path}").status_code == 405
+
 
 class TestSectionM2:
     @pytest.fixture

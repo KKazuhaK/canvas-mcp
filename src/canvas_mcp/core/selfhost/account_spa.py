@@ -8,12 +8,12 @@ reach a file that was not validated at startup, whatever path it names.
 
 Every response carries a strict Content Security Policy (scripts and connections
 from this origin only), ``index.html`` is never cached, and the hashed files under
-``/account/assets/`` are cached for a year. Any other GET below ``/account/`` that is
-not ``/api/v1`` answers with ``index.html`` (the client-side router decides what
-to show); an unknown asset is a plain 404, never ``index.html``.
+``/account/assets/`` are cached for a year. Other GETs below ``/account/`` answer
+with ``index.html`` (the client-side router decides what to show, including its
+not-found view); an unknown asset is a plain 404, never ``index.html``. The
+separate ``/api/v1`` namespace never falls through to the app.
 
-If the bundle is unusable the caller falls back to the server-rendered pages (see
-:func:`~.app.install_selfhost`); this module never serves a half-working page.
+An unusable bundle refuses startup; self-hosting requires the complete app.
 """
 
 from __future__ import annotations

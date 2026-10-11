@@ -109,8 +109,17 @@ for path in /api/v1/me /api/v1/me/grants /api/v1/consent?txn=AAAAAAAAAAAAAAAAAAA
   grep -q not_authenticated "$WORKDIR/body" || fail "$path does not require a browser session"
   grep -qi 'cache-control:.*no-store' "$WORKDIR/headers" || fail "$path cache policy"
 done
-for path in /api/v1/unknown /account/api/me /account/login /account/callback /consent /auth/callback /.well-known/openid-configuration; do
+for path in /api/v1/unknown /consent /auth/callback /.well-known/openid-configuration; do
   status 404 "$path"
+done
+# Unknown account GETs deliberately return the React shell for its not-found
+# view. They must not become JSON endpoints, redirects or form handlers.
+for path in /account/api/me /account/login /account/callback; do
+  status 200 "$path"
+  grep -q 'id="root"' "$WORKDIR/body" || fail "$path did not return the SPA shell"
+  grep -qi '^content-type: text/html' "$WORKDIR/headers" || fail "$path became an API"
+  if grep -qi '^location:' "$WORKDIR/headers"; then fail "$path became a redirect"; fi
+  status 405 "$path" -X POST
 done
 status 303 /auth/login?txn=bogus
 grep -qi '^location:.*account/sign-in?error=authorization_invalid' "$WORKDIR/headers" || fail "invalid transaction redirect"
