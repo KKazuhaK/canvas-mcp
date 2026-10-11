@@ -25,7 +25,7 @@ from .conftest import CLIENT, TENANT
 SCRIPT = Path(__file__).resolve().parents[2] / "deploy" / "selfhost" / "setup-env.sh"
 SECRET = "Fake~Entra.Secret_value-0123456789"
 BASE = "https://canvas.example.test"
-CANVAS = "https://canvas.school.example"
+IMAGE = "canvas-mcp:selfhost-v1-local"
 
 
 def _find_bash() -> str | None:
@@ -54,7 +54,7 @@ def run_script(
     base_env = {
         key: value
         for key, value in os.environ.items()
-        if key not in {"PUBLIC_BASE_URL", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "CANVAS_API_URL"}
+        if key not in {"PUBLIC_BASE_URL", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "CANVAS_MCP_IMAGE"}
     }
     base_env.update(env or {})
     assert BASH is not None
@@ -82,7 +82,7 @@ def preset(**overrides: str) -> dict[str, str]:
         "PUBLIC_BASE_URL": BASE,
         "ENTRA_TENANT_ID": TENANT,
         "ENTRA_CLIENT_ID": CLIENT,
-        "CANVAS_API_URL": CANVAS,
+        "CANVAS_MCP_IMAGE": IMAGE,
     }
     values.update(overrides)
     return values
@@ -95,7 +95,6 @@ def read_env(path: Path) -> dict[str, str]:
 def load(values: dict[str, str], tmp_path: Path) -> object:
     env = dict(values)
     # The container paths are not writable here; everything else is used as written.
-    env["FASTMCP_HOME"] = str(tmp_path / "fastmcp")
     env["SELFHOST_DATA_DIR"] = str(tmp_path / "data")
     return load_selfhost_settings(env)
 
@@ -105,13 +104,15 @@ def test_generated_env_is_accepted_by_the_settings_loader(tmp_path):
     assert result.returncode == 0, result.stderr
     values = read_env(tmp_path / ".env")
 
-    assert values["MCP_AUTH_MODE"] == "entra-oauth"
+    assert values["MCP_AUTH_MODE"] == "selfhost"
     assert values["PUBLIC_BASE_URL"] == BASE
     assert values["ENTRA_TENANT_ID"] == TENANT
     assert values["ENTRA_CLIENT_ID"] == CLIENT
     assert values["ENTRA_CLIENT_SECRET"] == SECRET
-    assert values["CANVAS_API_URL"] == CANVAS
-    assert values["FASTMCP_HOME"] == "/data/fastmcp"
+    assert values["CANVAS_MCP_IMAGE"] == IMAGE
+    assert "FASTMCP_HOME" not in values
+    assert "OAUTH_JWT_SIGNING_KEY" not in values
+    assert "CANVAS_API_URL" not in values
     assert values["CANVAS_TOKEN_KEYS"].startswith("k1:")
 
     settings = load(values, tmp_path)
@@ -197,17 +198,17 @@ def test_the_enabled_writes_comment_and_help_say_each_user_still_opts_in(tmp_pat
 
 
 def test_values_can_be_answered_at_the_prompts(tmp_path):
-    answers = "\n".join((BASE, TENANT, CLIENT, CANVAS, SECRET)) + "\n"
+    answers = "\n".join((BASE, TENANT, CLIENT, IMAGE, SECRET)) + "\n"
     result = run_script(tmp_path, stdin=answers)
     assert result.returncode == 0, result.stderr
     values = read_env(tmp_path / ".env")
     assert values["ENTRA_CLIENT_SECRET"] == SECRET
-    assert values["CANVAS_API_URL"] == CANVAS
+    assert values["CANVAS_MCP_IMAGE"] == IMAGE
     load(values, tmp_path)
 
 
 def test_windows_line_endings_from_a_paste_are_stripped(tmp_path):
-    answers = "\r\n".join((BASE, TENANT, CLIENT, CANVAS, SECRET)) + "\r\n"
+    answers = "\r\n".join((BASE, TENANT, CLIENT, IMAGE, SECRET)) + "\r\n"
     result = run_script(tmp_path, stdin=answers)
     assert result.returncode == 0, result.stderr
     values = read_env(tmp_path / ".env")
@@ -221,7 +222,7 @@ def test_no_secret_is_printed(tmp_path):
     assert result.returncode == 0, result.stderr
     values = read_env(tmp_path / ".env")
     output = result.stdout + result.stderr
-    for name in ("ENTRA_CLIENT_SECRET", "OAUTH_JWT_SIGNING_KEY", "ACCOUNT_SESSION_SECRET"):
+    for name in ("ENTRA_CLIENT_SECRET", "ACCOUNT_SESSION_SECRET"):
         assert values[name] not in output, f"{name} leaked to the terminal"
     assert values["CANVAS_TOKEN_KEYS"].removeprefix("k1:") not in output
 
@@ -233,7 +234,7 @@ def test_every_run_generates_fresh_keys(tmp_path):
     assert run_script(first, env=preset()).returncode == 0
     assert run_script(second, env=preset()).returncode == 0
     a, b = read_env(first / ".env"), read_env(second / ".env")
-    for name in ("OAUTH_JWT_SIGNING_KEY", "ACCOUNT_SESSION_SECRET", "CANVAS_TOKEN_KEYS"):
+    for name in ("ACCOUNT_SESSION_SECRET", "CANVAS_TOKEN_KEYS"):
         assert a[name] != b[name]
 
 
@@ -271,10 +272,10 @@ def test_the_file_is_private(tmp_path):
         ({"PUBLIC_BASE_URL": BASE + "?x=1"}, SECRET),
         ({"PUBLIC_BASE_URL": BASE + ":65536"}, SECRET),
         ({"PUBLIC_BASE_URL": BASE + ":0"}, SECRET),
-        ({"CANVAS_API_URL": "http://canvas.school.example"}, SECRET),
-        ({"CANVAS_API_URL": CANVAS + ":99999"}, SECRET),
-        ({"CANVAS_API_URL": CANVAS + "/courses/123"}, SECRET),
-        ({"CANVAS_API_URL": "https://school.example/canvas"}, SECRET),
+        ({"CANVAS_MCP_IMAGE": "bad image"}, SECRET),
+        ({"CANVAS_MCP_IMAGE": IMAGE + ":99999"}, SECRET),
+        ({"CANVAS_MCP_IMAGE": IMAGE + "/courses/123"}, SECRET),
+        ({"CANVAS_MCP_IMAGE": "image:$secret"}, SECRET),
         ({}, "too-short"),
         ({}, "has space in the middle 0123456789"),
         ({}, "dollar$sign0123456789abcdef"),
@@ -292,21 +293,6 @@ def test_invalid_input_is_refused_and_writes_nothing(tmp_path, overrides, secret
         assert secret not in result.stdout + result.stderr
 
 
-@pytest.mark.parametrize(
-    ("given", "written"),
-    [
-        (CANVAS + "/", CANVAS),
-        (CANVAS + "/api/v1", CANVAS + "/api/v1"),
-        (CANVAS + "/api/v1/", CANVAS + "/api/v1"),
-        (CANVAS + ":8443", CANVAS + ":8443"),
-    ],
-)
-def test_canvas_urls_the_server_understands_are_accepted(tmp_path, given, written):
-    result = run_script(tmp_path, env=preset(CANVAS_API_URL=given))
-    assert result.returncode == 0, result.stderr
-    values = read_env(tmp_path / ".env")
-    assert values["CANVAS_API_URL"] == written
-    load(values, tmp_path)
 
 
 def test_highest_port_is_accepted(tmp_path):
@@ -345,7 +331,7 @@ def test_xtrace_does_not_print_secrets(tmp_path):
     assert raw.returncode == 0, raw.stderr.decode("utf-8", "replace")
     values = read_env(tmp_path / ".env")
     output = (raw.stdout + raw.stderr).decode("utf-8", "replace")
-    for name in ("ENTRA_CLIENT_SECRET", "OAUTH_JWT_SIGNING_KEY", "ACCOUNT_SESSION_SECRET"):
+    for name in ("ENTRA_CLIENT_SECRET", "ACCOUNT_SESSION_SECRET"):
         assert values[name] not in output, f"{name} leaked through xtrace"
 
 
@@ -395,71 +381,15 @@ def test_help_describes_the_options_and_writes_nothing(tmp_path):
 # -- --school-search ---------------------------------------------------------------------------
 
 
-def test_schools_are_off_by_default_and_shown_commented_out(tmp_path):
-    result = run_script(tmp_path, env=preset())
-    assert result.returncode == 0, result.stderr
+def test_schools_are_managed_in_the_database_not_generated_as_env(tmp_path):
+    assert run_script(tmp_path, env=preset()).returncode == 0
     values = read_env(tmp_path / ".env")
-    assert "CANVAS_FEATURED_SCHOOLS" not in values
-    assert "CANVAS_SCHOOL_SEARCH" not in values
-    text = (tmp_path / ".env").read_text(encoding="utf-8")
-    assert "# CANVAS_FEATURED_SCHOOLS=canvas.school.example\n" in text
-    assert "# CANVAS_SCHOOL_SEARCH=true\n" in text
-    settings = load(values, tmp_path)
-    assert settings.featured_schools == ()
-    assert settings.school_search is False
+    for removed in ("CANVAS_API_URL", "CANVAS_FEATURED_SCHOOLS", "CANVAS_SCHOOL_SEARCH"):
+        assert removed not in values
+    assert "Admin > Settings" in (tmp_path / ".env").read_text(encoding="utf-8")
 
 
-def test_school_search_writes_the_featured_host_and_turns_search_on(tmp_path):
+def test_removed_school_search_option_is_refused_without_writing(tmp_path):
     result = run_script(tmp_path, "--school-search", env=preset())
-    assert result.returncode == 0, result.stderr
-    values = read_env(tmp_path / ".env")
-    assert values["CANVAS_SCHOOL_SEARCH"] == "true"
-    assert values["CANVAS_FEATURED_SCHOOLS"] == "canvas.school.example"
-    assert values["CANVAS_API_URL"] == CANVAS
-
-    settings = load(values, tmp_path)
-    assert settings.school_search is True
-    assert [school.host for school in settings.featured_schools] == ["canvas.school.example"]
-    assert "directory" in (tmp_path / ".env").read_text(encoding="utf-8")
-
-
-@pytest.mark.parametrize(
-    "given",
-    [
-        "https://Canvas.School.Example:8443",
-        "https://CANVAS.school.example/api/v1/",
-        "https://canvas.school.example:8443/api/v1",
-    ],
-)
-def test_the_featured_host_has_no_port_path_or_capitals(tmp_path, given):
-    result = run_script(tmp_path, "--school-search", env=preset(CANVAS_API_URL=given))
-    assert result.returncode == 0, result.stderr
-    values = read_env(tmp_path / ".env")
-    assert values["CANVAS_FEATURED_SCHOOLS"] == "canvas.school.example"
-    settings = load(values, tmp_path)
-    assert settings.featured_schools[0].host == "canvas.school.example"
-
-
-def test_school_search_combines_with_the_other_flags(tmp_path):
-    result = run_script(tmp_path, "--school-search", "--enable-writes", "--real-names", env=preset())
-    assert result.returncode == 0, result.stderr
-    values = read_env(tmp_path / ".env")
-    assert values["CANVAS_SCHOOL_SEARCH"] == "true"
-    assert values["ALLOWED_WRITE_TOOLS"] == "all"
-    assert values["ENABLE_DATA_ANONYMIZATION"] == "false"
-    load(values, tmp_path)
-
-
-def test_the_summary_mentions_the_school_mode(tmp_path):
-    plain = run_script(tmp_path, env=preset())
-    assert "Single school" in plain.stderr
-    (tmp_path / ".env").unlink()
-    searched = run_script(tmp_path, "--school-search", env=preset())
-    assert "directory search on" in searched.stderr
-
-
-def test_help_lists_the_school_search_option(tmp_path):
-    result = run_script(tmp_path, "--help")
-    assert result.returncode == 0
-    assert "--school-search" in result.stdout
-    assert "CANVAS_SCHOOL_SEARCH" in result.stdout
+    assert result.returncode != 0 and "Unknown argument" in result.stderr
+    assert not (tmp_path / ".env").exists()

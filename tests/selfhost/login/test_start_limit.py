@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -26,10 +27,10 @@ def test_one_client_spending_its_proxy_allowance_does_not_lock_out_another(
     with provider_stack(tmp_path, monkeypatch) as ps:
         attacker = ps.person()
         for _ in range(2 * PROXY_PER_IP_PER_MINUTE):
-            assert attacker.get("/account/login/github").status_code == 302
+            assert attacker.get("/auth/login/github").status_code == 302
         victim = ps.person()
-        assert victim.get("/account/login/github").status_code == 302
-        assert victim.get("/account/login/google").status_code == 302
+        assert victim.get("/auth/login/github").status_code == 302
+        assert victim.get("/auth/login/google").status_code == 302
 
 
 def test_the_backstop_still_refuses_once_the_pending_ceremonies_reach_it(
@@ -42,8 +43,12 @@ def test_the_backstop_still_refuses_once_the_pending_ceremonies_reach_it(
         # The bucket runs on the shared test clock (real time plus an offset); drain it in one go.
         while bucket.take() == 0:
             pass
-        assert ps.person().get("/account/login/github").status_code == 429
+        refused = ps.person().get("/auth/login/github")
+        assert refused.status_code == 303
+        assert parse_qs(urlsplit(refused.headers["location"]).query)["error"] == [
+            "rate_limited"
+        ]
         # the other providers have their own bucket
-        assert ps.person().get("/account/login/google").status_code == 302
+        assert ps.person().get("/auth/login/google").status_code == 302
         ps.clock.advance(1)
-        assert ps.person().get("/account/login/github").status_code == 302
+        assert ps.person().get("/auth/login/github").status_code == 302

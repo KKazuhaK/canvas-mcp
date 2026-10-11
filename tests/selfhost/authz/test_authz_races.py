@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 from dbbackend import IS_POSTGRES, make_store, raw_sql
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from canvas_mcp.core.selfhost.authz import tokens as tk
 from canvas_mcp.core.selfhost.authz.models import ExchangeOutcome as X
@@ -103,7 +104,9 @@ class World:
     def b(self) -> Side:
         return self.sides[1]
 
-    def new_side(self, tmp_path: pathlib.Path, keyring: Keyring, settings: AuthzSettings) -> Side:
+    def new_side(
+        self, tmp_path: pathlib.Path, keyring: Keyring, settings: AuthzSettings
+    ) -> Side:
         tokens = make_store(tmp_path / "races.sqlite3", keyring, clock=self.clock)
         side = Side(
             tokens,
@@ -117,15 +120,27 @@ class World:
         return self.a.tokens.get_principal_status(self.account_key).session_epoch
 
     def code(
-        self, side: Side | None = None, *, account_id: str | None = None, session_epoch: int | None = None
+        self,
+        side: Side | None = None,
+        *,
+        account_id: str | None = None,
+        session_epoch: int | None = None,
     ) -> str:
         side = side or self.a
         raw = tk.new_auth_code()
         assert side.authz.create_code(
-            code_hash=tk.hash_secret(raw), client_id=CLIENT, client_kind="dcr", client_name="App",
-            client_host=None, account_id=account_id or self.account_key.removeprefix("acct:"),
-            redirect_uri=REDIRECT, redirect_uri_explicit=True, redirect_host="claude.ai",
-            code_challenge=CHALLENGE, scopes=(SCOPE,), resource=RESOURCE,
+            code_hash=tk.hash_secret(raw),
+            client_id=CLIENT,
+            client_kind="dcr",
+            client_name="App",
+            client_host=None,
+            account_id=account_id or self.account_key.removeprefix("acct:"),
+            redirect_uri=REDIRECT,
+            redirect_uri_explicit=True,
+            redirect_host="claude.ai",
+            code_challenge=CHALLENGE,
+            scopes=(SCOPE,),
+            resource=RESOURCE,
             upstream_auth_at=int(self.clock()),
             session_epoch=self.epoch() if session_epoch is None else session_epoch,
         )
@@ -134,7 +149,9 @@ class World:
     @staticmethod
     def exchange(side: Side, raw: str):
         return side.authz.exchange_code(
-            code_hash=tk.hash_secret(raw), client_id=CLIENT, grant_id=str(uuid.uuid4()),
+            code_hash=tk.hash_secret(raw),
+            client_id=CLIENT,
+            grant_id=str(uuid.uuid4()),
             refresh_hash=tk.hash_secret(tk.new_refresh_token()),
         )
 
@@ -142,7 +159,9 @@ class World:
         """A live grant and its first raw refresh token."""
         raw_refresh = tk.new_refresh_token()
         result = self.a.authz.exchange_code(
-            code_hash=tk.hash_secret(self.code()), client_id=CLIENT, grant_id=str(uuid.uuid4()),
+            code_hash=tk.hash_secret(self.code()),
+            client_id=CLIENT,
+            grant_id=str(uuid.uuid4()),
             refresh_hash=tk.hash_secret(raw_refresh),
         )
         assert result.outcome is X.WON and result.grant is not None
@@ -151,7 +170,9 @@ class World:
     @staticmethod
     def rotate(side: Side, raw: str):
         new = tk.new_refresh_token()
-        return side.authz.rotate_refresh(token_hash=tk.hash_secret(raw), new_hash=tk.hash_secret(new)), new
+        return side.authz.rotate_refresh(
+            token_hash=tk.hash_secret(raw), new_hash=tk.hash_secret(new)
+        ), new
 
 
 @pytest.fixture
@@ -162,7 +183,11 @@ def world(tmp_path: pathlib.Path) -> World:
     first.initialize()
     world = World([], clock, make_account(first, OID_A))
     world.sides.append(
-        Side(first, AuthzStore(first.database, clock=clock), SqlLoginStateStore(first.database, clock=clock))
+        Side(
+            first,
+            AuthzStore(first.database, clock=clock),
+            SqlLoginStateStore(first.database, clock=clock),
+        )
     )
     world.new_side(tmp_path, keyring, AuthzSettings())
     return world
@@ -170,46 +195,100 @@ def world(tmp_path: pathlib.Path) -> World:
 
 def grant_row(world: World, grant_id: str) -> tuple:
     return raw_sql(
-        world.a.tokens, "SELECT revoked_at, revoked_reason FROM oauth_grants WHERE id = :g", {"g": grant_id}
+        world.a.tokens,
+        "SELECT revoked_at, revoked_reason FROM oauth_grants WHERE id = :g",
+        {"g": grant_id},
     )[0]
 
 
 class TestLoginStates:
-    def test_two_pops_of_one_state_hand_the_payload_to_one_caller(self, world: World) -> None:
+    def test_two_pops_of_one_state_hand_the_payload_to_one_caller(
+        self, world: World
+    ) -> None:
         for _ in range(5):
-            sid = world.a.txns.put_sync("mcp_txn", b"payload", 60, binding_hash="h")
-            gate = Gate("after_txn_select")
+            sid = world.a.txns.put_sync(
+                "mcp_txn", b"payload", 60, binding_hash="a" * 64
+            )
+            gate = Gate("before_txn_pop")
             world.a.txns.pause_hook = gate
-            first = Runner(lambda s=sid: world.a.txns.pop_sync("mcp_txn", s, binding_hash="h"))
+            first = Runner(
+                lambda s=sid: world.a.txns.pop_sync("mcp_txn", s, binding_hash="a" * 64)
+            )
             assert gate.reached.wait(WAIT)
-            second = Runner(lambda s=sid: world.b.txns.pop_sync("mcp_txn", s, binding_hash="h"))
+            second = Runner(
+                lambda s=sid: world.b.txns.pop_sync("mcp_txn", s, binding_hash="a" * 64)
+            )
             if not IS_POSTGRES:
-                assert second.still_blocked()  # SQLite: the write lock is held by the first
+                assert (
+                    second.still_blocked()
+                )  # SQLite: the write lock is held by the first
             gate.release.set()
             results = [first.join(), second.join()]
             assert sorted(r is None for r in results) == [False, True]
             world.a.txns.pause_hook = None
 
-    def test_the_wrong_binding_or_an_expired_state_gives_nothing(self, world: World) -> None:
-        sid = world.a.txns.put_sync("mcp_txn", b"payload", 60, binding_hash="h")
-        assert world.b.txns.pop_sync("mcp_txn", sid, binding_hash="other") is None
+    def test_the_wrong_binding_or_an_expired_state_gives_nothing(
+        self, world: World
+    ) -> None:
+        sid = world.a.txns.put_sync("mcp_txn", b"payload", 60, binding_hash="a" * 64)
+        assert world.b.txns.pop_sync("mcp_txn", sid, binding_hash="b" * 64) is None
         assert world.b.txns.pop_sync("mcp_txn", sid) is None
         world.clock.advance(61)
-        assert world.b.txns.pop_sync("mcp_txn", sid, binding_hash="h") is None
+        assert world.b.txns.pop_sync("mcp_txn", sid, binding_hash="a" * 64) is None
 
-    def test_many_free_threads_one_winner(self, world: World, tmp_path: pathlib.Path) -> None:
+    def test_many_free_threads_one_winner(
+        self, world: World, tmp_path: pathlib.Path
+    ) -> None:
         keyring = Keyring.parse(KEYS_RAW)
         sides = [world.new_side(tmp_path, keyring, AuthzSettings()) for _ in range(4)]
-        sid = world.a.txns.put_sync("mcp_txn", b"payload", 60, binding_hash="h")
+        sid = world.a.txns.put_sync("mcp_txn", b"payload", 60, binding_hash="a" * 64)
         runners = [
-            Runner(lambda s=side: s.txns.pop_sync("mcp_txn", sid, binding_hash="h"))
+            Runner(
+                lambda s=side: s.txns.pop_sync("mcp_txn", sid, binding_hash="a" * 64)
+            )
             for side in sides + sides
         ]
         results = [r.join() for r in runners]
-        assert results.count(b"payload") == 1 and results.count(None) == len(results) - 1
+        assert (
+            results.count(b"payload") == 1 and results.count(None) == len(results) - 1
+        )
 
 
 class TestAuthorizationCode:
+    @pytest.mark.skipif(not IS_POSTGRES, reason="PostgreSQL row-lock inspection")
+    def test_replay_holds_its_code_before_attempting_the_grant_lock(
+        self, world, monkeypatch
+    ):
+        raw = world.code()
+        assert world.exchange(world.a, raw).outcome is X.WON
+        gate = Gate("before_grant")
+        original = world.a.authz._repos.grants.lock_live
+
+        def guarded(*args, **kwargs):
+            gate("before_grant")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(world.a.authz._repos.grants, "lock_live", guarded)
+        replay = Runner(lambda: world.exchange(world.a, raw))
+        try:
+            assert gate.reached.wait(WAIT)
+            # The replay will update this code's counter after locking the grant.
+            # It must already own the code, so a competing code writer cannot
+            # take that row and then wait for the replay's grant.
+            with world.b.tokens.database.engine.begin() as conn:
+                with pytest.raises(DBAPIError) as caught:
+                    conn.execute(
+                        text(
+                            "SELECT code_hash FROM oauth_codes WHERE code_hash = :code FOR NO KEY UPDATE NOWAIT"
+                        ),
+                        {"code": bytes.fromhex(tk.hash_secret(raw))},
+                    )
+                assert caught.value.orig.sqlstate == "55P03"
+        finally:
+            gate.release.set()
+            result = replay.join()
+        assert result.outcome is X.GRACE
+
     def test_the_second_exchange_waits_and_then_gets_a_sibling_not_the_death_of_the_grant(
         self, world: World
     ) -> None:
@@ -219,18 +298,27 @@ class TestAuthorizationCode:
         first = Runner(lambda: world.exchange(world.a, raw))
         assert gate.reached.wait(WAIT)
         second = Runner(lambda: world.exchange(world.b, raw))
-        assert second.still_blocked()  # it cannot see the code as unused, nor as used, yet
+        assert (
+            second.still_blocked()
+        )  # it cannot see the code as unused, nor as used, yet
         gate.release.set()
         winner, duplicate = first.join(), second.join()
         assert winner.outcome is X.WON
         assert duplicate.outcome is X.GRACE and duplicate.grant.id == winner.grant.id
-        assert grant_row(world, winner.grant.id)[0] is None  # the winner's grant survives
+        assert (
+            grant_row(world, winner.grant.id)[0] is None
+        )  # the winner's grant survives
 
-    def test_many_threads_exactly_one_winner_and_the_grant_lives(self, world: World, tmp_path) -> None:
+    @pytest.mark.parametrize("round_number", range(8))
+    def test_many_threads_exactly_one_winner_and_the_grant_lives(
+        self, world: World, tmp_path, round_number
+    ) -> None:
         keyring = Keyring.parse(KEYS_RAW)
         sides = [world.new_side(tmp_path, keyring, AuthzSettings()) for _ in range(5)]
         raw = world.code()
-        runners = [Runner(lambda s=side: world.exchange(s, raw)) for side in sides + [world.a]]
+        runners = [
+            Runner(lambda s=side: world.exchange(s, raw)) for side in sides + [world.a]
+        ]
         results = [r.join() for r in runners]
         outcomes = Counter(r.outcome for r in results)
         assert outcomes[X.WON] == 1
@@ -241,7 +329,9 @@ class TestAuthorizationCode:
         assert grant_row(world, winner.grant.id)[0] is None
         assert raw_sql(world.a.tokens, "SELECT COUNT(*) FROM oauth_grants")[0][0] == 1
 
-    def test_a_replay_after_the_window_revokes_even_with_a_concurrent_first_use(self, world: World) -> None:
+    def test_a_replay_after_the_window_revokes_even_with_a_concurrent_first_use(
+        self, world: World
+    ) -> None:
         raw = world.code()
         result = world.exchange(world.a, raw)
         world.clock.advance(31)
@@ -256,11 +346,15 @@ class TestCodeReplayAgainstRotation:
     (the replay's window decision read the family before the rotation, its insert came after).
     """
 
-    def test_a_rotation_waits_for_a_replay_and_retires_its_sibling(self, world: World) -> None:
+    def test_a_rotation_waits_for_a_replay_and_retires_its_sibling(
+        self, world: World
+    ) -> None:
         raw = world.code()
         raw_a = tk.new_refresh_token()
         first = world.a.authz.exchange_code(
-            code_hash=tk.hash_secret(raw), client_id=CLIENT, grant_id=str(uuid.uuid4()),
+            code_hash=tk.hash_secret(raw),
+            client_id=CLIENT,
+            grant_id=str(uuid.uuid4()),
             refresh_hash=tk.hash_secret(raw_a),
         )
         assert first.outcome is X.WON and first.grant is not None
@@ -269,13 +363,17 @@ class TestCodeReplayAgainstRotation:
         world.b.authz.pause_hook = gate
         replay = Runner(
             lambda: world.b.authz.exchange_code(
-                code_hash=tk.hash_secret(raw), client_id=CLIENT, grant_id=str(uuid.uuid4()),
+                code_hash=tk.hash_secret(raw),
+                client_id=CLIENT,
+                grant_id=str(uuid.uuid4()),
                 refresh_hash=tk.hash_secret(raw_b),
             )
         )
         assert gate.reached.wait(WAIT)
         rotation = Runner(lambda: world.rotate(world.a, raw_a))
-        assert rotation.still_blocked()  # the replay holds the grant row, on both backends
+        assert (
+            rotation.still_blocked()
+        )  # the replay holds the grant row, on both backends
         gate.release.set()
         assert replay.join().outcome is X.GRACE
         rotated, successor = rotation.join()
@@ -290,7 +388,9 @@ class TestCodeReplayAgainstRotation:
         raw = world.code()
         raw_a = tk.new_refresh_token()
         first = world.a.authz.exchange_code(
-            code_hash=tk.hash_secret(raw), client_id=CLIENT, grant_id=str(uuid.uuid4()),
+            code_hash=tk.hash_secret(raw),
+            client_id=CLIENT,
+            grant_id=str(uuid.uuid4()),
             refresh_hash=tk.hash_secret(raw_a),
         )
         assert first.outcome is X.WON and first.grant is not None
@@ -311,7 +411,9 @@ class TestFirstExchangeAgainstDisabling:
     """A grant created while the account is being disabled must not outlive the disablement."""
 
     @pytest.mark.parametrize("via", ["disable_principal", "admission_lost"])
-    def test_the_disablement_revokes_a_grant_that_is_being_created(self, world: World, via: str) -> None:
+    def test_the_disablement_revokes_a_grant_that_is_being_created(
+        self, world: World, via: str
+    ) -> None:
         raw = world.code()
         gate = Gate("after_grant_insert")
         world.a.authz.pause_hook = gate
@@ -323,25 +425,35 @@ class TestFirstExchangeAgainstDisabling:
                 return world.b.tokens.disable_principal(
                     world.account_key, actor=OPERATOR, reason="operator_disabled"
                 )
-            return world.b.authz.revoke_all_for_account(world.account_key, reason="admission_lost")
+            return world.b.authz.revoke_all_for_account(
+                world.account_key, reason="admission_lost"
+            )
 
         disabling = Runner(disable)
-        assert disabling.still_blocked()  # it waits for the account row the exchange locked
+        assert (
+            disabling.still_blocked()
+        )  # it waits for the account row the exchange locked
         gate.release.set()
         result = exchange.join()
         assert result.outcome is X.WON and result.grant is not None
         assert disabling.join()
         reason = grant_row(world, result.grant.id)
-        assert reason[0] is not None and reason[1] == via.replace("disable_principal", "account_disabled")
+        assert reason[0] is not None and reason[1] == via.replace(
+            "disable_principal", "account_disabled"
+        )
         if via == "disable_principal":
             world.b.tokens.enable_principal(world.account_key, actor=OPERATOR)
         status = world.a.authz.grant_status(result.grant.id)
-        assert not status.usable(int(world.clock()))  # re-enabling the account does not revive it
+        assert not status.usable(
+            int(world.clock())
+        )  # re-enabling the account does not revive it
 
     def test_an_exchange_after_the_disablement_is_refused(self, world: World) -> None:
         raw = world.code()
-        assert world.b.tokens.disable_principal(world.account_key, actor=OPERATOR, reason="operator_disabled")
-        assert world.exchange(world.a, raw).outcome is X.INACTIVE
+        assert world.b.tokens.disable_principal(
+            world.account_key, actor=OPERATOR, reason="operator_disabled"
+        )
+        assert world.exchange(world.a, raw).outcome is X.DEAD
         assert raw_sql(world.a.tokens, "SELECT COUNT(*) FROM oauth_grants")[0][0] == 0
 
 
@@ -353,8 +465,12 @@ class TestCodesAgainstTheEndOfTheApprovingSession:
     @staticmethod
     def end(world: World, via: str) -> Any:
         if via == "admission_lost":
-            return world.b.authz.revoke_all_for_account(world.account_key, reason="admission_lost")
-        assert world.b.tokens.disable_principal(world.account_key, actor=OPERATOR, reason="operator_disabled")
+            return world.b.authz.revoke_all_for_account(
+                world.account_key, reason="admission_lost"
+            )
+        assert world.b.tokens.disable_principal(
+            world.account_key, actor=OPERATOR, reason="operator_disabled"
+        )
         if via == "disable_and_enable":
             assert world.b.tokens.enable_principal(world.account_key, actor=OPERATOR)
         return True
@@ -379,7 +495,9 @@ class TestCodesAgainstTheEndOfTheApprovingSession:
             ending.join()
             assert world.epoch() > epoch
         else:
-            assert ending.still_blocked()  # SQLite: the write lock is held by the approval
+            assert (
+                ending.still_blocked()
+            )  # SQLite: the write lock is held by the approval
         gate.release.set()
         raw = approving.join()
         ending.join()
@@ -397,7 +515,7 @@ class TestCodesAgainstTheEndOfTheApprovingSession:
         assert world.exchange(world.a, world.code()).outcome is X.WON
 
     @pytest.mark.parametrize("via", ["disable", "disable_and_enable"])
-    def test_a_code_consumed_just_before_the_account_is_read_is_refused_when_the_epoch_moved(
+    def test_an_exchange_serializes_before_disable_and_its_grant_is_revoked(
         self, world: World, via: str
     ) -> None:
         raw = world.code()
@@ -406,28 +524,24 @@ class TestCodesAgainstTheEndOfTheApprovingSession:
         exchange = Runner(lambda: world.exchange(world.a, raw))
         assert gate.reached.wait(WAIT)
         ending = Runner(lambda: self.end(world, via))
-        if IS_POSTGRES:
-            ending.join()  # the exchange holds the code row only, not the account's
-        else:
+        try:
+            # Disable removes unredeemed codes first. The exchange holds this code's
+            # row (or SQLite's writer lock), so ending cannot commit until it finishes.
             assert ending.still_blocked()
-        gate.release.set()
+        finally:
+            gate.release.set()
         result = exchange.join()
         ending.join()
         world.a.authz.pause_hook = None
-        if IS_POSTGRES:
-            # The account row is read after the end of the session: the epoch has moved.
-            assert result.outcome is X.INACTIVE
-            self.no_grants(world)
-        else:
-            # SQLite: the exchange held the write lock to its end, so the session ended after
-            # the grant existed, and the disablement revoked it.
-            assert result.outcome is X.WON and result.grant is not None
-            assert grant_row(world, result.grant.id)[0] is not None
+        assert result.outcome is X.WON and result.grant is not None
+        assert grant_row(world, result.grant.id)[0] is not None
         assert world.exchange(world.b, raw).outcome is X.DEAD  # burned
 
 
 class TestRefreshRotation:
-    def test_the_second_rotation_waits_and_then_gets_a_sibling(self, world: World) -> None:
+    def test_the_second_rotation_waits_and_then_gets_a_sibling(
+        self, world: World
+    ) -> None:
         grant_id, refresh = world.grant()
         gate = Gate("after_refresh_mark")
         world.a.authz.pause_hook = gate
@@ -451,7 +565,10 @@ class TestRefreshRotation:
         keyring = Keyring.parse(KEYS_RAW)
         sides = [world.new_side(tmp_path, keyring, AuthzSettings()) for _ in range(5)]
         grant_id, refresh = world.grant()
-        runners = [Runner(lambda s=side: world.rotate(s, refresh)) for side in sides + [world.a]]
+        runners = [
+            Runner(lambda s=side: world.rotate(s, refresh))
+            for side in sides + [world.a]
+        ]
         results = [r.join()[0] for r in runners]
         outcomes = Counter(r.outcome for r in results)
         assert outcomes[R.ROTATED] == 1 and outcomes[R.GRACE] <= 2
@@ -459,22 +576,39 @@ class TestRefreshRotation:
         assert set(outcomes) <= {R.ROTATED, R.GRACE, R.CAPPED}
         assert grant_row(world, grant_id)[0] is None
 
-    def test_three_parallel_duplicates_do_not_hurt_the_grant(self, world: World, tmp_path) -> None:
+    def test_three_parallel_duplicates_do_not_hurt_the_grant(
+        self, world: World, tmp_path
+    ) -> None:
         keyring = Keyring.parse(KEYS_RAW)
         sides = [world.new_side(tmp_path, keyring, AuthzSettings()) for _ in range(2)]
         grant_id, refresh = world.grant()
-        results = [Runner(lambda s=side: world.rotate(s, refresh)).join()[0] for side in [world.a] + sides]
-        assert Counter(r.outcome for r in results) == Counter({R.ROTATED: 1, R.GRACE: 2})
+        results = [
+            Runner(lambda s=side: world.rotate(s, refresh)).join()[0]
+            for side in [world.a] + sides
+        ]
+        assert Counter(r.outcome for r in results) == Counter(
+            {R.ROTATED: 1, R.GRACE: 2}
+        )
         assert grant_row(world, grant_id)[0] is None
 
-    def test_the_absolute_expiry_is_kept_across_concurrent_rotations(self, world: World) -> None:
+    def test_the_absolute_expiry_is_kept_across_concurrent_rotations(
+        self, world: World
+    ) -> None:
         grant_id, refresh = world.grant()
-        cap = raw_sql(world.a.tokens, "SELECT expires_at FROM oauth_grants WHERE id = :g", {"g": grant_id})[0][0]
+        cap = raw_sql(
+            world.a.tokens,
+            "SELECT expires_at FROM oauth_grants WHERE id = :g",
+            {"g": grant_id},
+        )[0][0]
         world.clock.advance(1000)
         result, successor = world.rotate(world.b, refresh)
         world.clock.advance(1000)
         _, third = world.rotate(world.a, successor)
-        rows = raw_sql(world.a.tokens, "SELECT DISTINCT expires_at FROM oauth_refresh_tokens")
+        rows = raw_sql(
+            world.a.tokens,
+            "SELECT DISTINCT g.expires_at FROM oauth_refresh_tokens r "
+            "JOIN oauth_grants g ON g.id = r.grant_id",
+        )
         assert rows == [(cap,)] and result.outcome is R.ROTATED and third
 
 
@@ -493,13 +627,17 @@ class TestRevocationRaces:
             world.a.authz.pause_hook = gate
             rotation = Runner(lambda: world.rotate(world.a, refresh))
             assert gate.reached.wait(WAIT)
-            revocation = Runner(lambda: world.b.authz.revoke_own_grant(grant_id, world.account_key))
+            revocation = Runner(
+                lambda: world.b.authz.revoke_own_grant(grant_id, world.account_key)
+            )
             assert revocation.still_blocked()  # the rotation holds the grant row
             gate.release.set()
             (result, successor), revoked = rotation.join(), revocation.join()
             assert result.outcome is R.ROTATED and revoked is True
             world.a.authz.pause_hook = None
-            assert world.rotate(world.b, successor)[0].outcome is R.DEAD  # nothing live survives
+            assert (
+                world.rotate(world.b, successor)[0].outcome is R.DEAD
+            )  # nothing live survives
         assert grant_row(world, grant_id)[0] is not None
         assert world.a.authz.revoke_own_grant(grant_id, world.account_key) is False
 
@@ -509,7 +647,9 @@ class TestRevocationRaces:
     ) -> None:
         grant_id, refresh = world.grant()
         if disable_first:
-            assert world.b.tokens.disable_principal(world.account_key, actor=OPERATOR, reason="operator_disabled")
+            assert world.b.tokens.disable_principal(
+                world.account_key, actor=OPERATOR, reason="operator_disabled"
+            )
             assert world.rotate(world.a, refresh)[0].outcome is R.DEAD
         else:
             gate = Gate("after_grant_lock")
@@ -529,7 +669,10 @@ class TestRevocationRaces:
             world.a.authz.pause_hook = None
             if result.outcome is R.ROTATED:
                 assert world.rotate(world.b, successor)[0].outcome is R.DEAD
-        assert grant_row(world, grant_id) == (grant_row(world, grant_id)[0], "account_disabled")
+        assert grant_row(world, grant_id) == (
+            grant_row(world, grant_id)[0],
+            "account_disabled",
+        )
         assert grant_row(world, grant_id)[0] is not None
 
     def test_two_revocations_of_one_grant_change_it_once(self, world: World) -> None:
@@ -542,23 +685,35 @@ class TestRevocationRaces:
 
 
 class TestClientDocuments:
-    def test_concurrent_upserts_keep_the_newest_document(self, world: World, tmp_path) -> None:
+    def test_concurrent_upserts_keep_the_newest_document(
+        self, world: World, tmp_path
+    ) -> None:
         keyring = Keyring.parse(KEYS_RAW)
         sides = [world.new_side(tmp_path, keyring, AuthzSettings()) for _ in range(4)]
         url = "https://client.example/cimd.json"
         runners = [
-            Runner(lambda s=side, n=n: s.authz.upsert_cimd(url, f'{{"n": {n}}}', fetched_at=1000 + n, fresh_until=5000))
+            Runner(
+                lambda s=side, n=n: s.authz.upsert_cimd(
+                    url, f'{{"n": {n}}}', fetched_at=1000 + n, fresh_until=5000
+                )
+            )
             for n, side in zip((3, 1, 4, 2, 0, 5), (sides + sides)[:6], strict=True)
         ]
         for runner in runners:
             runner.join()
         snapshot = world.a.authz.cimd_snapshot(url)
-        assert snapshot is not None and snapshot.doc_json == '{"n": 5}' and snapshot.fetched_at == 1005
+        assert (
+            snapshot is not None
+            and snapshot.doc == {"n": 5}
+            and snapshot.fetched_at == 1005
+        )
 
 
 @pytest.mark.postgres
 class TestWriterLockOnPostgres:
-    def test_row_write_takes_no_advisory_lock_and_write_does(self, world: World) -> None:
+    def test_row_write_takes_no_advisory_lock_and_write_does(
+        self, world: World
+    ) -> None:
         db = world.a.tokens.database
         query = text(
             "SELECT count(*) FROM pg_locks"
@@ -566,7 +721,10 @@ class TestWriterLockOnPostgres:
         )
         with db.row_write() as conn:
             assert conn.execute(query).scalar_one() == 0
-            assert conn.execute(text("SHOW transaction_isolation")).scalar_one() == "read committed"
+            assert (
+                conn.execute(text("SHOW transaction_isolation")).scalar_one()
+                == "read committed"
+            )
         with db.write() as conn:
             assert conn.execute(query).scalar_one() == 1
         assert IS_POSTGRES or db.kind == "postgresql"

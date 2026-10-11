@@ -1,5 +1,6 @@
 ---
 title: "Stage A appendix: evidence for the self-hosted multi-user pilot"
+status: historical record; upstream pilot not pursued; G1 and G2 unmet
 issue: vishalsachdev/canvas-mcp#484
 main-document: stage-a-main.md
 implementation: KKazuhaK/canvas-mcp, branch uci-student at f32b9d3, pushed and CI-green. 76aa7ba merges upstream main 8f1b0ae (3170ca6 plus one README commit) into uci-student; G3 and G4 are 76aa7ba..c8a4a28; P3 (the optional PostgreSQL data layer) is c8a4a28..3dd0954; the restart test (bf703a6), the tool switch SELFHOST_DISABLED_TOOLS (ff230fa) and a test-class rename (f32b9d3) follow.
@@ -7,6 +8,13 @@ date: 2026-10-09
 ---
 
 # Stage A appendix: evidence
+
+Historical record of `f32b9d3`; its evidence remains tied to that revision. The
+upstream pilot is not pursued, and the fork continues independently. G1 and G2
+are unmet and are not claimed. The old `MCP_AUTH_MODE=entra-oauth` name and Entra
+proxy described below are gone in v1; multi-school support was added by the
+owner's choice. Use [V1-PROGRESS.md](../../deploy/selfhost/V1-PROGRESS.md) for
+current implementation and acceptance status.
 
 Paths are relative to the fork root. Tests are cited as `path::Class::test`. The labels are those of the main document: **implemented**, **tested**, **documented** (an operator instruction in `deploy/selfhost/README.md` that the code cannot enforce) and **unverified**.
 

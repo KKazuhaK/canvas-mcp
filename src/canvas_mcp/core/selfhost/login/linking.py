@@ -18,17 +18,14 @@ import logging
 import secrets
 from typing import TYPE_CHECKING
 
-import anyio.to_thread
-
-from .. import accounts as acc
 from ..account_ops import IdentityView, Linked, LinkStarted, Refusal, Unlinked
 from ..accounts import ExternalClaims
+from ..db.workers import run_store
 from ..token_store import AccessActionRefused, LinkedIdentity
 from .ceremony import (
     FLOW_COOKIE,
     FLOW_KIND,
     FLOW_TTL_S,
-    LINK_KIND,
     FlowRecord,
     binding_digest,
     new_cookie_payload,
@@ -38,7 +35,7 @@ from .metadata import ProviderUnavailable
 if TYPE_CHECKING:
     from starlette.requests import Request
 
-    from ..account_web import _AccountApp, _Session
+    from ..account_core import AccountCore, _Session
     from .registry import LoginRuntime
 
 logger = logging.getLogger("canvas_mcp.selfhost.account")
@@ -48,17 +45,22 @@ LINK_START_LIMIT = 5
 UNLINK_LIMIT = 10
 LIMIT_WINDOW_S = 600
 
+
 def _b64url_sha256(verifier: str) -> str:
     import base64
     import hashlib
 
-    return base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+    return (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest())
+        .rstrip(b"=")
+        .decode("ascii")
+    )
 
 
 class LinkingService:
     """The linking operations of one running server."""
 
-    def __init__(self, app: _AccountApp, runtime: LoginRuntime) -> None:
+    def __init__(self, app: AccountCore, runtime: LoginRuntime) -> None:
         self.app = app
         self.rt = runtime
 
@@ -69,7 +71,7 @@ class LinkingService:
         if not self.rt.linking_enabled:
             return Refusal("not_found")
         try:
-            rows = await anyio.to_thread.run_sync(self.app.store.list_identities, session.acct)
+            rows = await run_store(self.app.store.list_identities, session.acct)
         except Exception as exc:  # noqa: BLE001
             logger.error("account identities read failed: %s", type(exc).__name__)
             return Refusal("token_store_unavailable")
@@ -91,15 +93,13 @@ class LinkingService:
         if not app.link_limiter.allow((session.acct,)):
             return Refusal("rate_limited", {"retry_after_s": LIMIT_WINDOW_S})
         try:
-            rows = await anyio.to_thread.run_sync(app.store.list_identities, session.acct)
+            rows = await run_store(app.store.list_identities, session.acct)
         except Exception as exc:  # noqa: BLE001
             logger.error("account link start failed: %s", type(exc).__name__)
             return Refusal("token_store_unavailable")
         if any(row.provider_id == provider_id for row in rows):
             return Refusal("provider_already_linked")
         try:
-            if provider_id == acc.PROVIDER_ENTRA:
-                return await self._start_entra(session)
             return await self._start_provider(session, provider_id)
         except ProviderUnavailable:
             return Refusal("provider_unavailable")
@@ -116,43 +116,35 @@ class LinkingService:
         nonce = secrets.token_urlsafe(32)
         binding = secrets.token_urlsafe(32)
         record = FlowRecord(
-            p=provider.id, cv=verifier, n=nonce, pp="link", txn=None, rt=None, rz=True,
-            ru=provider.redirect_uri, la=session.acct, le=session.ep, li=session.iat, iat=now,
+            p=provider.id,
+            cv=verifier,
+            n=nonce,
+            pp="link",
+            txn=None,
+            rt=None,
+            rz=True,
+            ru=provider.redirect_uri,
+            la=session.acct,
+            le=session.ep,
+            li=session.iat,
+            iat=now,
         )
         state = await rt.flow_store.put(
-            FLOW_KIND, record.to_json(), FLOW_TTL_S, binding_hash=binding_digest(binding)
+            FLOW_KIND,
+            record.to_json(),
+            FLOW_TTL_S,
+            binding_hash=binding_digest(binding),
         )
         url = provider.authorize_url(
-            state=state, nonce=nonce, code_challenge=_b64url_sha256(verifier), reauth=True
-        )
-        cookie = app.codec.seal(FLOW_COOKIE, new_cookie_payload(state, binding, provider.id, now, "link"))
-        return LinkStarted(url, provider.id, FLOW_COOKIE, cookie, FLOW_TTL_S)
-
-    async def _start_entra(self, session: _Session) -> LinkStarted:
-        from ..account_web import LOGIN_COOKIE
-
-        app, rt = self.app, self.rt
-        now = int(app.clock())
-        state = secrets.token_urlsafe(32)
-        nonce = secrets.token_urlsafe(32)
-        verifier = secrets.token_urlsafe(48)
-        binding = secrets.token_urlsafe(32)
-        record = FlowRecord(
-            p=acc.PROVIDER_ENTRA, cv="", n="", pp="link", txn=None, rt=None, rz=True,
-            ru=app.base + "/account/callback", la=session.acct, le=session.ep, li=session.iat, iat=now,
-        )
-        link_id = await rt.flow_store.put(
-            LINK_KIND, record.to_json(), FLOW_TTL_S, binding_hash=binding_digest(binding)
+            state=state,
+            nonce=nonce,
+            code_challenge=_b64url_sha256(verifier),
+            reauth=True,
         )
         cookie = app.codec.seal(
-            LOGIN_COOKIE,
-            {
-                "state": state, "nonce": nonce, "verifier": verifier, "iat": now,
-                "pp": "link", "lf": link_id, "lb": binding,
-            },
+            FLOW_COOKIE, new_cookie_payload(state, binding, provider.id, now, "link")
         )
-        url = app._entra_authorize_url(state, nonce, _b64url_sha256(verifier))
-        return LinkStarted(url, acc.PROVIDER_ENTRA, LOGIN_COOKIE, cookie, FLOW_TTL_S)
+        return LinkStarted(url, provider.id, FLOW_COOKIE, cookie, FLOW_TTL_S)
 
     # -- completing a link (the callbacks call this) ----------------------------------------------
 
@@ -178,9 +170,12 @@ class LinkingService:
             return Refusal("link_session_ended")
         assert record.le is not None
         try:
-            result = await anyio.to_thread.run_sync(
+            result = await run_store(
                 functools.partial(
-                    app.identity.link, record.la, ext, expected_epoch=record.le,
+                    app.identity.link,
+                    record.la,
+                    ext,
+                    expected_epoch=record.le,
                     ua_hash=app._ua_hash(request),
                 )
             )
@@ -190,15 +185,23 @@ class LinkingService:
         if not result.ok:
             logger.info(
                 "account link refused account=%s provider=%s code=%s",
-                session.acct, ext.provider_id, result.code,
+                session.acct,
+                ext.provider_id,
+                result.code,
             )
             return Refusal(result.code)
-        logger.info("account identity linked account=%s provider=%s", session.acct, ext.provider_id)
+        logger.info(
+            "account identity linked account=%s provider=%s",
+            session.acct,
+            ext.provider_id,
+        )
         return Linked(ext.provider_id)
 
     # -- unlinking --------------------------------------------------------------------------------
 
-    async def unlink_own(self, session: _Session, identity_id: int) -> Unlinked | Refusal:
+    async def unlink_own(
+        self, session: _Session, identity_id: str
+    ) -> Unlinked | Refusal:
         """Remove one of the caller's identities (they keep at least one)."""
         app = self.app
         if not self.rt.linking_enabled:
@@ -210,9 +213,12 @@ class LinkingService:
         if not app.unlink_limiter.allow((session.acct,)):
             return Refusal("rate_limited", {"retry_after_s": LIMIT_WINDOW_S})
         try:
-            result = await anyio.to_thread.run_sync(
+            result = await run_store(
                 functools.partial(
-                    app.identity.unlink, session.acct, identity_id, actor=session.acct,
+                    app.identity.unlink,
+                    session.acct,
+                    identity_id,
+                    actor=session.acct,
                     expected_epoch=session.ep,
                 )
             )
@@ -223,11 +229,15 @@ class LinkingService:
             return Refusal("token_store_unavailable")
         if not result.ok:
             return Refusal(result.code)
-        logger.info("account identity unlinked account=%s provider=%s by=self", session.acct, result.provider_id)
+        logger.info(
+            "account identity unlinked account=%s provider=%s by=self",
+            session.acct,
+            result.provider_id,
+        )
         return self._after_unlink(session, result.provider_id, result.session_epoch)
 
     async def owner_unlink(
-        self, session: _Session, target: str, identity_id: int
+        self, session: _Session, target: str, identity_id: str
     ) -> Unlinked | Refusal:
         """An owner removes an identity from any account (fresh sign-in; owner re-checked in the transaction)."""
         app = self.app
@@ -240,8 +250,10 @@ class LinkingService:
         if not app.unlink_limiter.allow((session.acct,)):
             return Refusal("rate_limited", {"retry_after_s": LIMIT_WINDOW_S})
         try:
-            result = await anyio.to_thread.run_sync(
-                functools.partial(app.identity.unlink, target, identity_id, actor=session.acct)
+            result = await run_store(
+                functools.partial(
+                    app.identity.unlink, target, identity_id, actor=session.acct
+                )
             )
         except AccessActionRefused:
             return Refusal("forbidden")
@@ -252,18 +264,24 @@ class LinkingService:
             return Refusal(result.code)
         logger.info(
             "account identity unlinked account=%s provider=%s by=owner owner=%s",
-            target, result.provider_id, session.acct,
+            target,
+            result.provider_id,
+            session.acct,
         )
         if target == session.acct:
             return self._after_unlink(session, result.provider_id, result.session_epoch)
         return Unlinked(result.provider_id, signed_out=False, session_cookie=None)
 
-    def _after_unlink(self, session: _Session, provider_id: str, epoch: int) -> Unlinked:
+    def _after_unlink(
+        self, session: _Session, provider_id: str, epoch: int
+    ) -> Unlinked:
         """The caller keeps their session (re-issued under the new epoch) unless they used the identity just removed."""
         if provider_id == session.pid:
             return Unlinked(provider_id, signed_out=True, session_cookie=None)
         return Unlinked(
-            provider_id, signed_out=False, session_cookie=self.app._reissue_session(session, epoch)
+            provider_id,
+            signed_out=False,
+            session_cookie=self.app._reissue_session(session, epoch),
         )
 
 

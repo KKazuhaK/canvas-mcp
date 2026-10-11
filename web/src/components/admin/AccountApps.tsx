@@ -1,3 +1,4 @@
+import LoadMore from '@/components/LoadMore'
 import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
 import Dialog from '@mui/material/Dialog'
@@ -117,6 +118,7 @@ export default function AccountApps({ account }: { account: AdminAccount }) {
               ))}
             </Box>
           ) : null}
+          <LoadMore query={grants} />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setOpen(false)}>{t('common:actions.close')}</Button>

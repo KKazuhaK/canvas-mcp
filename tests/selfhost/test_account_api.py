@@ -1,8 +1,7 @@
-"""The JSON API under /account/api, on whichever backend the run selects.
+"""The JSON API under /api/v1, on whichever backend the run selects.
 
-The API is exercised through the "fallback" composition (``ui="react"`` without a
-built bundle): the HTML pages and the API are registered over one application, which
-is also how the shared rate-limit budget and the shared operations are proved.
+The API runs on the real built-in authorization server and required React bundle.
+Provider, Canvas and DNS I/O are scripted by the native account fixture.
 """
 
 from __future__ import annotations
@@ -21,31 +20,22 @@ import pytest
 from canvas_mcp.core import audit
 from canvas_mcp.core.selfhost import account_api
 from canvas_mcp.core.selfhost import accounts as acc
-from canvas_mcp.core.selfhost.account_web import (
+from canvas_mcp.core.selfhost.account_core import (
     SESSION_COOKIE,
     CanvasCheckError,
     CanvasIdentity,
 )
 from canvas_mcp.core.selfhost.accounts import AccessPolicy, AccessRule
+from canvas_mcp.core.selfhost.custody import CUSTODY_NOTICE_VERSION
 from canvas_mcp.core.selfhost.db.errors import StoreUnavailable
 from canvas_mcp.core.selfhost.schools import (
     DirectoryEntry,
-    FeaturedSchool,
-    SchoolPolicy,
+    School,
 )
 from canvas_mcp.core.selfhost.token_store import ToolPrefs
 from canvas_mcp.core.selfhost.tool_prefs import ToolPrefsCache, WriteToolCatalog
 
-from .conftest import acct_key, make_account
-from .test_account_schools import (
-    DEFAULT_HOST,
-    DEFAULT_URL,
-    HOST_A,
-    HOST_B,
-    FakeDirectory,
-    FakeResolver,
-)
-from .test_account_web import (
+from .account_fixture import (
     BASE,
     CANVAS_TOKEN,
     KEY,
@@ -61,12 +51,23 @@ from .test_account_web import (
     put_row,
     sign_in,
 )
+from .conftest import acct_key, make_account
+from .school_fixture import (
+    DEFAULT_HOST,
+    DEFAULT_URL,
+    HOST_A,
+    HOST_B,
+    FakeDirectory,
+    FakeResolver,
+    school_policy,
+)
 
-P = "/account/api"
+P = "/api/v1"
 OID_PENDING = "dddddddd-0000-4000-8000-0000000000dd"
 OID_BLOCKED = "eeeeeeee-0000-4000-8000-0000000000ee"
 OWNER_RULE = AccessRule("entra", "role", "Canvas.Owner")
 APPROVAL = AccessPolicy(mode="approval", owner_rules=(OWNER_RULE,))
+ACKNOWLEDGED = {"acknowledged": True, "notice_version": CUSTODY_NOTICE_VERSION}
 NEW_TOKEN = "8~" + "N" * 62
 OTHER_TOKEN = "9~" + "O" * 62
 
@@ -165,8 +166,16 @@ def use_cookies(h: Harness, saved: httpx.Cookies) -> None:
 
 
 def sign_in_owner(h: Harness) -> None:
-    assert sign_in(h, oid=OID_OWNER, name="Olive Owner", upn="olive@example.test",
-                   roles=("Canvas.Owner",)).status_code == 303
+    assert (
+        sign_in(
+            h,
+            oid=OID_OWNER,
+            name="Olive Owner",
+            upn="olive@example.test",
+            roles=("Canvas.Owner",),
+        ).status_code
+        == 303
+    )
 
 
 def error_of(response: httpx.Response, status: int, code: str) -> dict[str, Any]:
@@ -197,7 +206,7 @@ def assert_api_headers(response: httpx.Response) -> None:
 
 
 def make(tmp_path: pathlib.Path, **kwargs: Any) -> Harness:
-    return build_harness(tmp_path, ui="react", **kwargs)
+    return build_harness(tmp_path, **kwargs)
 
 
 @pytest.fixture
@@ -239,14 +248,16 @@ def demote_directly(h: Harness, key: str) -> None:
 
 
 def audit_rows(h: Harness) -> list[tuple[str, str | None, str | None]]:
-    return [(e.action, e.target, e.reason) for e in h.store.list_audit(500)]
+    return [(e.action, e.target, e.reason) for e in h.store.iter_audit()]
 
 
 # -- providers and the shape of every answer ----------------------------------------------
 
 
 class TestProviders:
-    def test_it_needs_no_session_and_names_only_microsoft(self, h: Harness, api: Api) -> None:
+    def test_it_needs_no_session_and_names_only_microsoft(
+        self, h: Harness, api: Api
+    ) -> None:
         response = api.get("/providers")
         assert response.status_code == 200
         assert_api_headers(response)
@@ -257,7 +268,7 @@ class TestProviders:
                     "kind": "oidc",
                     "name": "Microsoft",
                     "icon": "microsoft",
-                    "start_url": "/account/login",
+                    "start_url": "/auth/login/entra",
                 }
             ],
             "mcp_url": f"{BASE}/mcp",
@@ -274,7 +285,7 @@ class TestProviders:
 
 class TestTransport:
     def test_every_route_without_a_session_is_401(self, h: Harness, api: Api) -> None:
-        table = account_api.ApiApp(None).route_table()  # type: ignore[arg-type]
+        table = account_api.ApiApp(h.core).route_table()
         seen = 0
         for path, endpoints in table:
             url = path.replace("{id}", OID_2)
@@ -284,16 +295,18 @@ class TestTransport:
                 )
                 if endpoint.access == "public":
                     assert response.status_code == 200
-                elif endpoint.local_authz or endpoint.linking:
-                    # The local authorization server's and the sign-in methods' routes: absent here.
+                elif endpoint.linking:
+                    # This fixture has one provider, so linking is absent.
                     error_of(response, 404, "not_found")
                 else:
                     error_of(response, 401, "not_authenticated")
                 assert_api_headers(response)
                 seen += 1
-        assert seen == 33
+        assert seen == sum(len(endpoints) for _, endpoints in table)
 
-    def test_a_known_path_with_the_wrong_method_is_405_with_allow(self, user: Api) -> None:
+    def test_a_known_path_with_the_wrong_method_is_405_with_allow(
+        self, user: Api
+    ) -> None:
         response = user.call("PATCH", "/me/canvas-token")
         error_of(response, 405, "method_not_allowed")
         assert response.headers["allow"] == "DELETE, GET, PUT"
@@ -325,18 +338,21 @@ class TestTransport:
                     "Access-Control-Request-Method": "PUT",
                 },
             )
-            assert response.status_code == 405
-            assert not [n for n in response.headers if n.lower().startswith("access-control-")]
-            if method == "OPTIONS":
-                assert_api_headers(response)
+            assert response.status_code == 403
+            assert not [
+                n for n in response.headers if n.lower().startswith("access-control-")
+            ]
+            # The outer origin guard refuses these before API method dispatch.
+            same_origin = user.h.client.request(
+                method, f"{P}/me", headers={"Origin": BASE}
+            )
+            assert same_origin.status_code == 405
 
     @pytest.mark.parametrize(
         "path",
         [
             "/nothing",
             "/me/identities",
-            "/me/grants",
-            "/me/grants/abc",
             "/consent/abc",
             "/me/",
             "/me/canvas-token/",
@@ -354,7 +370,9 @@ class TestTransport:
             error_of(response, 404, "not_found")
             assert_api_headers(response)
 
-    def test_the_session_cookie_is_the_one_the_pages_use(self, h: Harness, user: Api) -> None:
+    def test_the_session_cookie_is_the_one_the_pages_use(
+        self, h: Harness, user: Api
+    ) -> None:
         assert h.client.cookies.get(SESSION_COOKIE)
         assert user.get("/me").status_code == 200
 
@@ -362,12 +380,16 @@ class TestTransport:
         response = user.post("/session/logout?all=1", csrf=True)
         error_of(response, 422, "validation_failed")
 
-    def test_logout_clears_the_cookie_and_signs_out(self, h: Harness, user: Api) -> None:
+    def test_logout_clears_the_cookie_and_signs_out(
+        self, h: Harness, user: Api
+    ) -> None:
         response = user.post("/session/logout")
         assert response.status_code == 204 and response.content == b""
         assert_api_headers(response)
         line = next(
-            x for x in response.headers.get_list("set-cookie") if x.startswith(SESSION_COOKIE)
+            x
+            for x in response.headers.get_list("set-cookie")
+            if x.startswith(SESSION_COOKIE)
         ).lower()
         assert "max-age=0" in line and "secure" in line and "httponly" in line
         assert "samesite=lax" in line and "path=/" in line
@@ -403,22 +425,22 @@ class TestMe:
         assert body["session"]["fresh_until"] == "2027-01-15T08:10:00Z"
         assert body["session"]["expires_at"] == "2027-01-15T08:15:00Z"
         assert body["canvas"]["state"] == "none"
-        assert body["write_tools"] is None
+        assert body["write_tools"] == {"offered": 0, "enabled": 0}
         assert body["features"] == {
             "school_picker": False,
             "school_search": False,
-            "write_tools": False,
+            "write_tools": True,
             "admin": False,
             "identities": False,
-            "connected_apps": False,
-            "consent": False,
             "logout_everywhere": False,
             "role_management": False,
         }
         assert body["ui_locale"] is None
         assert body["server"] == {"mcp_url": f"{BASE}/mcp", "display_timezone": "UTC"}
 
-    def test_the_session_goes_stale_after_ten_minutes(self, h: Harness, user: Api) -> None:
+    def test_the_session_goes_stale_after_ten_minutes(
+        self, h: Harness, user: Api
+    ) -> None:
         h.now += 601
         body = user.get("/me").json()
         assert body["session"]["fresh"] is False
@@ -430,7 +452,9 @@ class TestMe:
         assert body["account"]["role"] == "owner"
         assert body["features"]["admin"] is True
 
-    def test_a_pending_account_sees_almost_nothing(self, tmp_path: pathlib.Path) -> None:
+    def test_a_pending_account_sees_almost_nothing(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         h = make(tmp_path, policy=APPROVAL)
         sign_in(h, roles=())
         body = Api(h).get("/me").json()
@@ -443,15 +467,20 @@ class TestMe:
     ) -> None:
         from zoneinfo import ZoneInfo
 
-        from canvas_mcp.core.selfhost import account_web
+        from canvas_mcp.core.selfhost import account_core
 
-        monkeypatch.setattr(account_web, "output_timezone", lambda: ZoneInfo("America/Los_Angeles"))
-        assert user.get("/me").json()["server"]["display_timezone"] == "America/Los_Angeles"
+        monkeypatch.setattr(
+            account_core, "_display_tz", lambda: ZoneInfo("America/Los_Angeles")
+        )
+        assert (
+            user.get("/me").json()["server"]["display_timezone"]
+            == "America/Los_Angeles"
+        )
 
     def test_the_language_cookie_is_reflected(self, h: Harness, user: Api) -> None:
-        h.client.cookies.set("canvas_mcp_lang", "zh", path="/account")
+        h.client.cookies.set("canvas_mcp_lang", "zh", path="/")
         assert user.get("/me").json()["ui_locale"] == "zh"
-        h.client.cookies.set("canvas_mcp_lang", "fr", path="/account")
+        h.client.cookies.set("canvas_mcp_lang", "fr", path="/")
         assert user.get("/me").json()["ui_locale"] is None
 
     def test_a_disabled_account_is_signed_out(self, h: Harness, user: Api) -> None:
@@ -473,7 +502,7 @@ class TestMe:
         sign_in(h, roles=())
         a = Api(h)
         assert a.get("/me").status_code == 200
-        assert h.store.purge_stale_pending(retention_seconds=-10) == 1
+        assert h.store.delete_account(KEY)
         error_of(a.get("/me"), 401, "not_authenticated")
 
     def test_a_store_failure_is_503_and_names_nothing(
@@ -482,7 +511,7 @@ class TestMe:
         def boom(_key: str) -> Any:
             raise sqlite3.OperationalError("database is locked: /secret/path.db")
 
-        monkeypatch.setattr(h.store, "get_principal_status", boom)
+        monkeypatch.setattr(h.store, "read_session_snapshot", boom)
         response = user.get("/me")
         error_of(response, 503, "token_store_unavailable")
         assert "secret" not in response.text and "locked" not in response.text
@@ -496,7 +525,11 @@ class TestMe:
 
     def test_the_cross_site_fetch_metadata_is_refused(self, user: Api) -> None:
         for value in ("cross-site", "same-site"):
-            error_of(user.get("/me", headers={"Sec-Fetch-Site": value}), 403, "origin_not_allowed")
+            error_of(
+                user.get("/me", headers={"Sec-Fetch-Site": value}),
+                403,
+                "origin_not_allowed",
+            )
         for value in ("same-origin", "none"):
             assert user.get("/me", headers={"Sec-Fetch-Site": value}).status_code == 200
 
@@ -504,7 +537,11 @@ class TestMe:
 # -- CSRF, Origin, content type and bodies ----------------------------------------------------------
 
 MUTATIONS: list[tuple[str, str, Any]] = [
-    ("PUT", "/me/canvas-token", {"canvas_token": CANVAS_TOKEN}),
+    (
+        "PUT",
+        "/me/canvas-token",
+        {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN},
+    ),
     ("DELETE", "/me/canvas-token", None),
     ("POST", "/me/canvas-token/recheck", None),
     ("PUT", "/me/write-tools", {"enabled": []}),
@@ -520,7 +557,9 @@ class TestCsrfAndOrigin:
         self, user: Api, method: str, path: str, body: Any
     ) -> None:
         error_of(user.call(method, path, body, csrf=False), 403, "csrf_invalid")
-        error_of(user.call(method, path, body, csrf="not-the-token"), 403, "csrf_invalid")
+        error_of(
+            user.call(method, path, body, csrf="not-the-token"), 403, "csrf_invalid"
+        )
         error_of(user.call(method, path, body, csrf=""), 403, "csrf_invalid")
 
     @pytest.mark.parametrize(("method", "path", "body"), MUTATIONS)
@@ -541,10 +580,13 @@ class TestCsrfAndOrigin:
         self, user: Api, method: str, path: str, body: Any
     ) -> None:
         error_of(user.call(method, path, body, origin=None), 403, "origin_not_allowed")
-        error_of(
-            user.call(method, path, body, origin="https://evil.example"), 403, "origin_not_allowed"
-        )
-        error_of(user.call(method, path, body, origin=BASE + "/"), 403, "origin_not_allowed")
+        for origin in ("https://evil.example", BASE + "/"):
+            response = user.call(method, path, body, origin=origin)
+            assert response.status_code == 403  # outer guard, before API dispatch
+            assert not [
+                k for k in response.headers if k.lower().startswith("access-control-")
+            ]
+            assert "evil.example" not in response.text
 
     @pytest.mark.parametrize(("method", "path", "body"), MUTATIONS)
     def test_fetch_metadata_must_say_same_origin(
@@ -552,18 +594,21 @@ class TestCsrfAndOrigin:
     ) -> None:
         for value in ("cross-site", "same-site", "none"):
             error_of(
-                user.call(method, path, body, fetch_site=value), 403, "origin_not_allowed"
+                user.call(method, path, body, fetch_site=value),
+                403,
+                "origin_not_allowed",
             )
 
     def test_the_origin_is_checked_before_the_csrf_token(self, user: Api) -> None:
-        error_of(
-            user.delete("/me/canvas-token", csrf=False, origin="https://evil.example"),
-            403,
-            "origin_not_allowed",
+        response = user.delete(
+            "/me/canvas-token", csrf=False, origin="https://evil.example"
         )
+        assert response.status_code == 403
+        assert "access-control-allow-origin" not in response.headers
 
     @pytest.mark.parametrize(
-        "content_type", ["application/x-www-form-urlencoded", "text/plain", "application/jsonx", None]
+        "content_type",
+        ["application/x-www-form-urlencoded", "text/plain", "application/jsonx", None],
     )
     def test_a_body_must_be_json(self, user: Api, content_type: str | None) -> None:
         response = user.call(
@@ -595,7 +640,9 @@ class TestCsrfAndOrigin:
         a = Api(r.h)
         error_of(a.get("/me/schools/search?q=abc"), 403, "csrf_invalid")
         error_of(
-            a.get("/me/schools/search?q=abc", headers={"X-CSRF-Token": "no"}), 403, "csrf_invalid"
+            a.get("/me/schools/search?q=abc", headers={"X-CSRF-Token": "no"}),
+            403,
+            "csrf_invalid",
         )
         assert r.directory.calls == 0
         assert a.get("/me/schools/search?q=abc", csrf=True).status_code == 200
@@ -606,15 +653,23 @@ class TestCsrfAndOrigin:
         h = make(tmp_path, policy=APPROVAL)
         sign_in(h, roles=())
         a = Api(h)
-        error_of(a.delete("/me/canvas-token", origin=None, csrf=False), 403, "pending_approval")
+        error_of(
+            a.delete("/me/canvas-token", origin=None, csrf=False),
+            403,
+            "pending_approval",
+        )
 
 
 class TestBodies:
     def test_more_than_8_kib_is_413(self, user: Api) -> None:
         big = json.dumps({"locale": "zh", "pad": "x" * 9000}).encode()
-        error_of(user.call("PUT", "/me/ui-locale", content=big), 413, "payload_too_large")
+        error_of(
+            user.call("PUT", "/me/ui-locale", content=big), 413, "payload_too_large"
+        )
 
-    def test_a_declared_length_over_the_cap_is_refused_before_reading(self, user: Api) -> None:
+    def test_a_declared_length_over_the_cap_is_refused_before_reading(
+        self, user: Api
+    ) -> None:
         response = user.call(
             "PUT",
             "/me/ui-locale",
@@ -622,7 +677,10 @@ class TestBodies:
             headers={"Content-Length": "100000"},
         )
         assert response.status_code in (413, 400)
-        assert response.json()["error"]["code"] in ("payload_too_large", "malformed_request")
+        assert response.json()["error"]["code"] in (
+            "payload_too_large",
+            "malformed_request",
+        )
 
     def test_a_streamed_body_over_the_cap_is_413(self, user: Api) -> None:
         def chunks() -> Any:
@@ -662,23 +720,31 @@ class TestBodies:
         ],
     )
     def test_bad_json_is_400(self, user: Api, raw: bytes) -> None:
-        error_of(user.call("PUT", "/me/ui-locale", content=raw), 400, "malformed_request")
+        error_of(
+            user.call("PUT", "/me/ui-locale", content=raw), 400, "malformed_request"
+        )
 
     def test_an_unknown_field_is_422_and_names_the_field(self, user: Api) -> None:
         params = error_of(
-            user.put("/me/ui-locale", {"locale": "zh", "extra": 1}), 422, "validation_failed"
+            user.put("/me/ui-locale", {"locale": "zh", "extra": 1}),
+            422,
+            "validation_failed",
         )
         assert params == {"field": "extra"}
 
     def test_an_odd_field_name_is_not_echoed(self, user: Api) -> None:
         params = error_of(
-            user.put("/me/ui-locale", {"locale": "zh", "<script>": 1}), 422, "validation_failed"
+            user.put("/me/ui-locale", {"locale": "zh", "<script>": 1}),
+            422,
+            "validation_failed",
         )
         assert params == {"field": "body"}
 
     @pytest.mark.parametrize("value", [1, None, ["zh"], {"a": 1}, "fr", "", "ZH"])
     def test_a_wrong_value_is_422(self, user: Api, value: Any) -> None:
-        params = error_of(user.put("/me/ui-locale", {"locale": value}), 422, "validation_failed")
+        params = error_of(
+            user.put("/me/ui-locale", {"locale": value}), 422, "validation_failed"
+        )
         assert params == {"field": "locale"}
 
     def test_a_missing_field_is_422(self, user: Api) -> None:
@@ -694,7 +760,9 @@ class TestBodies:
             ("POST", "/session/logout"),
         ],
     )
-    def test_a_body_less_mutation_refuses_a_body(self, user: Api, method: str, path: str) -> None:
+    def test_a_body_less_mutation_refuses_a_body(
+        self, user: Api, method: str, path: str
+    ) -> None:
         error_of(user.call(method, path, content=b"{}"), 400, "malformed_request")
         error_of(user.call(method, path, {"x": 1}), 400, "malformed_request")
 
@@ -704,9 +772,11 @@ class TestBodies:
         response = user.put("/me/ui-locale", {"locale": "zh"})
         assert response.status_code == 204
         line = next(
-            x for x in response.headers.get_list("set-cookie") if x.startswith("canvas_mcp_lang=")
+            x
+            for x in response.headers.get_list("set-cookie")
+            if x.startswith("canvas_mcp_lang=")
         ).lower()
-        assert "canvas_mcp_lang=zh" in line and "path=/account" in line
+        assert "canvas_mcp_lang=zh" in line and "path=/" in line
         assert "secure" in line and "httponly" in line and "samesite=lax" in line
         assert user.get("/me").json()["ui_locale"] == "zh"
 
@@ -715,7 +785,9 @@ class TestBodies:
 
 
 class SchoolsRig:
-    def __init__(self, h: Harness, directory: FakeDirectory, resolver: FakeResolver) -> None:
+    def __init__(
+        self, h: Harness, directory: FakeDirectory, resolver: FakeResolver
+    ) -> None:
         self.h = h
         self.directory = directory
         self.resolver = resolver
@@ -725,9 +797,9 @@ def schools_rig(
     tmp_path: pathlib.Path,
     *,
     default: str = DEFAULT_URL,
-    featured: Sequence[FeaturedSchool] = (
-        FeaturedSchool(HOST_A, "School <b>A</b>"),
-        FeaturedSchool(HOST_B, "School B"),
+    featured: Sequence[School] = (
+        School(HOST_A, f"https://{HOST_A}/api/v1", "School <b>A</b>"),
+        School(HOST_B, f"https://{HOST_B}/api/v1", "School B"),
     ),
     search: bool = False,
     entries: Sequence[DirectoryEntry] = (),
@@ -737,7 +809,7 @@ def schools_rig(
 ) -> SchoolsRig:
     directory = FakeDirectory(entries, error=directory_error)
     fake_resolver = resolver or FakeResolver()
-    policy = SchoolPolicy.build(default, featured, search)
+    policy = school_policy(default, featured, search)
     h = make(
         tmp_path,
         cfg=make_cfg(schools=policy),
@@ -759,17 +831,25 @@ class TestCanvasTokenRead:
 
     def test_an_enrolled_token(self, h: Harness, user: Api) -> None:
         put_row(
-            h.store, OID, token=CANVAS_TOKEN, name="Ada Canvas", canvas_user_id="42",
-            canvas_host="canvas.example.test",
+            h.store,
+            OID,
+            token=CANVAS_TOKEN,
+            name="Ada Canvas",
+            canvas_user_id="42",
+            canvas_host="canvas.example.edu",
         )
         body = user.get("/me/canvas-token").json()
         assert body["state"] == "active"
-        assert body["canvas_user_id"] == "42" and body["canvas_user_name"] == "Ada Canvas"
+        assert (
+            body["canvas_user_id"] == "42" and body["canvas_user_name"] == "Ada Canvas"
+        )
         assert body["school"] == {
-            "host": "canvas.example.test", "name": "canvas.example.test", "offered": True,
+            "host": "canvas.example.edu",
+            "name": "Canvas",
+            "offered": True,
         }
         assert body["invalid_reason"] is None and body["recheck_allowed"] is False
-        assert body["settings_url"] == "https://canvas.example.test/profile/settings"
+        assert body["settings_url"] == "https://canvas.example.edu/profile/settings"
         assert body["enrolled_at"] == "2027-01-15T08:00:00Z"
         assert body["last_used_at"] is None
         assert CANVAS_TOKEN not in json.dumps(body)
@@ -781,7 +861,11 @@ class TestCanvasTokenRead:
 
     @pytest.mark.parametrize(
         ("reason", "allowed"),
-        [("canvas_token_rejected", True), ("decrypt_failed", True), ("revoked_by_admin", False)],
+        [
+            ("canvas_token_rejected", True),
+            ("decrypt_failed", True),
+            ("revoked_by_admin", False),
+        ],
     )
     def test_an_invalid_token_and_whether_it_can_be_rechecked(
         self, h: Harness, user: Api, reason: str, allowed: bool
@@ -799,30 +883,50 @@ class TestCanvasTokenRead:
         # h.now is 2027-01-15 08:00 UTC; the hint is stored as midnight UTC.
         base = int(h.now) - int(h.now) % day
         put_row(
-            h.store, OID, token=CANVAS_TOKEN, name="Ada", canvas_user_id="42",
+            h.store,
+            OID,
+            token=CANVAS_TOKEN,
+            name="Ada",
+            canvas_user_id="42",
             expires_hint_at=base + 30 * day,
         )
         body = user.get("/me/canvas-token").json()
         assert body["expires_on"] == "2027-02-14" and body["expiry_notice"] == "none"
         for delta, notice in ((6 * day, "soon"), (0, "soon"), (-1 * day, "passed")):
             put_row(
-                h.store, OID, token=CANVAS_TOKEN, name="Ada", canvas_user_id="42",
+                h.store,
+                OID,
+                token=CANVAS_TOKEN,
+                name="Ada",
+                canvas_user_id="42",
                 expires_hint_at=base + delta,
             )
             assert user.get("/me/canvas-token").json()["expiry_notice"] == notice, delta
         put_row(
-            h.store, OID, token=CANVAS_TOKEN, name="Ada", canvas_user_id="42",
+            h.store,
+            OID,
+            token=CANVAS_TOKEN,
+            name="Ada",
+            canvas_user_id="42",
             expires_hint_at=base + 8 * day,
         )
         assert user.get("/me/canvas-token").json()["expiry_notice"] == "none"
 
     def test_a_school_the_server_no_longer_offers(self, h: Harness, user: Api) -> None:
         put_row(
-            h.store, OID, token=CANVAS_TOKEN, name="Ada", canvas_user_id="42",
+            h.store,
+            OID,
+            token=CANVAS_TOKEN,
+            name="Ada",
+            canvas_user_id="42",
             canvas_host="canvas.gone.edu",
         )
         body = user.get("/me/canvas-token").json()
-        assert body["school"] == {"host": "canvas.gone.edu", "name": "canvas.gone.edu", "offered": False}
+        assert body["school"] == {
+            "host": "canvas.gone.edu",
+            "name": "canvas.gone.edu",
+            "offered": False,
+        }
         assert body["settings_url"] is None
 
 
@@ -830,89 +934,151 @@ class TestCanvasTokenSave:
     def test_a_new_token_is_verified_stored_and_audited(
         self, h: Harness, user: Api, events: list[dict[str, Any]]
     ) -> None:
-        response = user.put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN})
+        response = user.put(
+            "/me/canvas-token", {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN}
+        )
         assert response.status_code == 200
         assert_api_headers(response)
         body = response.json()
         assert body["state"] == "active" and body["canvas_user_name"] == "Ada Canvas"
         assert body["canvas_user_id"] == "42"
         assert h.whoami_calls == [CANVAS_TOKEN]
-        assert h.whoami_urls == ["https://canvas.example.test/api/v1"]
+        assert h.whoami_urls == ["https://canvas.example.edu/api/v1"]
         stored = h.store.get(KEY)
         assert stored is not None and stored.api_token == CANVAS_TOKEN
         assert CANVAS_TOKEN not in response.text
         assert ("token_enrolled", KEY, None) in audit_rows(h)
 
     def test_a_replacement_keeps_the_audit_trail(self, h: Harness, user: Api) -> None:
-        user.put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN})
-        user.put("/me/canvas-token", {"canvas_token": NEW_TOKEN})
+        user.put(
+            "/me/canvas-token", {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN}
+        )
+        user.put(
+            "/me/canvas-token", {"custody": ACKNOWLEDGED, "canvas_token": NEW_TOKEN}
+        )
         assert [r[0] for r in audit_rows(h)].count("token_replaced") == 1
 
     def test_the_expiry_date_is_stored(self, h: Harness, user: Api) -> None:
         response = user.put(
-            "/me/canvas-token", {"canvas_token": CANVAS_TOKEN, "expires_on": "2027-03-01"}
+            "/me/canvas-token",
+            {
+                "custody": ACKNOWLEDGED,
+                "canvas_token": CANVAS_TOKEN,
+                "expires_on": "2027-03-01",
+            },
         )
         assert response.json()["expires_on"] == "2027-03-01"
 
-    @pytest.mark.parametrize("value", ["2027-02-30", "yesterday", "2027-1-1", "2020-01-01", "2099-01-01", "x" * 40])
+    @pytest.mark.parametrize(
+        "value",
+        ["2027-02-30", "yesterday", "2027-1-1", "2020-01-01", "2099-01-01", "x" * 40],
+    )
     def test_a_bad_expiry_date_is_422(self, h: Harness, user: Api, value: str) -> None:
         params = error_of(
-            user.put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN, "expires_on": value}),
-            422, "validation_failed",
+            user.put(
+                "/me/canvas-token",
+                {
+                    "custody": ACKNOWLEDGED,
+                    "canvas_token": CANVAS_TOKEN,
+                    "expires_on": value,
+                },
+            ),
+            422,
+            "validation_failed",
         )
         assert params == {"field": "expires_on"}
         assert h.whoami_calls == []
 
-    @pytest.mark.parametrize("token", ["short", "has space " + "x" * 30, "ü" * 30, "x" * 600, ""])
+    @pytest.mark.parametrize(
+        "token", ["short", "has space " + "x" * 30, "ü" * 30, "x" * 600, ""]
+    )
     def test_a_badly_shaped_token_is_refused_without_asking_canvas(
         self, h: Harness, user: Api, token: str
     ) -> None:
-        error_of(user.put("/me/canvas-token", {"canvas_token": token}), 422, "token_invalid_format")
+        error_of(
+            user.put(
+                "/me/canvas-token", {"custody": ACKNOWLEDGED, "canvas_token": token}
+            ),
+            422,
+            "token_invalid_format",
+        )
         assert h.whoami_calls == []
 
     @pytest.mark.parametrize(
         "body",
         [
             {},
-            {"canvas_token": 5},
-            {"canvas_token": None},
-            {"canvas_token": CANVAS_TOKEN, "school": 3},
-            {"canvas_token": CANVAS_TOKEN, "school_sig": 3},
-            {"canvas_token": CANVAS_TOKEN, "expires_on": 20270101},
-            {"canvas_token": CANVAS_TOKEN, "confirm_identity_change": ["x"]},
-            {"canvas_token": CANVAS_TOKEN, "principal_key": KEY_2},
-            {"canvas_token": CANVAS_TOKEN, "account": KEY_2},
+            {"custody": ACKNOWLEDGED, "canvas_token": 5},
+            {"custody": ACKNOWLEDGED, "canvas_token": None},
+            {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN, "school": 3},
+            {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN, "school_sig": 3},
+            {
+                "custody": ACKNOWLEDGED,
+                "canvas_token": CANVAS_TOKEN,
+                "expires_on": 20270101,
+            },
+            {
+                "custody": ACKNOWLEDGED,
+                "canvas_token": CANVAS_TOKEN,
+                "confirm_identity_change": ["x"],
+            },
+            {
+                "custody": ACKNOWLEDGED,
+                "canvas_token": CANVAS_TOKEN,
+                "principal_key": KEY_2,
+            },
+            {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN, "account": KEY_2},
         ],
     )
-    def test_the_field_set_is_closed(self, h: Harness, user: Api, body: dict[str, Any]) -> None:
+    def test_the_field_set_is_closed(
+        self, h: Harness, user: Api, body: dict[str, Any]
+    ) -> None:
         error_of(user.put("/me/canvas-token", body), 422, "validation_failed")
         assert h.whoami_calls == []
         assert h.store.info(KEY) is None
 
     def test_canvas_rejecting_the_token(self, h: Harness, user: Api) -> None:
         h.whoami_result = CanvasCheckError("invalid")
-        response = user.put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN})
+        response = user.put(
+            "/me/canvas-token", {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN}
+        )
         error_of(response, 422, "token_rejected")
         assert h.store.info(KEY) is None
 
     def test_canvas_being_down(self, h: Harness, user: Api) -> None:
         h.whoami_result = CanvasCheckError("unavailable")
-        error_of(user.put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN}), 503, "canvas_unavailable")
+        error_of(
+            user.put(
+                "/me/canvas-token",
+                {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN},
+            ),
+            503,
+            "canvas_unavailable",
+        )
 
     def test_a_pending_account_cannot_save(self, tmp_path: pathlib.Path) -> None:
         h = make(tmp_path, policy=APPROVAL)
         sign_in(h, roles=())
         error_of(
-            Api(h).put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN}), 403, "pending_approval"
+            Api(h).put(
+                "/me/canvas-token",
+                {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN},
+            ),
+            403,
+            "pending_approval",
         )
         assert h.whoami_calls == [] and h.store.count() == 0
 
     def test_an_account_disabled_after_the_session_check_is_refused_by_the_store(
-        self, h: Harness, user: Api, events: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+        self,
+        h: Harness,
+        user: Api,
+        events: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from canvas_mcp.core.selfhost.token_store import OPERATOR
 
-        real = h.store.get_principal_status
+        real = h.store.read_session_snapshot
 
         def status_then_disable(key: str) -> Any:
             status = real(key)
@@ -920,8 +1086,10 @@ class TestCanvasTokenSave:
             return status
 
         user.csrf()
-        monkeypatch.setattr(h.store, "get_principal_status", status_then_disable)
-        response = user.put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN})
+        monkeypatch.setattr(h.store, "read_session_snapshot", status_then_disable)
+        response = user.put(
+            "/me/canvas-token", {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN}
+        )
         error_of(response, 403, "access_disabled")
         assert h.store.info(KEY) is None
         assert any(e.get("action") == "enroll_refused" for e in events)
@@ -933,7 +1101,9 @@ class TestCanvasTokenSave:
             raise StoreUnavailable()
 
         monkeypatch.setattr(h.store, "put", boom)
-        response = user.put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN})
+        response = user.put(
+            "/me/canvas-token", {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN}
+        )
         error_of(response, 503, "token_store_unavailable")
         assert CANVAS_TOKEN not in response.text
 
@@ -941,58 +1111,97 @@ class TestCanvasTokenSave:
         self, h: Harness, user: Api, caplog: pytest.LogCaptureFixture
     ) -> None:
         caplog.set_level(logging.DEBUG)
-        user.put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN})
+        user.put(
+            "/me/canvas-token", {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN}
+        )
         h.whoami_result = CanvasCheckError("invalid")
-        user.put("/me/canvas-token", {"canvas_token": OTHER_TOKEN})
+        user.put(
+            "/me/canvas-token", {"custody": ACKNOWLEDGED, "canvas_token": OTHER_TOKEN}
+        )
         text = caplog.text + "".join(r.getMessage() for r in caplog.records)
         assert CANVAS_TOKEN not in text and OTHER_TOKEN not in text
 
-    def test_ten_attempts_per_ten_minutes_with_retry_after(self, h: Harness, user: Api) -> None:
+    def test_ten_attempts_per_ten_minutes_with_retry_after(
+        self, h: Harness, user: Api
+    ) -> None:
         for _ in range(10):
-            user.put("/me/canvas-token", {"canvas_token": "short"})
-        response = user.put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN})
+            user.put(
+                "/me/canvas-token", {"custody": ACKNOWLEDGED, "canvas_token": "short"}
+            )
+        response = user.put(
+            "/me/canvas-token", {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN}
+        )
         params = error_of(response, 429, "rate_limited")
         assert params == {"retry_after_s": 600}
         assert response.headers["retry-after"] == "600"
         assert h.whoami_calls == []
         h.now += 601
         # The session is still valid for 900 s; the budget is back.
-        assert user.put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN}).status_code == 200
+        assert (
+            user.put(
+                "/me/canvas-token",
+                {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN},
+            ).status_code
+            == 200
+        )
 
-    def test_the_budget_is_shared_with_the_html_form(self, h: Harness, user: Api) -> None:
-        from .test_account_web import csrf_of, post_form
-
-        csrf = csrf_of(h)
-        for _ in range(5):
-            post_form(h, "/account/token", {"csrf": csrf, "canvas_token": "short"})
-        for _ in range(5):
-            user.put("/me/canvas-token", {"canvas_token": "short"})
-        error_of(user.put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN}), 429, "rate_limited")
-        assert post_form(
-            h, "/account/token", {"csrf": csrf, "canvas_token": CANVAS_TOKEN}
-        ).status_code == 429
+    def test_the_budget_is_shared_across_api_clients(
+        self, h: Harness, user: Api
+    ) -> None:
+        second = Api(h)
+        for client in (second, user):
+            for _ in range(5):
+                client.put(
+                    "/me/canvas-token",
+                    {"custody": ACKNOWLEDGED, "canvas_token": "short"},
+                )
+        for client in (second, user):
+            error_of(
+                client.put(
+                    "/me/canvas-token",
+                    {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN},
+                ),
+                429,
+                "rate_limited",
+            )
 
     def test_each_account_has_its_own_budget(self, h: Harness, user: Api) -> None:
         mine = snapshot_cookies(h)
         for _ in range(10):
-            user.put("/me/canvas-token", {"canvas_token": "short"})
+            user.put(
+                "/me/canvas-token", {"custody": ACKNOWLEDGED, "canvas_token": "short"}
+            )
         h.client.cookies.clear()
         sign_in(h, oid=OID_2, name="Bob", upn="bob@example.test")
-        assert user.put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN}).status_code == 200
+        assert (
+            user.put(
+                "/me/canvas-token",
+                {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN},
+            ).status_code
+            == 200
+        )
         use_cookies(h, mine)
 
 
 class TestIdentityChange:
     def enroll(self, h: Harness, a: Api) -> None:
         h.whoami_result = CanvasIdentity("42", "Ada Canvas")
-        assert a.put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN}).status_code == 200
+        assert (
+            a.put(
+                "/me/canvas-token",
+                {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN},
+            ).status_code
+            == 200
+        )
 
     def test_a_token_of_another_canvas_user_needs_a_confirmation(
         self, h: Harness, user: Api, events: list[dict[str, Any]]
     ) -> None:
         self.enroll(h, user)
         h.whoami_result = CanvasIdentity("77", "Bob \x07Canvas")
-        response = user.put("/me/canvas-token", {"canvas_token": NEW_TOKEN})
+        response = user.put(
+            "/me/canvas-token", {"custody": ACKNOWLEDGED, "canvas_token": NEW_TOKEN}
+        )
         params = error_of(response, 409, "identity_change_required")
         assert params["enrolled_user_name"] == "Ada Canvas"
         assert params["new_user_name"] == "Bob Canvas"
@@ -1003,36 +1212,59 @@ class TestIdentityChange:
         assert any(e.get("action") == "identity_change_detected" for e in events)
 
         response = user.put(
-            "/me/canvas-token", {"canvas_token": NEW_TOKEN, "confirm_identity_change": confirmation}
+            "/me/canvas-token",
+            {
+                "custody": ACKNOWLEDGED,
+                "canvas_token": NEW_TOKEN,
+                "confirm_identity_change": confirmation,
+            },
         )
         assert response.status_code == 200
         assert response.json()["canvas_user_name"] == "Bob Canvas"
         assert any(e.get("action") == "identity_change_confirmed" for e in events)
 
-    def test_a_confirmation_does_not_carry_to_a_third_user(self, h: Harness, user: Api) -> None:
+    def test_a_confirmation_does_not_carry_to_a_third_user(
+        self, h: Harness, user: Api
+    ) -> None:
         self.enroll(h, user)
         h.whoami_result = CanvasIdentity("77", "Bob")
         confirmation = str(
             error_of(
-                user.put("/me/canvas-token", {"canvas_token": NEW_TOKEN}), 409, "identity_change_required"
+                user.put(
+                    "/me/canvas-token",
+                    {"custody": ACKNOWLEDGED, "canvas_token": NEW_TOKEN},
+                ),
+                409,
+                "identity_change_required",
             )["confirmation"]
         )
         h.whoami_result = CanvasIdentity("88", "Cleo")
         error_of(
             user.put(
                 "/me/canvas-token",
-                {"canvas_token": OTHER_TOKEN, "confirm_identity_change": confirmation},
+                {
+                    "custody": ACKNOWLEDGED,
+                    "canvas_token": OTHER_TOKEN,
+                    "confirm_identity_change": confirmation,
+                },
             ),
             409,
             "identity_change_required",
         )
 
-    def test_a_confirmation_is_bound_to_the_session(self, h: Harness, user: Api) -> None:
+    def test_a_confirmation_is_bound_to_the_session(
+        self, h: Harness, user: Api
+    ) -> None:
         self.enroll(h, user)
         h.whoami_result = CanvasIdentity("77", "Bob")
         confirmation = str(
             error_of(
-                user.put("/me/canvas-token", {"canvas_token": NEW_TOKEN}), 409, "identity_change_required"
+                user.put(
+                    "/me/canvas-token",
+                    {"custody": ACKNOWLEDGED, "canvas_token": NEW_TOKEN},
+                ),
+                409,
+                "identity_change_required",
             )["confirmation"]
         )
         h.client.cookies.clear()
@@ -1040,15 +1272,26 @@ class TestIdentityChange:
         error_of(
             user.put(
                 "/me/canvas-token",
-                {"canvas_token": NEW_TOKEN, "confirm_identity_change": confirmation},
+                {
+                    "custody": ACKNOWLEDGED,
+                    "canvas_token": NEW_TOKEN,
+                    "confirm_identity_change": confirmation,
+                },
             ),
             409,
             "identity_change_required",
         )
 
-    def test_the_same_canvas_user_needs_no_confirmation(self, h: Harness, user: Api) -> None:
+    def test_the_same_canvas_user_needs_no_confirmation(
+        self, h: Harness, user: Api
+    ) -> None:
         self.enroll(h, user)
-        assert user.put("/me/canvas-token", {"canvas_token": NEW_TOKEN}).status_code == 200
+        assert (
+            user.put(
+                "/me/canvas-token", {"custody": ACKNOWLEDGED, "canvas_token": NEW_TOKEN}
+            ).status_code
+            == 200
+        )
 
 
 class TestCanvasTokenDelete:
@@ -1065,7 +1308,9 @@ class TestCanvasTokenDelete:
         assert ("token_deleted", KEY, None) in audit_rows(h)
         assert user.delete("/me/canvas-token").status_code == 204
 
-    def test_a_disabled_user_cannot_use_it_to_get_back_in(self, h: Harness, user: Api) -> None:
+    def test_a_disabled_user_cannot_use_it_to_get_back_in(
+        self, h: Harness, user: Api
+    ) -> None:
         user.delete("/me/canvas-token")
         assert h.store.get_principal_status(KEY).active
 
@@ -1074,9 +1319,9 @@ class TestCanvasTokenDelete:
     ) -> None:
         put_row(h.store, OID, token=CANVAS_TOKEN, name="Ada", canvas_user_id="42")
         user.delete("/me/canvas-token")
-        assert [e["action"] for e in events if e.get("action") == "self_disconnected"] == [
-            "self_disconnected"
-        ]
+        assert [
+            e["action"] for e in events if e.get("action") == "self_disconnected"
+        ] == ["self_disconnected"]
         events.clear()
         user.delete("/me/canvas-token")
         assert not [e for e in events if e.get("action") == "self_disconnected"]
@@ -1084,8 +1329,14 @@ class TestCanvasTokenDelete:
 
 class TestRecheck:
     def invalid(self, h: Harness, reason: str = "canvas_token_rejected") -> None:
-        put_row(h.store, OID, token=CANVAS_TOKEN, name="Ada", canvas_user_id="42",
-                canvas_host="canvas.example.test")
+        put_row(
+            h.store,
+            OID,
+            token=CANVAS_TOKEN,
+            name="Ada",
+            canvas_user_id="42",
+            canvas_host="canvas.example.edu",
+        )
         h.store.mark_invalid(KEY, reason=reason)
 
     def test_a_token_that_canvas_accepts_again_is_restored(
@@ -1097,9 +1348,14 @@ class TestRecheck:
         body = response.json()
         assert body["result"] == "restored" and body["canvas"]["state"] == "active"
         assert h.whoami_calls == [CANVAS_TOKEN]
-        assert any(e.get("action") == "recheck" and e.get("outcome") == "restored" for e in events)
+        assert any(
+            e.get("action") == "recheck" and e.get("outcome") == "restored"
+            for e in events
+        )
 
-    def test_a_token_that_is_not_invalid_is_unchanged(self, h: Harness, user: Api) -> None:
+    def test_a_token_that_is_not_invalid_is_unchanged(
+        self, h: Harness, user: Api
+    ) -> None:
         put_row(h.store, OID, token=CANVAS_TOKEN, name="Ada", canvas_user_id="42")
         body = user.post("/me/canvas-token/recheck").json()
         assert body["result"] == "unchanged" and body["canvas"]["state"] == "active"
@@ -1128,12 +1384,20 @@ class TestRecheck:
         error_of(user.post("/me/canvas-token/recheck"), 503, "canvas_unavailable")
 
     def test_a_school_the_server_dropped(self, h: Harness, user: Api) -> None:
-        put_row(h.store, OID, token=CANVAS_TOKEN, name="Ada", canvas_user_id="42",
-                canvas_host="canvas.gone.edu")
+        put_row(
+            h.store,
+            OID,
+            token=CANVAS_TOKEN,
+            name="Ada",
+            canvas_user_id="42",
+            canvas_host="canvas.gone.edu",
+        )
         h.store.mark_invalid(KEY, reason="canvas_token_rejected")
         error_of(user.post("/me/canvas-token/recheck"), 422, "school_not_offered")
 
-    def test_an_unreadable_token(self, h: Harness, user: Api, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_an_unreadable_token(
+        self, h: Harness, user: Api, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from canvas_mcp.core.selfhost.token_store import TokenDecryptionError
 
         self.invalid(h, "decrypt_failed")
@@ -1164,12 +1428,12 @@ class TestRecheck:
 
             def append(self, item: Any) -> None:
                 super().append(item)
-                h.store.put(
-                    principal_key=KEY,
-                    api_token=NEW_TOKEN,
+                put_row(
+                    h.store,
+                    OID,
+                    token=NEW_TOKEN,
                     canvas_user_id="42",
-                    canvas_user_name="Ada Canvas",
-                    canvas_host="canvas.example.test",
+                    name="Ada Canvas",
                 )
 
         h.whoami_calls = ReplaceWhileAsking()
@@ -1179,24 +1443,35 @@ class TestRecheck:
         assert stored is not None and stored.api_token == NEW_TOKEN
         assert stored.status == "active"
 
+
 # -- schools --------------------------------------------------------------------------------------
 
 
 class TestSchools:
-    def test_a_pinned_server_has_a_fixed_school(self, user: Api) -> None:
+    def test_one_explicit_school_is_sole(self, user: Api) -> None:
         body = user.get("/me/schools").json()
-        assert body["mode"] == "fixed" and body["choices"] == [] and body["selected"] is None
-        assert body["sole"] == {"host": "canvas.example.test", "name": "canvas.example.test"}
+        assert (
+            body["mode"] == "sole"
+            and body["choices"] == []
+            and body["selected"] is None
+        )
+        assert body["sole"] == {"host": "canvas.example.edu", "name": "Canvas"}
         assert body["search_enabled"] is False
 
-    def test_a_single_featured_school_without_a_default(self, tmp_path: pathlib.Path) -> None:
-        r = schools_rig(tmp_path, default="", featured=(FeaturedSchool(HOST_A, "School A"),))
+    def test_a_single_featured_school_without_a_default(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        r = schools_rig(
+            tmp_path,
+            default="",
+            featured=(School(HOST_A, f"https://{HOST_A}/api/v1", "School A"),),
+        )
         sign_in(r.h)
         body = Api(r.h).get("/me/schools").json()
         assert body["mode"] == "sole"
         assert body["sole"] == {"host": HOST_A, "name": "School A"}
 
-    def test_several_schools_make_a_picker_with_the_default_selected(
+    def test_several_schools_make_a_picker_without_implicit_selection(
         self, tmp_path: pathlib.Path
     ) -> None:
         r = schools_rig(tmp_path)
@@ -1206,7 +1481,7 @@ class TestSchools:
         assert [c["host"] for c in body["choices"]] == [DEFAULT_HOST, HOST_A, HOST_B]
         assert {c["source"] for c in body["choices"]} == {"featured"}
         assert body["choices"][1]["name"] == "School <b>A</b>"  # data, not markup
-        assert body["selected"] == DEFAULT_HOST
+        assert body["selected"] is None
         assert body["sole"] is None
 
     def test_the_enrolled_school_is_selected_and_a_searched_one_is_listed(
@@ -1215,21 +1490,42 @@ class TestSchools:
         r = schools_rig(tmp_path, search=True)
         sign_in(r.h)
         a = Api(r.h)
-        put_row(r.h.store, OID, token=CANVAS_TOKEN, name="Ada", canvas_user_id="42", canvas_host=HOST_B)
+        put_row(
+            r.h.store,
+            OID,
+            token=CANVAS_TOKEN,
+            name="Ada",
+            canvas_user_id="42",
+            canvas_host=HOST_B,
+        )
         assert a.get("/me/schools").json()["selected"] == HOST_B
-        put_row(r.h.store, OID, token=CANVAS_TOKEN, name="Ada", canvas_user_id="42",
-                canvas_host="canvas.searched.edu")
+        put_row(
+            r.h.store,
+            OID,
+            token=CANVAS_TOKEN,
+            name="Ada",
+            canvas_user_id="42",
+            canvas_host="canvas.searched.edu",
+        )
         body = a.get("/me/schools").json()
         assert body["selected"] == "canvas.searched.edu"
         assert body["choices"][-1] == {
-            "host": "canvas.searched.edu", "name": "canvas.searched.edu", "source": "enrolled",
+            "host": "canvas.searched.edu",
+            "name": "canvas.searched.edu",
+            "source": "enrolled",
         }
 
-    def test_a_picker_with_search_and_nothing_featured_is_empty(self, tmp_path: pathlib.Path) -> None:
+    def test_a_picker_with_search_and_nothing_featured_is_empty(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         r = schools_rig(tmp_path, default="", featured=(), search=True)
         sign_in(r.h)
         body = Api(r.h).get("/me/schools").json()
-        assert body["mode"] == "picker" and body["choices"] == [] and body["selected"] is None
+        assert (
+            body["mode"] == "picker"
+            and body["choices"] == []
+            and body["selected"] is None
+        )
 
     def test_a_pending_account_is_refused(self, tmp_path: pathlib.Path) -> None:
         h = make(tmp_path, policy=APPROVAL)
@@ -1258,7 +1554,9 @@ class TestSchoolSearch:
         assert_api_headers(response)
         results = response.json()["results"]
         assert [x["host"] for x in results] == ["canvas.found.edu", "canvas.other.edu"]
-        assert all(set(x) == {"host", "name", "sig"} and len(x["sig"]) == 43 for x in results)
+        assert all(
+            set(x) == {"host", "name", "sig"} and len(x["sig"]) == 43 for x in results
+        )
         assert r.directory.searches == ["found"]
 
     def test_the_search_is_off_unless_enabled(self, tmp_path: pathlib.Path) -> None:
@@ -1267,10 +1565,14 @@ class TestSchoolSearch:
         error_of(Api(r.h).get("/me/schools/search?q=abc", csrf=True), 404, "not_found")
 
     @pytest.mark.parametrize("q", ["", "a", "x" * 65, "ab\x00c", "  a  ", "ab\ncd"])
-    def test_a_bad_query_is_422_with_the_limits(self, tmp_path: pathlib.Path, q: str) -> None:
+    def test_a_bad_query_is_422_with_the_limits(
+        self, tmp_path: pathlib.Path, q: str
+    ) -> None:
         r, a = self.rig(tmp_path)
         params = error_of(
-            a.get("/me/schools/search", params={"q": q}, csrf=True), 422, "validation_failed"
+            a.get("/me/schools/search", params={"q": q}, csrf=True),
+            422,
+            "validation_failed",
         )
         assert params == {"field": "q", "min": 2, "max": 64}
         assert r.directory.calls == 0
@@ -1292,16 +1594,22 @@ class TestSchoolSearch:
         self, tmp_path: pathlib.Path
     ) -> None:
         _r, a = self.rig(tmp_path, directory_error=True)
-        error_of(a.get("/me/schools/search?q=found", csrf=True), 503, "directory_unavailable")
+        error_of(
+            a.get("/me/schools/search?q=found", csrf=True), 503, "directory_unavailable"
+        )
 
     def test_a_pending_account_cannot_search(self, tmp_path: pathlib.Path) -> None:
         directory = FakeDirectory(self.ENTRIES)
         h = make(
-            tmp_path, policy=APPROVAL, directory=directory,
-            cfg=make_cfg(schools=SchoolPolicy.build(DEFAULT_URL, (), True)),
+            tmp_path,
+            policy=APPROVAL,
+            directory=directory,
+            cfg=make_cfg(schools=school_policy(DEFAULT_URL, (), True)),
         )
         sign_in(h, roles=())
-        error_of(Api(h).get("/me/schools/search?q=found", csrf=True), 403, "pending_approval")
+        error_of(
+            Api(h).get("/me/schools/search?q=found", csrf=True), 403, "pending_approval"
+        )
         assert directory.calls == 0
 
 
@@ -1314,17 +1622,22 @@ class TestEnrollingAtASchool:
         return r, Api(r.h)
 
     def enroll(self, a: Api, school: str | None, **extra: Any) -> httpx.Response:
-        body: dict[str, Any] = {"canvas_token": CANVAS_TOKEN, **extra}
+        body: dict[str, Any] = {
+            "custody": ACKNOWLEDGED,
+            "canvas_token": CANVAS_TOKEN,
+            **extra,
+        }
         if school is not None:
             body["school"] = school
         return a.put("/me/canvas-token", body)
 
-    def test_the_default_school_when_none_is_named(self, tmp_path: pathlib.Path) -> None:
+    def test_a_picker_requires_an_explicit_school(self, tmp_path: pathlib.Path) -> None:
         r, a = self.rig(tmp_path)
-        assert self.enroll(a, None).status_code == 200
-        assert r.h.whoami_urls == [DEFAULT_URL]
-        assert self.enroll(a, "").status_code == 200
+        for school in (None, ""):
+            error_of(self.enroll(a, school), 422, "school_required")
+        assert r.h.whoami_urls == []
         assert self.enroll(a, DEFAULT_HOST).status_code == 200
+        assert r.h.whoami_urls == [DEFAULT_URL]
 
     def test_a_featured_school(self, tmp_path: pathlib.Path) -> None:
         r, a = self.rig(tmp_path)
@@ -1349,9 +1662,20 @@ class TestEnrollingAtASchool:
         self, tmp_path: pathlib.Path
     ) -> None:
         r, a = self.rig(tmp_path)
-        for extra in ({}, {"school_sig": "nope"}, {"school_sig": ""}, {"school_sig": None}):
-            error_of(self.enroll(a, "canvas.found.edu", **extra), 422, "school_selection_unverified")
-        assert r.directory.calls == 0 and r.resolver.calls == [] and r.h.whoami_calls == []
+        for extra in (
+            {},
+            {"school_sig": "nope"},
+            {"school_sig": ""},
+            {"school_sig": None},
+        ):
+            error_of(
+                self.enroll(a, "canvas.found.edu", **extra),
+                422,
+                "school_selection_unverified",
+            )
+        assert (
+            r.directory.calls == 0 and r.resolver.calls == [] and r.h.whoami_calls == []
+        )
 
     def test_a_signature_from_another_session_or_another_host_is_refused(
         self, tmp_path: pathlib.Path
@@ -1359,20 +1683,30 @@ class TestEnrollingAtASchool:
         r, a = self.rig(tmp_path)
         hit = a.get("/me/schools/search?q=found", csrf=True).json()["results"][0]
         error_of(
-            self.enroll(a, "canvas.other.edu", school_sig=hit["sig"]), 422, "school_selection_unverified"
+            self.enroll(a, "canvas.other.edu", school_sig=hit["sig"]),
+            422,
+            "school_selection_unverified",
         )
         r.h.client.cookies.clear()
         sign_in(r.h, oid=OID_2, name="Bob", upn="bob@example.test")
         error_of(
-            self.enroll(a, "canvas.found.edu", school_sig=hit["sig"]), 422, "school_selection_unverified"
+            self.enroll(a, "canvas.found.edu", school_sig=hit["sig"]),
+            422,
+            "school_selection_unverified",
         )
 
     def test_the_school_you_are_already_enrolled_at_needs_no_signature(
         self, tmp_path: pathlib.Path
     ) -> None:
         r, a = self.rig(tmp_path)
-        put_row(r.h.store, OID, token=CANVAS_TOKEN, name="Ada Canvas", canvas_user_id="42",
-                canvas_host="canvas.found.edu")
+        put_row(
+            r.h.store,
+            OID,
+            token=CANVAS_TOKEN,
+            name="Ada Canvas",
+            canvas_user_id="42",
+            canvas_host="canvas.found.edu",
+        )
         response = self.enroll(a, "canvas.found.edu")
         assert response.status_code == 200, response.text
 
@@ -1396,50 +1730,78 @@ class TestEnrollingAtASchool:
     def test_a_school_nobody_offers(self, tmp_path: pathlib.Path) -> None:
         r = schools_rig(tmp_path, search=False)
         sign_in(r.h)
-        error_of(Api(r.h).put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN, "school": "canvas.x.edu"}),
-                 422, "school_not_offered")
+        error_of(
+            Api(r.h).put(
+                "/me/canvas-token",
+                {
+                    "custody": ACKNOWLEDGED,
+                    "canvas_token": CANVAS_TOKEN,
+                    "school": "canvas.x.edu",
+                },
+            ),
+            422,
+            "school_not_offered",
+        )
 
     def test_an_unlisted_school_cannot_be_named_without_a_search_result(
         self, tmp_path: pathlib.Path
     ) -> None:
         r, a = self.rig(tmp_path)
         error_of(
-            self.enroll(a, "canvas.unknown.edu", school_sig="x"), 422, "school_selection_unverified"
+            self.enroll(a, "canvas.unknown.edu", school_sig="x"),
+            422,
+            "school_selection_unverified",
         )
         assert r.directory.calls == 0
 
     def test_featured_schools_that_resolve_badly_are_refused_by_dns(
         self, tmp_path: pathlib.Path
     ) -> None:
-        r = schools_rig(
-            tmp_path,
-            resolver=FakeResolver({HOST_A: OSError("nxdomain"), HOST_B: ["10.0.0.5"]}),
-        )
+        resolver = FakeResolver()
+        r = schools_rig(tmp_path, resolver=resolver)
+        resolver.table.update({HOST_A: OSError("nxdomain"), HOST_B: ["10.0.0.5"]})
         sign_in(r.h)
         a = Api(r.h)
         error_of(self.enroll(a, HOST_A), 422, "school_unresolvable")
         error_of(self.enroll(a, HOST_B), 422, "school_address_blocked")
         assert r.h.whoami_calls == []
 
-    def test_a_picker_without_a_default_needs_a_school(self, tmp_path: pathlib.Path) -> None:
+    def test_a_picker_without_a_default_needs_a_school(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         r = schools_rig(tmp_path, default="", search=True, entries=self.ENTRIES)
         sign_in(r.h)
         error_of(
-            Api(r.h).put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN}), 422, "school_required"
+            Api(r.h).put(
+                "/me/canvas-token",
+                {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN},
+            ),
+            422,
+            "school_required",
         )
 
-    def test_the_directory_being_down_while_confirming(self, tmp_path: pathlib.Path) -> None:
+    def test_the_directory_being_down_while_confirming(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         r, a = self.rig(tmp_path)
         hit = a.get("/me/schools/search?q=found", csrf=True).json()["results"][0]
         r.directory.error = True
-        error_of(self.enroll(a, hit["host"], school_sig=hit["sig"]), 503, "directory_unavailable")
+        error_of(
+            self.enroll(a, hit["host"], school_sig=hit["sig"]),
+            503,
+            "directory_unavailable",
+        )
 
-    def test_a_signed_host_the_directory_no_longer_confirms(self, tmp_path: pathlib.Path) -> None:
+    def test_a_signed_host_the_directory_no_longer_confirms(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         r, a = self.rig(tmp_path)
         hit = a.get("/me/schools/search?q=found", csrf=True).json()["results"][0]
         r.directory.entries = []
         error_of(
-            self.enroll(a, hit["host"], school_sig=hit["sig"]), 422, "school_not_in_directory"
+            self.enroll(a, hit["host"], school_sig=hit["sig"]),
+            422,
+            "school_not_in_directory",
         )
 
 
@@ -1468,7 +1830,7 @@ def wt_rig(
     async def listing() -> list[str]:
         return list(REGISTERED)
 
-    kwargs: dict[str, Any] = {}
+    kwargs: dict[str, Any] = {"write_tools": None, "tool_prefs": None}
     if catalog:
         kwargs["write_tools"] = WriteToolCatalog(
             ceiling=CEILING if ceiling is None else ceiling, list_registered=listing
@@ -1501,23 +1863,37 @@ class TestWriteToolsRead:
         assert response.status_code == 200
         body = response.json()
         assert [g["id"] for g in body["groups"]] == [
-            "planner", "submissions", "modules", "inbox", "other",
+            "planner",
+            "submissions",
+            "modules",
+            "inbox",
+            "other",
         ]
         assert body["offered_any"] is True and body["editable"] is True
         assert body["kept_not_offered"] == []
         assert tool_state(body, "send_message") == {
-            "name": "send_message", "offered": True, "enabled": False, "enabled_at": None,
+            "name": "send_message",
+            "offered": True,
+            "enabled": False,
+            "enabled_at": None,
             "effect": "canvas_write",
         }
         assert tool_state(body, "submit_assignment")["offered"] is False
         assert [t["name"] for t in body["groups"][-1]["tools"]] == ["create_assignment"]
 
-    def test_nothing_offered_means_nothing_to_edit(self, tmp_path: pathlib.Path) -> None:
+    def test_nothing_offered_means_nothing_to_edit(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         r = wt_rig(tmp_path, ceiling=set())
         sign_in(r.h)
         body = Api(r.h).get("/me/write-tools").json()
         assert body["offered_any"] is False and body["editable"] is False
-        assert [g["id"] for g in body["groups"]] == ["planner", "submissions", "modules", "inbox"]
+        assert [g["id"] for g in body["groups"]] == [
+            "planner",
+            "submissions",
+            "modules",
+            "inbox",
+        ]
 
     def test_without_a_catalog_it_is_404(self, tmp_path: pathlib.Path) -> None:
         r = wt_rig(tmp_path, catalog=False)
@@ -1567,8 +1943,10 @@ class TestWriteToolsSave:
         r = wt_rig(tmp_path)
         sign_in(r.h)
         a = Api(r.h)
-        assert r.cache.enabled(KEY) == frozenset()
-        response = a.put("/me/write-tools", {"enabled": ["send_message", "mark_module_item_done"]})
+        assert r.cache.enabled(KEY, 0) == frozenset()
+        response = a.put(
+            "/me/write-tools", {"enabled": ["send_message", "mark_module_item_done"]}
+        )
         assert response.status_code == 200
         body = response.json()
         assert body["result"] == "saved"
@@ -1576,18 +1954,26 @@ class TestWriteToolsSave:
         assert tool_state(body, "send_message")["enabled_at"] == "2027-01-15T08:00:00Z"
         assert tool_state(body, "reply_to_conversation")["enabled"] is False
         assert stored_tools(r) == {"send_message", "mark_module_item_done"}
-        assert r.cache.enabled(KEY) == {"send_message", "mark_module_item_done"}  # invalidated
+        assert r.cache.enabled(KEY, r.h.store.get_tool_prefs(KEY).version) == {
+            "send_message",
+            "mark_module_item_done",
+        }
         write_events = [e for e in events if e.get("event_type") == "write_tools"]
         assert [e["action"] for e in write_events] == ["changed"]
 
-    def test_the_same_request_again_changes_nothing(self, tmp_path: pathlib.Path) -> None:
+    def test_the_same_request_again_changes_nothing(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         r = wt_rig(tmp_path)
         sign_in(r.h)
         a = Api(r.h)
         a.put("/me/write-tools", {"enabled": ["send_message"]})
         before = r.h.store.get_tool_prefs(KEY)
         r.h.now += 5
-        assert a.put("/me/write-tools", {"enabled": ["send_message"]}).json()["result"] == "unchanged"
+        assert (
+            a.put("/me/write-tools", {"enabled": ["send_message"]}).json()["result"]
+            == "unchanged"
+        )
         assert r.h.store.get_tool_prefs(KEY) == before
 
     def test_a_stale_session_cannot_turn_a_tool_on(
@@ -1601,7 +1987,9 @@ class TestWriteToolsSave:
         assert error_of(response, 403, "reauth_required") == {"max_age_s": 600}
         assert stored_tools(r) == frozenset()
         refused = [e for e in events if e.get("event_type") == "write_tools"]
-        assert [(e["action"], e["outcome"]) for e in refused] == [("refused", "sign_in_too_old")]
+        assert [(e["action"], e["outcome"]) for e in refused] == [
+            ("refused", "sign_in_too_old")
+        ]
 
     def test_the_freshness_check_comes_before_the_nothing_changed_check(
         self, tmp_path: pathlib.Path
@@ -1610,15 +1998,23 @@ class TestWriteToolsSave:
         sign_in(r.h)
         a = Api(r.h)
         r.h.now += 601
-        error_of(a.put("/me/write-tools", {"enabled": ["create_assignment"]}), 403, "reauth_required")
+        error_of(
+            a.put("/me/write-tools", {"enabled": ["create_assignment"]}),
+            403,
+            "reauth_required",
+        )
 
-    def test_turning_tools_off_never_needs_a_fresh_sign_in(self, tmp_path: pathlib.Path) -> None:
+    def test_turning_tools_off_never_needs_a_fresh_sign_in(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         r = wt_rig(tmp_path)
         sign_in(r.h)
         a = Api(r.h)
         a.put("/me/write-tools", {"enabled": ["send_message", "create_assignment"]})
         r.h.now += 601
-        assert a.put("/me/write-tools", {"enabled": ["send_message"]}).status_code == 200
+        assert (
+            a.put("/me/write-tools", {"enabled": ["send_message"]}).status_code == 200
+        )
         assert stored_tools(r) == {"send_message"}
         response = a.delete("/me/write-tools")
         assert response.status_code == 200 and response.json()["result"] == "saved"
@@ -1628,10 +2024,17 @@ class TestWriteToolsSave:
         r = wt_rig(tmp_path)
         sign_in(r.h)
         a = Api(r.h)
-        for name in ("delete_page", "submit_assignment", "execute_typescript", "list_courses", "nonexistent"):
+        for name in (
+            "delete_page",
+            "submit_assignment",
+            "execute_typescript",
+            "list_courses",
+            "nonexistent",
+        ):
             params = error_of(
                 a.put("/me/write-tools", {"enabled": ["send_message", name]}),
-                422, "write_tool_not_allowed",
+                422,
+                "write_tool_not_allowed",
             )
             assert params == {"tool": name}
         assert stored_tools(r) == frozenset()
@@ -1656,7 +2059,9 @@ class TestWriteToolsSave:
         r = wt_rig(tmp_path)
         sign_in(r.h)
         params = error_of(
-            Api(r.h).put("/me/write-tools", {"enabled": enabled}), 422, "validation_failed"
+            Api(r.h).put("/me/write-tools", {"enabled": enabled}),
+            422,
+            "validation_failed",
         )
         assert params == {"field": "enabled"}
 
@@ -1670,7 +2075,13 @@ class TestWriteToolsSave:
         # Earlier choices the server no longer offers: one with a row on the page
         # (mark_module_item_done), two without (create_assignment, delete_module).
         r.h.store.set_tool_prefs(
-            KEY, {"send_message", "mark_module_item_done", "create_assignment", "delete_module"}
+            KEY,
+            {
+                "send_message",
+                "mark_module_item_done",
+                "create_assignment",
+                "delete_module",
+            },
         )
         narrower = wt_rig_with(r, ceiling={"send_message", "reply_to_conversation"})
         body = narrower.get("/me/write-tools").json()
@@ -1679,11 +2090,15 @@ class TestWriteToolsSave:
         assert body["kept_not_offered"] == ["create_assignment", "delete_module"]
         # Kept names may be named again, and saving something else leaves them alone.
         response = narrower.put(
-            "/me/write-tools", {"enabled": ["reply_to_conversation", "create_assignment"]}
+            "/me/write-tools",
+            {"enabled": ["reply_to_conversation", "create_assignment"]},
         )
         assert response.status_code == 200, response.text
         assert stored_tools(r) == {
-            "reply_to_conversation", "mark_module_item_done", "create_assignment", "delete_module",
+            "reply_to_conversation",
+            "mark_module_item_done",
+            "create_assignment",
+            "delete_module",
         }
         # "Turn all off" clears the kept names too.
         assert narrower.delete("/me/write-tools").json()["result"] == "saved"
@@ -1700,7 +2115,11 @@ class TestWriteToolsSave:
             raise StoreUnavailable()
 
         monkeypatch.setattr(r.h.store, "set_tool_prefs", boom)
-        error_of(a.put("/me/write-tools", {"enabled": ["send_message"]}), 503, "write_tools_unavailable")
+        error_of(
+            a.put("/me/write-tools", {"enabled": ["send_message"]}),
+            503,
+            "write_tools_unavailable",
+        )
 
     def test_a_disabled_account_cannot_save(self, tmp_path: pathlib.Path) -> None:
         from canvas_mcp.core.selfhost.token_store import OPERATOR
@@ -1710,7 +2129,11 @@ class TestWriteToolsSave:
         a = Api(r.h)
         a.csrf()
         r.h.store.disable_principal(KEY, actor=OPERATOR, reason="operator_disabled")
-        error_of(a.put("/me/write-tools", {"enabled": ["send_message"]}), 401, "not_authenticated")
+        error_of(
+            a.put("/me/write-tools", {"enabled": ["send_message"]}),
+            401,
+            "not_authenticated",
+        )
         assert stored_tools(r) == frozenset()
 
 
@@ -1719,22 +2142,34 @@ def wt_rig_with(r: WtRig, *, ceiling: set[str]) -> Api:
     from starlette.applications import Starlette
     from starlette.testclient import TestClient
 
-    from canvas_mcp.core.selfhost.account_web import build_account_routes
+    from canvas_mcp.core.selfhost.account_core import build_account_app
 
     async def listing() -> list[str]:
         return list(REGISTERED)
 
     h = r.h
-    routes = build_account_routes(
-        make_cfg(), h.store, h.identity,  # type: ignore[arg-type]
+    core = build_account_app(
+        h.core.cfg,
+        h.store,
+        h.identity,
+        authz=h.core.authz,
+        logins=h.core.logins,
+        snapshots=h.core.snapshots,
         clock=h.clock,
         write_tools=WriteToolCatalog(ceiling=ceiling, list_registered=listing),
         tool_prefs=r.cache,
-        ui="react",
     )
+    routes = account_api.build_api_routes(core)
     client = TestClient(Starlette(routes=routes), base_url=BASE, follow_redirects=False)
     client.cookies = h.client.cookies
-    other = Harness(client=client, store=h.store, identity=h.identity, now=h.now)
+    other = Harness(
+        client=client,
+        store=h.store,
+        identity=h.identity,
+        now=h.now,
+        core=core,
+        stack=h.stack,
+    )
     return Api(other)
 
 
@@ -1742,7 +2177,9 @@ def wt_rig_with(r: WtRig, *, ceiling: set[str]) -> Api:
 
 
 class TestLoginHistory:
-    def test_own_sign_ins_only_newest_first_without_addresses(self, h: Harness, api: Api) -> None:
+    def test_own_sign_ins_only_newest_first_without_addresses(
+        self, h: Harness, api: Api
+    ) -> None:
         sign_in(h)
         h.now += 10
         sign_in(h)
@@ -1755,17 +2192,27 @@ class TestLoginHistory:
         events = response.json()["events"]
         assert len(events) == 2
         assert all(
-            set(e) == {"at", "provider_id", "outcome", "reason"} and e["provider_id"] == "entra"
+            set(e) == {"id", "at", "provider_id", "outcome", "reason"}
+            and e["provider_id"] == "entra"
             for e in events
         )
         assert {e["outcome"] for e in events} == {"success"}
-        assert "unknown" not in response.text  # the (unknown) client address is not exposed
+        assert (
+            "unknown" not in response.text
+        )  # the (unknown) client address is not exposed
 
-    def test_at_most_twenty(self, h: Harness, api: Api) -> None:
+    def test_history_has_bounded_keyset_pages(self, h: Harness, api: Api) -> None:
         for _ in range(25):
             sign_in(h)
             h.now += 1
-        assert len(api.get("/me/login-history").json()["events"]) == 20
+        page = api.get("/me/login-history?limit=20").json()
+        assert len(page["events"]) == 20 and page["next_cursor"]
+        older = api.get(
+            "/me/login-history", params={"limit": 20, "cursor": page["next_cursor"]}
+        ).json()
+        assert len(older["events"]) == 5 and older["next_cursor"] is None
+        ids = [event["id"] for event in page["events"] + older["events"]]
+        assert ids == sorted(set(ids), reverse=True)
 
     def test_a_pending_account_may_read_it(self, tmp_path: pathlib.Path) -> None:
         h = make(tmp_path, policy=APPROVAL)
@@ -1779,18 +2226,38 @@ class TestLoginHistory:
 
 
 class TestIsolation:
-    def test_one_user_never_sees_or_changes_another_users_data(self, h: Harness, api: Api) -> None:
-        put_row(h.store, OID_2, token=OTHER_TOKEN, name="Bob Canvas", canvas_user_id="99",
-                canvas_host="canvas.example.test")
+    def test_one_user_never_sees_or_changes_another_users_data(
+        self, h: Harness, api: Api
+    ) -> None:
+        put_row(
+            h.store,
+            OID_2,
+            token=OTHER_TOKEN,
+            name="Bob Canvas",
+            canvas_user_id="99",
+            canvas_host="canvas.example.edu",
+        )
         sign_in(h)
         assert api.get("/me/canvas-token").json()["state"] == "none"
         assert OTHER_TOKEN not in api.get("/me").text
         assert "Bob" not in api.get("/me").text
-        assert api.delete("/me/canvas-token").status_code == 204  # nothing of Bob's is touched
+        assert (
+            api.delete("/me/canvas-token").status_code == 204
+        )  # nothing of Bob's is touched
         assert h.store.info(KEY_2) is not None
         error_of(api.post("/me/canvas-token/recheck"), 404, "not_found")
-        for body in ({"canvas_token": CANVAS_TOKEN, "principal_key": KEY_2},
-                     {"canvas_token": CANVAS_TOKEN, "account_id": KEY_2.removeprefix("acct:")}):
+        for body in (
+            {
+                "custody": ACKNOWLEDGED,
+                "canvas_token": CANVAS_TOKEN,
+                "principal_key": KEY_2,
+            },
+            {
+                "custody": ACKNOWLEDGED,
+                "canvas_token": CANVAS_TOKEN,
+                "account_id": KEY_2.removeprefix("acct:"),
+            },
+        ):
             error_of(api.put("/me/canvas-token", body), 422, "validation_failed")
         assert h.store.get(KEY_2).api_token == OTHER_TOKEN  # type: ignore[union-attr]
 
@@ -1802,22 +2269,24 @@ class TestIsolation:
         bob = KEY_2.removeprefix("acct:")
         me = KEY.removeprefix("acct:")
         count = 0
-        for path, endpoints in account_api.ApiApp(None).route_table():  # type: ignore[arg-type]
+        for path, endpoints in account_api.ApiApp(h.core).route_table():
             if "/admin/" not in path:
                 continue
             for method, endpoint in endpoints.items():
-                if endpoint.local_authz or endpoint.linking:
+                if endpoint.linking:
                     continue  # absent in this mode (their own tests)
                 for target in (bob, me):
                     url = path.replace("{id}", target)
-                    response = api.call(method, url[len(P):])
+                    response = api.call(method, url[len(P) :])
                     error_of(response, 403, "forbidden")
                     count += 1
         assert count >= 12
         assert h.store.get_principal_status(KEY_2).active
         assert h.store.info(KEY_2) is not None
 
-    def test_a_stale_cookie_of_a_demoted_owner_is_forbidden(self, h: Harness, api: Api) -> None:
+    def test_a_stale_cookie_of_a_demoted_owner_is_forbidden(
+        self, h: Harness, api: Api
+    ) -> None:
         sign_in_owner(h)
         demote_directly(h, KEY_OWNER)
         error_of(api.get("/admin/accounts"), 403, "forbidden")
@@ -1828,10 +2297,25 @@ class TestIsolation:
 
 
 def seed_people(h: Harness) -> None:
-    put_row(h.store, OID, token=CANVAS_TOKEN, name="Ada Canvas", canvas_user_id="42",
-            display="Ada Lovelace", upn="ada@example.test", canvas_host="canvas.example.test")
-    put_row(h.store, OID_2, token=OTHER_TOKEN, name="Bob Canvas", canvas_user_id="43",
-            display="Bob", upn="bob@example.test")
+    put_row(
+        h.store,
+        OID,
+        token=CANVAS_TOKEN,
+        name="Ada Canvas",
+        canvas_user_id="42",
+        display="Ada Lovelace",
+        upn="ada@example.test",
+        canvas_host="canvas.example.edu",
+    )
+    put_row(
+        h.store,
+        OID_2,
+        token=OTHER_TOKEN,
+        name="Bob Canvas",
+        canvas_user_id="43",
+        display="Bob",
+        upn="bob@example.test",
+    )
 
 
 class TestOwnerRead:
@@ -1843,18 +2327,31 @@ class TestOwnerRead:
         assert response.status_code == 200
         assert_api_headers(response)
         body = response.json()
-        assert body["counts"] == {"total": 3, "active": 3, "pending": 0, "disabled": 0, "owners": 1}
+        assert body["counts"] == {
+            "total": 3,
+            "active": 3,
+            "pending": 0,
+            "disabled": 0,
+            "owners": 1,
+        }
         by_name = {a["display_name"]: a for a in body["accounts"]}
         ada = by_name["Ada Lovelace"]
         assert ada["id"] == KEY.removeprefix("acct:") and ada["key"] == KEY
         assert ada["username"] == "ada@example.test"
-        assert ada["role"] == "user" and ada["status"] == "active" and ada["is_self"] is False
-        assert ada["identity"]["provider_id"] == "entra" and ada["identity"]["tenant_id"]
+        assert (
+            ada["role"] == "user"
+            and ada["status"] == "active"
+            and ada["is_self"] is False
+        )
+        assert (
+            ada["identity"]["provider_id"] == "entra" and ada["identity"]["tenant_id"]
+        )
         assert ada["enrollment"]["canvas_user_name"] == "Ada Canvas"
         assert ada["enrollment"]["state"] == "active"
         assert ada["enrollment"]["school"] == {
-            "host": "canvas.example.test", "name": "canvas.example.test",
-            "offered": True, "is_default": True,
+            "host": "canvas.example.edu",
+            "name": "Canvas",
+            "offered": True,
         }
         assert ada["actions"] == ["mark_invalid", "disable", "remove_enrollment"]
         bob = by_name["Bob"]
@@ -1876,7 +2373,9 @@ class TestOwnerRead:
         assert pending["accounts"][0]["actions"] == ["approve", "deny"]
         assert pending["accounts"][0]["status"] == "pending"
         assert pending["counts"]["pending"] == 1 and pending["counts"]["total"] == 2
-        assert [x["key"] for x in a.get("/admin/accounts?status=active").json()["accounts"]] == [KEY_OWNER]
+        assert [
+            x["key"] for x in a.get("/admin/accounts?status=active").json()["accounts"]
+        ] == [KEY_OWNER]
         assert a.get("/admin/accounts?status=disabled").json()["accounts"] == []
         error_of(a.get("/admin/accounts?status=banana"), 422, "validation_failed")
         # Pending people come first in the unfiltered list.
@@ -1888,8 +2387,15 @@ class TestOwnerRead:
         from canvas_mcp.core.selfhost.token_store import OPERATOR
 
         h.store.disable_principal(KEY_2, actor=OPERATOR, reason="operator_disabled")
-        bob = next(x for x in api.get("/admin/accounts").json()["accounts"] if x["key"] == KEY_2)
-        assert bob["status"] == "disabled" and bob["disabled_reason"] == "operator_disabled"
+        bob = next(
+            x
+            for x in api.get("/admin/accounts").json()["accounts"]
+            if x["key"] == KEY_2
+        )
+        assert (
+            bob["status"] == "disabled"
+            and bob["disabled_reason"] == "operator_disabled"
+        )
         assert bob["disabled_at"] == "2027-01-15T08:00:00Z"
         assert bob["actions"] == ["enable", "remove_enrollment"]
 
@@ -1901,10 +2407,12 @@ class TestOwnerRead:
         h.store.mark_invalid(KEY_2, reason="decrypt_failed")
         body = api.get("/admin/enrollments").json()
         keys = [r["key"] for r in body["rows"]]
-        assert keys[0] == acct_key(OID_PENDING)  # waiting people come first
-        assert set(keys) == {KEY, KEY_2, acct_key(OID_PENDING), acct_key(OID_BLOCKED)}
+        assert set(keys) == {KEY, KEY_2}
         assert body["counts"] == {
-            "needing": 1, "total_enrollments": 2, "disabled": 1, "pending": 1,
+            "needing": 1,
+            "total_enrollments": 2,
+            "disabled": 1,
+            "pending": 1,
         }
         needing = api.get("/admin/enrollments?filter=needs_reenroll").json()
         assert [r["key"] for r in needing["rows"]] == [KEY_2]
@@ -1912,17 +2420,19 @@ class TestOwnerRead:
         assert api.get("/admin/enrollments?filter=all").json() == body
         error_of(api.get("/admin/enrollments?filter=x"), 422, "validation_failed")
 
-    def test_pending_and_disabled_people_without_a_token_are_listed_only_for_all(
+    def test_pending_people_without_a_token_are_accounts_without_enrollments(
         self, h: Harness, api: Api
     ) -> None:
         make_account(h.store, OID_PENDING, status="pending", name="Newcomer")
         sign_in_owner(h)
-        assert [r["key"] for r in api.get("/admin/enrollments").json()["rows"]] == [
-            acct_key(OID_PENDING)
-        ]
+        assert api.get("/admin/enrollments").json()["rows"] == []
+        assert [
+            r["key"]
+            for r in api.get("/admin/accounts?status=pending").json()["accounts"]
+        ] == [acct_key(OID_PENDING)]
         assert api.get("/admin/enrollments?filter=needs_reenroll").json()["rows"] == []
 
-    def test_an_enrollment_without_an_account_is_listed_as_missing(
+    def test_deleting_an_account_cascades_its_enrollment(
         self, h: Harness, api: Api
     ) -> None:
         from sqlalchemy import text
@@ -1930,22 +2440,25 @@ class TestOwnerRead:
         seed_people(h)
         sign_in_owner(h)
         with h.store._db.write() as conn:
-            conn.execute(
-                text("DELETE FROM accounts WHERE id = :id"), {"id": KEY_2.removeprefix("acct:")}
-            )
+            conn.execute(text("DELETE FROM accounts WHERE id = :id"), {"id": KEY_2})
         rows = {r["key"]: r for r in api.get("/admin/enrollments").json()["rows"]}
-        orphan = rows[KEY_2]
-        assert orphan["status"] == "missing" and orphan["enrollment"] is not None
-        assert orphan["actions"] == ["remove_enrollment"]  # nothing to disable
-        assert orphan["identity"] is None and orphan["display_name"] == ""
-        removed = api.delete(f"/admin/enrollments/{KEY_2.removeprefix('acct:')}")
-        assert removed.status_code == 200 and removed.json()["changed"] is True
-        assert removed.json()["account"]["status"] == "missing"
+        assert KEY_2 not in rows and KEY in rows
+        assert h.store.info(KEY_2) is None
+        error_of(api.delete(f"/admin/enrollments/{KEY_2}"), 404, "not_found")
+        assert any(
+            entry["action"] == "token_enrolled"
+            for entry in api.get("/admin/audit").json()["entries"]
+        )
 
     def test_the_audit_log(self, h: Harness, api: Api) -> None:
         seed_people(h)
         sign_in_owner(h)
-        assert api.post(f"/admin/enrollments/{KEY_2.removeprefix('acct:')}/mark-invalid").status_code == 200
+        assert (
+            api.post(
+                f"/admin/enrollments/{KEY_2.removeprefix('acct:')}/mark-invalid"
+            ).status_code
+            == 200
+        )
         response = api.get("/admin/audit")
         assert response.status_code == 200
         assert_api_headers(response)
@@ -1953,13 +2466,18 @@ class TestOwnerRead:
         assert body["next_cursor"] is None
         first = body["entries"][0]
         assert first["action"] == "token_marked_invalid"
-        assert first["actor"] == {"kind": "account", "key": KEY_OWNER, "name": "Olive Owner"}
+        assert first["actor"] == {
+            "kind": "account",
+            "key": KEY_OWNER,
+            "name": "Olive Owner",
+        }
         assert first["target"] == {"key": KEY_2, "name": "Bob"}
         assert first["reason"] == "revoked_by_admin"
         assert first["at"] == "2027-01-15T08:00:00Z" and isinstance(first["id"], int)
         assert all(
             isinstance(v, str | int | bool | list)
-            for e in body["entries"] for v in e["detail"].values()
+            for e in body["entries"]
+            for v in e["detail"].values()
         )
         kinds = {e["actor"]["kind"] for e in body["entries"]}
         assert kinds <= {"account", "operator", "system"}
@@ -1968,19 +2486,36 @@ class TestOwnerRead:
         sign_in_owner(h)
         with h.store._db.write() as conn:
             for i in range(130):
-                h.store._audit(conn, "system", "pending_purged", detail={"count": i}, now=1000 + i)
+                h.store._audit(
+                    conn, "system", "pending_purged", detail={"count": i}, now=1000 + i
+                )
         page = api.get("/admin/audit").json()
-        assert len(page["entries"]) == 100
-        assert page["next_cursor"] == str(page["entries"][-1]["id"])
-        older = api.get(f"/admin/audit?before={page['next_cursor']}").json()
-        ids = [e["id"] for e in page["entries"]] + [e["id"] for e in older["entries"]]
-        assert ids == sorted(ids, reverse=True) and len(set(ids)) == len(ids)
-        assert older["next_cursor"] is None
-        assert older["entries"][0]["actor"] == {"kind": "system", "key": None, "name": None}
+        assert len(page["entries"]) == 50
+        assert isinstance(page["next_cursor"], str) and len(page["next_cursor"]) <= 512
+        assert page["next_cursor"] != str(page["entries"][-1]["id"])
+        entries = list(page["entries"])
+        while page["next_cursor"]:
+            page = api.get(
+                "/admin/audit", params={"cursor": page["next_cursor"]}
+            ).json()
+            entries.extend(page["entries"])
+        ids = [entry["id"] for entry in entries]
+        assert ids == sorted(set(ids), reverse=True) and len(ids) >= 130
+        assert all(
+            entry["actor"] == {"kind": "system", "key": None, "name": None}
+            for entry in entries
+            if entry["action"] == "pending_purged"
+        )
         for bad in ("abc", "-1", "1" * 15, "1.5", ""):
-            error_of(api.get(f"/admin/audit?before={bad}"), 422, "validation_failed")
+            error_of(
+                api.get("/admin/audit", params={"cursor": bad}),
+                422,
+                "validation_failed",
+            )
 
-    def test_an_owner_needs_a_recent_sign_in_even_to_read(self, h: Harness, api: Api) -> None:
+    def test_an_owner_needs_a_recent_sign_in_even_to_read(
+        self, h: Harness, api: Api
+    ) -> None:
         sign_in_owner(h)
         h.now += 601
         for path in ("/admin/accounts", "/admin/enrollments", "/admin/audit"):
@@ -1988,7 +2523,9 @@ class TestOwnerRead:
         # Everything else keeps working for the stale session.
         assert api.get("/me").status_code == 200
 
-    def test_a_pending_owner_candidate_gets_pending_not_forbidden(self, tmp_path: pathlib.Path) -> None:
+    def test_a_pending_owner_candidate_gets_pending_not_forbidden(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         h = make(tmp_path, policy=APPROVAL)
         sign_in(h, roles=())
         error_of(Api(h).get("/admin/accounts"), 403, "pending_approval")
@@ -1998,7 +2535,9 @@ class TestOwnerActions:
     def target(self, key: str) -> str:
         return key.removeprefix("acct:")
 
-    def test_disable_and_enable(self, h: Harness, api: Api, events: list[dict[str, Any]]) -> None:
+    def test_disable_and_enable(
+        self, h: Harness, api: Api, events: list[dict[str, Any]]
+    ) -> None:
         seed_people(h)
         sign_in_owner(h)
         response = api.post(f"/admin/accounts/{self.target(KEY)}/disable")
@@ -2009,7 +2548,10 @@ class TestOwnerActions:
         assert body["account"]["disabled_reason"] == "admin_disabled"
         assert body["account"]["actions"] == ["enable", "remove_enrollment"]
         assert h.store.get_principal_status(KEY).disabled
-        assert any(e.get("action") == "disabled" and e.get("actor") == KEY_OWNER for e in events)
+        assert any(
+            e.get("action") == "disabled" and e.get("actor") == KEY_OWNER
+            for e in events
+        )
         again = api.post(f"/admin/accounts/{self.target(KEY)}/disable").json()
         assert again["changed"] is False
         response = api.post(f"/admin/accounts/{self.target(KEY)}/enable")
@@ -2017,7 +2559,9 @@ class TestOwnerActions:
         assert response.json()["account"]["status"] == "active"
         assert any(e.get("action") == "enabled" for e in events)
 
-    def test_a_disabled_user_loses_the_session_at_once(self, h: Harness, api: Api) -> None:
+    def test_a_disabled_user_loses_the_session_at_once(
+        self, h: Harness, api: Api
+    ) -> None:
         seed_people(h)
         sign_in(h)
         ada = snapshot_cookies(h)
@@ -2027,45 +2571,48 @@ class TestOwnerActions:
         use_cookies(h, ada)
         error_of(api.get("/me"), 401, "not_authenticated")
 
-    def test_the_access_cache_is_dropped(self, tmp_path: pathlib.Path) -> None:
-        from canvas_mcp.core.selfhost.principal_access import PrincipalAccessCache
-
-        class Lazy:
-            store: Any = None
-
-            def get_principal_status(self, key: str) -> Any:
-                return self.store.get_principal_status(key)
-
-        class Recording(PrincipalAccessCache):
-            def __init__(self, source: Any) -> None:
-                super().__init__(source)
-                self.dropped: list[str | None] = []
-
-            def invalidate(self, principal_key: str | None = None) -> None:
-                self.dropped.append(principal_key)
-                super().invalidate(principal_key)
-
-        lazy = Lazy()
-        cache = Recording(lazy)
-        h = make(tmp_path, access=cache)
-        lazy.store = h.store
+    def test_enable_requires_a_new_session_after_disable(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        h = make(tmp_path)
         seed_people(h)
+        sign_in(h)
+        old_cookie = snapshot_cookies(h)
+        h.client.cookies.clear()
         sign_in_owner(h)
+        owner = snapshot_cookies(h)
         api = Api(h)
-        api.post(f"/admin/accounts/{self.target(KEY)}/disable")
-        api.post(f"/admin/accounts/{self.target(KEY)}/enable")
-        api.post(f"/admin/accounts/{self.target(KEY_2)}/deny")
-        assert cache.dropped == [KEY, KEY, KEY_2]
+        assert api.post(f"/admin/accounts/{KEY}/disable").status_code == 200
+        assert api.post(f"/admin/accounts/{KEY}/enable").status_code == 200
+        use_cookies(h, old_cookie)
+        error_of(api.get("/me"), 401, "not_authenticated")
+        use_cookies(h, owner)
+        assert api.get("/admin/accounts").status_code == 200
+        h.client.cookies.clear()
+        sign_in(h)
+        assert api.get("/me").status_code == 200
 
-    def test_cannot_disable_yourself(self, h: Harness, api: Api, events: list[dict[str, Any]]) -> None:
+    def test_cannot_disable_yourself(
+        self, h: Harness, api: Api, events: list[dict[str, Any]]
+    ) -> None:
         seed_people(h)
         sign_in_owner(h)
-        error_of(api.post(f"/admin/accounts/{self.target(KEY_OWNER)}/disable"), 409, "cannot_disable_self")
+        error_of(
+            api.post(f"/admin/accounts/{self.target(KEY_OWNER)}/disable"),
+            409,
+            "cannot_disable_self",
+        )
         assert h.store.get_principal_status(KEY_OWNER).active
-        assert any(e.get("action") == "refused" and e.get("outcome") == "self" for e in events)
+        assert any(
+            e.get("action") == "refused" and e.get("outcome") == "self" for e in events
+        )
 
     def test_the_store_refusing_the_last_active_owner_is_409(
-        self, h: Harness, api: Api, monkeypatch: pytest.MonkeyPatch, events: list[dict[str, Any]]
+        self,
+        h: Harness,
+        api: Api,
+        monkeypatch: pytest.MonkeyPatch,
+        events: list[dict[str, Any]],
     ) -> None:
         from canvas_mcp.core.selfhost.token_store import AccessActionRefused
 
@@ -2079,8 +2626,13 @@ class TestOwnerActions:
         # The store counts owners inside its transaction; an account actor cannot reach
         # this branch without a race, so the mapping is shown by making the store say it.
         monkeypatch.setattr(h.store, "disable_principal", refuse)
-        error_of(api.post(f"/admin/accounts/{self.target(KEY)}/disable"), 409, "last_owner")
-        assert any(e.get("action") == "refused" and e.get("outcome") == "last_owner" for e in events)
+        error_of(
+            api.post(f"/admin/accounts/{self.target(KEY)}/disable"), 409, "last_owner"
+        )
+        assert any(
+            e.get("action") == "refused" and e.get("outcome") == "last_owner"
+            for e in events
+        )
 
     def test_two_owners_can_disable_each_other_only_one_at_a_time(
         self, h: Harness, api: Api
@@ -2088,7 +2640,10 @@ class TestOwnerActions:
         sign_in_owner(h)
         second = make_account(h.store, OID, role="owner", name="Second Owner")
         assert h.store.count_active_owners() == 2
-        assert api.post(f"/admin/accounts/{self.target(second)}/disable").json()["changed"] is True
+        assert (
+            api.post(f"/admin/accounts/{self.target(second)}/disable").json()["changed"]
+            is True
+        )
         assert h.store.count_active_owners() == 1
         # The one left is the caller, and nobody can disable the caller through the API.
         error_of(
@@ -2097,7 +2652,9 @@ class TestOwnerActions:
             "cannot_disable_self",
         )
 
-    def test_approve_and_deny(self, tmp_path: pathlib.Path, events: list[dict[str, Any]]) -> None:
+    def test_approve_and_deny(
+        self, tmp_path: pathlib.Path, events: list[dict[str, Any]]
+    ) -> None:
         h = make(tmp_path, policy=APPROVAL)
         sign_in(h, roles=())
         ada = snapshot_cookies(h)
@@ -2111,7 +2668,10 @@ class TestOwnerActions:
         assert h.store.get_principal_status(KEY).active
         assert any(e.get("action") == "approved" for e in events)
         # Denying an account that is no longer pending changes nothing.
-        assert a.post(f"/admin/accounts/{self.target(KEY)}/deny").json()["changed"] is False
+        assert (
+            a.post(f"/admin/accounts/{self.target(KEY)}/deny").json()["changed"]
+            is False
+        )
         # A second newcomer is denied.
         h.client.cookies.clear()
         sign_in(h, oid=OID_2, name="Bob", upn="bob@example.test", roles=())
@@ -2124,7 +2684,9 @@ class TestOwnerActions:
         assert any(e.get("action") == "denied" for e in events)
         use_cookies(h, ada)
 
-    def test_mark_invalid_and_remove(self, h: Harness, api: Api, events: list[dict[str, Any]]) -> None:
+    def test_mark_invalid_and_remove(
+        self, h: Harness, api: Api, events: list[dict[str, Any]]
+    ) -> None:
         seed_people(h)
         sign_in_owner(h)
         response = api.post(f"/admin/enrollments/{self.target(KEY)}/mark-invalid")
@@ -2135,7 +2697,12 @@ class TestOwnerActions:
         assert body["account"]["enrollment"]["invalid_reason"] == "revoked_by_admin"
         assert "mark_invalid" not in body["account"]["actions"]
         assert any(e.get("action") == "admin_marked_invalid" for e in events)
-        assert api.post(f"/admin/enrollments/{self.target(KEY)}/mark-invalid").json()["changed"] is False
+        assert (
+            api.post(f"/admin/enrollments/{self.target(KEY)}/mark-invalid").json()[
+                "changed"
+            ]
+            is False
+        )
         response = api.delete(f"/admin/enrollments/{self.target(KEY)}")
         assert response.status_code == 200
         assert response.json()["changed"] is True
@@ -2143,7 +2710,10 @@ class TestOwnerActions:
         assert h.store.info(KEY) is None
         assert h.store.get_principal_status(KEY).active  # not an access decision
         assert any(e.get("action") == "enrollment_removed" for e in events)
-        assert api.delete(f"/admin/enrollments/{self.target(KEY)}").json()["changed"] is False
+        assert (
+            api.delete(f"/admin/enrollments/{self.target(KEY)}").json()["changed"]
+            is False
+        )
 
     def test_unknown_and_malformed_targets(self, h: Harness, api: Api) -> None:
         sign_in_owner(h)
@@ -2159,7 +2729,7 @@ class TestOwnerActions:
             error_of(api.call(method, path), 404, "not_found")
         for bad in (
             "abc",
-            KEY,  # the prefixed key is not an id
+            "acct:" + KEY,  # legacy prefixed keys are not native ids
             KEY.removeprefix("acct:").upper(),
             "00000000-0000-4000-8000-00000000000g",
             "x" * 300,
@@ -2170,7 +2740,9 @@ class TestOwnerActions:
             assert params == {"field": "id"}
             error_of(api.delete(f"/admin/enrollments/{bad}"), 422, "validation_failed")
 
-    def test_a_stale_owner_gets_reauth_required_on_every_action(self, h: Harness, api: Api) -> None:
+    def test_a_stale_owner_gets_reauth_required_on_every_action(
+        self, h: Harness, api: Api
+    ) -> None:
         seed_people(h)
         sign_in_owner(h)
         api.csrf()
@@ -2182,8 +2754,13 @@ class TestOwnerActions:
             ("POST", f"/admin/enrollments/{bob}/mark-invalid"),
             ("DELETE", f"/admin/enrollments/{bob}"),
         ):
-            assert error_of(api.call(method, path), 403, "reauth_required") == {"max_age_s": 600}
-        assert h.store.get_principal_status(KEY_2).active and h.store.info(KEY_2) is not None
+            assert error_of(api.call(method, path), 403, "reauth_required") == {
+                "max_age_s": 600
+            }
+        assert (
+            h.store.get_principal_status(KEY_2).active
+            and h.store.info(KEY_2) is not None
+        )
 
     def test_a_non_owner_never_changes_anything(self, h: Harness, api: Api) -> None:
         seed_people(h)
@@ -2218,7 +2795,7 @@ class TestOwnerActions:
         seed_people(h)
         sign_in_owner(h)
         api.csrf()
-        real = h.store.get_principal_status
+        real = h.store.read_session_snapshot
 
         def status_then_demote(key: str) -> Any:
             status = real(key)
@@ -2226,13 +2803,18 @@ class TestOwnerActions:
                 demote_directly(h, KEY_OWNER)
             return status
 
-        monkeypatch.setattr(h.store, "get_principal_status", status_then_demote)
+        monkeypatch.setattr(h.store, "read_session_snapshot", status_then_demote)
         response = api.call(method, tail.format(t=self.target(KEY_2)))
         error_of(response, 403, "forbidden")
-        monkeypatch.setattr(h.store, "get_principal_status", real)
+        monkeypatch.setattr(h.store, "read_session_snapshot", real)
         assert h.store.get_principal_status(KEY_2).active
-        assert h.store.info(KEY_2) is not None and h.store.info(KEY_2).status == "active"  # type: ignore[union-attr]
-        assert any(e.get("action") == "refused" and e.get("outcome") == "not_owner" for e in events)
+        assert (
+            h.store.info(KEY_2) is not None and h.store.info(KEY_2).status == "active"
+        )  # type: ignore[union-attr]
+        assert any(
+            e.get("action") == "refused" and e.get("outcome") == "not_owner"
+            for e in events
+        )
 
     def test_a_store_failure_while_changing_access_is_503(
         self, h: Harness, api: Api, monkeypatch: pytest.MonkeyPatch
@@ -2245,7 +2827,11 @@ class TestOwnerActions:
             raise StoreUnavailable()
 
         monkeypatch.setattr(h.store, "disable_principal", boom)
-        error_of(api.post(f"/admin/accounts/{self.target(KEY)}/disable"), 503, "token_store_unavailable")
+        error_of(
+            api.post(f"/admin/accounts/{self.target(KEY)}/disable"),
+            503,
+            "token_store_unavailable",
+        )
 
 
 # -- the shape of every answer ----------------------------------------------------------------------------------
@@ -2269,7 +2855,11 @@ class TestEveryAnswer:
             api.get("/nope"),
             api.call("PATCH", "/me"),
             api.put("/me/canvas-token", {"nope": 1}),
-            api.call("PUT", "/me/ui-locale", content=b"[", ),
+            api.call(
+                "PUT",
+                "/me/ui-locale",
+                content=b"[",
+            ),
             api.call("PUT", "/me/ui-locale", {"locale": "zh"}, csrf=False),
         ]
         for response in responses:
@@ -2279,7 +2869,11 @@ class TestEveryAnswer:
                 assert body["error"]["code"] in account_api.API_ERROR_CODES
 
     def test_an_unexpected_failure_is_a_plain_500_with_only_the_class_logged(
-        self, h: Harness, user: Api, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+        self,
+        h: Harness,
+        user: Api,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         def boom(_key: str) -> Any:
             raise RuntimeError("secret internal detail /etc/passwd")
@@ -2295,31 +2889,69 @@ class TestEveryAnswer:
     def test_upstream_text_never_appears(self, h: Harness, user: Api) -> None:
         marker = "UPSTREAM-MARKER-<script>"
         h.whoami_result = CanvasCheckError("invalid")
-        response = user.put("/me/canvas-token", {"canvas_token": CANVAS_TOKEN})
+        response = user.put(
+            "/me/canvas-token", {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN}
+        )
         assert marker not in response.text
-        h.token_response = lambda r: httpx.Response(400, json={"error_description": marker})
+        before = h.stack.idp.token_requests
+        h.stack.idp.provider.token_error = (400, {"error_description": marker})
         h.client.cookies.clear()
         login = sign_in(h)
+        assert h.stack.idp.token_requests == before + 1
+        assert login.status_code == 303
         assert marker not in login.text
+        assert marker not in login.headers["location"]
 
     def test_the_error_codes_equal_the_documented_set(self) -> None:
         assert account_api.API_ERROR_CODES == {
-            "not_authenticated", "csrf_invalid", "origin_not_allowed", "reauth_required",
-            "forbidden", "pending_approval", "access_disabled", "method_not_allowed",
-            "unsupported_media_type", "payload_too_large", "malformed_request",
-            "validation_failed", "not_found", "rate_limited", "token_store_unavailable",
-            "internal_error", "token_invalid_format", "token_rejected", "token_unreadable",
-            "canvas_unavailable", "identity_change_required", "recheck_not_allowed",
-            "school_required", "school_invalid", "school_not_offered", "school_not_in_directory",
-            "school_unresolvable", "school_address_blocked", "school_selection_unverified",
-            "directory_unavailable", "write_tool_not_allowed", "write_tools_unavailable",
-            "last_owner", "cannot_disable_self",
-            "authorization_invalid", "client_unavailable",
+            "not_authenticated",
+            "csrf_invalid",
+            "origin_not_allowed",
+            "reauth_required",
+            "forbidden",
+            "pending_approval",
+            "access_disabled",
+            "method_not_allowed",
+            "unsupported_media_type",
+            "payload_too_large",
+            "malformed_request",
+            "validation_failed",
+            "not_found",
+            "rate_limited",
+            "token_store_unavailable",
+            "internal_error",
+            "token_invalid_format",
+            "token_rejected",
+            "token_unreadable",
+            "canvas_unavailable",
+            "identity_change_required",
+            "recheck_not_allowed",
+            "school_required",
+            "school_invalid",
+            "school_not_offered",
+            "school_not_in_directory",
+            "school_unresolvable",
+            "school_address_blocked",
+            "school_selection_unverified",
+            "directory_unavailable",
+            "write_tool_not_allowed",
+            "write_tools_unavailable",
+            "last_owner",
+            "cannot_disable_self",
+            "authorization_invalid",
+            "client_unavailable",
             # linked sign-in methods
-            "identity_in_use", "provider_already_linked", "last_identity", "link_session_ended",
+            "identity_in_use",
+            "provider_already_linked",
+            "last_identity",
+            "link_session_ended",
             "provider_unavailable",
+            "not_enrolled",
+            "custody_ack_required",
+            "settings_conflict",
+            "pilot_profile_restricted",
+            "confirmation_required",
+            "custody_notice_outdated",
         }
         for status in account_api.ERROR_STATUS.values():
             assert 400 <= status < 600
-
-

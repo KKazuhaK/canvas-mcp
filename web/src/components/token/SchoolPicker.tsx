@@ -1,3 +1,4 @@
+import Alert from '@mui/material/Alert'
 import SearchIcon from '@mui/icons-material/Search'
 import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
@@ -25,7 +26,7 @@ export interface SchoolSelection {
 export const SEARCH_MIN_CHARS = 2
 export const SEARCH_MAX_CHARS = 64
 
-/** The selection a fresh form starts with: what the server says is the default. */
+/** The selection a fresh form starts with: the currently enrolled school, when it is still offered. */
 export function initialSelection(schools: SchoolsResponse): SchoolSelection | null {
   if (schools.mode !== 'picker' || schools.selected === null) return null
   const choice = schools.choices.find((c) => c.host === schools.selected)
@@ -39,7 +40,7 @@ export function initialSelection(schools: SchoolsResponse): SchoolSelection | nu
  *   list, plus, when the server allows it, a directory search. A search result
  *   carries a signature that the server checks, so only a school the server itself
  *   listed for this session can be enrolled.
- * - `sole` / `fixed`: the server has one school; it is shown, nothing is sent.
+ * - `sole`: the server has one school; it is shown, nothing is sent.
  */
 export default function SchoolPicker({
   schools,
@@ -55,6 +56,8 @@ export default function SchoolPicker({
   const { t } = useTranslation()
   const [query, setQuery] = useState('')
   const search = useMutation({ mutationFn: (q: string) => searchSchools(q) })
+
+  if (schools.mode === 'none') return <Alert severity="warning">{t('account:school.none')}</Alert>
 
   if (schools.mode !== 'picker') {
     if (!schools.sole) return null

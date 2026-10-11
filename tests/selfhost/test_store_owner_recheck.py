@@ -14,6 +14,7 @@ import pytest
 from dbbackend import make_store
 
 from canvas_mcp.core.selfhost import accounts as acc
+from canvas_mcp.core.selfhost.custody import CustodyAcknowledgement
 from canvas_mcp.core.selfhost.token_store import (
     OPERATOR,
     AccessActionRefused,
@@ -33,19 +34,28 @@ TOKEN = "7~" + "T" * 62
 @pytest.fixture
 def store(tmp_path: pathlib.Path) -> TokenStore:
     keyring = Keyring.parse("k1:" + base64.b64encode(b"\x01" * 32).decode())
-    store = make_store(tmp_path / "tokens.sqlite3", keyring, clock=lambda: 1_800_000_000)
+    store = make_store(
+        tmp_path / "tokens.sqlite3", keyring, clock=lambda: 1_800_000_000
+    )
     store.initialize()
     return store
 
 
 def target(store: TokenStore) -> str:
     key = make_account(store, OID_TARGET, name="Target")
-    store.put(principal_key=key, api_token=TOKEN, canvas_user_id="9", canvas_user_name="Target")
+    store.put(
+        principal_key=key,
+        api_token=TOKEN,
+        canvas_user_id="9",
+        canvas_user_name="Target",
+        canvas_host="canvas.example.edu",
+        custody=CustodyAcknowledgement(1, store._now()),
+    )
     return key
 
 
 def audit_actions(store: TokenStore) -> list[str]:
-    return [e.action for e in store.list_audit(100)]
+    return [e.action for e in list(store.iter_audit())]
 
 
 class TestDelete:
@@ -54,17 +64,23 @@ class TestDelete:
         key = target(store)
         assert store.delete(key, actor=owner) is True
         assert store.info(key) is None
-        e = next(e for e in store.list_audit(10) if e.action == "token_deleted")
+        e = next(e for e in store.iter_audit() if e.action == "token_deleted")
         assert e.actor == owner and e.target == key
 
-    def test_the_operator_and_the_account_itself_need_no_owner(self, store: TokenStore) -> None:
+    def test_the_operator_and_the_account_itself_need_no_owner(
+        self, store: TokenStore
+    ) -> None:
         key = target(store)
         assert store.delete(key, actor=OPERATOR) is True
         key = target(store)
         assert store.delete(key) is True  # a self-disconnect: no actor
 
-    @pytest.mark.parametrize("who", ["user", "disabled_owner", "pending_owner", "unknown", "self"])
-    def test_anyone_else_is_refused_and_nothing_changes(self, store: TokenStore, who: str) -> None:
+    @pytest.mark.parametrize(
+        "who", ["user", "disabled_owner", "pending_owner", "unknown", "self"]
+    )
+    def test_anyone_else_is_refused_and_nothing_changes(
+        self, store: TokenStore, who: str
+    ) -> None:
         key = target(store)
         actor = {
             "user": lambda: make_account(store, OID_USER),
@@ -77,13 +93,13 @@ class TestDelete:
             "unknown": lambda: acct_key("dddddddd-0000-4000-8000-0000000000d1"),
             "self": lambda: key,
         }[who]()
-        before = store.list_audit(100)
+        before = list(store.iter_audit())
         generation = store.credential_generation(key)
         with pytest.raises(AccessActionRefused) as info:
             store.delete(key, actor=actor)
         assert info.value.code == AccessActionRefused.NOT_OWNER
         assert store.info(key) is not None
-        assert store.list_audit(100) == before
+        assert list(store.iter_audit()) == before
         assert store.credential_generation(key) == generation
 
     def test_an_owner_demoted_earlier_is_refused(self, store: TokenStore) -> None:
@@ -92,7 +108,12 @@ class TestDelete:
         key = target(store)
         with store._db.write() as conn:
             store._repos.accounts.set_role(
-                conn, acc.account_id_of(owner), role="user", source=None, seen_at=None, now=1
+                conn,
+                acc.account_id_of(owner),
+                role="user",
+                source=None,
+                seen_at=None,
+                now=1,
             )
         with pytest.raises(AccessActionRefused):
             store.delete(key, actor=owner)
@@ -113,15 +134,28 @@ class TestMarkInvalid:
         assert info is not None and info.status == "invalid"
         assert "token_marked_invalid" in audit_actions(store)
 
-    def test_the_operator_and_the_automatic_probe_need_no_owner(self, store: TokenStore) -> None:
+    def test_the_operator_and_the_automatic_probe_need_no_owner(
+        self, store: TokenStore
+    ) -> None:
         key = target(store)
-        assert store.mark_invalid(key, reason="revoked_by_admin", actor=OPERATOR) is True
+        assert (
+            store.mark_invalid(key, reason="revoked_by_admin", actor=OPERATOR) is True
+        )
         key2 = make_account(store, OID_USER)
-        store.put(principal_key=key2, api_token=TOKEN, canvas_user_id="8", canvas_user_name="U")
+        store.put(
+            principal_key=key2,
+            api_token=TOKEN,
+            canvas_user_id="8",
+            canvas_user_name="U",
+            canvas_host="canvas.example.edu",
+            custody=CustodyAcknowledgement(1, store._now()),
+        )
         assert store.mark_invalid(key2, reason="canvas_token_rejected") is True
 
     @pytest.mark.parametrize("who", ["user", "disabled_owner", "unknown"])
-    def test_anyone_else_is_refused_and_nothing_changes(self, store: TokenStore, who: str) -> None:
+    def test_anyone_else_is_refused_and_nothing_changes(
+        self, store: TokenStore, who: str
+    ) -> None:
         key = target(store)
         actor = {
             "user": lambda: make_account(store, OID_USER),

@@ -21,7 +21,11 @@ import pytest
 from dbbackend import make_store
 from sqlalchemy import text
 
-from canvas_mcp.core.selfhost.db import migrate
+from canvas_mcp.core.selfhost.custody import (
+    CUSTODY_NOTICE_VERSION,
+    CustodyAcknowledgement,
+)
+from canvas_mcp.core.selfhost.db.migrations import runner as migrate
 from canvas_mcp.core.selfhost.token_store import (
     DISABLE_REASON_ADMIN,
     DISABLE_REASON_OPERATOR,
@@ -50,7 +54,10 @@ WAIT = 20  # seconds: far above any honest wait, only there to end a hung test
 
 def _ring(*ids: str) -> Keyring:
     return Keyring.parse(
-        ",".join(f"{kid}:{base64.b64encode(bytes([i + 1]) * 32).decode()}" for i, kid in enumerate(ids))
+        ",".join(
+            f"{kid}:{base64.b64encode(bytes([i + 1]) * 32).decode()}"
+            for i, kid in enumerate(ids)
+        )
     )
 
 
@@ -106,8 +113,13 @@ class Runner:
         return self.result
 
 
-def _put(store: TokenStore, key: str = KEY_A, token: str = "7~" + "T" * 62, **kw: Any) -> Any:
+def _put(
+    store: TokenStore, key: str = KEY_A, token: str = "7~" + "T" * 62, **kw: Any
+) -> Any:
     ensure_account(store, key)  # a no-op when the account exists
+    kw.setdefault(
+        "custody", CustodyAcknowledgement(CUSTODY_NOTICE_VERSION, store._now())
+    )
     return store.put(
         principal_key=key,
         api_token=token,
@@ -135,14 +147,18 @@ def _make_owners(store: TokenStore, *keys: str) -> None:
 
 
 class TestEnrollmentVersusDisable:
-    def test_a_disable_waits_for_an_enrollment_that_has_read_the_gate(self, pair) -> None:
+    def test_a_disable_waits_for_an_enrollment_that_has_read_the_gate(
+        self, pair
+    ) -> None:
         enroller, admin, _ = pair
         gate = Gate("after_gate_read")
         enroller._pause_hook = gate
         put = Runner(lambda: _put(enroller))
         assert gate.reached.wait(WAIT)
         disable = Runner(
-            lambda: admin.disable_principal(KEY_A, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)
+            lambda: admin.disable_principal(
+                KEY_A, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR
+            )
         )
         assert disable.still_blocked()  # the enrollment holds the writer lock
         gate.release.set()
@@ -152,14 +168,20 @@ class TestEnrollmentVersusDisable:
         status = admin.get_principal_status(KEY_A)
         assert status.disabled
         assert info.credential_generation == 1 and status.credential_generation == 2
-        assert admin.info(KEY_A) is not None  # the row is kept; the principal is cut off
+        assert (
+            admin.info(KEY_A) is not None
+        )  # the row is kept; the principal is cut off
 
     def test_an_enrollment_that_waits_for_a_disable_is_refused(self, pair) -> None:
         enroller, admin, _ = pair
         _make_owners(admin, KEY_A, KEY_B)
         gate = Gate("after_owner_count")
         admin._pause_hook = gate
-        disable = Runner(lambda: admin.disable_principal(KEY_A, actor=KEY_B, reason=DISABLE_REASON_ADMIN))
+        disable = Runner(
+            lambda: admin.disable_principal(
+                KEY_A, actor=KEY_B, reason=DISABLE_REASON_ADMIN
+            )
+        )
         assert gate.reached.wait(WAIT)
         put = Runner(lambda: _put(enroller))
         assert put.still_blocked()
@@ -167,7 +189,9 @@ class TestEnrollmentVersusDisable:
         assert disable.join() is True
         with pytest.raises(PrincipalDisabledError):
             put.join()
-        assert enroller.info(KEY_A) is None  # nothing was saved for a disabled principal
+        assert (
+            enroller.info(KEY_A) is None
+        )  # nothing was saved for a disabled principal
 
     def test_generations_of_concurrent_changes_are_strictly_ordered(self, pair) -> None:
         first, second, _ = pair
@@ -180,7 +204,9 @@ class TestEnrollmentVersusDisable:
                 with lock:
                     seen.append(info.credential_generation)
 
-        runners = [Runner(lambda s=s: worker(s, 6)) for s in (first, second, first, second)]
+        runners = [
+            Runner(lambda s=s: worker(s, 6)) for s in (first, second, first, second)
+        ]
         for runner in runners:
             runner.join()
         assert sorted(seen) == list(range(1, 25))  # unique, gap-free
@@ -194,11 +220,15 @@ class TestOwnersDisablingEachOther:
         gate = Gate("after_owner_count")
         one._pause_hook = gate
         a_disables_b = Runner(
-            lambda: one.disable_principal(KEY_B, actor=KEY_A, reason=DISABLE_REASON_ADMIN)
+            lambda: one.disable_principal(
+                KEY_B, actor=KEY_A, reason=DISABLE_REASON_ADMIN
+            )
         )
         assert gate.reached.wait(WAIT)
         b_disables_a = Runner(
-            lambda: two.disable_principal(KEY_A, actor=KEY_B, reason=DISABLE_REASON_ADMIN)
+            lambda: two.disable_principal(
+                KEY_A, actor=KEY_B, reason=DISABLE_REASON_ADMIN
+            )
         )
         assert b_disables_a.still_blocked()
         gate.release.set()
@@ -218,11 +248,15 @@ class TestOwnersDisablingEachOther:
         gate = Gate("after_owner_count")
         one._pause_hook = gate
         first = Runner(
-            lambda: one.disable_principal(KEY_B, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)
+            lambda: one.disable_principal(
+                KEY_B, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR
+            )
         )
         assert gate.reached.wait(WAIT)
         second = Runner(
-            lambda: two.disable_principal(KEY_A, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR)
+            lambda: two.disable_principal(
+                KEY_A, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR
+            )
         )
         assert second.still_blocked()
         gate.release.set()
@@ -238,7 +272,9 @@ class TestLateVerdictsAgainstAReplacement:
     """The regression tests for READ COMMITTED: a verdict about an old token must
     never land on the replacement saved while the verdict waited for the writer."""
 
-    def _replace_while(self, pair, verdict: Callable[[TokenStore], Any]) -> tuple[Any, Any, Any]:
+    def _replace_while(
+        self, pair, verdict: Callable[[TokenStore], Any]
+    ) -> tuple[Any, Any, Any]:
         enroller, prober, clock = pair
         old = _put(enroller)
         gate = Gate("after_gate_read")
@@ -262,7 +298,11 @@ class TestLateVerdictsAgainstAReplacement:
         assert changed is False
         assert new.credential_generation == 2
         row = pair[1].info(KEY_A)
-        assert row is not None and row.status == STATUS_ACTIVE and row.credential_generation == 2
+        assert (
+            row is not None
+            and row.status == STATUS_ACTIVE
+            and row.credential_generation == 2
+        )
 
     def test_a_late_rejection_guarded_by_updated_at_is_refused_too(self, pair) -> None:
         enroller, prober, clock = pair
@@ -274,7 +314,9 @@ class TestLateVerdictsAgainstAReplacement:
         assert gate.reached.wait(WAIT)
         late = Runner(
             lambda: prober.mark_invalid(
-                KEY_A, reason=REASON_CANVAS_TOKEN_REJECTED, expected_updated_at=old.updated_at
+                KEY_A,
+                reason=REASON_CANVAS_TOKEN_REJECTED,
+                expected_updated_at=old.updated_at,
             )
         )
         assert late.still_blocked()
@@ -291,14 +333,20 @@ class TestLateVerdictsAgainstAReplacement:
         gate = Gate("after_gate_read")
         enroller._pause_hook = gate
         clock.now += 10
-        put = Runner(lambda: _put(enroller, token="7~" + "N" * 62))  # active again, gen 3
+        put = Runner(
+            lambda: _put(enroller, token="7~" + "N" * 62)
+        )  # active again, gen 3
         assert gate.reached.wait(WAIT)
-        late = Runner(lambda: prober.restore_active(KEY_A, expected_generation=stale_generation))
+        late = Runner(
+            lambda: prober.restore_active(KEY_A, expected_generation=stale_generation)
+        )
         assert late.still_blocked()
         gate.release.set()
         put.join()
         assert late.join() is False
-        assert prober.credential_generation(KEY_A) == 3  # no extra bump from a no-op restore
+        assert (
+            prober.credential_generation(KEY_A) == 3
+        )  # no extra bump from a no-op restore
 
     def test_a_late_success_is_not_recorded_on_the_replacement(self, pair) -> None:
         enroller, prober, clock = pair
@@ -310,9 +358,12 @@ class TestLateVerdictsAgainstAReplacement:
         assert gate.reached.wait(WAIT)
         clock.now += 5000
         late = Runner(
-            lambda: prober.mark_verified(KEY_A, min_interval_seconds=1, expected_generation=1)
+            lambda: prober.mark_verified(
+                KEY_A, min_interval_seconds=1, expected_generation=1
+            )
         )
-        assert late.still_blocked()
+        # PostgreSQL may update the old credential before the replacement takes its
+        # row lock; SQLite serializes it. Neither ordering may update the new token.
         gate.release.set()
         new = put.join()
         late.join()
@@ -323,13 +374,17 @@ class TestLateVerdictsAgainstAReplacement:
         enroller, prober, _ = pair
         info = _put(enroller)
         assert prober.mark_invalid(
-            KEY_A, reason=REASON_CANVAS_TOKEN_REJECTED, expected_generation=info.credential_generation
+            KEY_A,
+            reason=REASON_CANVAS_TOKEN_REJECTED,
+            expected_generation=info.credential_generation,
         )
         assert enroller.info(KEY_A).status == STATUS_INVALID  # type: ignore[union-attr]
 
 
 class TestOtherWriters:
-    def test_sign_in_and_disable_leave_one_consistent_history(self, tmp_path: pathlib.Path) -> None:
+    def test_sign_in_and_disable_leave_one_consistent_history(
+        self, tmp_path: pathlib.Path
+    ) -> None:
         for round_ in range(8):
             path = tmp_path / f"r{round_}.sqlite3"
             one = make_store(path, _ring("k1"))
@@ -338,14 +393,21 @@ class TestOtherWriters:
             two = make_store(path, _ring("k1"))
             barrier = threading.Barrier(2)
 
-            def sign_in(store: TokenStore = one, barrier: threading.Barrier = barrier) -> None:
+            def sign_in(
+                store: TokenStore = one, barrier: threading.Barrier = barrier
+            ) -> None:
                 barrier.wait()
                 sign_in_as(store, OID_A, owner=True)
 
-            def disable(store: TokenStore = two, barrier: threading.Barrier = barrier) -> None:
+            def disable(
+                store: TokenStore = two, barrier: threading.Barrier = barrier
+            ) -> None:
                 barrier.wait()
                 store.disable_principal(
-                    KEY_A, actor=OPERATOR, reason=DISABLE_REASON_OPERATOR, allow_last_owner=True
+                    KEY_A,
+                    actor=OPERATOR,
+                    reason=DISABLE_REASON_OPERATOR,
+                    allow_last_owner=True,
                 )
 
             runners = [Runner(sign_in), Runner(disable)]
@@ -353,9 +415,9 @@ class TestOtherWriters:
                 runner.join()
             status = one.get_principal_status(KEY_A)
             assert status.disabled and status.session_epoch == 1
-            actions = [e.action for e in one.list_status_events(KEY_A)]
-            assert actions.count("disabled") == 1
-            assert actions.count("owner_gained") <= 1
+            actions = [e.action for e in one.iter_audit(account_id=KEY_A)]
+            assert actions.count("account_disabled") == 1
+            assert actions.count("role_changed") <= 1
 
     def test_rotate_and_enrollments_leave_every_row_readable_under_the_new_key(
         self, tmp_path: pathlib.Path
@@ -364,7 +426,7 @@ class TestOtherWriters:
         path = tmp_path / "rot.sqlite3"
         old = make_store(path, old_ring)
         old.initialize()
-        keys = [f"acct:{n:08d}-0000-4000-8000-000000000000" for n in range(6)]
+        keys = [f"{n:08d}-0000-4000-8000-000000000000" for n in range(6)]
         for key in keys:
             _put(old, key)
         new_ring = Keyring.parse(
@@ -372,7 +434,7 @@ class TestOtherWriters:
         )
         rotator = make_store(path, new_ring)
         writer = make_store(path, new_ring)
-        writer_keys = [f"acct:{n:08d}-0000-4000-8000-0000000000ff" for n in range(6)]
+        writer_keys = [f"{n:08d}-0000-4000-8000-0000000000ff" for n in range(6)]
         runners = [
             Runner(rotator.rotate),
             Runner(lambda: [_put(writer, k) for k in writer_keys]),
@@ -385,10 +447,17 @@ class TestOtherWriters:
             row = rotator.get(key)
             assert row is not None and row.key_id == "k2"
 
-    def test_concurrent_tool_preference_writers_never_leave_a_torn_record(self, pair) -> None:
+    def test_concurrent_tool_preference_writers_never_leave_a_torn_record(
+        self, pair
+    ) -> None:
         first, second, _ = pair
         ensure_account(first, KEY_A)
-        sets = [["tool_a"], ["tool_b", "tool_c"], ["tool_d"], ["tool_e", "tool_f", "tool_g"]]
+        sets = [
+            ["tool_a"],
+            ["tool_b", "tool_c"],
+            ["tool_d"],
+            ["tool_e", "tool_f", "tool_g"],
+        ]
         barrier = threading.Barrier(len(sets))
 
         def writer(store: TokenStore, names: list[str]) -> None:
@@ -396,7 +465,8 @@ class TestOtherWriters:
             store.set_tool_prefs(KEY_A, names)
 
         runners = [
-            Runner(lambda s=s, n=n: writer(s, n)) for s, n in zip((first, second) * 2, sets, strict=True)
+            Runner(lambda s=s, n=n: writer(s, n))
+            for s, n in zip((first, second) * 2, sets, strict=True)
         ]
         for runner in runners:
             runner.join()
@@ -434,7 +504,9 @@ class TestPostgresTransactionShape:
         if pair[0].database.kind != "postgresql":
             pytest.skip("PostgreSQL only (CANVAS_MCP_TEST_BACKEND=postgres)")
 
-    def test_writes_run_at_read_committed_with_the_writer_lock_held_first(self, pair) -> None:
+    def test_writes_run_at_read_committed_with_the_writer_lock_held_first(
+        self, pair
+    ) -> None:
         db = pair[0].database
         with db.write() as conn:
             level = conn.execute(text("SHOW transaction_isolation")).scalar_one()
@@ -452,7 +524,11 @@ class TestPostgresTransactionShape:
         with db.read() as conn:
             values = {
                 name: conn.execute(text(f"SHOW {name}")).scalar_one()
-                for name in ("statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout")
+                for name in (
+                    "statement_timeout",
+                    "lock_timeout",
+                    "idle_in_transaction_session_timeout",
+                )
             }
             app = conn.execute(text("SHOW application_name")).scalar_one()
         assert values["statement_timeout"] == "15s"

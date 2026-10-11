@@ -1,14 +1,12 @@
-"""The request context and the tool gate for tokens whose status is invalid."""
+"""Native credential health, compare-and-set invalidation and tool refusals."""
 
-from __future__ import annotations
-
-import pathlib
 from typing import Any
 
 import pytest
-from dbbackend import make_store, raw_connection
+from dbbackend import make_store
 from fastmcp import Client, FastMCP
 from fastmcp.server.auth import AccessToken
+from sqlalchemy import select
 
 from canvas_mcp.core.credentials import (
     RequestCredentials,
@@ -19,6 +17,12 @@ from canvas_mcp.core.credentials import (
     set_request_token_state,
 )
 from canvas_mcp.core.selfhost import tool_gate
+from canvas_mcp.core.selfhost.custody import (
+    CUSTODY_NOTICE_VERSION,
+    CustodyAcknowledgement,
+)
+from canvas_mcp.core.selfhost.db import schema
+from canvas_mcp.core.selfhost.mcp_state import MCP_READ, McpRead
 from canvas_mcp.core.selfhost.request_context import (
     invalid_token_message,
     not_enrolled_message,
@@ -38,91 +42,69 @@ from canvas_mcp.core.selfhost.token_store import (
 )
 from canvas_mcp.core.selfhost.tool_gate import SelfhostCredentialGate
 
-from .conftest import OID_A, TENANT, acct_key, make_account, make_principal
+from .conftest import OID_A, acct_key, make_account, make_principal
 from .test_request_context import (
     ACCOUNT_URL,
+    CANVAS_HOST,
+    GRANT,
     SECRET_TOKEN,
     FakeStore,
     Probe,
     _claims,
     _middleware,
-    _Row,
     _run,
     _user,
+    native_snapshot,
 )
-from .test_token_store import Clock as StoreClock
-from .test_token_store import _ring
+from .test_token_store import Clock, _ring
 
-
-class StatusRow(_Row):
-    def __init__(
-        self,
-        status: str = STATUS_ACTIVE,
-        reason: str | None = None,
-        updated_at: int = 1234,
-    ) -> None:
-        super().__init__(SECRET_TOKEN, None)
-        self.status = status
-        self.invalid_reason = reason
-        self.updated_at = updated_at
-
-
-class RowStore(FakeStore):
-    """A fake store whose row can carry a status."""
-
-    def __init__(self, row: StatusRow | None, *, fail: Exception | None = None) -> None:
-        super().__init__(fail=fail)
-        self.row = row
-
-    def get(self, principal_key: str) -> Any:  # type: ignore[override]
-        self.gets.append(principal_key)
-        if self.fail is not None:
-            raise self.fail
-        return self.row
+KEY = acct_key(OID_A)
 
 
 class Recorder:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
-        self.versions: list[int | None] = []
+    def __init__(self):
+        self.calls = []
+        self.versions = []
+        self.generations = []
         self.fail = False
 
     async def mark_invalid(
         self,
-        principal_key: str,
-        reason: str,
+        principal_key,
+        reason,
         *,
-        expected_updated_at: int | None = None,
-        expected_generation: int | None = None,
-    ) -> bool:
-        if self.fail:
-            raise RuntimeError("store exploded")
+        expected_updated_at=None,
+        expected_generation=None,
+    ):
         self.calls.append((principal_key, reason))
         self.versions.append(expected_updated_at)
+        self.generations.append(expected_generation)
+        if self.fail:
+            raise RuntimeError("status write failed")
         return True
 
 
 class StateProbe(Probe):
-    """Also records the shared token-health object of the request."""
-
     state: RequestTokenState | None = None
 
-    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+    async def __call__(self, scope, receive, send):
         self.state = get_request_token_state()
         await super().__call__(scope, receive, send)
 
 
-async def serve(store: FakeStore, health: Recorder | None = None) -> StateProbe:
+async def serve(*, snapshot=None, fail=None, health=None):
+    store = FakeStore({KEY: SECRET_TOKEN}, fail=fail)
+    store.snapshots[KEY] = snapshot or native_snapshot()
     probe = StateProbe()
-    middleware = _middleware(probe, store)
-    middleware.health = health
-    await _run(middleware, user=_user(_claims()))
-    return probe
+    response = await _run(
+        _middleware(probe, store, health=health), user=_user(_claims())
+    )
+    return response, probe, store
 
 
 class TestInvalidRows:
     @pytest.mark.parametrize(
-        ("reason", "expected"),
+        "reason,expected",
         [
             (REASON_CANVAS_TOKEN_REJECTED, token_rejected_message(ACCOUNT_URL)),
             (REASON_REVOKED_BY_ADMIN, token_revoked_message(ACCOUNT_URL)),
@@ -130,131 +112,140 @@ class TestInvalidRows:
             (None, token_rejected_message(ACCOUNT_URL)),
         ],
     )
-    async def test_an_invalid_row_mounts_no_credentials_and_says_how_to_fix_it(
-        self, reason: str | None, expected: str
-    ) -> None:
-        store = RowStore(StatusRow(STATUS_INVALID, reason))
-        probe = await serve(store)
+    async def test_invalid_snapshot_never_decrypts_or_touches(self, reason, expected):
+        response, probe, store = await serve(
+            snapshot=native_snapshot(
+                credential_status=STATUS_INVALID, invalid_reason=reason
+            )
+        )
+        assert response.status == 200 and probe.seen["creds"] is None
+        assert probe.seen["principal"] is not None and probe.seen["message"] == expected
+        assert probe.state.dead and probe.state.message == expected
+        assert store.gets == store.touches == []
 
-        assert probe.seen["creds"] is None
-        assert probe.seen["principal"] is not None
-        assert probe.seen["message"] == expected
-        assert ACCOUNT_URL in expected
-        assert probe.state is not None and probe.state.dead and probe.state.message == expected
-        assert store.touches == []  # a dead token is not "used"
-
-    async def test_the_messages_never_ask_for_the_token_in_chat(self) -> None:
+    async def test_messages_do_not_ask_for_a_token_in_chat(self):
         for message in (
             token_rejected_message(ACCOUNT_URL),
             token_revoked_message(ACCOUNT_URL),
             invalid_token_message(ACCOUNT_URL, REASON_REVOKED_BY_ADMIN),
         ):
             assert "never paste it into this chat" in message
-            assert SECRET_TOKEN not in message
-            assert message.isascii()
+            assert SECRET_TOKEN not in message and message.isascii()
 
-    async def test_an_active_row_starts_a_live_token_state_with_its_version(self) -> None:
-        probe = await serve(RowStore(StatusRow(STATUS_ACTIVE, updated_at=777)))
-        assert probe.seen["creds"] is not None
-        assert probe.state is not None
-        assert probe.state.dead is False and probe.state.token_version == 777
+    async def test_active_state_carries_the_snapshot_version_and_generation(self):
+        _, probe, _ = await serve(
+            snapshot=native_snapshot(
+                credential_updated_at=777, generation=4, credential_generation=4
+            )
+        )
+        assert probe.seen["creds"] is not None and not probe.state.dead
+        assert (
+            probe.state.token_version == 777 and probe.state.credential_generation == 4
+        )
 
-    async def test_rows_without_a_status_attribute_are_active(self) -> None:
-        probe = await serve(FakeStore({(TENANT, OID_A): SECRET_TOKEN}))
-        assert probe.seen["creds"] is not None
-        assert probe.state is not None and probe.state.dead is False
+    async def test_unenrolled_user_can_connect_without_credentials(self):
+        response, probe, store = await serve(
+            snapshot=native_snapshot(credential_id=None)
+        )
+        assert response.status == 200 and not probe.state.dead
+        assert (
+            probe.seen["message"] == not_enrolled_message(ACCOUNT_URL)
+            and store.gets == []
+        )
 
-    async def test_not_enrolled_users_are_unaffected(self) -> None:
-        probe = await serve(RowStore(None))
-        assert probe.seen["message"] == not_enrolled_message(ACCOUNT_URL)
-        assert probe.state is not None and probe.state.dead is False
-
-    async def test_the_state_does_not_outlive_the_request(self) -> None:
-        await serve(RowStore(StatusRow(STATUS_INVALID, REASON_CANVAS_TOKEN_REJECTED)))
+    async def test_state_does_not_outlive_the_request(self):
+        await serve(snapshot=native_snapshot(credential_status=STATUS_INVALID))
         assert get_request_token_state() is None
 
 
-def _decrypt_error(version: int | None) -> TokenDecryptionError:
-    error = TokenDecryptionError("nope")
-    error.updated_at = version
-    return error
-
-
 class TestDecryptFailure:
-    async def test_a_failed_decryption_marks_the_failing_row_invalid(self) -> None:
+    async def test_failure_marks_only_the_snapshot_version_and_generation(self):
         health = Recorder()
-        probe = await serve(RowStore(None, fail=_decrypt_error(4321)), health)
-        assert health.calls == [(acct_key(OID_A), REASON_DECRYPT_FAILED)]
-        # Only the row version that failed to decrypt may be marked.
-        assert health.versions == [4321]
-        assert probe.seen["creds"] is None
-        assert probe.seen["message"] == unreadable_token_message(ACCOUNT_URL)
-        assert probe.state is not None and probe.state.dead
+        error = TokenDecryptionError("secret")
+        error.updated_at = 9999  # Exception text/attributes are not authoritative.
+        response, probe, _ = await serve(
+            snapshot=native_snapshot(
+                credential_updated_at=4321, credential_generation=7, generation=7
+            ),
+            fail=error,
+            health=health,
+        )
+        assert response.status == 503 and probe.calls == 0
+        assert health.calls == [(KEY, REASON_DECRYPT_FAILED)]
+        assert health.versions == [4321] and health.generations == [7]
+        assert b"could not be read" in response.body and b"secret" not in response.body
 
-    async def test_without_a_row_version_nothing_is_marked(self) -> None:
+    async def test_no_snapshot_version_changes_nothing(self):
         health = Recorder()
-        probe = await serve(RowStore(None, fail=_decrypt_error(None)), health)
-        assert health.calls == []
-        assert probe.seen["message"] == unreadable_token_message(ACCOUNT_URL)
-        assert probe.state is not None and probe.state.dead
+        response, _, _ = await serve(
+            snapshot=native_snapshot(credential_updated_at=None),
+            fail=TokenDecryptionError("nope"),
+            health=health,
+        )
+        assert response.status == 503 and health.calls == []
 
-    async def test_a_token_saved_while_the_old_row_was_unreadable_stays_active(
-        self, tmp_path: pathlib.Path
-    ) -> None:
-        store = make_store(tmp_path / "tokens.sqlite3", _ring(("k1", 1)), clock=StoreClock())
+    @pytest.mark.parametrize("health", [None, Recorder()])
+    async def test_status_write_failure_cannot_allow_the_request(self, health):
+        if health:
+            health.fail = True
+        response, probe, _ = await serve(
+            fail=TokenDecryptionError("nope"), health=health
+        )
+        assert response.status == 503 and probe.calls == 0
+
+    async def test_a_replacement_saved_during_failed_decryption_stays_active(
+        self, tmp_path
+    ):
+        clock = Clock()
+        store = make_store(tmp_path / "tokens.sqlite3", _ring(("k1", 1)), clock=clock)
         store.initialize()
-        put_args: dict[str, Any] = {
-            "principal_key": make_account(store, OID_A, name="Ada", username="ada@example.test"),
+        put_args = {
+            "principal_key": make_account(store, OID_A),
+            "canvas_host": CANVAS_HOST,
             "canvas_user_id": "42",
             "canvas_user_name": "Ada",
+            "custody": CustodyAcknowledgement(CUSTODY_NOTICE_VERSION, int(clock())),
         }
         store.put(api_token=SECRET_TOKEN, **put_args)
-        with raw_connection(store) as conn:
-            conn.execute("UPDATE canvas_tokens SET ciphertext = x'00'")
-        key = acct_key(OID_A)
+        with store.database.write() as conn:
+            conn.execute(
+                schema.canvas_credentials.update().values(ciphertext=b"x" * 32)
+            )
+        with store.database.read() as conn:
+            row = conn.execute(select(schema.canvas_credentials)).mappings().one()
+        held = native_snapshot(
+            credential_id=row["id"],
+            key_id=row["key_id"],
+            ciphertext=row["ciphertext"],
+            nonce=row["nonce"],
+            canvas_host=row["canvas_host"],
+            credential_updated_at=row["updated_at"],
+            generation=row["generation"],
+            credential_generation=row["generation"],
+        )
 
         class RacingStore(TokenStore):
-            """The user saves a new token right after the read of the old row failed."""
-
-            def get(self, principal_key: str) -> Any:
+            def decrypt_snapshot(self, account_id, snapshot):
                 try:
-                    return super().get(principal_key)
+                    return super().decrypt_snapshot(account_id, snapshot)
                 finally:
-                    # The fresh row gets a newer updated_at than the failed read.
-                    store_clock.now += 5
+                    clock.now += 5
                     self.put(api_token="7~" + "R" * 62, **put_args)
 
-        store_clock = StoreClock()
-        racing = RacingStore(store.database, _ring(("k1", 1)), clock=store_clock)
+        racing = RacingStore(store.database, _ring(("k1", 1)), clock=clock)
         health = TokenHealth(racing, account_url=ACCOUNT_URL)
         probe = StateProbe()
-        middleware = _middleware(probe, racing)  # type: ignore[arg-type]
-        middleware.health = health
-        await _run(middleware, user=_user(_claims()))
-
-        row = racing.info(key)
-        assert row is not None and row.status == STATUS_ACTIVE
-        assert row.invalid_reason is None
-        assert probe.state is not None and probe.state.dead  # this request still fails closed
-
-    @pytest.mark.parametrize("error", [RuntimeError("database is locked"), OSError("disk")])
-    async def test_a_store_failure_that_is_not_a_decryption_error_changes_nothing(
-        self, error: Exception
-    ) -> None:
-        health = Recorder()
-        probe = await serve(RowStore(None, fail=error), health)
-        assert health.calls == []
-        assert probe.seen["message"] == unreadable_token_message(ACCOUNT_URL)
-
-    async def test_a_failing_status_write_does_not_change_the_answer(self) -> None:
-        health = Recorder()
-        health.fail = True
-        probe = await serve(RowStore(None, fail=TokenDecryptionError("nope")), health)
-        assert probe.seen["message"] == unreadable_token_message(ACCOUNT_URL)
-
-    async def test_without_a_health_service_the_message_is_still_given(self) -> None:
-        probe = await serve(RowStore(None, fail=TokenDecryptionError("nope")), None)
-        assert probe.seen["message"] == unreadable_token_message(ACCOUNT_URL)
+        read = McpRead(KEY, GRANT, held)
+        response = await _run(
+            _middleware(probe, racing, health=health), read=read, user=_user(_claims())
+        )
+        try:
+            current = racing.info(KEY)
+            assert current.status == STATUS_ACTIVE and current.invalid_reason is None
+            assert current.credential_generation > held.generation
+            assert response.status == 503 and probe.calls == 0
+        finally:
+            store.close()
 
 
 class Body:
@@ -262,9 +253,9 @@ class Body:
 
 
 @pytest.fixture
-def server() -> FastMCP:
+def server():
     Body.runs = 0
-    mcp = FastMCP("gate-health-test")
+    mcp = FastMCP("gate-health")
     mcp.add_middleware(SelfhostCredentialGate())
 
     @mcp.tool()
@@ -277,60 +268,59 @@ def server() -> FastMCP:
 
 
 @pytest.fixture
-def verified_oid(monkeypatch: pytest.MonkeyPatch) -> None:
+def verified_oid(monkeypatch):
     monkeypatch.setattr(
         tool_gate,
         "get_access_token",
-        lambda: AccessToken(token="t", client_id="c", scopes=[], claims={"tid": TENANT, "oid": OID_A}),
+        lambda: AccessToken(
+            token="t",
+            client_id="client",
+            scopes=[],
+            claims=_claims(iss="https://canvas.example.test"),
+        ),
     )
+    marker = MCP_READ.set(McpRead(KEY, GRANT, native_snapshot()))
+    try:
+        yield
+    finally:
+        MCP_READ.reset(marker)
 
 
-async def call(server: FastMCP) -> Any:
+async def call(server) -> Any:
     async with Client(server) as client:
         return await client.call_tool("get_my_profile", {}, raise_on_error=False)
 
 
-def text_of(result: Any) -> str:
+def text_of(result):
     return "".join(getattr(block, "text", "") for block in result.content)
 
 
 class TestToolGate:
-    async def test_an_invalid_token_gets_the_reenroll_message_and_the_tool_never_runs(
-        self, server: FastMCP, verified_oid: None
-    ) -> None:
-        # What the middleware publishes for an invalid row: no credentials, a message.
+    @pytest.mark.parametrize("mounted", [False, True])
+    async def test_dead_token_stops_initial_and_later_calls(
+        self, server, verified_oid, mounted
+    ):
         from canvas_mcp.core.credentials import set_missing_credentials_message
 
         message = token_rejected_message(ACCOUNT_URL)
         set_request_principal(make_principal(OID_A))
         set_missing_credentials_message(message)
+        if mounted:
+            set_request_credentials(
+                RequestCredentials(
+                    api_token=SECRET_TOKEN, api_url="https://canvas.example.edu/api/v1"
+                )
+            )
         set_request_token_state(RequestTokenState(dead=True, message=message))
-
         result = await call(server)
+        assert result.is_error and text_of(result) == message and Body.runs == 0
 
-        assert result.is_error
-        assert text_of(result) == message
-        assert Body.runs == 0
-
-    async def test_a_token_found_dead_earlier_in_the_request_stops_later_calls(
-        self, server: FastMCP, verified_oid: None
-    ) -> None:
-        message = token_rejected_message(ACCOUNT_URL)
+    async def test_live_token_passes(self, server, verified_oid):
         set_request_principal(make_principal(OID_A))
         set_request_credentials(
-            RequestCredentials(api_token="canvas-token-1234567890abcdef", api_url="https://c.example.test/api/v1")
-        )
-        set_request_token_state(RequestTokenState(dead=True, message=message))
-
-        result = await call(server)
-
-        assert result.is_error and text_of(result) == message
-        assert Body.runs == 0
-
-    async def test_a_live_token_passes(self, server: FastMCP, verified_oid: None) -> None:
-        set_request_principal(make_principal(OID_A))
-        set_request_credentials(
-            RequestCredentials(api_token="canvas-token-1234567890abcdef", api_url="https://c.example.test/api/v1")
+            RequestCredentials(
+                api_token=SECRET_TOKEN, api_url="https://canvas.example.edu/api/v1"
+            )
         )
         set_request_token_state(RequestTokenState())
         result = await call(server)

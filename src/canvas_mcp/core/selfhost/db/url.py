@@ -35,9 +35,18 @@ ALLOW_OUTSIDE_ENV = "DATABASE_ALLOW_SQLITE_OUTSIDE_DATA_DIR"
 
 POSTGRES_SCHEME = "postgresql+psycopg"
 _SQLITE_SCHEMES = ("sqlite", "sqlite+pysqlite")
-_SSL_MODES = frozenset({"disable", "allow", "prefer", "require", "verify-ca", "verify-full"})
+_SSL_MODES = frozenset(
+    {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
+)
 _QUERY_KEYS = frozenset(
-    {"sslmode", "sslrootcert", "sslcert", "sslkey", "connect_timeout", "application_name"}
+    {
+        "sslmode",
+        "sslrootcert",
+        "sslcert",
+        "sslkey",
+        "connect_timeout",
+        "application_name",
+    }
 )
 _APP_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,63}$")
 _DBNAME_RE = re.compile(r"^[^\x00-\x1f\x7f/?#]{1,63}$")
@@ -108,7 +117,9 @@ def _parse(
     if not raw:
         return default
     if len(raw) > _MAX_URL_CHARS or any(ch.isspace() or ord(ch) < 0x20 for ch in raw):
-        problems.append(f"{name} must be a single URL without whitespace or control characters")
+        problems.append(
+            f"{name} must be a single URL without whitespace or control characters"
+        )
         return default
     scheme, sep, _ = raw.partition("://")
     scheme = scheme.lower()
@@ -164,7 +175,9 @@ def _parse_sqlite(
         return default
     path_text = rest[1:]
     if not path_text or path_text.startswith(":memory:"):
-        problems.append(f"{name} for SQLite must name a file; memory databases are not allowed")
+        problems.append(
+            f"{name} for SQLite must name a file; memory databases are not allowed"
+        )
         return default
     if not _is_absolute(path_text):
         problems.append(f"{name} for SQLite must be an absolute path")
@@ -182,7 +195,9 @@ def _parse_sqlite(
     return sqlite_target(path)
 
 
-def _parse_postgres(raw: str, problems: list[str], default: DatabaseTarget) -> DatabaseTarget:
+def _parse_postgres(
+    raw: str, problems: list[str], default: DatabaseTarget
+) -> DatabaseTarget:
     name = DATABASE_URL_ENV
     try:
         parts = urlsplit(raw)
@@ -210,10 +225,14 @@ def _parse_postgres(raw: str, problems: list[str], default: DatabaseTarget) -> D
         return default
     dbname = parts.path[1:] if parts.path.startswith("/") else parts.path
     if not _DBNAME_RE.fullmatch(dbname):
-        problems.append(f"{name} must include a database name (a path such as /canvas_mcp)")
+        problems.append(
+            f"{name} must include a database name (a path such as /canvas_mcp)"
+        )
         return default
     try:
-        query = parse_qsl(parts.query, keep_blank_values=True, strict_parsing=bool(parts.query))
+        query = parse_qsl(
+            parts.query, keep_blank_values=True, strict_parsing=bool(parts.query)
+        )
     except ValueError:
         problems.append(f"{name} has a malformed query string")
         return default
@@ -230,9 +249,11 @@ def _query_problem(query: list[tuple[str, str]]) -> str | None:
     seen: set[str] = set()
     for key, value in query:
         if key not in _QUERY_KEYS:
-            return "has a query parameter that is not allowed (allowed: " + ", ".join(
-                sorted(_QUERY_KEYS)
-            ) + ")"
+            return (
+                "has a query parameter that is not allowed (allowed: "
+                + ", ".join(sorted(_QUERY_KEYS))
+                + ")"
+            )
         if key in seen:
             return f"repeats the query parameter {key}"
         seen.add(key)

@@ -3,32 +3,21 @@ the encrypted store and the real Canvas client. Only Entra and Canvas are faked.
 
 from __future__ import annotations
 
-import base64
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import fastmcp
 import httpx
 import pytest
 import respx
-from dbbackend import raw_connection, stack_env
-from fastmcp import FastMCP
-from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
-from starlette.testclient import TestClient
+from dbbackend import raw_connection
 
-from canvas_mcp.core.selfhost.app import (
-    build_selfhost_asgi_app,
-    install_selfhost,
-    prepare_selfhost,
-)
 from canvas_mcp.core.selfhost.request_context import (
     token_rejected_message,
     token_revoked_message,
     unreadable_token_message,
 )
-from canvas_mcp.core.selfhost.settings import load_selfhost_settings
 from canvas_mcp.core.selfhost.token_store import (
     REASON_CANVAS_TOKEN_REJECTED,
     REASON_DECRYPT_FAILED,
@@ -38,8 +27,10 @@ from canvas_mcp.core.selfhost.token_store import (
 )
 from canvas_mcp.tools import register_course_tools
 
-from .conftest import CLIENT, OID_A, OID_B, TENANT, acct_key, store_put
-from .test_selfhost_integration import TOKENS, call_tool, text_of
+from .account_fixture import _display_in_utc, build_harness, put_row  # noqa: F401
+from .authz.stack import User
+from .conftest import OID_A, OID_B, acct_key
+from .test_selfhost_integration import call_tool, rpc, text_of
 
 BASE = "https://canvas.example.test"
 CANVAS = "https://canvas.example.edu"
@@ -51,7 +42,9 @@ KEY_A = acct_key(OID_A)
 KEY_B = acct_key(OID_B)
 COURSES = {
     TOKEN_A: [{"id": 101, "name": "Intermediate Python", "course_code": "ICS 33"}],
-    TOKEN_B: [{"id": 202, "name": "Single Variable Calculus", "course_code": "MATH 2B"}],
+    TOKEN_B: [
+        {"id": 202, "name": "Single Variable Calculus", "course_code": "MATH 2B"}
+    ],
     NEW_TOKEN_A: [{"id": 101, "name": "Intermediate Python", "course_code": "ICS 33"}],
 }
 DEAD_HEADERS = {"WWW-Authenticate": 'Bearer realm="canvas-lms"'}
@@ -72,16 +65,24 @@ class FakeCanvas:
         self.seen.append((path, token))
         if token in self.dead:
             return httpx.Response(
-                401, json={"errors": [{"message": "Invalid access token."}]}, headers=DEAD_HEADERS
+                401,
+                json={"errors": [{"message": "Invalid access token."}]},
+                headers=DEAD_HEADERS,
             )
         if token not in COURSES:
-            return httpx.Response(401, json={"errors": [{"message": "Invalid access token."}]})
+            return httpx.Response(
+                401, json={"errors": [{"message": "Invalid access token."}]}
+            )
         if path == "/api/v1/users/self":
             return httpx.Response(200, json={"id": 42, "name": "Ada"})
         if token in self.permission_denied:
             return httpx.Response(
                 401,
-                json={"errors": [{"message": "user not authorized to perform that action"}]},
+                json={
+                    "errors": [
+                        {"message": "user not authorized to perform that action"}
+                    ]
+                },
                 headers=DEAD_HEADERS if self.permission_challenge else None,
             )
         if path == "/api/v1/courses":
@@ -97,50 +98,32 @@ class FakeCanvas:
 
 @pytest.fixture
 def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNamespace]:
-    monkeypatch.setattr(fastmcp.settings, "home", tmp_path / "fastmcp")
-    monkeypatch.setenv("CANVAS_API_URL", CANVAS)
-    for name in ("CANVAS_API_TOKEN", "CANVAS_ROLE"):
-        monkeypatch.delenv(name, raising=False)
-    from canvas_mcp.core.config import reset_config
-
-    reset_config()
-    settings = load_selfhost_settings({
-        "PUBLIC_BASE_URL": BASE,
-        "ENTRA_TENANT_ID": TENANT,
-        "ENTRA_CLIENT_ID": CLIENT,
-        "ENTRA_CLIENT_SECRET": "entra-client-secret-0123456789",
-        "OAUTH_JWT_SIGNING_KEY": "jwt-signing-key-" + "z" * 40,
-        "ACCOUNT_SESSION_SECRET": base64.b64encode(bytes(range(32))).decode(),
-        "CANVAS_TOKEN_KEYS": "k1:" + base64.b64encode(bytes(32)).decode(),
-        "FASTMCP_HOME": str(tmp_path / "fastmcp"),
-        "SELFHOST_DATA_DIR": str(tmp_path / "data"),
-        **stack_env(),
-    })
-    runtime = prepare_selfhost(settings)
+    h = build_harness(tmp_path, register_tools=register_course_tools)
+    runtime = h.stack.runtime
+    tokens = {}
+    for label, oid in (("A", OID_A), ("B", OID_B)):
+        tokens["bearer-" + label] = h.stack.tokens_for(User(label, oid))[1][
+            "access_token"
+        ]
 
     def enroll(oid: str, token: str) -> None:
-        store_put(runtime.store,
-            tenant_id=TENANT, object_id=oid, api_token=token, canvas_user_id="42",
-            canvas_user_name="n", entra_display_name="n", entra_upn="n@example.test",
-            canvas_host="canvas.example.edu",
-        )
+        put_row(h.store, oid, token=token, name="n", canvas_user_id="42")
 
     enroll(OID_A, TOKEN_A)
     enroll(OID_B, TOKEN_B)
 
-    config: Any = SimpleNamespace(canvas_api_url=f"{CANVAS}/api/v1")
-    mcp = FastMCP("integration", auth=StaticTokenVerifier(TOKENS, required_scopes=["Canvas.Access"]))
-    register_course_tools(mcp)
-    install_selfhost(mcp, runtime, config)
-    app = build_selfhost_asgi_app(mcp, runtime, config)
     canvas = FakeCanvas()
 
-    with respx.mock(assert_all_called=False) as router, TestClient(app, base_url=BASE) as client:
+    with respx.mock(assert_all_called=False) as router:
         router.route(host="canvas.example.edu").mock(side_effect=canvas)
         yield SimpleNamespace(
-            client=client, runtime=runtime, canvas=canvas, enroll=enroll, store=runtime.store
+            client=h.client,
+            runtime=runtime,
+            canvas=canvas,
+            enroll=enroll,
+            store=runtime.store,
+            tokens=tokens,
         )
-    reset_config()
 
 
 def status_of(stack: SimpleNamespace, key: str = KEY_A) -> Any:
@@ -167,7 +150,9 @@ class TestDeadTokenEndToEnd:
 
         stack.canvas.seen.clear()
         second = call_tool(stack, "bearer-A", "list_courses")
-        third = call_tool(stack, "bearer-A", "get_course_details", {"course_identifier": "101"})
+        third = call_tool(
+            stack, "bearer-A", "get_course_details", {"course_identifier": "101"}
+        )
 
         assert second["isError"] is True and third["isError"] is True
         assert token_rejected_message(ACCOUNT_URL) in text_of(second)
@@ -186,10 +171,16 @@ class TestDeadTokenEndToEnd:
         call_tool(stack, "bearer-A", "list_courses")
         assert status_of(stack).status == STATUS_INVALID
 
-        stack.enroll(OID_A, NEW_TOKEN_A)  # what the account page does on a successful save
+        stack.enroll(
+            OID_A, NEW_TOKEN_A
+        )  # what the account page does on a successful save
 
         info = status_of(stack)
-        assert info.status == STATUS_ACTIVE and info.invalid_reason is None and info.invalid_since is None
+        assert (
+            info.status == STATUS_ACTIVE
+            and info.invalid_reason is None
+            and info.invalid_since is None
+        )
         result = call_tool(stack, "bearer-A", "list_courses")
         assert result["isError"] is False and "ICS 33" in text_of(result)
         assert stack.canvas.seen[-1] == ("/api/v1/courses", NEW_TOKEN_A)
@@ -207,7 +198,9 @@ class TestDeadTokenEndToEnd:
 
     def test_a_suspicious_401_that_the_probe_clears_is_a_permission_error(self, stack):
         stack.canvas.permission_denied.add(TOKEN_A)
-        stack.canvas.permission_challenge = True  # looks like a dead token at first sight
+        stack.canvas.permission_challenge = (
+            True  # looks like a dead token at first sight
+        )
         result = call_tool(stack, "bearer-A", "list_courses")
         assert "401" in text_of(result)
         assert token_rejected_message(ACCOUNT_URL) not in text_of(result)
@@ -224,7 +217,7 @@ class TestDeadTokenEndToEnd:
         assert before is not None
         # Make the stored time old enough for the rate limit to allow a write.
         with raw_connection(stack.runtime.store) as conn:
-            conn.execute("UPDATE canvas_tokens SET last_verified_at = 1")
+            conn.execute("UPDATE canvas_credentials SET last_verified_at = 1")
         call_tool(stack, "bearer-A", "list_courses")
         assert status_of(stack).last_verified_at > 1
 
@@ -248,25 +241,38 @@ class TestMarkedInvalidBeforeTheCall:
         assert token_rejected_message(ACCOUNT_URL) in text_of(result)
         assert stack.canvas.seen == []
 
-    def test_listing_tools_still_works_so_the_user_can_read_the_instructions(self, stack):
+    def test_listing_tools_still_works_so_the_user_can_read_the_instructions(
+        self, stack
+    ):
         stack.store.mark_invalid(KEY_A, reason=REASON_CANVAS_TOKEN_REJECTED)
         from .test_selfhost_integration import result_of, rpc
 
-        names = {tool["name"] for tool in result_of(rpc(stack, "bearer-A", "tools/list"))["tools"]}
+        names = {
+            tool["name"]
+            for tool in result_of(rpc(stack, "bearer-A", "tools/list"))["tools"]
+        }
         assert "list_courses" in names
 
 
 class TestDecryptFailure:
     def test_an_unreadable_row_is_marked_invalid_and_stays_that_way(self, stack):
         with raw_connection(stack.runtime.store) as conn:
-            conn.execute("UPDATE canvas_tokens SET ciphertext = ? WHERE principal_key = ?", (b"x" * 40, acct_key(OID_A)))
+            conn.execute(
+                "UPDATE canvas_credentials SET ciphertext = ? WHERE account_id = ?",
+                (b"x" * 40, acct_key(OID_A)),
+            )
 
-        first = call_tool(stack, "bearer-A", "list_courses")
+        first = rpc(
+            stack, "bearer-A", "tools/call", {"name": "list_courses", "arguments": {}}
+        )
 
-        assert first["isError"] is True
-        assert unreadable_token_message(ACCOUNT_URL) in text_of(first)
+        assert first.status_code == 503
+        assert unreadable_token_message(ACCOUNT_URL) in first.json()["error"]
         info = status_of(stack)
-        assert info.status == STATUS_INVALID and info.invalid_reason == REASON_DECRYPT_FAILED
+        assert (
+            info.status == STATUS_INVALID
+            and info.invalid_reason == REASON_DECRYPT_FAILED
+        )
         since = info.invalid_since
 
         second = call_tool(stack, "bearer-A", "list_courses")
@@ -276,8 +282,19 @@ class TestDecryptFailure:
 
     def test_saving_a_new_token_clears_the_mark(self, stack):
         with raw_connection(stack.runtime.store) as conn:
-            conn.execute("UPDATE canvas_tokens SET ciphertext = ? WHERE principal_key = ?", (b"x" * 40, acct_key(OID_A)))
-        call_tool(stack, "bearer-A", "list_courses")
+            conn.execute(
+                "UPDATE canvas_credentials SET ciphertext = ? WHERE account_id = ?",
+                (b"x" * 40, acct_key(OID_A)),
+            )
+        assert (
+            rpc(
+                stack,
+                "bearer-A",
+                "tools/call",
+                {"name": "list_courses", "arguments": {}},
+            ).status_code
+            == 503
+        )
         stack.enroll(OID_A, NEW_TOKEN_A)
         assert status_of(stack).status == STATUS_ACTIVE
         assert call_tool(stack, "bearer-A", "list_courses")["isError"] is False

@@ -22,8 +22,8 @@ function rowOf(text: string): HTMLElement {
 }
 
 const PROVIDERS = [
-  { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/account/login/entra' },
-  { id: 'google', kind: 'oidc', name: 'Google', icon: 'google', start_url: '/account/login/google' },
+  { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/auth/login/entra' },
+  { id: 'google', kind: 'oidc', name: 'Google', icon: 'google', start_url: '/auth/login/google' },
 ]
 
 /** A server with two providers whose /me/identities answer is whatever the test passes. */
@@ -128,7 +128,7 @@ describe('Sign-in methods', () => {
     ['https://user:pass@idp.example.test/authorize'],
     ['https://idp.example.test/au\u0000thorize'],
     ['//idp.example.test/authorize'],
-    ['/account/login/google'],
+    ['/auth/login/google'],
     [''],
   ])('does not navigate to an address that is not a plain https page (%j)', async (bad) => {
     const user = userEvent.setup()
@@ -258,7 +258,7 @@ describe('Sign-in methods', () => {
       await user.click(within(alert).getByRole('button', { name: 'Sign in again' }))
       // Several providers: the chooser stays open for a person who is already signed in.
       expect(hardNavigate).toHaveBeenCalledWith(
-        '/account/login?reauth=1&return_to=%2Faccount%2Fsign-in-methods',
+        '/auth/login?reauth=1&return_to=%2Faccount%2Fsign-in-methods',
       )
     })
 

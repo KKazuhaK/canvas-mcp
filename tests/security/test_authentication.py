@@ -50,7 +50,9 @@ class TestAPITokenSecurity:
         from canvas_mcp.server import _validate_token
 
         # Mock a successful /users/self response
-        with patch("canvas_mcp.core.client.make_canvas_request", new_callable=AsyncMock) as mock_req:
+        with patch(
+            "canvas_mcp.core.client.make_canvas_request", new_callable=AsyncMock
+        ) as mock_req:
             mock_req.return_value = {"id": 1, "name": "Test User"}
             ok, msg = await _validate_token()
             assert ok is True
@@ -61,7 +63,9 @@ class TestAPITokenSecurity:
         """Verify _validate_token returns True on successful /users/self."""
         from canvas_mcp.server import _validate_token
 
-        with patch("canvas_mcp.core.client.make_canvas_request", new_callable=AsyncMock) as mock_req:
+        with patch(
+            "canvas_mcp.core.client.make_canvas_request", new_callable=AsyncMock
+        ) as mock_req:
             mock_req.return_value = {"id": 42, "name": "Dr. Smith"}
             ok, msg = await _validate_token()
             assert ok is True
@@ -72,7 +76,9 @@ class TestAPITokenSecurity:
         """Verify _validate_token returns False on API error."""
         from canvas_mcp.server import _validate_token
 
-        with patch("canvas_mcp.core.client.make_canvas_request", new_callable=AsyncMock) as mock_req:
+        with patch(
+            "canvas_mcp.core.client.make_canvas_request", new_callable=AsyncMock
+        ) as mock_req:
             mock_req.return_value = {"error": "Invalid access token."}
             ok, msg = await _validate_token()
             assert ok is False
@@ -83,7 +89,9 @@ class TestAPITokenSecurity:
         """Verify _validate_token handles network exceptions gracefully."""
         from canvas_mcp.server import _validate_token
 
-        with patch("canvas_mcp.core.client.make_canvas_request", new_callable=AsyncMock) as mock_req:
+        with patch(
+            "canvas_mcp.core.client.make_canvas_request", new_callable=AsyncMock
+        ) as mock_req:
             mock_req.side_effect = ConnectionError("Network unreachable")
             ok, msg = await _validate_token()
             assert ok is False
@@ -100,7 +108,7 @@ class TestAPITokenSecurity:
         if not env_file.exists():
             pytest.skip(".env file not found - skipping permissions check")
 
-        if os.name == 'nt':  # Skip on Windows
+        if os.name == "nt":  # Skip on Windows
             pytest.skip("File permission check not applicable on Windows")
 
         # Check file permissions (should ideally be 600)
@@ -108,9 +116,9 @@ class TestAPITokenSecurity:
         permissions = oct(stat_info.st_mode)[-3:]
 
         # In dev/CI environments, permissions may vary - just warn, don't fail
-        if permissions[2] != '0':
+        if permissions[2] != "0":
             pytest.skip(f".env is world-readable ({permissions}) - fix in production")
-        if permissions[1] != '0':
+        if permissions[1] != "0":
             pytest.skip(f".env is group-readable ({permissions}) - fix in production")
 
     def test_env_in_gitignore(self):
@@ -135,9 +143,9 @@ class TestAPITokenSecurity:
             content = py_file.read_text(encoding="utf-8")
 
             # Skip comments and docstrings (simple approach)
-            lines = content.split('\n')
+            lines = content.split("\n")
             for line in lines:
-                if line.strip().startswith('#'):
+                if line.strip().startswith("#"):
                     continue
                 if '"""' in line or "'''" in line:
                     continue
@@ -150,11 +158,19 @@ class TestAPITokenSecurity:
                         continue
                     if "CANVAS_API_TOKEN" in line:  # Environment variable reference
                         continue
+                    # SQLAlchemy constraint/index names are public schema identifiers.
+                    if re.fullmatch(r"(?:uq|ck|fk|pk|ix)_[a-z][a-z0-9_]*", match[1:-1]):
+                        continue
+                    # RFC 9207's discovery field is a public protocol label.
+                    if match[1:-1] == "authorization_response_iss_parameter_supported":
+                        continue
 
                     # If we find a suspicious token, flag it
                     # This is a basic check - adjust as needed
                     if len(match) > 40:
-                        pytest.fail(f"Potential hardcoded token in {py_file}: {line.strip()}")
+                        pytest.fail(
+                            f"Potential hardcoded token in {py_file}: {line.strip()}"
+                        )
 
 
 class TestAuthorizationControls:
@@ -216,12 +232,16 @@ class TestSecretsInVersionControl:
             content = template.read_text(encoding="utf-8")
 
             # Verify placeholder values only
-            assert "your_canvas_api_token_here" in content.lower() or \
-                   "your-institution" in content.lower()
+            assert (
+                "your_canvas_api_token_here" in content.lower()
+                or "your-institution" in content.lower()
+            )
 
             # Verify no real-looking tokens
-            assert not re.search(r'[A-Za-z0-9]{40,}', content) or \
-                   "example" in content.lower()
+            assert (
+                not re.search(r"[A-Za-z0-9]{40,}", content)
+                or "example" in content.lower()
+            )
 
 
 if __name__ == "__main__":

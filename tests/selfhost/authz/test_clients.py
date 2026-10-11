@@ -6,7 +6,6 @@ import pytest
 from mcp.shared.auth import InvalidRedirectUriError, OAuthClientInformationFull
 from pydantic import AnyUrl
 
-from canvas_mcp.core.selfhost import oauth
 from canvas_mcp.core.selfhost.authz.clients import (
     DCR_TTL_SECONDS,
     PublicClient,
@@ -34,8 +33,8 @@ def error_of(client: OAuthClientInformationFull) -> str | None:
     return None if problem is None else problem.error
 
 
-def test_a_registration_lives_as_long_as_the_proxy_kept_one() -> None:
-    assert DCR_TTL_SECONDS == oauth.DCR_CLIENT_TTL_SECONDS == 30 * 86400
+def test_registration_lifetime_is_thirty_days() -> None:
+    assert DCR_TTL_SECONDS == 30 * 86400
 
 
 class TestValidation:

@@ -1,11 +1,9 @@
 # canvas-mcp-account-web
 
-The React account UI for the self-hosted Canvas MCP server. It replaces the
-server-rendered `/account` pages and is served by the Python server under
-`/account/` when `ACCOUNT_UI=react` is set (see
-[Serving](#serving) and `deploy/selfhost/README.md`, "Account UI"). With
-`ACCOUNT_UI=legacy` (the default) the server-rendered pages stay in charge and none of
-this is used.
+The mandatory React account UI for the self-hosted Canvas MCP server, served
+under `/account/`. API requests use `/api/v1`; sign-in and authorization use the
+server's `/auth/*` routes. `ACCOUNT_UI` and the server-rendered pages are removed.
+A missing or invalid production build refuses startup.
 
 Vite + React 19 + TypeScript 7, MUI 9, React Router 8 (data router), TanStack
 Query 5 for server state, i18next for English and Chinese, axios for the one
@@ -20,7 +18,7 @@ Needs Node 24 or newer.
 cd web
 npm ci --ignore-scripts      # never `npm install` in CI or Docker
 npm run dev:mock             # http://127.0.0.1:5175/account/ with the in-browser mock API (no backend needed)
-npm run dev                  # same, but proxies /account/api, /account/login and /account/callback to the Python server
+npm run dev                  # same, but proxies /api/v1, /auth/login and /auth/callback to the Python server
 ```
 
 `npm run dev` proxies those three paths to `http://127.0.0.1:8819` (override with
@@ -35,7 +33,7 @@ else is what the mock mode is for.
 
 `npm run dev:mock` runs Vite with `--mode mock`, which loads `.env.mock`
 (`VITE_MOCK=1`). `src/main.tsx` then swaps the axios adapter for
-`src/dev/mockServer.ts`, an in-memory implementation of every `/account/api`
+`src/dev/mockServer.ts`, an in-memory implementation of every `/api/v1`
 route. It is built from the same `Contract` table as the real client (see
 [API contract](#api-contract)), so a handler that returns the wrong shape does not
 compile. It copies the server's pipeline too: the session and pending checks, the
@@ -61,7 +59,7 @@ Pick a scenario with `?mock=<name>` on the first page load:
 | `no-write-tools` | the server has no write-tool catalog (the screen is hidden) |
 | `error-503` | saving the token answers `token_store_unavailable` |
 | `rate-limited` | token save and re-check answer `rate_limited` |
-| `local` | the server's own authorization server (`SELFHOST_AUTH_MODE=local`): consent screen and Connected apps |
+| `local` | the server's own authorization server (`MCP_AUTH_MODE=selfhost`): consent screen and Connected apps |
 | `local-owner` | the same, as an owner (the per-account apps dialog on the accounts page) |
 | `local-pending` | the same, as an account waiting for approval (the consent screen can only cancel) |
 
@@ -72,7 +70,7 @@ Handy URLs: `/account/?mock=fresh`, `/account/admin?mock=owner`,
 any other well-formed id answers `authorization_invalid`, like an expired or used request. Token inputs containing `rejected` or
 `offline` trigger `token_rejected` and `canvas_unavailable`; a search containing
 `offline` triggers `directory_unavailable`. The sign-in hand-off (a full-page
-navigation to `/account/login`) is bounced back into the app by a tiny dev-only Vite
+navigation to `/auth/login`) is bounced back into the app by a tiny dev-only Vite
 middleware. Mock state resets on reload.
 
 The mock can never ship: it is reached only through
@@ -119,7 +117,7 @@ pending account, Canvas token enroll / replace / re-check / delete (school list 
 directory search, optional expiry date, identity-change confirmation, invalid-token
 and expiry banners), write tools (with **Turn all off**), recent sign-ins, and
 owner-only accounts, enrollments and audit log. With the server's own authorization server
-(`SELFHOST_AUTH_MODE=local`, the `consent` and `connected_apps` flags of `GET /me`) there are two more:
+(`MCP_AUTH_MODE=selfhost`, the `consent` and `connected_apps` flags of `GET /me`) there are two more:
 the consent screen (`/consent?txn=...`, outside the signed-in routes: a signed-out visitor goes to the
 server-side sign-in of that request, and the page navigates to the app's return address after checking it,
 never by a form post) and **Connected apps** (a list with a confirmed revoke, plus an owner's per-account
@@ -127,13 +125,15 @@ dialog). Layout is phone-first (16 px
 gutters, stacked cards below 900 px, no horizontal page scroll at 360 px) and
 follows `prefers-color-scheme` with an optional light/dark toggle.
 
-What is **not** here on purpose: linked sign-in methods, role changes, "sign out everywhere".
-The server does not have them yet; it says so in `features` of `GET /account/api/me`, those routes
-are not in `contract.ts`, and the navigation lists only what `features` allows (`RequireFeature`
-answers a deep link to a missing feature like any unknown page). Consent and connected apps are in
-`contract.ts` because the server always lists their routes, but it serves them only in
-`SELFHOST_AUTH_MODE=local` (`not_found` otherwise) and sets `features.consent` and
-`features.connected_apps` accordingly.
+Sign-in method linking/unlinking, owner account configuration and connected apps
+use the server's feature flags. Client route gates control the view; each API call
+checks authoritative account and owner state on the server. Role management,
+persisted web sessions, quotas and Canvas OAuth remain reserved.
+
+All six account/admin lists support Load more with opaque `cursor` and bounded
+`limit` queries. Server filters start a fresh query; account-name search and
+audit-action filtering cover loaded pages. See
+[Pagination](../deploy/selfhost/PAGINATION.md) for the wire and operator contracts.
 
 ## Language
 
@@ -143,7 +143,7 @@ The language changes only through the toggle, which stores `en` or `zh` in
 `localStorage` under `canvas_mcp_lang` (a per-viewer convenience, always wrapped
 in try/catch), or through an explicit `?lang=en|zh` link, which applies for that
 page view and is not stored. When signed in, the toggle also tells the server
-(`PUT /account/api/me/ui-locale`), which keeps it in the `canvas_mcp_lang` cookie the
+(`PUT /api/v1/me/ui-locale`), which keeps it in the `canvas_mcp_lang` cookie the
 server-rendered pages read; in another browser that has made no choice, that
 remembered value (`ui_locale` of `GET /me`) is applied for the page view. Locale files
 live in `src/locales/{en,zh}/` as the namespaces `common`, `auth`, `account`, `admin`,
@@ -163,9 +163,9 @@ the client and screen tests), lint, or `check-dist.mjs`:
   never writes a credential, session id, CSRF token or Canvas token to
   `localStorage`, `sessionStorage`, IndexedDB, JS cookies or a URL. `localStorage`
   is used only by `stores/language.ts` and `stores/theme.ts`. Signing in is never an
-  XHR: it is a full-page navigation to the server's `/account/login`, which goes to
-  the identity provider and returns through `/account/callback`.
-- **Same origin only.** `baseURL` is `/account/api`, `withCredentials` is true,
+  XHR: it is a full-page navigation to the server's `/auth/login`, which goes to
+  the identity provider and returns through `/auth/callback`.
+- **Same origin only.** `baseURL` is `/api/v1`, `withCredentials` is true,
   there are no absolute API URLs, CORS or third-party requests.
 - **CSRF.** Every POST/PUT/PATCH/DELETE, and the school search GET (which the server
   counts as a change), sends `X-CSRF-Token` from the in-memory result of `GET /me`
@@ -189,14 +189,14 @@ the client and screen tests), lint, or `check-dist.mjs`:
   that come from Canvas or the identity provider are rendered as React text.
 - **Redirect safety.** `return_to` goes through `utils/returnTo.ts`, which applies the
   same rules as the server's `sanitize_return_to` (at most 512 ASCII characters,
-  inside `/account`, not `/account/api`, `/account/login` or `/account/callback`, no
+  inside `/account`, not `/api/v1`, `/auth/login` or `/auth/callback`, no
   `//`, backslash, control character or dot segment, and again after percent-decoding).
   A provider's `start_url` is used only if it is a plain path on this site. There is no
   automatic redirect to the provider: a person who just signed out, or whose browser
   drops the session cookie, would loop.
 - **A recent sign-in** is required for owner pages and for turning a write tool on
   (`reauth_required`). The screen shows a **Sign in again** button that goes through
-  `/account/login?return_to=<this page>`; it does not redirect by itself, because that
+  `/auth/login?return_to=<this page>`; it does not redirect by itself, because that
   would throw away unsaved changes and could loop.
 - **External links** render through `components/ExternalLink.tsx`: https only,
   `target="_blank" rel="noopener noreferrer"`, otherwise plain text.
@@ -227,7 +227,7 @@ base-uri 'none'; form-action 'self'
 `index.html` has exactly one external module script and no inline script, no
 inline handlers and no runtime config injected by script. `script-src` needs no
 nonce and no `'unsafe-eval'`. The one concession is `style-src 'unsafe-inline'`:
-MUI/Emotion injects `<style>` tags at runtime, as the legacy pages already did.
+MUI/Emotion injects `<style>` tags at runtime.
 A nonce-based `style-src` would need a per-request nonce in `index.html` and an
 Emotion cache created with that nonce (`createCache({ key: 'css', nonce })`);
 deferred until the owner wants it. `form-action 'self'` stays because the sign-in
@@ -237,24 +237,23 @@ hand-off is a top-level navigation, not a form post.
 
 `Dockerfile.selfhost` builds `web/` in a Node stage and copies the result to
 `/app/web-dist`; `ACCOUNT_WEB_DIST` points there (from a checkout, point it at
-`web/dist`). With `ACCOUNT_UI=react` the Python server reads the build into memory at
+`web/dist`). The Python server reads the mandatory build into memory at
 start and checks it (`src/canvas_mcp/core/selfhost/account_spa.py`): one `index.html`
 that loads one module script from `/account/assets/`, plain asset names, every
 reference present. It then serves `index.html` with `Cache-Control: no-store` for
-`/account/` and every other GET below it that is not `/account/api`, the hashed files
+`/account/` and every other GET below it that is not `/api/v1`, the hashed files
 under `/account/assets/` as immutable, and an unknown asset as a plain 404. If the
-build is missing or unusable it logs one line and serves the legacy pages instead,
-never a broken app. `scripts/check-dist.mjs` and the server's loader enforce the same
+build is missing or unusable startup is refused with an operator error. `scripts/check-dist.mjs` and the server's loader enforce the same
 shape, so a build that passes `npm run check:dist` loads.
 
 Because the mount path is fixed, the app's own routes are `/account/` (home),
 `/account/sign-in`, `/account/token`, `/account/write-tools`, `/account/activity` and
-`/account/admin[/enrollments|/audit]`. `/account/login` and `/account/callback` are
+`/account/admin[/enrollments|/audit]`. `/auth/login` and `/auth/callback` are
 the server's, not the app's.
 
 ## API contract
 
-All routes are same-origin under `/account/api`, JSON in and out, every response
+All routes are same-origin under `/api/v1`, JSON in and out, every response
 `Cache-Control: no-store`, failures as `{ "error": { "code", "params?" } }`.
 
 - `src/api/contract.ts` is the route table: one entry per `METHOD /path` with its

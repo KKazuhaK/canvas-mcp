@@ -38,7 +38,7 @@ def exchange(stack: Stack, client_id: str, verifier: str, code: str, **overrides
 
 
 def grant_rows(stack: Stack) -> list[tuple]:
-    return raw_sql(stack.store, "SELECT id, revoked_reason, expires_at FROM oauth_grants")
+    return [(str(row[0]), row[1], row[2]) for row in raw_sql(stack.store, "SELECT id, revoked_reason, expires_at FROM oauth_grants")]
 
 
 @pytest.fixture
@@ -66,9 +66,9 @@ class TestRegistration:
         assert body.get("client_secret_expires_at") is None
         assert body["scope"] == SCOPE and body["redirect_uris"] == [CLAUDE_REDIRECT]
         assert "jwks_uri" not in body and "contacts" not in body
-        stored = raw_sql(stack.store, "SELECT info_json, expires_at, created_at FROM oauth_clients")[0]
-        assert "client_secret" not in stored[0] or '"client_secret":null' in stored[0].replace(" ", "")
-        assert stored[1] - stored[2] == 30 * 86400
+        stored = stack.authz.store.get_client_record(body["client_id"])
+        assert stored.info.get("client_secret") is None
+        assert stored.expires_at - stored.created_at == 30 * 86400
 
     def test_without_a_method_the_stock_default_secret_is_not_kept(self, stack: Stack) -> None:
         response = stack.client.post("/register", json={"redirect_uris": [CLAUDE_REDIRECT]})
@@ -165,11 +165,11 @@ class TestTokenEndpoint:
         assert set(tokens) == {"access_token", "token_type", "expires_in", "scope", "refresh_token"}
         assert tokens["token_type"] == "Bearer" and tokens["scope"] == SCOPE
         assert 3500 < tokens["expires_in"] <= 3600
-        claims = stack.authz.codec.decode(tokens["access_token"])
+        claims = stack.authz.codec.decode(tokens["access_token"]).claims
         assert claims["client_id"] == client_id and claims["acct"] == alice and claims["aud"] == AUDIENCE
         assert tk.REFRESH_RE.fullmatch(tokens["refresh_token"])
         rows = raw_sql(stack.store, "SELECT token_hash FROM oauth_refresh_tokens")
-        assert rows == [(tk.hash_secret(tokens["refresh_token"]),)]
+        assert rows == [(bytes.fromhex(tk.hash_secret(tokens["refresh_token"])),)]
 
     def test_a_foreign_resource_is_invalid_target_and_a_missing_one_is_fine(self, stack: Stack, alice: str) -> None:
         client_id, verifier, code, _ = stack.code_for(ALICE)
@@ -311,7 +311,7 @@ class TestRefresh:
         assert refreshed.status_code == 200
         new = refreshed.json()
         assert new["refresh_token"] != tokens["refresh_token"] and new["access_token"] != tokens["access_token"]
-        assert {r[0] for r in raw_sql(stack.store, "SELECT expires_at FROM oauth_refresh_tokens")} == {cap}
+        assert {r[0] for r in raw_sql(stack.store, "SELECT g.expires_at FROM oauth_refresh_tokens r JOIN oauth_grants g ON g.id=r.grant_id")} == {cap}
         assert stack.mcp_status(new["access_token"]) == 200
 
     def test_downscoping_to_the_granted_scope_works_and_escalation_burns_nothing(self, stack: Stack, alice: str) -> None:
@@ -467,8 +467,8 @@ class TestMcpEndpoint:
         anyio.run(stack.authz.grants.revoke_own, grant_id, alice)
         assert stack.mcp_status(tokens["access_token"]) == 401
 
-    def test_a_change_made_elsewhere_is_noticed_after_the_cache_time(self, tmp_path, monkeypatch) -> None:
-        with local_stack(tmp_path, monkeypatch, env={"GRANT_STATUS_CACHE_S": "1"}) as stack:
+    def test_a_change_made_elsewhere_is_noticed_at_the_next_request(self, tmp_path, monkeypatch) -> None:
+        with local_stack(tmp_path, monkeypatch, env={}) as stack:
             alice = stack.enroll(ALICE)
             _, tokens = stack.tokens_for(ALICE)
             assert stack.mcp_status(tokens["access_token"]) == 200
@@ -478,12 +478,10 @@ class TestMcpEndpoint:
 
             other = AuthzStore(stack.store.database)
             assert other.revoke_own_grant(grant_id, alice)
-            assert stack.mcp_status(tokens["access_token"]) == 200  # still cached
-            time.sleep(1.2)
             assert stack.mcp_status(tokens["access_token"]) == 401
 
     def test_with_no_cache_every_request_asks_the_database(self, tmp_path, monkeypatch) -> None:
-        with local_stack(tmp_path, monkeypatch, env={"GRANT_STATUS_CACHE_S": "0"}) as stack:
+        with local_stack(tmp_path, monkeypatch, env={}) as stack:
             alice = stack.enroll(ALICE)
             _, tokens = stack.tokens_for(ALICE)
             assert stack.mcp_status(tokens["access_token"]) == 200
@@ -493,25 +491,21 @@ class TestMcpEndpoint:
     def test_disabling_the_account_revokes_its_grants_in_the_same_transaction(self, stack: Stack, alice: str) -> None:
         _, tokens = stack.tokens_for(ALICE)
         stack.store.disable_principal(alice, actor=OPERATOR, reason="operator_disabled")
-        stack.authz.account_changed(alice)
         assert grant_rows(stack)[0][1] == "account_disabled"
         assert stack.mcp_status(tokens["access_token"]) == 401
 
-    def test_within_the_cache_window_the_request_context_still_refuses_a_disabled_account(
-        self, stack: Stack, alice: str
-    ) -> None:
+    def test_a_disablement_is_immediate_without_an_invalidation_hook(self, stack: Stack, alice: str) -> None:
         _, tokens = stack.tokens_for(ALICE)
-        assert stack.mcp_status(tokens["access_token"]) == 200  # both caches now hold "fine"
-        stack.store.disable_principal(alice, actor=OPERATOR, reason="operator_disabled")  # another process
-        stack.runtime.access.invalidate()  # the 5 s account cache has expired; the grant cache has not
-        response = stack.rpc(tokens["access_token"], "tools/list")
-        assert response.status_code == 403 and "disabled" in response.text
+        assert stack.mcp_status(tokens["access_token"]) == 200
+        stack.store.disable_principal(alice, actor=OPERATOR, reason="operator_disabled")
+        assert stack.rpc(tokens["access_token"], "tools/list").status_code == 401
 
     def test_a_token_whose_account_is_not_the_grants_is_refused(self, stack: Stack, alice: str) -> None:
         bob = stack.enroll(BOB)
         _, tokens = stack.tokens_for(ALICE)
-        claims = stack.authz.codec.decode(tokens["access_token"])
+        claims = stack.authz.codec.decode(tokens["access_token"]).claims
         forged = stack.authz.codec.encode(
+            epoch=stack.authz.store.jwt_epoch(),
             account_key=bob, client_id=claims["client_id"], grant_id=claims["grant"],
             scopes=[SCOPE], expires_at=claims["exp"],
         ).token
@@ -519,8 +513,9 @@ class TestMcpEndpoint:
 
     def test_a_token_of_another_client_for_the_same_grant_is_refused(self, stack: Stack, alice: str) -> None:
         _, tokens = stack.tokens_for(ALICE)
-        claims = stack.authz.codec.decode(tokens["access_token"])
+        claims = stack.authz.codec.decode(tokens["access_token"]).claims
         forged = stack.authz.codec.encode(
+            epoch=stack.authz.store.jwt_epoch(),
             account_key=alice, client_id="someone-else", grant_id=claims["grant"],
             scopes=[SCOPE], expires_at=claims["exp"],
         ).token
@@ -528,22 +523,21 @@ class TestMcpEndpoint:
 
     def test_a_token_for_a_grant_that_does_not_exist_is_refused(self, stack: Stack, alice: str) -> None:
         forged = stack.authz.codec.encode(
+            epoch=stack.authz.store.jwt_epoch(),
             account_key=alice, client_id="c", grant_id="11111111-1111-4111-8111-111111111111",
             scopes=[SCOPE], expires_at=int(time.time()) + 600,
         ).token
         assert stack.mcp_status(forged) == 401
 
-    def test_an_unreadable_database_fails_closed_but_a_cached_answer_is_served(self, stack: Stack, alice: str, monkeypatch) -> None:
+    def test_an_unreadable_database_is_503_after_a_successful_request(self, stack: Stack, alice: str, monkeypatch) -> None:
         _, tokens = stack.tokens_for(ALICE)
-        assert stack.mcp_status(tokens["access_token"]) == 200  # cached
+        assert stack.mcp_status(tokens["access_token"]) == 200
 
         def failing(*a: Any, **k: Any) -> None:
             raise StoreUnavailable(kind="OperationalError")
 
-        monkeypatch.setattr(stack.authz.store, "grant_status", failing)
-        assert stack.mcp_status(tokens["access_token"]) == 200  # within the TTL
-        stack.authz.cache.clear()
-        assert stack.mcp_status(tokens["access_token"]) == 401  # cache miss with the database down
+        monkeypatch.setattr(stack.authz.store, "read_mcp_snapshot", failing)
+        assert stack.mcp_status(tokens["access_token"]) == 503
 
     def test_bumping_the_jwt_epoch_invalidates_access_tokens_but_not_the_connection(self, stack: Stack, alice: str) -> None:
         client_id, tokens = stack.tokens_for(ALICE)

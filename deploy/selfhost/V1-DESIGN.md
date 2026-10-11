@@ -1181,7 +1181,7 @@ The PostgreSQL figures are from candidate stress seeds. SQLite plans are index s
 - A statement that deletes or updates `oauth_codes` runs before the account row is locked (by `FOR NO KEY UPDATE`, by an `UPDATE accounts`, or by `bump_credential_generation`). This is today's order in `AuthzStore.revoke_all_for_account` ("codes first, then the account lock").
 - Deleting an account deletes its codes first (`DELETE FROM oauth_codes WHERE account_id = ?`), then deletes the account row, whose cascade reaches the other children. A bare `DELETE FROM accounts` locks the account and then cascades into `oauth_codes`, which is the reverse order.
 - Checked on PostgreSQL 16.2 with a first exchange holding its code row and waiting for the account: an account lock followed by a code delete (revoke-all) and a bare account delete each ended in `DeadlockDetected`; the codes-first forms of both completed, with the exchange succeeding.
-- One reviewed exception: the code-replay branch of `exchange_code` locks the grant (`lock_live`) and then updates the code row (`bump_grace`). It cannot deadlock, because the code is already consumed: no transaction holds a consumed code row while waiting for a grant (a first exchange inserts a new grant, and the revoke-all delete matches only `consumed_at IS NULL`, which it evaluates without waiting on a consumed row).
+- The code-replay branch also follows codes before grants. After the conditional consume, read the code `FOR NO KEY UPDATE` even when consume matched nothing, before `lock_live` and `bump_grace`. The former exception was invalidated by a PostgreSQL concurrent-replay deadlock: an UPDATE waiter can retain a tuple lock while rechecking a consumed row. Keeping the code lock through the grant lock and counter update removes that cycle. Refresh transactions do not write code rows.
 - Among account rows, only G transactions lock more than one, and they are serialised by the advisory lock, so their order among themselves does not matter. The other owners' rows read by `usable_owner_ids` are locked `FOR NO KEY UPDATE` (today `FOR UPDATE`, the reviewed form); the lock is redundant under the advisory lock and costs at most a short wait for those owners' first code exchanges.
 
 **Every write path:**
@@ -1418,7 +1418,7 @@ The API takes `cursor` (an opaque base64url of the last key) and `limit` (defaul
        - the TypeDecorators convert text uuids to `uuid`, 0/1 to boolean, JSON text to `jsonb` and BLOB to `bytea`.
      - Skip `ephemeral` tables (`oauth_codes`, `login_states`).
      - `server_state`: copy `jwt_epoch` and `settings_revision + 1`, so caches rebuild. Keep the target's own `database_id` and `compat_floor`.
-     - `setval(pg_get_serial_sequence(t, 'id'), max(id))` for `auth_events` and `audit_log`; entity ids are uuids and need nothing.
+     - Advance the sequences for `auth_events` and `audit_log` with transactional `ALTER SEQUENCE ... RESTART WITH max(id) + 1`; entity ids are uuids and need nothing. Unlike `setval`, `RESTART` also rolls back if importing into an already initialized empty target fails.
      - Compare row counts per table.
      - Decrypt every sealed value through `SEALED`.
   3. Commit. Any failure rolls back everything.

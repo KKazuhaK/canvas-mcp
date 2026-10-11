@@ -2,9 +2,10 @@
 
 Revision ``${up_revision}``.
 
-If an older server would misread the database after this revision, set
-COMPAT_SCHEMA_VERSION above the previous revision's value: the server refuses
-a database whose ``meta.schema_version`` is newer than it supports.
+Expand revisions leave server_state.compat_floor unchanged. Contract revisions
+raise that floor only after a release stopped using the contracted shape.
+Keep backups, rebuild helpers and upgrade-only code inside this package.
+Never import current schema metadata into a frozen revision.
 """
 
 from __future__ import annotations
@@ -18,7 +19,8 @@ down_revision = ${repr(down_revision)}
 branch_labels = ${repr(branch_labels)}
 depends_on = ${repr(depends_on)}
 
-COMPAT_SCHEMA_VERSION = 4
+CONTRACT = False
+NON_TRANSACTIONAL = False  # PostgreSQL concurrent DDL only; use policy.concurrent_index.
 
 
 def upgrade() -> None:

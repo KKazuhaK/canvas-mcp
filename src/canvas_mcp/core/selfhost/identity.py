@@ -1,39 +1,11 @@
-"""Who may use the server: the one place the MCP path and /account turn claims into an account.
-
-Both entrances use :class:`IdentityService`:
-
-* the MCP endpoint hands it the claims of the verified Entra *access* token
-  (:meth:`IdentityService.resolve_request`), which also checks the issuing client in
-  ``azp``;
-* the ``/account`` sign-in hands it the claims of the verified *id* token
-  (:meth:`IdentityService.sign_in`), whose client is its ``aud``, checked where the
-  token is verified. A provider other than Entra (Google, GitHub, a generic OpenID Connect
-  provider; ``SELFHOST_AUTH_MODE=local`` only) hands it neutral claims that its own
-  ceremony already verified (:meth:`IdentityService.sign_in_external`), and an explicit
-  link from ``/account`` goes through :meth:`IdentityService.link`.
-
-Each reduces the claims to an external identity ``(provider, issuer, subject)`` (for
-Entra: the tenant's issuer URL and the ``oid``), matches it against the configured
-rules, looks the identity up and lets the store decide and apply the result in one
-transaction (:meth:`TokenStore.resolve_identity`). The pure rules live in
-:mod:`.accounts`. For an account that already exists the MCP path only reads: it
-writes when it creates an account the first time the identity is seen, or activates a
-pending one.
-
-``evaluate_entra_claims`` is the first release's rule, rebuilt on the pure functions;
-it is kept as the oracle that the default policy admits exactly the same people.
-"""
+"""Resolve verified sign-in claims and explicit identity links under the admission policy."""
 
 from __future__ import annotations
 
-import threading
-import time
-from collections import OrderedDict
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
-from ..credentials import RequestPrincipal
 from . import accounts as acc
 from .accounts import (
     AccessPolicy,
@@ -43,7 +15,6 @@ from .accounts import (
     Verdict,
 )
 from .token_store import (
-    LINK_OK,
     Actor,
     LinkResult,
     PrincipalStatus,
@@ -51,20 +22,13 @@ from .token_store import (
     UnlinkResult,
 )
 
-DenyReason = Literal["wrong_tenant", "wrong_client", "bad_subject", "missing_role", "bad_roles"]
-
-#: How long a known identity -> account mapping is reused. The cache is read only by the
-#: ``entra_proxy`` MCP path, where linking cannot exist (Entra is the only provider), so a
-#: mapping never changes there; the account's own status is read separately, so a stale
-#: entry cannot widen access. An unlink in this process discards the entry at once.
-IDENTITY_CACHE_SECONDS = 300.0
-_MAX_CACHED_IDENTITIES = 4096
-
 
 class IdentityStore(Protocol):
     """The slice of the token store the service uses."""
 
-    def lookup_identity(self, provider_id: str, issuer: str, subject: str) -> str | None: ...
+    def lookup_identity(
+        self, provider_id: str, issuer: str, subject: str
+    ) -> str | None: ...
 
     def get_principal_status(self, principal_key: str) -> PrincipalStatus: ...
 
@@ -106,70 +70,12 @@ class IdentityStore(Protocol):
     def unlink_identity(
         self,
         principal_key: str,
-        identity_id: int,
+        identity_id: str,
         *,
         actor: Actor,
         expected_epoch: int | None = None,
         listed_providers: Collection[str] | None = None,
     ) -> UnlinkResult: ...
-
-
-class StatusSource(Protocol):
-    """Where the service reads an existing account's status (the access cache, or the store)."""
-
-    def status(self, principal_key: str) -> PrincipalStatus: ...
-
-
-class IdentityCache:
-    """``(provider, issuer, subject)`` -> account key, with a TTL and a size bound.
-
-    Misses are never cached, so an identity that signs in for the first time is
-    found at once. Thread-safe.
-    """
-
-    def __init__(
-        self,
-        *,
-        ttl_seconds: float = IDENTITY_CACHE_SECONDS,
-        max_entries: int = _MAX_CACHED_IDENTITIES,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._ttl = ttl_seconds
-        self._max = max_entries
-        self._clock = clock
-        self._lock = threading.Lock()
-        self._entries: OrderedDict[tuple[str, str, str], tuple[float, str]] = OrderedDict()
-
-    def get(self, identity: tuple[str, str, str]) -> str | None:
-        now = self._clock()
-        with self._lock:
-            entry = self._entries.get(identity)
-            if entry is None:
-                return None
-            if entry[0] <= now:
-                del self._entries[identity]
-                return None
-            return entry[1]
-
-    def put(self, identity: tuple[str, str, str], account_key: str) -> None:
-        with self._lock:
-            self._entries[identity] = (self._clock() + self._ttl, account_key)
-            self._entries.move_to_end(identity)
-            while len(self._entries) > self._max:
-                self._entries.popitem(last=False)
-
-    def discard(self, identity: tuple[str, str, str]) -> None:
-        """Forget one mapping (an identity that was unlinked)."""
-        with self._lock:
-            self._entries.pop(identity, None)
-
-    def clear(self) -> None:
-        with self._lock:
-            self._entries.clear()
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._entries)
 
 
 @dataclass(frozen=True)
@@ -198,25 +104,6 @@ class SignIn:
         return self.status.principal_key
 
 
-def request_principal(
-    ext: ExternalClaims, verdict: Verdict, account_key: str
-) -> RequestPrincipal:
-    """The request context for an admitted account (Entra: tenant and object id stay for the gate)."""
-    return RequestPrincipal(
-        key=account_key,
-        tenant_id=ext.tenant_id,
-        object_id=ext.subject,
-        display_name=ext.display_name,
-        upn=ext.username,
-        roles=ext.roles,
-        is_owner=verdict.owner_by_rule,
-        provider_id=ext.provider_id,
-        issuer=ext.issuer,
-        subject=ext.subject,
-        account_id=acc.account_id_of(account_key),
-    )
-
-
 class IdentityService:
     """Resolve verified claims to an account (or a refusal). Synchronous; run in a thread."""
 
@@ -226,8 +113,6 @@ class IdentityService:
         claims_policy: EntraClaimsPolicy,
         access_policy: AccessPolicy,
         *,
-        access: StatusSource | None = None,
-        cache: IdentityCache | None = None,
         login_providers: Collection[str] | None = None,
     ) -> None:
         # The providers of SELFHOST_LOGIN_PROVIDERS decide which owners are usable (None: every
@@ -238,76 +123,8 @@ class IdentityService:
         self._store = store
         self.claims_policy = claims_policy
         self.access_policy = access_policy
-        self._access = access
-        self.cache = cache or IdentityCache()
 
     # -- the MCP path ----------------------------------------------------------------
-
-    def resolve_request(self, claims: Mapping[str, Any]) -> RequestPrincipal | Denied:
-        """The account behind a verified Entra access token, or why not.
-
-        Existing accounts take a read-only path (identity cache or one indexed lookup,
-        then the access cache). A first sight of the identity, or a pending account a
-        rule now admits, goes through the store's single write transaction. A database
-        error propagates: the caller must fail closed.
-        """
-        ext = acc.entra_external_claims(
-            claims,
-            self.claims_policy,
-            token_kind="access",
-            parse_groups=self.access_policy.has_group_rule(),
-        )
-        if isinstance(ext, Denied):
-            return ext
-        verdict = acc.evaluate_admission(ext, self.access_policy)
-        key = self.cache.get(ext.identity)
-        if key is None:
-            key = self._store.lookup_identity(*ext.identity)
-            if key is not None:
-                self.cache.put(ext.identity, key)
-        bootstrap = acc.is_bootstrap_identity(ext, self.access_policy)
-        if key is None and not bootstrap:
-            # An identity nobody has seen that no rule admits: refuse without taking the
-            # writer lock. (The counts are irrelevant for a refusal; a creation is decided
-            # again with the real counts inside the transaction.)
-            first = acc.decide(None, verdict, self.access_policy, acc.DecisionFacts(), "request")
-            if not first.create and first.denied is not None:
-                return first.denied
-        if key is not None and not bootstrap:
-            status = self._status(key)
-            if not status.missing:
-                decision = acc.decide(
-                    status.facts,
-                    verdict,
-                    self.access_policy,
-                    acc.DecisionFacts(active_owner_count=1),
-                    "request",
-                )
-                if not decision.writes:
-                    if decision.outcome == "allow":
-                        return request_principal(ext, verdict, key)
-                    assert decision.denied is not None
-                    return decision.denied
-        return self._resolve_with_write(ext, verdict, purpose="request")
-
-    def _status(self, key: str) -> PrincipalStatus:
-        if self._access is not None:
-            return self._access.status(key)
-        return self._store.get_principal_status(key)
-
-    def _resolve_with_write(
-        self, ext: ExternalClaims, verdict: Verdict, *, purpose: acc.Purpose
-    ) -> RequestPrincipal | Denied:
-        resolution = self._store.resolve_identity(
-            ext, verdict, self.access_policy, purpose=purpose, listed_providers=self.login_providers
-        )
-        key = resolution.principal_key
-        if key is not None:
-            self.cache.put(ext.identity, key)
-        if resolution.allowed and key is not None:
-            return request_principal(ext, verdict, key)
-        assert resolution.denied is not None
-        return resolution.denied
 
     # -- the /account sign-in ----------------------------------------------------------
 
@@ -327,7 +144,6 @@ class IdentityService:
         ext = acc.entra_external_claims(
             claims,
             self.claims_policy,
-            token_kind="id",
             parse_groups=self.access_policy.has_group_rule(),
         )
         if isinstance(ext, Denied):
@@ -361,19 +177,28 @@ class IdentityService:
         """
         verdict = acc.evaluate_admission(ext, self.access_policy)
         resolution = self._store.resolve_identity(
-            ext, verdict, self.access_policy, purpose="sign_in", ip=ip, ua_hash=ua_hash,
+            ext,
+            verdict,
+            self.access_policy,
+            purpose="sign_in",
+            ip=ip,
+            ua_hash=ua_hash,
             listed_providers=self.login_providers,
         )
         key = resolution.principal_key
-        if key is not None:
-            self.cache.put(ext.identity, key)
         if resolution.outcome == "deny" or resolution.status is None:
             assert resolution.denied is not None
             message = resolution.denied.message
-            if ext.provider_id != acc.PROVIDER_ENTRA and resolution.denied.code == acc.DENY_ACCESS_DENIED:
+            if (
+                ext.provider_id != acc.PROVIDER_ENTRA
+                and resolution.denied.code == acc.DENY_ACCESS_DENIED
+            ):
                 message = acc.NEUTRAL_ACCESS_DENIED
             return SignInDenied(
-                resolution.denied.code, message, account_key=key, reason=resolution.reason
+                resolution.denied.code,
+                message,
+                account_key=key,
+                reason=resolution.reason,
             )
         return SignIn(
             status=resolution.status,
@@ -402,124 +227,22 @@ class IdentityService:
             expected_epoch=expected_epoch,
             ua_hash=ua_hash,
         )
-        if result.code == LINK_OK:
-            self.cache.put(ext.identity, account_key)
         return result
 
     def unlink(
         self,
         account_key: str,
-        identity_id: int,
+        identity_id: str,
         *,
         actor: Actor,
         expected_epoch: int | None = None,
     ) -> UnlinkResult:
-        """Remove an identity from an account and forget its cached mapping."""
+        """Remove an identity from an account."""
         result = self._store.unlink_identity(
-            account_key, identity_id, actor=actor, expected_epoch=expected_epoch,
+            account_key,
+            identity_id,
+            actor=actor,
+            expected_epoch=expected_epoch,
             listed_providers=self.login_providers,
         )
-        if result.ok:
-            self.cache.discard((result.provider_id, result.issuer, result.subject))
         return result
-
-
-# -- the first release's rule, kept as the oracle -------------------------------------
-
-_LEGACY_MESSAGES: dict[str, str] = {
-    "wrong_tenant": acc.DENIAL_MESSAGES[acc.DENY_WRONG_TENANT],
-    "wrong_client": acc.DENIAL_MESSAGES[acc.DENY_WRONG_CLIENT],
-    "bad_subject": acc.DENIAL_MESSAGES[acc.DENY_BAD_SUBJECT],
-    "missing_role": acc.DENIAL_MESSAGES[acc.DENY_ACCESS_DENIED],
-    "bad_roles": acc.DENIAL_MESSAGES[acc.DENY_BAD_ROLES],
-}
-
-
-_LEGACY_CODES: dict[str, DenyReason] = {
-    acc.DENY_WRONG_TENANT: "wrong_tenant",
-    acc.DENY_WRONG_CLIENT: "wrong_client",
-    acc.DENY_BAD_SUBJECT: "bad_subject",
-    acc.DENY_BAD_ROLES: "bad_roles",
-}
-
-
-@dataclass(frozen=True)
-class ClaimsPolicy:
-    """What the first release configured: the tenant, the app and the two roles."""
-
-    tenant_id: str
-    client_id: str
-    required_role: str
-    owner_role: str
-
-
-@dataclass(frozen=True)
-class ClaimsDenied:
-    """A refusal with a stable ``reason`` code and a safe user-facing ``message``."""
-
-    reason: DenyReason
-    message: str
-
-
-def principal_key(tenant_id: str, object_id: str) -> str:
-    """The legacy identity key ``entra:<tid>:<oid>`` (audit lines before the account model)."""
-    return f"entra:{tenant_id}:{object_id}".lower()
-
-
-def _legacy_denied(reason: DenyReason) -> ClaimsDenied:
-    return ClaimsDenied(reason=reason, message=_LEGACY_MESSAGES[reason])
-
-
-def evaluate_entra_claims(
-    claims: Mapping[str, Any],
-    policy: ClaimsPolicy,
-    *,
-    token_kind: Literal["access", "id"],
-) -> RequestPrincipal | ClaimsDenied:
-    """The first release's decision, built on the pure functions of :mod:`.accounts`.
-
-    Admits the holders of ``required_role`` or ``owner_role``; the group claims, which the
-    first release did not read, are ignored. Its principal carries the legacy
-    ``entra:<tid>:<oid>`` key: the production paths use :class:`IdentityService` instead.
-    """
-    ext = acc.entra_external_claims(
-        claims,
-        EntraClaimsPolicy(policy.tenant_id, policy.client_id),
-        token_kind=token_kind,
-        parse_groups=False,
-    )
-    if isinstance(ext, Denied):
-        return _legacy_denied(_LEGACY_CODES.get(ext.code, "bad_roles"))
-    if "roles" not in claims:
-        return _legacy_denied("missing_role")
-    verdict = acc.evaluate_admission(ext, acc.default_policy(policy.required_role, policy.owner_role))
-    if not verdict.admitted_by_rule and not verdict.owner_by_rule:
-        return _legacy_denied("missing_role")
-    return RequestPrincipal(
-        key=principal_key(ext.tenant_id, ext.subject),
-        tenant_id=ext.tenant_id,
-        object_id=ext.subject,
-        display_name=ext.display_name,
-        upn=ext.username,
-        roles=ext.roles,
-        is_owner=verdict.owner_by_rule,
-    )
-
-
-def authorize_id_token_claims(
-    policy: ClaimsPolicy,
-) -> Callable[[Mapping[str, Any]], tuple[RequestPrincipal | None, str]]:
-    """Adapter of the first release's ``/account`` check: ``(principal, '')`` or ``(None, message)``.
-
-    No longer used by the server (``/account`` calls :meth:`IdentityService.sign_in`);
-    kept with :func:`evaluate_entra_claims` as the reference the default policy is
-    tested against.
-    """
-
-    def authorize(claims: Mapping[str, Any]) -> tuple[RequestPrincipal | None, str]:
-        result = evaluate_entra_claims(claims, policy, token_kind="id")
-        if isinstance(result, ClaimsDenied):
-            return None, result.message
-        return result, ""
-
-    return authorize

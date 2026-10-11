@@ -1,6 +1,7 @@
 """Tests for the credential gate on tool calls and resource reads."""
 
 import logging
+from dataclasses import fields
 from typing import Any
 
 import pytest
@@ -14,10 +15,12 @@ from canvas_mcp.core.credentials import (
     set_request_principal,
 )
 from canvas_mcp.core.selfhost import tool_gate
+from canvas_mcp.core.selfhost.db.snapshots import McpSnapshot
+from canvas_mcp.core.selfhost.mcp_state import MCP_READ, McpRead
 from canvas_mcp.core.selfhost.request_context import not_enrolled_message
 from canvas_mcp.core.selfhost.tool_gate import SelfhostCredentialGate
 
-from .conftest import OID_A, OID_B, TENANT, make_principal
+from .conftest import OID_A, OID_B, acct_key, make_principal
 
 ACCOUNT_URL = "https://mcp.example.test/account"
 
@@ -56,7 +59,19 @@ def server() -> FastMCP:
 def _verified_token(oid: str | None) -> AccessToken | None:
     if oid is None:
         return None
-    return AccessToken(token="t", client_id="c", scopes=[], claims={"tid": TENANT, "oid": oid})
+    key = acct_key(oid)
+    if oid == oid.upper():
+        key = key.upper()
+    return AccessToken(
+        token="t",
+        client_id="c",
+        scopes=[],
+        claims={
+            "acct": key,
+            "iss": "https://canvas.example.test",
+            "token_use": "access",
+        },
+    )
 
 
 @pytest.fixture
@@ -65,13 +80,35 @@ def verified_oid(monkeypatch: pytest.MonkeyPatch):
 
     def use(oid: str | None) -> None:
         monkeypatch.setattr(tool_gate, "get_access_token", lambda: _verified_token(oid))
+        values = {field.name: None for field in fields(McpSnapshot)}
+        values.update(
+            client_id="c",
+            display_name="",
+            status="active",
+            role="user",
+            session_epoch=0,
+            credential_generation=1,
+            write_tools_version=0,
+            jwt_epoch=0,
+            settings_revision=0,
+            grant_expires_at=4_000_000_000,
+        )
+        MCP_READ.set(
+            None
+            if oid is None
+            else McpRead(acct_key(oid), "grant", McpSnapshot(**values))
+        )
 
     return use
 
 
 def _enrol(oid: str = OID_A, token: str = "canvas-token-1234567890abcdef") -> None:
     set_request_principal(make_principal(oid))
-    set_request_credentials(RequestCredentials(api_token=token, api_url="https://canvas.example.test/api/v1"))
+    set_request_credentials(
+        RequestCredentials(
+            api_token=token, api_url="https://canvas.example.test/api/v1"
+        )
+    )
 
 
 async def _call(server: FastMCP) -> Any:
@@ -84,7 +121,9 @@ def _text(result: Any) -> str:
 
 
 class TestToolCalls:
-    async def test_unenrolled_user_gets_the_account_message_and_the_body_never_runs(self, server, verified_oid):
+    async def test_unenrolled_user_gets_the_account_message_and_the_body_never_runs(
+        self, server, verified_oid
+    ):
         verified_oid(OID_A)
         set_request_principal(make_principal(OID_A))
         set_missing_credentials_message(not_enrolled_message(ACCOUNT_URL))
@@ -103,13 +142,19 @@ class TestToolCalls:
 
     async def test_no_principal_is_refused(self, server, verified_oid):
         verified_oid(OID_A)
-        set_request_credentials(RequestCredentials(api_token="x" * 30, api_url="https://c.example.test/api/v1"))
+        set_request_credentials(
+            RequestCredentials(
+                api_token="x" * 30, api_url="https://c.example.test/api/v1"
+            )
+        )
         result = await _call(server)
         assert result.is_error
         assert _text(result) == "Not signed in."
         assert Body.runs == 0
 
-    async def test_principal_and_token_oid_mismatch_is_refused(self, server, verified_oid, caplog):
+    async def test_principal_and_token_oid_mismatch_is_refused(
+        self, server, verified_oid, caplog
+    ):
         caplog.set_level(logging.ERROR)
         verified_oid(OID_B)
         _enrol(OID_A)
@@ -128,12 +173,15 @@ class TestToolCalls:
         assert _text(result) == "Identity check failed; reconnect the connector."
         assert Body.runs == 0
 
-    async def test_token_oid_is_compared_case_insensitively(self, server, verified_oid):
+    async def test_account_uuid_claim_is_not_case_folded(self, server, verified_oid):
         verified_oid(OID_A.upper())
         _enrol(OID_A)
-        assert not (await _call(server)).is_error
+        assert (await _call(server)).is_error
+        assert Body.runs == 0
 
-    async def test_default_missing_message_is_the_legacy_text(self, server, verified_oid):
+    async def test_default_missing_message_is_the_legacy_text(
+        self, server, verified_oid
+    ):
         verified_oid(OID_A)
         set_request_principal(make_principal(OID_A))
         result = await _call(server)
@@ -169,7 +217,9 @@ class TestResources:
 
 
 class TestNotGated:
-    async def test_listing_and_prompts_work_without_credentials(self, server, verified_oid):
+    async def test_listing_and_prompts_work_without_credentials(
+        self, server, verified_oid
+    ):
         verified_oid(OID_A)
         set_request_principal(make_principal(OID_A))
         async with Client(server) as client:
@@ -180,26 +230,14 @@ class TestNotGated:
         assert Body.runs == 0
 
 
-class _StaleCache:
-    """An access cache that still reports the generation from before the change."""
-
-    def __init__(self, generation: int) -> None:
-        from canvas_mcp.core.selfhost.token_store import PrincipalStatus
-
-        self._status = PrincipalStatus(principal_key=make_principal(OID_A).key, credential_generation=generation)
-
-    def status(self, principal_key: str):
-        return self._status
-
-
 class TestSupersededCredentialInProcess:
     """A change this process made is known at once, without waiting for the cache."""
 
     @staticmethod
-    def _server(access) -> FastMCP:
+    def _server() -> FastMCP:
         Body.runs = 0
         mcp = FastMCP("gate-stale")
-        mcp.add_middleware(SelfhostCredentialGate(access=access))
+        mcp.add_middleware(SelfhostCredentialGate())
 
         @mcp.tool()
         def get_my_profile() -> str:
@@ -209,8 +247,9 @@ class TestSupersededCredentialInProcess:
 
         return mcp
 
-    @pytest.mark.parametrize("with_cache", [True, False])
-    async def test_a_lagging_cache_does_not_let_the_old_generation_through(self, verified_oid, with_cache):
+    async def test_a_lagging_cache_does_not_let_the_old_generation_through(
+        self, verified_oid
+    ):
         from canvas_mcp.core.credentials import (
             note_credential_generation,
             set_request_credential_generation,
@@ -221,12 +260,12 @@ class TestSupersededCredentialInProcess:
         key = make_principal(OID_A).key
         note_credential_generation(key, 1)
         set_request_credential_generation(1)
-        server = self._server(_StaleCache(1) if with_cache else None)
+        server = self._server()
 
         result = await _call(server)
         assert not result.is_error and Body.runs == 1  # nothing changed yet
 
-        # /account saved another token in this process; the cache still says 1.
+        # This request holds generation 1; a successful local save announced 2.
         note_credential_generation(key, 2)
         result = await _call(server)
         assert result.is_error

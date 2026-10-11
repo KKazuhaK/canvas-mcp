@@ -1,0 +1,10 @@
+# Build the reviewed checkout before the first v1 image is published.
+# From deploy/selfhost, set CANVAS_MCP_IMAGE=canvas-mcp:selfhost-v1-local in .env:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+# Add -f docker-compose.postgres.yml for PostgreSQL.
+services:
+  canvas-mcp:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.selfhost
+    pull_policy: build

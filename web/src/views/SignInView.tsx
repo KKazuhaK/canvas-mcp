@@ -26,11 +26,11 @@ function isPlainPath(url: string): boolean {
 
 /**
  * /sign-in. One button per provider from GET /providers, each a plain link to the
- * server-side sign-in redirect (a full-page navigation to /account/login, then the
+ * server-side sign-in redirect (a full-page navigation to /auth/login, then the
  * identity provider, then back). The server returns here with ?error=<code> when a
  * sign-in fails; the code is mapped to fixed text and the raw value is never shown.
  *
- * With several providers the server sends the person here (from /account/login) and the
+ * With several providers the server sends the person here (from /auth/login) and the
  * request id of a waiting app (`txn`) and "use a different account" (`reauth`) travel on to
  * every provider's start link; the server checks both again. A waiting app or a requested
  * re-sign-in keeps this page open even for a person who is already signed in.

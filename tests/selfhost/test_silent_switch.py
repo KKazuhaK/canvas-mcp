@@ -16,9 +16,12 @@ from dbbackend import PG_URL, reset_public_schema
 
 from canvas_mcp.core.selfhost import token_admin
 from canvas_mcp.core.selfhost.app import prepare_selfhost
-from canvas_mcp.core.selfhost.db import migrate
 from canvas_mcp.core.selfhost.db.engine import Database
-from canvas_mcp.core.selfhost.db.transfer import refuse_silent_switch, target_holds_rows
+from canvas_mcp.core.selfhost.db.migrations import runner as migrate
+from canvas_mcp.core.selfhost.db.migrations.transfer import (
+    refuse_silent_switch,
+    target_holds_rows,
+)
 from canvas_mcp.core.selfhost.db.url import default_sqlite_path
 from canvas_mcp.core.selfhost.settings import (
     SelfhostConfigError,
@@ -45,10 +48,8 @@ def _settings_env(data_dir: pathlib.Path, **extra: str) -> dict[str, str]:
         "ENTRA_TENANT_ID": TENANT,
         "ENTRA_CLIENT_ID": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         "ENTRA_CLIENT_SECRET": "s3cret-value-of-entra-client",
-        "OAUTH_JWT_SIGNING_KEY": "k" * 48,
         "ACCOUNT_SESSION_SECRET": base64.b64encode(bytes(range(32))).decode(),
         "CANVAS_TOKEN_KEYS": KEYS,
-        "FASTMCP_HOME": str(data_dir / "fastmcp"),
         "SELFHOST_DATA_DIR": str(data_dir),
         **extra,
     }
@@ -72,7 +73,11 @@ def _disabled_legacy_file(data_dir: pathlib.Path) -> pathlib.Path:
 def env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
     monkeypatch.setenv("SELFHOST_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("CANVAS_TOKEN_KEYS", KEYS)
-    for name in ("DATABASE_URL", "DATABASE_AUTO_MIGRATE", "DATABASE_ALLOW_SQLITE_OUTSIDE_DATA_DIR"):
+    for name in (
+        "DATABASE_URL",
+        "DATABASE_AUTO_MIGRATE",
+        "DATABASE_ALLOW_SQLITE_OUTSIDE_DATA_DIR",
+    ):
         monkeypatch.delenv(name, raising=False)
     return tmp_path
 
@@ -121,7 +126,9 @@ class TestTheCheck:
         target = Database.sqlite(tmp_path / "other.sqlite3")
         migrate.ensure_ready(target, auto=True)
         with target.write() as conn:
-            conn.exec_driver_sql("UPDATE meta SET value = '999' WHERE key = 'schema_version'")
+            conn.exec_driver_sql(
+                "UPDATE canvas_mcp_alembic_version SET version_num = '999999999999'"
+            )
         assert migrate.current(target).state == migrate.STATE_NEWER
         refuse_silent_switch(target, legacy_path)  # ensure_ready says "newer" itself
 
@@ -131,14 +138,18 @@ class TestStartup:
         _disabled_legacy_file(env)
         # What `token_admin db upgrade` (or a failed import) leaves: a schema, no rows.
         migrate.ensure_ready(Database.sqlite(env / "other.sqlite3"), auto=True)
-        settings = load_selfhost_settings(_settings_env(env, DATABASE_URL=_other_url(env)))
+        settings = load_selfhost_settings(
+            _settings_env(env, DATABASE_URL=_other_url(env))
+        )
         with pytest.raises(SelfhostConfigError) as refused:
             prepare_selfhost(settings)
         assert "holds no data" in " ".join(refused.value.problems)
 
     def test_a_missing_target_is_refused_before_anything_is_created(self, env) -> None:
         _disabled_legacy_file(env)
-        settings = load_selfhost_settings(_settings_env(env, DATABASE_URL=_other_url(env)))
+        settings = load_selfhost_settings(
+            _settings_env(env, DATABASE_URL=_other_url(env))
+        )
         with pytest.raises(SelfhostConfigError):
             prepare_selfhost(settings)
         assert not (env / "other.sqlite3").exists()
@@ -150,7 +161,9 @@ class TestStartup:
         store.initialize()
         make_account(store, OID, status="disabled")
         store.close()
-        settings = load_selfhost_settings(_settings_env(env, DATABASE_URL=_other_url(env)))
+        settings = load_selfhost_settings(
+            _settings_env(env, DATABASE_URL=_other_url(env))
+        )
         runtime = prepare_selfhost(settings)
         assert runtime.store.get_principal_status(acct_key(OID)).disabled
         runtime.store.close()
@@ -175,21 +188,27 @@ class TestOperatorCli:
             ["list"],
             ["access"],
             ["history"],
-            ["disable", TENANT, OTHER],
-            ["enable", TENANT, OID],
-            ["remove", TENANT, OID],
+            ["disable", acct_key(OTHER)],
+            ["enable", acct_key(OID)],
+            ["remove", acct_key(OID)],
             ["rotate"],
         ],
     )
-    def test_commands_refuse_an_empty_target_and_create_nothing(self, env, argv, capsys) -> None:
+    def test_commands_refuse_an_empty_target_and_create_nothing(
+        self, env, argv, capsys
+    ) -> None:
         assert token_admin.main(argv) == token_admin.EXIT_CONFIG
         assert "holds no data" in capsys.readouterr().err
         assert not (env / "other.sqlite3").exists()
 
-    def test_a_disable_cannot_make_the_empty_target_look_populated(self, env, capsys) -> None:
-        assert token_admin.main(["disable", TENANT, OTHER]) == token_admin.EXIT_CONFIG
+    def test_a_disable_cannot_make_the_empty_target_look_populated(
+        self, env, capsys
+    ) -> None:
+        assert token_admin.main(["disable", acct_key(OTHER)]) == token_admin.EXIT_CONFIG
         capsys.readouterr()
-        settings = load_selfhost_settings(_settings_env(env, DATABASE_URL=_other_url(env)))
+        settings = load_selfhost_settings(
+            _settings_env(env, DATABASE_URL=_other_url(env))
+        )
         with pytest.raises(SelfhostConfigError):
             prepare_selfhost(settings)
 
@@ -197,7 +216,9 @@ class TestOperatorCli:
         assert token_admin.main(["db", "upgrade"]) == 0
         assert token_admin.main(["db", "current"]) == 0
         capsys.readouterr()
-        settings = load_selfhost_settings(_settings_env(env, DATABASE_URL=_other_url(env)))
+        settings = load_selfhost_settings(
+            _settings_env(env, DATABASE_URL=_other_url(env))
+        )
         with pytest.raises(SelfhostConfigError):
             prepare_selfhost(settings)
 
@@ -211,24 +232,37 @@ class TestPostgres:
         monkeypatch.setenv("DATABASE_URL", PG_URL)
 
     def _prepare(self, env: pathlib.Path) -> None:
-        prepare_selfhost(load_selfhost_settings(_settings_env(env, DATABASE_URL=PG_URL)))
+        runtime = prepare_selfhost(
+            load_selfhost_settings(_settings_env(env, DATABASE_URL=PG_URL))
+        )
+        runtime.store.close()
 
-    def test_an_empty_database_is_refused_and_import_is_the_way_across(self, env, capsys) -> None:
+    def test_an_empty_database_is_refused_and_import_is_the_way_across(
+        self, env, capsys
+    ) -> None:
         with pytest.raises(SelfhostConfigError) as refused:
             self._prepare(env)
         assert "db import-sqlite" in " ".join(refused.value.problems)
-        assert token_admin.main(["db", "import-sqlite", str(default_sqlite_path(env))]) == 0
+        assert (
+            token_admin.main(["db", "import-sqlite", str(default_sqlite_path(env))])
+            == 0
+        )
         capsys.readouterr()
         self._prepare(env)
 
-    def test_a_failed_import_leaves_the_server_refusing(self, env, monkeypatch, capsys) -> None:
+    def test_a_failed_import_leaves_the_server_refusing(
+        self, env, monkeypatch, capsys
+    ) -> None:
         # A key ring that lacks the key id of a stored token: the private copy of the
         # SQLite file cannot be migrated, so the import stops before it touches
         # PostgreSQL. The database is still uninitialized (no tables at all) and the
         # server must still refuse it.
         source = env / "old.sqlite3"
         legacy.build(source, "v4")
-        assert token_admin.main(["db", "import-sqlite", str(source)]) == token_admin.EXIT_CONFIG
+        assert (
+            token_admin.main(["db", "import-sqlite", str(source)])
+            == token_admin.EXIT_CONFIG
+        )
         capsys.readouterr()
         assert migrate.current(_pg()).state == migrate.STATE_UNINITIALIZED
         with pytest.raises(SelfhostConfigError):
@@ -240,16 +274,18 @@ class TestPostgres:
         # The import fails inside the PostgreSQL transaction. DDL is transactional
         # there, so the schema it created goes with the rows: "uninitialized" again,
         # not "current but empty". Either way the guard refuses (it counts rows).
-        from canvas_mcp.core.selfhost.db import transfer
+        from canvas_mcp.core.selfhost.db.migrations import transfer
 
-        source = env / "old.sqlite3"
-        legacy.build(source, "v4")
+        source = _disabled_legacy_file(env / "source")
 
         def broken(*_args, **_kwargs) -> None:
             raise TokenStoreError("simulated failure; nothing was imported")
 
-        monkeypatch.setattr(transfer, "_verify_tokens", broken)
-        assert token_admin.main(["db", "import-sqlite", str(source)]) == token_admin.EXIT_CONFIG
+        monkeypatch.setattr(transfer, "verify", broken)
+        assert (
+            token_admin.main(["db", "import-sqlite", str(source)])
+            == token_admin.EXIT_CONFIG
+        )
         capsys.readouterr()
         assert migrate.current(_pg()).state == migrate.STATE_UNINITIALIZED
         assert not target_holds_rows(_pg())
@@ -261,7 +297,7 @@ class TestPostgres:
     ) -> None:
         # Here the schema was created before (db upgrade), so it legitimately stays:
         # "current" and empty. What matters is that no row got in and the server refuses.
-        from canvas_mcp.core.selfhost.db import transfer
+        from canvas_mcp.core.selfhost.db.migrations import transfer
 
         assert token_admin.main(["db", "upgrade"]) == 0
         source = env / "old.sqlite3"
@@ -270,8 +306,11 @@ class TestPostgres:
         def broken(*_args, **_kwargs) -> None:
             raise TokenStoreError("simulated failure; nothing was imported")
 
-        monkeypatch.setattr(transfer, "_verify_tokens", broken)
-        assert token_admin.main(["db", "import-sqlite", str(source)]) == token_admin.EXIT_CONFIG
+        monkeypatch.setattr(transfer, "verify", broken)
+        assert (
+            token_admin.main(["db", "import-sqlite", str(source)])
+            == token_admin.EXIT_CONFIG
+        )
         capsys.readouterr()
         assert migrate.current(_pg()).state == migrate.STATE_CURRENT
         assert not target_holds_rows(_pg())

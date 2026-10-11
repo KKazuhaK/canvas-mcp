@@ -15,6 +15,8 @@ class StoreUnavailable(TokenStoreError):
     exception class of the underlying driver error, for the operator's log.
     """
 
-    def __init__(self, message: str = "the token database is unavailable", kind: str = "") -> None:
+    def __init__(
+        self, message: str = "the token database is unavailable", kind: str = ""
+    ) -> None:
         super().__init__(f"{message} ({kind})" if kind else message)
         self.kind = kind

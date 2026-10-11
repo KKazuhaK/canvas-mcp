@@ -29,9 +29,15 @@ def store(env: Env, clock) -> tx.SqlLoginStateStore:
 
 def pending(**overrides) -> tx.PendingAuthorization:
     fields = {
-        "client_id": CLIENT, "client_kind": "dcr", "redirect_uri": REDIRECT,
-        "redirect_uri_explicit": True, "code_challenge": CHALLENGE, "scopes": (SCOPE,),
-        "state": "st-1", "resource": RESOURCE, "created_at": 1_800_000_000,
+        "client_id": CLIENT,
+        "client_kind": "dcr",
+        "redirect_uri": REDIRECT,
+        "redirect_uri_explicit": True,
+        "code_challenge": CHALLENGE,
+        "scopes": (SCOPE,),
+        "state": "st-1",
+        "resource": RESOURCE,
+        "created_at": 1_800_000_000,
     }
     fields.update(overrides)
     return tx.PendingAuthorization(**fields)
@@ -43,7 +49,10 @@ class TestBindingHelpers:
         assert tx.binding_ok(value) and tx.txn_id_ok(value)
         assert len({tx.new_binding() for _ in range(100)}) == 100
 
-    @pytest.mark.parametrize("bad", ["", "short", "A" * 42, "A" * 44, "A" * 42 + "=", "A" * 42 + " ", None, 5])
+    @pytest.mark.parametrize(
+        "bad",
+        ["", "short", "A" * 42, "A" * 44, "A" * 42 + "=", "A" * 42 + " ", None, 5],
+    )
     def test_other_shapes_are_refused(self, bad) -> None:
         assert not tx.binding_ok(bad)
 
@@ -53,7 +62,11 @@ class TestBindingHelpers:
         assert len(tx.binding_hash(a)) == 64 and a not in tx.binding_hash(a)
 
     def test_the_cookie_name_uses_the_host_prefix(self) -> None:
-        assert tx.BINDING_COOKIE == "__Host-cmcp_bind" and tx.TXN_TTL_S == 600 and tx.TXN_KIND == "mcp_txn"
+        assert (
+            tx.BINDING_COOKIE == "__Host-cmcp_bind"
+            and tx.TXN_TTL_S == 600
+            and tx.TXN_KIND == "mcp_txn"
+        )
 
 
 class TestPendingAuthorization:
@@ -62,7 +75,9 @@ class TestPendingAuthorization:
         assert tx.PendingAuthorization.from_json(original.to_json()) == original
 
     def test_the_payload_stays_under_the_store_limit(self) -> None:
-        raw = pending(state="s" * tx.MAX_STATE_CHARS, redirect_uri="https://e.test/" + "p" * 2000).to_json()
+        raw = pending(
+            state="s" * tx.MAX_STATE_CHARS, redirect_uri="https://e.test/" + "p" * 2000
+        ).to_json()
         assert len(raw) <= tx.MAX_PAYLOAD_BYTES
 
     @pytest.mark.parametrize(
@@ -123,12 +138,24 @@ class TestSqlLoginStateStore:
 
     async def test_only_hashes_are_stored(self, store, env: Env) -> None:
         binding = tx.binding_hash(tx.new_binding())
-        state_id = await store.put("mcp_txn", b'{"secret":"payload"}', 60, binding_hash=binding)
-        rows = raw_sql(env.tokens, "SELECT kind, id_hash, binding_hash FROM login_states")
-        assert rows == [("mcp_txn", __import__("hashlib").sha256(state_id.encode()).hexdigest(), binding)]
+        state_id = await store.put(
+            "mcp_txn", b'{"secret":"payload"}', 60, binding_hash=binding
+        )
+        rows = raw_sql(
+            env.tokens, "SELECT kind, id_hash, binding_hash FROM login_states"
+        )
+        assert rows == [
+            (
+                "mcp_txn",
+                __import__("hashlib").sha256(state_id.encode()).digest(),
+                bytes.fromhex(binding),
+            )
+        ]
         assert state_id not in str(rows)
 
-    async def test_missing_wrong_kind_and_malformed_ids_look_the_same(self, store) -> None:
+    async def test_missing_wrong_kind_and_malformed_ids_look_the_same(
+        self, store
+    ) -> None:
         state_id = await store.put("mcp_txn", b"x", 60)
         assert await store.pop("other", state_id) is None
         assert await store.pop("mcp_txn", "never-issued") is None
@@ -147,32 +174,41 @@ class TestSqlLoginStateStore:
     async def test_binding_rules_match_the_in_memory_store(self, store) -> None:
         memory = InMemoryLoginStateStore()
         for impl in (store, memory):
-            sid = await impl.put("mcp_txn", b"payload", 60, binding_hash="h1")
+            sid = await impl.put("mcp_txn", b"payload", 60, binding_hash="a" * 64)
             assert await impl.pop("mcp_txn", sid) is None
-            assert await impl.pop("mcp_txn", sid, binding_hash="h2") is None
-            assert await impl.peek("mcp_txn", sid, binding_hash="h2") is None
-            assert await impl.peek("mcp_txn", sid, binding_hash="h1") == b"payload"
-            assert await impl.pop("mcp_txn", sid, binding_hash="h1") == b"payload"
-            assert await impl.pop("mcp_txn", sid, binding_hash="h1") is None
+            assert await impl.pop("mcp_txn", sid, binding_hash="b" * 64) is None
+            assert await impl.peek("mcp_txn", sid, binding_hash="b" * 64) is None
+            assert await impl.peek("mcp_txn", sid, binding_hash="a" * 64) == b"payload"
+            assert await impl.pop("mcp_txn", sid, binding_hash="a" * 64) == b"payload"
+            assert await impl.pop("mcp_txn", sid, binding_hash="a" * 64) is None
             plain = await impl.put("oidc", b"y", 60)
-            assert await impl.pop("oidc", plain, binding_hash="h1") is None
+            assert await impl.pop("oidc", plain, binding_hash="a" * 64) is None
             assert await impl.pop("oidc", plain) == b"y"
 
     async def test_a_refused_pop_leaves_the_state_for_its_holder(self, store) -> None:
-        sid = await store.put("mcp_txn", b"payload", 60, binding_hash="h1")
+        sid = await store.put("mcp_txn", b"payload", 60, binding_hash="a" * 64)
         for _ in range(3):
-            assert await store.pop("mcp_txn", sid, binding_hash="wrong") is None
-        assert await store.pop("mcp_txn", sid, binding_hash="h1") == b"payload"
+            assert await store.pop("mcp_txn", sid, binding_hash="b" * 64) is None
+        assert await store.pop("mcp_txn", sid, binding_hash="a" * 64) == b"payload"
 
     @pytest.mark.parametrize(
         ("kind", "payload", "ttl"),
-        [("", b"x", 10), ("k", b"x", 0), ("k", b"x", -1), ("k", b"x", 10_000), ("k", b"x" * 5000, 10), ("k", b"\xff", 10)],
+        [
+            ("", b"x", 10),
+            ("k", b"x", 0),
+            ("k", b"x", -1),
+            ("k", b"x", 10_000),
+            ("k", b"x" * 5000, 10),
+            ("k", b"\xff", 10),
+        ],
     )
     async def test_invalid_input_is_refused(self, store, kind, payload, ttl) -> None:
         with pytest.raises(ValueError):
             await store.put(kind, payload, ttl)
 
     async def test_concurrent_pops_hand_the_payload_to_one_caller(self, store) -> None:
-        sid = await store.put("mcp_txn", b"secret", 60, binding_hash="h1")
-        results = await asyncio.gather(*(store.pop("mcp_txn", sid, binding_hash="h1") for _ in range(12)))
+        sid = await store.put("mcp_txn", b"secret", 60, binding_hash="a" * 64)
+        results = await asyncio.gather(
+            *(store.pop("mcp_txn", sid, binding_hash="a" * 64) for _ in range(12))
+        )
         assert results.count(b"secret") == 1 and results.count(None) == 11

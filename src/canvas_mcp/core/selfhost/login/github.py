@@ -32,6 +32,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..accounts import GITHUB_ISSUER, PROVIDER_GITHUB, ExternalClaims
+from ..routes import auth_callback, auth_login
 from .config import GitHubConfig
 from .http import CAP_GITHUB, CAP_TOKEN, HttpResult, SafeHttp, UpstreamError
 from .oidc import clean_text
@@ -39,8 +40,8 @@ from .protocol import ProviderDisplay, SignInRejected
 
 logger = logging.getLogger("canvas_mcp.selfhost.login")
 
-GITHUB_START_PATH = "/account/login/github"
-GITHUB_CALLBACK_PATH = "/account/callback/github"
+GITHUB_START_PATH = auth_login(PROVIDER_GITHUB)
+GITHUB_CALLBACK_PATH = auth_callback(PROVIDER_GITHUB)
 AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 TOKEN_URL = "https://github.com/login/oauth/access_token"
 API = "https://api.github.com"
@@ -53,7 +54,11 @@ _MAX_LOGIN = 39
 
 
 def _is_login(value: Any) -> bool:
-    return isinstance(value, str) and 0 < len(value) <= _MAX_LOGIN and set(value) <= _LOGIN_OK
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= _MAX_LOGIN
+        and set(value) <= _LOGIN_OK
+    )
 
 
 def _rate_limited(headers: Mapping[str, str]) -> bool:
@@ -119,14 +124,17 @@ class GitHubLoginProvider:
 
     # -- the callback ---------------------------------------------------------------------------
 
-    async def finish(self, *, code: str, code_verifier: str, nonce: str) -> ExternalClaims:
+    async def finish(
+        self, *, code: str, code_verifier: str, nonce: str
+    ) -> ExternalClaims:
         token, granted = await self._exchange(code, code_verifier)
         try:
             return await self._identity(token, granted)
         except UpstreamError as exc:
             logger.warning(
                 "provider sign-in failed provider=github step=api code=%s status=%s",
-                exc.code, exc.status,
+                exc.code,
+                exc.status,
             )
             raise SignInRejected("provider_error") from None
 
@@ -143,7 +151,8 @@ class GitHubLoginProvider:
         except UpstreamError as exc:
             logger.warning(
                 "provider sign-in failed provider=github step=token code=%s status=%s",
-                exc.code, exc.status,
+                exc.code,
+                exc.status,
             )
             raise SignInRejected("provider_error") from None
         body: Mapping[str, Any] = result.body
@@ -152,12 +161,18 @@ class GitHubLoginProvider:
             error = body.get("error")
             logger.warning(
                 "provider sign-in failed provider=github step=token reason=%s",
-                error if isinstance(error, str) and error.replace("_", "").isalpha() and len(error) <= 64 else "unusable_response",
+                error
+                if isinstance(error, str)
+                and error.replace("_", "").isalpha()
+                and len(error) <= 64
+                else "unusable_response",
             )
             raise SignInRejected("provider_error")
         scope = body.get("scope")
         granted = frozenset(
-            part.strip().lower() for part in str(scope or "").replace(" ", ",").split(",") if part.strip()
+            part.strip().lower()
+            for part in str(scope or "").replace(" ", ",").split(",")
+            if part.strip()
         )
         return token, granted
 
@@ -169,18 +184,29 @@ class GitHubLoginProvider:
         }
 
     async def _get(
-        self, token: str, path: str, *, ok: tuple[int, ...] = (200,), expect: Any = "object"
+        self,
+        token: str,
+        path: str,
+        *,
+        ok: tuple[int, ...] = (200,),
+        expect: Any = "object",
     ) -> HttpResult:
         return await self._http.request(
-            "GET", API + path, max_bytes=CAP_GITHUB, headers=self._api_headers(token),
-            ok_statuses=ok, expect=expect,
+            "GET",
+            API + path,
+            max_bytes=CAP_GITHUB,
+            headers=self._api_headers(token),
+            ok_statuses=ok,
+            expect=expect,
         )
 
     async def _identity(self, token: str, granted: frozenset[str]) -> ExternalClaims:
         user = (await self._get(token, "/user")).body
         raw_id = user.get("id")
         if isinstance(raw_id, bool) or not isinstance(raw_id, int) or raw_id <= 0:
-            logger.warning("provider sign-in refused provider=github step=user reason=id")
+            logger.warning(
+                "provider sign-in refused provider=github step=user reason=id"
+            )
             raise SignInRejected("sign_in_unverified")
         login = user.get("login")
         login_text = login if _is_login(login) else ""
@@ -204,7 +230,9 @@ class GitHubLoginProvider:
     ) -> tuple[str | None, bool]:
         """The primary verified address, else the public profile address (unverified), else None."""
         if granted & _EMAIL_SCOPES:
-            result = await self._get(token, "/user/emails", ok=(200, 403, 404), expect="array")
+            result = await self._get(
+                token, "/user/emails", ok=(200, 403, 404), expect="array"
+            )
             if result.status == 200 and isinstance(result.body, list):
                 for entry in result.body:
                     if (
@@ -267,4 +295,10 @@ class GitHubLoginProvider:
                 raise UpstreamError("http_status", status=403)
             return "unavailable"
         state = result.body.get("state") if isinstance(result.body, dict) else None
-        return "active" if state == "active" else "pending" if state == "pending" else "none"
+        return (
+            "active"
+            if state == "active"
+            else "pending"
+            if state == "pending"
+            else "none"
+        )

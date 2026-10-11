@@ -8,6 +8,8 @@ import {
 } from './contract'
 import type {
   AdminAction,
+  PageQuery,
+  FeaturedSchoolsRequest,
   AdminEnrollmentFilter,
   AdminStatusFilter,
   CanvasTokenRequest,
@@ -63,6 +65,7 @@ export async function deleteCanvasToken(): Promise<void> {
 }
 
 export const recheckCanvasToken = () => call('POST /me/canvas-token/recheck')
+export const acknowledgeCanvasToken = (notice_version: number) => call('POST /me/canvas-token/acknowledge', { body: { notice_version } })
 
 export const getSchools = () => call('GET /me/schools')
 
@@ -76,7 +79,7 @@ export const putWriteTools = (enabled: string[]) =>
 /** "Turn all off": needs no fresh sign-in. */
 export const deleteWriteTools = () => call('DELETE /me/write-tools')
 
-export const getLoginHistory = () => call('GET /me/login-history')
+export const getLoginHistory = (query: PageQuery = {}) => call('GET /me/login-history', { query })
 
 // ---- sign-in methods (two or more providers) ------------------------------------------
 
@@ -100,11 +103,11 @@ export async function logout(): Promise<void> {
 
 // ---- owner ------------------------------------------------------------------------
 
-export const adminListAccounts = (status?: AdminStatusFilter) =>
-  call('GET /admin/accounts', { query: status ? { status } : {} })
+export const adminListAccounts = (status?: AdminStatusFilter, query: PageQuery = {}) =>
+  call('GET /admin/accounts', { query: { ...query, ...(status ? { status } : {}) } })
 
-export const adminListEnrollments = (filter: AdminEnrollmentFilter = 'all') =>
-  call('GET /admin/enrollments', { query: { filter } })
+export const adminListEnrollments = (filter: AdminEnrollmentFilter = 'all', query: PageQuery = {}) =>
+  call('GET /admin/enrollments', { query: { ...query, filter } })
 
 /** The row actions that go through POST /admin/accounts/{id}/<action>. */
 export type AdminAccessAction = Extract<AdminAction, 'approve' | 'deny' | 'disable' | 'enable'>
@@ -127,8 +130,8 @@ export const adminMarkInvalid = (id: string) =>
 
 export const adminRemoveEnrollment = (id: string) => call('DELETE /admin/enrollments/{id}', { id })
 
-export const adminAudit = (before?: string | null) =>
-  call('GET /admin/audit', { query: before ? { before } : {} })
+export const adminAudit = (cursor?: string | null) =>
+  call('GET /admin/audit', { query: cursor ? { cursor } : {} })
 
 // ---- apps (the server's own authorization server) --------------------------------
 
@@ -139,21 +142,21 @@ export const getConsent = (txn: string) => call('GET /consent', { query: { txn }
 export const decideConsent = (txn: string, decision: ConsentDecision) =>
   call('POST /consent', { body: { txn, decision } })
 
-export const getGrants = () => call('GET /me/grants')
+export const getGrants = (query: PageQuery = {}) => call('GET /me/grants', { query })
 
 export async function revokeGrant(id: string): Promise<void> {
   await call('DELETE /me/grants/{id}', { id })
 }
 
-export const adminGrants = (accountId: string) =>
-  call('GET /admin/accounts/{id}/grants', { id: accountId })
+export const adminGrants = (accountId: string, query: PageQuery = {}) =>
+  call('GET /admin/accounts/{id}/grants', { id: accountId, query })
 
 export const adminRevokeGrant = (id: string) => call('DELETE /admin/grants/{id}', { id })
 
 // ---- sign-in ------------------------------------------------------------------------
 
 /** The server-side OIDC start (a full-page navigation, never an XHR). */
-export const LOGIN_PATH = '/account/login'
+export const LOGIN_PATH = '/auth/login'
 
 export interface SignInUrlOptions {
   /** A validated same-site return address (utils/returnTo). */
@@ -183,3 +186,9 @@ export function signInUrl(
   const text = query.toString()
   return text ? `${startUrl}?${text}` : startUrl
 }
+
+export const getAdminSettings = () => call('GET /admin/settings')
+export const saveProviderNames = (revision: number, names: Record<string, string | null>) => call('PUT /admin/settings/sign-in-methods', { body: { revision, names } })
+export const saveFeaturedSchools = (body: FeaturedSchoolsRequest) => call('PUT /admin/settings/schools', { body })
+export const checkSchool = (host: string) => call('POST /admin/settings/schools/check', { body: { host } })
+export const saveDirectorySearch = (revision: number, enabled: boolean) => call('PUT /admin/settings/directory-search', { body: { revision, enabled } })

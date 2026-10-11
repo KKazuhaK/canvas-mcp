@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..accounts import ExternalClaims
+from ..routes import auth_callback, auth_login
 from .config import TOKEN_AUTH_METHODS, OidcConfig
 from .http import CAP_TOKEN, CAP_USERINFO, SafeHttp, UpstreamError
 from .idtoken import IdTokenRejected, peek_header, verify_id_token
@@ -46,7 +47,9 @@ def clean_text(value: Any, limit: int) -> str:
     """Display text from a provider: control characters become spaces, whitespace is collapsed."""
     if not isinstance(value, str):
         return ""
-    text = "".join(" " if (ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F) else ch for ch in value)
+    text = "".join(
+        " " if (ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F) else ch for ch in value
+    )
     return " ".join(text.split())[:limit]
 
 
@@ -147,7 +150,9 @@ class OidcLoginProvider:
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
         }
-        prompt = self._profile.always_prompt or (self._profile.reauth_prompt if reauth else None)
+        prompt = self._profile.always_prompt or (
+            self._profile.reauth_prompt if reauth else None
+        )
         if prompt:
             params["prompt"] = prompt
         params.update(self._profile.extra_params)
@@ -156,7 +161,9 @@ class OidcLoginProvider:
 
     # -- the callback -------------------------------------------------------------------------
 
-    async def finish(self, *, code: str, code_verifier: str, nonce: str) -> ExternalClaims:
+    async def finish(
+        self, *, code: str, code_verifier: str, nonce: str
+    ) -> ExternalClaims:
         try:
             meta = await self.discovery.get()
         except ProviderUnavailable:
@@ -164,12 +171,17 @@ class OidcLoginProvider:
         body = await self._exchange(meta, code, code_verifier)
         raw_id_token = body.get("id_token")
         if not isinstance(raw_id_token, str) or not raw_id_token:
-            logger.warning("provider sign-in failed provider=%s step=token reason=no_id_token", self.id)
+            logger.warning(
+                "provider sign-in failed provider=%s step=token reason=no_id_token",
+                self.id,
+            )
             raise SignInRejected("provider_error")
         claims = await self._verify(meta, raw_id_token, nonce)
         extra: Mapping[str, Any] = {}
         if self._userinfo:
-            extra = await self._fetch_userinfo(meta, body.get("access_token"), claims["sub"])
+            extra = await self._fetch_userinfo(
+                meta, body.get("access_token"), claims["sub"]
+            )
         return self._reduce(claims, extra)
 
     async def _exchange(
@@ -197,12 +209,18 @@ class OidcLoginProvider:
         except UpstreamError as exc:
             logger.warning(
                 "provider sign-in failed provider=%s step=token code=%s status=%s error=%s",
-                self.id, exc.code, exc.status, exc.oauth_error or "-",
+                self.id,
+                exc.code,
+                exc.status,
+                exc.oauth_error or "-",
             )
             raise SignInRejected("provider_error") from None
         body: Mapping[str, Any] = result.body
         if "error" in body:
-            logger.warning("provider sign-in failed provider=%s step=token reason=error_body", self.id)
+            logger.warning(
+                "provider sign-in failed provider=%s step=token reason=error_body",
+                self.id,
+            )
             raise SignInRejected("provider_error")
         return body
 
@@ -233,14 +251,20 @@ class OidcLoginProvider:
             )
         except IdTokenRejected as exc:
             logger.warning(
-                "provider sign-in refused provider=%s step=id_token reason=%s", self.id, exc.reason
+                "provider sign-in refused provider=%s step=id_token reason=%s",
+                self.id,
+                exc.reason,
             )
             raise SignInRejected("sign_in_unverified") from None
 
     async def _fetch_userinfo(
         self, meta: ProviderMetadata, access_token: Any, subject: str
     ) -> Mapping[str, Any]:
-        if meta.userinfo_endpoint is None or not isinstance(access_token, str) or not access_token:
+        if (
+            meta.userinfo_endpoint is None
+            or not isinstance(access_token, str)
+            or not access_token
+        ):
             raise SignInRejected("provider_error")
         try:
             result = await self._http.get_json(
@@ -251,18 +275,24 @@ class OidcLoginProvider:
         except UpstreamError as exc:
             logger.warning(
                 "provider sign-in failed provider=%s step=userinfo code=%s status=%s",
-                self.id, exc.code, exc.status,
+                self.id,
+                exc.code,
+                exc.status,
             )
             raise SignInRejected("provider_error") from None
         info: Mapping[str, Any] = result.body
         if info.get("sub") != subject:
-            logger.warning("provider sign-in refused provider=%s step=userinfo reason=sub", self.id)
+            logger.warning(
+                "provider sign-in refused provider=%s step=userinfo reason=sub", self.id
+            )
             raise SignInRejected("sign_in_unverified")
         return info
 
     # -- reduction ----------------------------------------------------------------------------------
 
-    def _reduce(self, claims: Mapping[str, Any], userinfo: Mapping[str, Any]) -> ExternalClaims:
+    def _reduce(
+        self, claims: Mapping[str, Any], userinfo: Mapping[str, Any]
+    ) -> ExternalClaims:
         def pick(name: str) -> tuple[Any, Mapping[str, Any]]:
             """The claim's value and the document it came from (the ID token wins)."""
             if name in claims:
@@ -272,7 +302,8 @@ class OidcLoginProvider:
         email_value, email_source = pick("email")
         email = (
             email_value.strip()
-            if isinstance(email_value, str) and 0 < len(email_value.strip()) <= _MAX_EMAIL
+            if isinstance(email_value, str)
+            and 0 < len(email_value.strip()) <= _MAX_EMAIL
             else None
         )
         verified = email is not None and email_source.get("email_verified") is True
@@ -285,7 +316,8 @@ class OidcLoginProvider:
             subject=claims["sub"],
             email=email,
             email_verified=verified,
-            display_name=clean_text(name_value, _MAX_NAME) or clean_text(preferred, _MAX_NAME),
+            display_name=clean_text(name_value, _MAX_NAME)
+            or clean_text(preferred, _MAX_NAME),
             username=username,
             claims=self._wanted_claims(claims, userinfo),
         )
@@ -306,7 +338,11 @@ class OidcLoginProvider:
                 values = list(value)
             else:
                 continue
-            kept = tuple(v for v in values[:_MAX_CLAIM_VALUES] if len(v) <= _MAX_CLAIM_VALUE_CHARS)
+            kept = tuple(
+                v
+                for v in values[:_MAX_CLAIM_VALUES]
+                if len(v) <= _MAX_CLAIM_VALUE_CHARS
+            )
             if kept:
                 out.append((name, kept))
         return tuple(out)
@@ -328,8 +364,8 @@ def build_oidc_provider(
     return OidcLoginProvider(
         provider_id=config.provider_id,
         display=ProviderDisplay(config.label, "key"),
-        start_path=f"/account/login/oidc/{config.slug}",
-        callback_path=f"/account/callback/oidc/{config.slug}",
+        start_path=auth_login(config.provider_id),
+        callback_path=auth_callback(config.provider_id),
         public_base_url=public_base_url,
         issuer=config.issuer,
         client_id=config.client_id,

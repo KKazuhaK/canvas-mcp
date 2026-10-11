@@ -1,28 +1,20 @@
 """The outermost shim: https scheme, limits on the open OAuth endpoints, cleanup.
 
 Anyone on the internet can call ``POST /register`` and ``GET /authorize`` and
-each call writes a file to the data volume that also holds the Canvas token
-database, so these endpoints are rate limited, registrations are capped in size
-and number, client records expire, and expired records are swept from disk.
+each call may create rows in the database, so these endpoints are rate limited, registrations are capped in size
+and number, client records expire, and bounded native housekeeping removes expired rows (tested in test_v1_maintenance.py).
 """
 
 import asyncio
 import json
-from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
-import fastmcp
 import pytest
-from fastmcp import FastMCP
-from starlette.testclient import TestClient
+from sqlalchemy import select
 
 from canvas_mcp.core.selfhost import edge_guard
-from canvas_mcp.core.selfhost.app import (
-    build_selfhost_asgi_app,
-    install_selfhost,
-    prepare_selfhost,
-)
+from canvas_mcp.core.selfhost.authz.clients import DCR_TTL_SECONDS
+from canvas_mcp.core.selfhost.db import schema as s
 from canvas_mcp.core.selfhost.edge_guard import (
     MAX_REGISTER_BODY_BYTES,
     PUBLIC_REQUESTS_PER_MINUTE,
@@ -30,15 +22,17 @@ from canvas_mcp.core.selfhost.edge_guard import (
     SelfhostEdgeGuard,
     TokenBucket,
 )
-from canvas_mcp.core.selfhost.oauth import (
-    DCR_CLIENT_TTL_SECONDS,
-    build_entra_auth_provider,
-    cull_expired_oauth_state,
-    oauth_storage_of,
-)
-from canvas_mcp.core.selfhost.settings import SelfhostSettings
 
-from .test_oauth_wiring import BASE, CLAUDE_CALLBACK, _settings
+from .authz.stack import CLAUDE_REDIRECT, local_stack
+
+
+def registration():
+    return {
+        "client_name": "Test client",
+        "redirect_uris": [CLAUDE_REDIRECT],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "token_endpoint_auth_method": "none",
+    }
 
 
 class FakeClock:
@@ -71,8 +65,14 @@ class Recorder:
         await send({"type": "http.response.body", "body": b"ok"})
 
 
-async def call(app, method: str, path: str, *, chunks: list[bytes] | None = None,
-               headers: list[tuple[bytes, bytes]] | None = None) -> tuple[int, dict[bytes, bytes]]:
+async def call(
+    app,
+    method: str,
+    path: str,
+    *,
+    chunks: list[bytes] | None = None,
+    headers: list[tuple[bytes, bytes]] | None = None,
+) -> tuple[int, dict[bytes, bytes]]:
     pending = list(chunks if chunks is not None else [b"{}"])
     sent: list[dict[str, Any]] = []
 
@@ -85,8 +85,14 @@ async def call(app, method: str, path: str, *, chunks: list[bytes] | None = None
     async def send(message: dict[str, Any]) -> None:
         sent.append(message)
 
-    scope = {"type": "http", "method": method, "path": path, "scheme": "http",
-             "headers": headers or [], "query_string": b""}
+    scope = {
+        "type": "http",
+        "method": method,
+        "path": path,
+        "scheme": "http",
+        "headers": headers or [],
+        "query_string": b"",
+    }
     await app(scope, receive, send)
     start = next(m for m in sent if m["type"] == "http.response.start")
     return start["status"], dict(start["headers"])
@@ -114,10 +120,17 @@ class TestRegistrationLimits:
         clock = FakeClock()
         inner = Recorder()
         app = SelfhostEdgeGuard(inner, clock=clock)
-        statuses = [(await call(app, "POST", "/register"))[0] for _ in range(PUBLIC_REQUESTS_PER_MINUTE + 1)]
-        assert statuses[:PUBLIC_REQUESTS_PER_MINUTE] == [200] * PUBLIC_REQUESTS_PER_MINUTE
+        statuses = [
+            (await call(app, "POST", "/register"))[0]
+            for _ in range(PUBLIC_REQUESTS_PER_MINUTE + 1)
+        ]
+        assert (
+            statuses[:PUBLIC_REQUESTS_PER_MINUTE] == [200] * PUBLIC_REQUESTS_PER_MINUTE
+        )
         assert statuses[-1] == 429
-        assert len(inner.bodies) == PUBLIC_REQUESTS_PER_MINUTE  # the refused call never reached FastMCP
+        assert (
+            len(inner.bodies) == PUBLIC_REQUESTS_PER_MINUTE
+        )  # the refused call never reached FastMCP
         status, headers = await call(app, "POST", "/register")
         assert status == 429 and int(headers[b"retry-after"]) >= 1
 
@@ -154,15 +167,22 @@ class TestRegistrationLimits:
     async def test_authorize_has_its_own_bucket(self):
         clock = FakeClock()
         app = SelfhostEdgeGuard(Recorder(), clock=clock)
-        statuses = [(await call(app, "GET", "/authorize"))[0] for _ in range(PUBLIC_REQUESTS_PER_MINUTE + 1)]
+        statuses = [
+            (await call(app, "GET", "/authorize"))[0]
+            for _ in range(PUBLIC_REQUESTS_PER_MINUTE + 1)
+        ]
         assert statuses[-1] == 429 and set(statuses[:-1]) == {200}
-        assert (await call(app, "POST", "/register"))[0] == 200  # not starved by /authorize
+        assert (await call(app, "POST", "/register"))[
+            0
+        ] == 200  # not starved by /authorize
 
     async def test_an_oversized_body_is_refused_before_the_app_sees_it(self):
         inner = Recorder()
         app = SelfhostEdgeGuard(inner, clock=FakeClock())
         length = str(MAX_REGISTER_BODY_BYTES + 1).encode()
-        status, _ = await call(app, "POST", "/register", headers=[(b"content-length", length)])
+        status, _ = await call(
+            app, "POST", "/register", headers=[(b"content-length", length)]
+        )
         assert status == 413
         big = [b"x" * 9000, b"y" * 9000]  # no content-length: counted while streaming
         status, _ = await call(app, "POST", "/register", chunks=big)
@@ -172,8 +192,12 @@ class TestRegistrationLimits:
     async def test_a_normal_body_reaches_the_app_unchanged(self):
         inner = Recorder()
         app = SelfhostEdgeGuard(inner, clock=FakeClock())
-        payload = json.dumps({"client_name": "c", "redirect_uris": [CLAUDE_CALLBACK]}).encode()
-        status, _ = await call(app, "POST", "/register", chunks=[payload[:10], payload[10:]])
+        payload = json.dumps(
+            {"client_name": "c", "redirect_uris": [CLAUDE_REDIRECT]}
+        ).encode()
+        status, _ = await call(
+            app, "POST", "/register", chunks=[payload[:10], payload[10:]]
+        )
         assert status == 200 and inner.bodies == [payload]
 
 
@@ -195,8 +219,14 @@ class TestSchemeIsPinnedToHttps:
     async def test_the_servers_own_scope_is_not_modified(self):
         inner = Recorder()
         app = SelfhostEdgeGuard(inner, clock=FakeClock())
-        original: dict[str, Any] = {"type": "http", "method": "GET", "path": "/", "scheme": "http",
-                                    "headers": [], "query_string": b""}
+        original: dict[str, Any] = {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "scheme": "http",
+            "headers": [],
+            "query_string": b"",
+        }
 
         async def receive() -> dict[str, Any]:
             return {"type": "http.request", "body": b"", "more_body": False}
@@ -216,10 +246,12 @@ class TestMaintenance:
         async def maintenance() -> None:
             runs.append(1)
 
-        app = SelfhostEdgeGuard(Recorder(), clock=clock, maintenance=maintenance, maintenance_interval=3600)
+        app = SelfhostEdgeGuard(
+            Recorder(), clock=clock, maintenance=maintenance, maintenance_interval=3600
+        )
         for _ in range(5):
             await call(app, "POST", "/register")
-        await asyncio.sleep(0)
+        await asyncio.gather(*app._maintenance.background)
         assert len(runs) == 1
         clock.now += 3601
         await call(app, "GET", "/authorize")
@@ -240,147 +272,81 @@ class TestMaintenance:
 
 
 @pytest.fixture
-def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SelfhostSettings:
-    monkeypatch.setattr(fastmcp.settings, "test_mode", True)  # cheap key stretching
-    monkeypatch.setattr(fastmcp.settings, "home", tmp_path / "fastmcp")
-    return _settings(tmp_path)
-
-
-def _registration(name: str = "test client", redirect: str = CLAUDE_CALLBACK) -> dict[str, Any]:
-    return {
-        "client_name": name,
-        "redirect_uris": [redirect],
-        "grant_types": ["authorization_code", "refresh_token"],
-        "token_endpoint_auth_method": "none",
-    }
-
-
-def _build(settings: SelfhostSettings, clock: FakeClock | None = None):
-    config: Any = SimpleNamespace(canvas_api_url="https://canvas.example.edu/api/v1")
-    runtime = prepare_selfhost(settings)
-    provider = build_entra_auth_provider(settings)
-    mcp = FastMCP("edge", auth=provider)
-    install_selfhost(mcp, runtime, config)
-    return provider, build_selfhost_asgi_app(mcp, runtime, config, clock=clock)
-
-
-def _files(root: Path) -> list[Path]:
-    return [p for p in root.rglob("*") if p.is_file()]
-
-
-def _records(root: Path, collection: str) -> list[Path]:
-    """Record files of one FastMCP collection (directories are sanitized names)."""
-    return [
-        p for p in _files(root)
-        if collection in p.parent.name and not p.name.endswith("-info.json")
-    ]
+def stack(tmp_path, monkeypatch):
+    with local_stack(tmp_path, monkeypatch, clock=FakeClock()) as running:
+        yield running
 
 
 class TestThroughTheRealApp:
-    def test_unauthenticated_registrations_cannot_flood_the_data_volume(self, settings):
-        clock = FakeClock()
-        _, app = _build(settings, clock)
-        home = settings.fastmcp_home
-        with TestClient(app, base_url=BASE) as client:
-            before = len(_files(home))
-            statuses = [
-                client.post("/register", json=_registration("x" * 2000)).status_code
-                for _ in range(PUBLIC_REQUESTS_PER_MINUTE + 20)
-            ]
-            created = len(_files(home)) - before
-        assert statuses.count(201) == PUBLIC_REQUESTS_PER_MINUTE
-        assert set(statuses[PUBLIC_REQUESTS_PER_MINUTE:]) == {429}
-        assert created <= PUBLIC_REQUESTS_PER_MINUTE + 2  # plus collection metadata files
-
-    def test_unauthenticated_authorize_is_limited_too(self, settings):
-        clock = FakeClock()
-        _, app = _build(settings, clock)
-        with TestClient(app, base_url=BASE) as client:
-            client_id = client.post("/register", json=_registration()).json()["client_id"]
-            params = {
-                "response_type": "code", "client_id": client_id, "redirect_uri": CLAUDE_CALLBACK,
-                "code_challenge": "c" * 43, "code_challenge_method": "S256", "state": "s",
-            }
-            statuses = [
-                client.get("/authorize", params=params, follow_redirects=False).status_code
-                for _ in range(PUBLIC_REQUESTS_PER_MINUTE + 5)
-            ]
-        assert statuses[:PUBLIC_REQUESTS_PER_MINUTE] == [302] * PUBLIC_REQUESTS_PER_MINUTE
-        assert set(statuses[PUBLIC_REQUESTS_PER_MINUTE:]) == {429}
-
-    def test_an_oversized_registration_is_refused(self, settings):
-        _, app = _build(settings, FakeClock())
-        with TestClient(app, base_url=BASE) as client:
-            response = client.post("/register", json=_registration("x" * (MAX_REGISTER_BODY_BYTES + 10)))
-        assert response.status_code == 413
-
-    def test_a_registered_client_record_gets_a_lifetime(self, settings):
-        _, app = _build(settings, FakeClock())
-        with TestClient(app, base_url=BASE) as client:
-            assert client.post("/register", json=_registration()).status_code == 201
-        records = _records(settings.fastmcp_home, "mcp_oauth_proxy_clients")
-        assert len(records) == 1
-        entry = json.loads(records[0].read_text(encoding="utf-8"))
-        assert entry["expires_at"], "a dynamic registration must not live for ever"
-        from datetime import datetime
-
-        created = datetime.fromisoformat(entry["created_at"])
-        lifetime = (datetime.fromisoformat(entry["expires_at"]) - created).total_seconds()
-        assert lifetime == pytest.approx(DCR_CLIENT_TTL_SECONDS, abs=5)
-
-    def test_trailing_slash_redirects_never_leave_https(self, settings):
-        """Behind the TLS proxy uvicorn reports scheme http; the 307 must stay on https."""
-        _, app = _build(settings, FakeClock())
-        with TestClient(app, base_url="http://canvas.example.test") as client:
-            for path in ("/account/", "/account/admin/", "/healthz/", "/mcp/"):
-                for method in ("GET", "POST"):
-                    response = client.request(method, path, follow_redirects=False)
-                    location = response.headers.get("location")
-                    assert location is None or location.startswith("https://"), (path, location)
-            redirect = client.get("/account/", follow_redirects=False)
-            assert redirect.status_code == 307
-            assert redirect.headers["location"] == "https://canvas.example.test/account"
-
-    def test_other_routes_still_work_through_the_shim(self, settings):
-        _, app = _build(settings, FakeClock())
-        with TestClient(app, base_url=BASE) as client:
-            assert client.get("/healthz").text == "ok"
-            assert client.get("/.well-known/oauth-authorization-server").status_code == 200
-            assert client.post("/mcp", json={}).status_code == 401
-
-
-class TestStorageLifetimeAndCleanup:
-    async def test_expired_oauth_records_are_deleted_from_disk(self, settings):
-        provider = build_entra_auth_provider(settings)
-        storage = oauth_storage_of(provider).store  # the object FastMCP writes through
-        await storage.put(key="stale", value={"a": 1}, collection="mcp-oauth-transactions", ttl=0.05)
-        await storage.put(key="fresh", value={"a": 2}, collection="mcp-oauth-transactions", ttl=3600)
-        await asyncio.sleep(0.2)
-        names = {p.name for p in _records(settings.fastmcp_home, "mcp_oauth_transactions")}
-        assert len(names) == 2  # an expired file stays until something removes it
-        await cull_expired_oauth_state(provider)
-        remaining = _records(settings.fastmcp_home, "mcp_oauth_transactions")
-        assert len(remaining) == 1
-        assert await storage.get(key="fresh", collection="mcp-oauth-transactions") == {"a": 2}
-
-    async def test_records_that_bring_their_own_lifetime_keep_it(self, settings):
-        provider = build_entra_auth_provider(settings)
-        await oauth_storage_of(provider).store.put(
-            key="txn", value={"a": 1}, collection="mcp-oauth-transactions", ttl=900
+    def test_registration_budget_bounds_native_client_rows(self, stack):
+        before = self.clients(stack)
+        statuses = [
+            stack.client.post("/register", json=registration()).status_code
+            for _ in range(PUBLIC_REQUESTS_PER_MINUTE + 20)
+        ]
+        assert (
+            statuses[:PUBLIC_REQUESTS_PER_MINUTE] == [201] * PUBLIC_REQUESTS_PER_MINUTE
         )
-        (record,) = _records(settings.fastmcp_home, "mcp_oauth_transactions")
-        entry = json.loads(record.read_text(encoding="utf-8"))
-        from datetime import datetime
+        assert set(statuses[PUBLIC_REQUESTS_PER_MINUTE:]) == {429}
+        assert len(self.clients(stack)) - len(before) == PUBLIC_REQUESTS_PER_MINUTE
 
-        lifetime = (datetime.fromisoformat(entry["expires_at"]) - datetime.fromisoformat(entry["created_at"]))
-        assert lifetime.total_seconds() == pytest.approx(900, abs=5)
+    @staticmethod
+    def clients(stack):
+        with stack.store.database.read() as conn:
+            return conn.execute(select(s.oauth_clients)).mappings().all()
 
-    def test_a_provider_that_is_not_ours_has_no_storage(self):
-        assert oauth_storage_of(object()) is None
-        assert oauth_storage_of(SimpleNamespace()) is None
+    def test_authorize_has_a_separate_public_budget(self, stack):
+        client = stack.register()
+        params = {
+            "client_id": client,
+            "response_type": "code",
+            "redirect_uri": CLAUDE_REDIRECT,
+            "code_challenge": "c" * 43,
+            "code_challenge_method": "S256",
+            "state": "s",
+        }
+        statuses = [
+            stack.client.get("/authorize", params=params).status_code
+            for _ in range(PUBLIC_REQUESTS_PER_MINUTE + 5)
+        ]
+        assert (
+            statuses[:PUBLIC_REQUESTS_PER_MINUTE] == [302] * PUBLIC_REQUESTS_PER_MINUTE
+        )
+        assert set(statuses[PUBLIC_REQUESTS_PER_MINUTE:]) == {429}
 
-    async def test_cleanup_for_an_unknown_provider_is_a_no_op(self):
-        await cull_expired_oauth_state(object())
+    def test_oversized_registration_never_creates_a_row(self, stack):
+        before = self.clients(stack)
+        body = registration()
+        body["client_name"] = "x" * (MAX_REGISTER_BODY_BYTES + 10)
+        assert stack.client.post("/register", json=body).status_code == 413
+        assert self.clients(stack) == before
+
+    def test_native_dynamic_client_lifetime(self, stack):
+        assert stack.client.post("/register", json=registration()).status_code == 201
+        (row,) = self.clients(stack)
+        assert row["expires_at"] - row["created_at"] == DCR_TTL_SECONDS
+        assert len(row["id"]) == 36
+
+    def test_redirects_through_http_are_https(self, stack):
+        for path in ("/account", "/account/", "/account/admin", "/healthz/", "/mcp/"):
+            for method in ("GET", "POST"):
+                response = stack.client.request(
+                    method, "http://canvas.example.test" + path
+                )
+                location = response.headers.get("location")
+                assert location is None or location.startswith("https://"), (
+                    path,
+                    location,
+                )
+        assert stack.client.get("/account/").status_code == 200
+
+    def test_other_routes_work_through_the_guard(self, stack):
+        assert stack.client.get("/healthz").text == "ok"
+        assert (
+            stack.client.get("/.well-known/oauth-authorization-server").status_code
+            == 200
+        )
+        assert stack.client.post("/mcp", json={}).status_code == 401
 
 
 def test_module_exposes_the_limits_the_docs_quote():

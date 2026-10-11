@@ -15,7 +15,6 @@ from canvas_mcp.core.selfhost.schools import (
     MAX_SCHOOL_NAME,
     DirectoryEntry,
     DirectoryError,
-    FeaturedSchool,
     School,
     SchoolDirectory,
     SchoolPolicy,
@@ -186,11 +185,17 @@ def _resolver(result: Sequence[str] | BaseException) -> Any:
 
 
 async def test_check_public_host_ok() -> None:
-    assert await check_public_host("x.edu", _resolver(["8.8.8.8", "2606:4700:4700::1111"])) == "ok"
+    assert (
+        await check_public_host("x.edu", _resolver(["8.8.8.8", "2606:4700:4700::1111"]))
+        == "ok"
+    )
 
 
 async def test_one_private_address_among_public_ones_blocks() -> None:
-    assert await check_public_host("x.edu", _resolver(["8.8.8.8", "10.0.0.5"])) == "blocked"
+    assert (
+        await check_public_host("x.edu", _resolver(["8.8.8.8", "10.0.0.5"]))
+        == "blocked"
+    )
 
 
 async def test_metadata_address_blocks() -> None:
@@ -265,13 +270,20 @@ def entry(domain: str, name: str = "A School", **extra: Any) -> dict[str, Any]:
 
 async def test_search_request_shape_and_parsing() -> None:
     directory, rec = directory_with(
-        lambda r: httpx.Response(200, json=[entry("Canvas.A.edu", "A U"), entry("canvas.b.edu", "B U")])
+        lambda r: httpx.Response(
+            200, json=[entry("Canvas.A.edu", "A U"), entry("canvas.b.edu", "B U")]
+        )
     )
     result = await directory.search("irvine", limit=7)
-    assert result == [DirectoryEntry("A U", "canvas.a.edu"), DirectoryEntry("B U", "canvas.b.edu")]
+    assert result == [
+        DirectoryEntry("A U", "canvas.a.edu"),
+        DirectoryEntry("B U", "canvas.b.edu"),
+    ]
     (request,) = rec.requests
     assert request.method == "GET"
-    assert str(request.url).startswith(INSTRUCTURE_DIRECTORY_URL + DIRECTORY_SEARCH_PATH)
+    assert str(request.url).startswith(
+        INSTRUCTURE_DIRECTORY_URL + DIRECTORY_SEARCH_PATH
+    )
     assert request.url.params["search_term"] == "irvine"
     assert request.url.params["per_page"] == "7"
     assert request.headers["accept"] == "application/json"
@@ -359,7 +371,10 @@ async def test_results_are_deduplicated_and_capped() -> None:
     assert len(await directory.search("x", limit=5)) == 5
     dup = [entry("a.school.edu"), entry("A.school.edu"), entry("b.school.edu")]
     directory2, _ = directory_with(lambda r: httpx.Response(200, json=dup))
-    assert [e.domain for e in await directory2.search("x")] == ["a.school.edu", "b.school.edu"]
+    assert [e.domain for e in await directory2.search("x")] == [
+        "a.school.edu",
+        "b.school.edu",
+    ]
 
 
 async def test_confirm_requests_the_host_itself() -> None:
@@ -376,12 +391,21 @@ async def test_confirm_is_case_insensitive_and_exact() -> None:
     directory, _ = directory_with(
         lambda r: httpx.Response(200, json=[entry("Canvas.A.EDU", "A U")])
     )
-    assert (await directory.confirm("CANVAS.a.edu")) == DirectoryEntry("A U", "canvas.a.edu")
+    assert (await directory.confirm("CANVAS.a.edu")) == DirectoryEntry(
+        "A U", "canvas.a.edu"
+    )
 
 
 @pytest.mark.parametrize(
     "domain",
-    ["canvas.a.edu.evil.com", "a.edu", "xcanvas.a.edu", "canvas.a.edu.", "canvas.a.ed", "anvas.a.edu"],
+    [
+        "canvas.a.edu.evil.com",
+        "a.edu",
+        "xcanvas.a.edu",
+        "canvas.a.edu.",
+        "canvas.a.ed",
+        "anvas.a.edu",
+    ],
 )
 async def test_confirm_rejects_near_misses(domain: str) -> None:
     directory, _ = directory_with(lambda r: httpx.Response(200, json=[entry(domain)]))
@@ -401,113 +425,91 @@ async def test_confirm_propagates_directory_errors() -> None:
 
 # -- SchoolPolicy -----------------------------------------------------------------------
 
-DEFAULT_URL = "https://canvas.default.edu/api/v1"
-FEATURED = (FeaturedSchool("canvas.a.edu", "A U"), FeaturedSchool("canvas.b.edu", ""))
+FEATURED = (
+    School("canvas.a.edu", "https://canvas.a.edu/api/v1", "A U"),
+    School("canvas.b.edu", "https://canvas.b.edu/api/v1", "B U"),
+)
 
 
-def test_pinned_policy() -> None:
-    policy = SchoolPolicy.pinned(DEFAULT_URL)
-    assert policy.default == School("canvas.default.edu", DEFAULT_URL, "canvas.default.edu", True)
-    assert policy.featured == (policy.default,)
-    assert policy.search_enabled is False
-    assert policy.picker_enabled is False
-    assert policy.sole_school == policy.default
-
-
-def test_default_keeps_port_and_prefix_and_takes_a_featured_name() -> None:
-    url = "https://Canvas.Default.edu:8443/lms/api/v1"
-    policy = SchoolPolicy.build(url, [FeaturedSchool("canvas.default.edu", "Default U")], False)
-    assert policy.default == School("canvas.default.edu", url, "Default U", True)
-    assert policy.featured == (policy.default,)
-
-
-def test_default_is_implicitly_featured_and_first() -> None:
-    policy = SchoolPolicy.build(DEFAULT_URL, FEATURED, False)
-    assert [s.host for s in policy.featured] == ["canvas.default.edu", "canvas.a.edu", "canvas.b.edu"]
-    assert policy.featured[1].api_url == "https://canvas.a.edu/api/v1"
-    assert policy.featured[2].name == "canvas.b.edu"
-    assert policy.picker_enabled is True
-    assert policy.sole_school is None
-
-
-def test_featured_only_without_default() -> None:
-    policy = SchoolPolicy.build("", FEATURED, False)
-    assert policy.default is None
-    assert [s.host for s in policy.featured] == ["canvas.a.edu", "canvas.b.edu"]
-    assert policy.picker_enabled is True
-
-
-def test_single_featured_school_is_the_sole_school() -> None:
-    policy = SchoolPolicy.build("", FEATURED[:1], False)
-    assert policy.picker_enabled is False
-    assert policy.sole_school is not None and policy.sole_school.host == "canvas.a.edu"
-
-
-def test_search_enables_the_picker_even_for_one_school() -> None:
-    policy = SchoolPolicy.build(DEFAULT_URL, (), True)
-    assert policy.picker_enabled is True
-    assert policy.sole_school is None
-
-
-def test_search_only_has_no_schools_to_pick() -> None:
-    policy = SchoolPolicy.build("", (), True)
-    assert policy.default is None and policy.featured == ()
-    assert policy.picker_enabled is True and policy.sole_school is None
-
-
-def test_empty_policy() -> None:
-    policy = SchoolPolicy.build("", (), False)
-    assert policy.default is None and policy.featured == ()
+def test_featured_policy_has_only_explicit_database_schools():
+    policy = SchoolPolicy(featured=FEATURED, search_enabled=False)
+    assert policy.featured == FEATURED and policy.picker_enabled
     assert policy.sole_school is None
     assert policy.resolve_stored(None) is None
+
+
+def test_single_featured_school_is_the_sole_school():
+    policy = SchoolPolicy(featured=FEATURED[:1], search_enabled=False)
+    assert not policy.picker_enabled and policy.sole_school == FEATURED[0]
+
+
+def test_search_enables_the_picker_even_for_one_school():
+    policy = SchoolPolicy(featured=FEATURED[:1], search_enabled=True)
+    assert policy.picker_enabled and policy.sole_school is None
+
+
+def test_search_only_has_no_implicit_school():
+    policy = SchoolPolicy()
+    assert (
+        policy.featured == () and policy.picker_enabled and policy.sole_school is None
+    )
+    assert policy.resolve_stored(None) is None
+
+
+def test_empty_closed_policy_refuses_every_host():
+    policy = SchoolPolicy(search_enabled=False)
+    assert policy.sole_school is None and policy.resolve_stored(None) is None
     assert policy.resolve_stored("canvas.a.edu") is None
 
 
-def test_resolve_stored_cases() -> None:
-    policy = SchoolPolicy.build(DEFAULT_URL, FEATURED, False)
-    assert policy.resolve_stored(None) == policy.default  # legacy row
-    assert policy.resolve_stored("canvas.default.edu") == policy.default
-    assert policy.resolve_stored("canvas.a.edu") == policy.featured[1]
-    assert policy.resolve_stored("canvas.zzz.edu") is None  # not offered, search off
-    assert policy.resolve_stored("") is None
+def test_resolve_stored_uses_explicit_school_url_verbatim():
+    school = School(
+        "canvas.private.edu",
+        "https://canvas.private.edu:8443/lms/api/v1",
+        "Private",
+        True,
+    )
+    policy = SchoolPolicy(private=(school,), search_enabled=False)
+    assert policy.resolve_stored(school.host) == school
+    assert policy.resolve_stored(None) is None
+    assert policy.featured_school(school.host) is None
 
 
-def test_resolve_stored_uses_the_default_api_url_with_port_and_prefix() -> None:
-    url = "https://canvas.default.edu:8443/lms/api/v1"
-    policy = SchoolPolicy.pinned(url)
-    resolved = policy.resolve_stored("canvas.default.edu")
-    assert resolved is not None and resolved.api_url == url
-
-
-def test_resolve_stored_searched_hosts_need_search_enabled() -> None:
-    off = SchoolPolicy.build(DEFAULT_URL, FEATURED, False)
-    on = SchoolPolicy.build(DEFAULT_URL, FEATURED, True)
+def test_resolve_stored_searched_hosts_need_search_enabled():
+    off = SchoolPolicy(featured=FEATURED, search_enabled=False)
+    on = SchoolPolicy(featured=FEATURED, search_enabled=True)
     assert off.resolve_stored("canvas.found.edu") is None
-    found = on.resolve_stored("canvas.found.edu")
-    assert found == School("canvas.found.edu", "https://canvas.found.edu/api/v1", "canvas.found.edu")
+    assert on.resolve_stored("canvas.found.edu") == School(
+        "canvas.found.edu", "https://canvas.found.edu/api/v1", "canvas.found.edu"
+    )
+    assert off.resolve_stored("canvas.a.edu") == FEATURED[0]
 
 
 @pytest.mark.parametrize(
     "stored",
-    ["localhost", "127.0.0.1", "x.local", "Canvas.Found.edu", "canvas.found.edu:8443", "a/b.edu", " canvas.found.edu"],
+    [
+        None,
+        "",
+        "localhost",
+        "127.0.0.1",
+        "x.local",
+        "Canvas.Found.edu",
+        "canvas.found.edu:8443",
+        "a/b.edu",
+        " canvas.found.edu",
+    ],
 )
-def test_resolve_stored_never_trusts_odd_stored_hosts(stored: str) -> None:
-    policy = SchoolPolicy.build("", (), True)
-    assert policy.resolve_stored(stored) is None
+def test_resolve_stored_never_trusts_odd_stored_hosts(stored):
+    assert SchoolPolicy().resolve_stored(stored) is None
 
 
-def test_legacy_row_without_a_default_is_not_allowed() -> None:
-    policy = SchoolPolicy.build("", FEATURED, True)
-    assert policy.resolve_stored(None) is None
-
-
-def test_featured_school_lookup() -> None:
-    policy = SchoolPolicy.build(DEFAULT_URL, FEATURED, False)
-    assert policy.featured_school("canvas.a.edu") is not None
+def test_featured_school_lookup():
+    policy = SchoolPolicy(featured=FEATURED, search_enabled=False)
+    assert policy.featured_school("canvas.a.edu") == FEATURED[0]
     assert policy.featured_school("nope.edu") is None
 
 
-def test_policy_is_immutable() -> None:
-    policy = SchoolPolicy.pinned(DEFAULT_URL)
+def test_policy_is_immutable():
+    policy = SchoolPolicy(featured=FEATURED, search_enabled=False)
     with pytest.raises(AttributeError):
-        policy.search_enabled = True  # type: ignore[misc]
+        policy.search_enabled = True

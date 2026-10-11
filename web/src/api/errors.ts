@@ -28,6 +28,9 @@ const CODE_SET: Record<ApiErrorCode, true> = {
   canvas_unavailable: true,
   identity_change_required: true,
   recheck_not_allowed: true,
+  custody_ack_required: true,
+  custody_notice_outdated: true,
+  not_enrolled: true,
   school_required: true,
   school_invalid: true,
   school_not_offered: true,
@@ -38,6 +41,9 @@ const CODE_SET: Record<ApiErrorCode, true> = {
   directory_unavailable: true,
   write_tool_not_allowed: true,
   write_tools_unavailable: true,
+  settings_conflict: true,
+  pilot_profile_restricted: true,
+  confirmation_required: true,
   last_owner: true,
   cannot_disable_self: true,
   identity_in_use: true,
@@ -51,7 +57,6 @@ const CODE_SET: Record<ApiErrorCode, true> = {
   sign_in_incomplete: true,
   sign_in_unverified: true,
   wrong_tenant: true,
-  wrong_client: true,
   bad_subject: true,
   bad_roles: true,
   access_denied: true,
@@ -101,6 +106,9 @@ function cleanParams(value: unknown): ErrorParams {
   const out: ErrorParams = {}
   for (const [k, v] of Object.entries(value)) {
     if (typeof v === 'string' || typeof v === 'number') out[k] = v
+    else if (k === 'affected' && typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      out[k] = Object.fromEntries(Object.entries(v).filter(([host, count]) => /^[a-z0-9.-]{1,253}$/.test(host) && typeof count === 'number' && Number.isSafeInteger(count) && count >= 0)) as Record<string, number>
+    }
   }
   return out
 }

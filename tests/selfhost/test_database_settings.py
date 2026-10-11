@@ -26,10 +26,8 @@ def _env(**overrides: str | None) -> dict[str, str]:
         "ENTRA_TENANT_ID": "11111111-2222-3333-4444-555555555555",
         "ENTRA_CLIENT_ID": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         "ENTRA_CLIENT_SECRET": "s3cret-value-of-entra-client",
-        "OAUTH_JWT_SIGNING_KEY": "k" * 48,
         "ACCOUNT_SESSION_SECRET": base64.b64encode(bytes(range(32))).decode(),
         "CANVAS_TOKEN_KEYS": "k1:" + base64.b64encode(bytes(32)).decode(),
-        "FASTMCP_HOME": "/data/fastmcp",
     }
     for key, value in overrides.items():
         if value is None:

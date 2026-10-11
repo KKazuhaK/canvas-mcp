@@ -9,18 +9,18 @@ ceiling, nothing is on by default, and no MCP tool can read or change the switch
 from __future__ import annotations
 
 import re
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.server.auth import AccessToken
-from selfhost.conftest import acct_key
+from selfhost.conftest import acct_key, make_principal
 
 import canvas_mcp.core.config as config_module
 from canvas_mcp.core.config import STUDENT_WRITE_TOOL_NAMES
 from canvas_mcp.core.credentials import (
     RequestCredentials,
-    RequestPrincipal,
     RequestToolPrefs,
     clear_http_request_context,
     set_request_credentials,
@@ -28,6 +28,8 @@ from canvas_mcp.core.credentials import (
     set_request_tool_prefs,
 )
 from canvas_mcp.core.selfhost import tool_gate
+from canvas_mcp.core.selfhost.db.snapshots import McpSnapshot
+from canvas_mcp.core.selfhost.mcp_state import MCP_READ, McpRead
 from canvas_mcp.core.selfhost.tool_gate import SelfhostCredentialGate
 from canvas_mcp.core.selfhost.tool_prefs import (
     WriteDecision,
@@ -45,7 +47,6 @@ from canvas_mcp.core.tool_policy import (
 from canvas_mcp.server import register_all_tools
 
 OID = "aaaaaaaa-0000-4000-8000-00000000000a"
-TENANT = "11111111-2222-3333-4444-555555555555"
 SRC = Path(__file__).resolve().parents[2] / "src" / "canvas_mcp"
 READ = {name for name, effect in TOOL_EFFECTS.items() if effect is Effect.READ}
 
@@ -56,23 +57,46 @@ def _request(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         tool_gate,
         "get_access_token",
-        lambda: AccessToken(token="t", client_id="c", scopes=[], claims={"oid": OID}),
+        lambda: AccessToken(
+            token="t",
+            client_id="c",
+            scopes=[],
+            claims={
+                "acct": acct_key(OID),
+                "iss": "https://canvas.example.test",
+                "token_use": "access",
+            },
+        ),
     )
-    set_request_principal(
-        RequestPrincipal(
-            key=acct_key(OID), tenant_id=TENANT, object_id=OID, display_name="",
-            upn="", roles=frozenset({"Canvas.User"}), is_owner=False,
-        )
+    values = {field.name: None for field in fields(McpSnapshot)}
+    values.update(
+        client_id="c",
+        display_name="",
+        status="active",
+        role="user",
+        session_epoch=0,
+        credential_generation=1,
+        write_tools_version=0,
+        jwt_epoch=0,
+        settings_revision=0,
+        grant_expires_at=4_000_000_000,
     )
-    set_request_credentials(RequestCredentials(api_token="x" * 30, api_url="https://c.example.test/api/v1"))
+    MCP_READ.set(McpRead(acct_key(OID), "grant", McpSnapshot(**values)))
+    set_request_principal(make_principal(OID))
+    set_request_credentials(
+        RequestCredentials(api_token="x" * 30, api_url="https://c.example.test/api/v1")
+    )
     yield
     clear_http_request_context()
+    MCP_READ.set(None)
 
 
 @pytest.fixture
 def all_flags_on(monkeypatch):
     monkeypatch.setenv("EXECUTE_TYPESCRIPT_ENABLED", "true")
-    monkeypatch.setenv("STUDENT_WRITE_TOOLS", ",".join(sorted(STUDENT_WRITE_TOOL_NAMES)))
+    monkeypatch.setenv(
+        "STUDENT_WRITE_TOOLS", ",".join(sorted(STUDENT_WRITE_TOOL_NAMES))
+    )
     monkeypatch.delenv("ALLOWED_WRITE_TOOLS", raising=False)
     monkeypatch.setattr(config_module, "_config", None, raising=False)
     yield
@@ -97,12 +121,16 @@ async def _visible(mcp: FastMCP) -> set[str]:
 
 class TestCeilingIsAHardLimit:
     @pytest.mark.parametrize("name", sorted(SIDE_EFFECT_TOOLS))
-    def test_a_stored_switch_never_beats_a_missing_operator_allowance(self, name: str) -> None:
+    def test_a_stored_switch_never_beats_a_missing_operator_allowance(
+        self, name: str
+    ) -> None:
         # The user's record names every write tool; the operator allows none.
         verdict = decide(name, enabled=SIDE_EFFECT_TOOLS, ceiling=frozenset())
         assert verdict is WriteDecision.NOT_OFFERED
 
-    @pytest.mark.parametrize("allowed", sorted(SIDE_EFFECT_TOOLS - {"execute_typescript"}))
+    @pytest.mark.parametrize(
+        "allowed", sorted(SIDE_EFFECT_TOOLS - {"execute_typescript"})
+    )
     def test_one_allowed_tool_opens_exactly_that_tool(self, allowed: str) -> None:
         for name in SIDE_EFFECT_TOOLS:
             verdict = decide(name, enabled=SIDE_EFFECT_TOOLS, ceiling={allowed})
@@ -110,21 +138,35 @@ class TestCeilingIsAHardLimit:
 
     def test_code_execution_is_never_user_enableable(self) -> None:
         everything = frozenset(TOOL_EFFECTS)
-        assert decide("execute_typescript", enabled=everything, ceiling=everything) is WriteDecision.NOT_OFFERED
+        assert (
+            decide("execute_typescript", enabled=everything, ceiling=everything)
+            is WriteDecision.NOT_OFFERED
+        )
         assert "execute_typescript" not in offered_write_tools(everything, everything)
 
     def test_the_effective_set_is_a_subset_of_both_inputs(self) -> None:
-        offered = offered_write_tools(TOOL_EFFECTS, {"send_message", "create_assignment"})
+        offered = offered_write_tools(
+            TOOL_EFFECTS, {"send_message", "create_assignment"}
+        )
         for enabled in (set(), {"send_message"}, set(SIDE_EFFECT_TOOLS), {"ghost"}):
             got = effective_write_tools(offered, enabled)
             assert got <= offered and got <= enabled
 
     def test_nothing_is_on_by_default(self) -> None:
         for name in SIDE_EFFECT_TOOLS - {"execute_typescript"}:
-            assert decide(name, enabled=frozenset(), ceiling=None) is WriteDecision.NOT_ENABLED
-            assert decide(name, enabled=frozenset(), ceiling=SIDE_EFFECT_TOOLS) is WriteDecision.NOT_ENABLED
+            assert (
+                decide(name, enabled=frozenset(), ceiling=None)
+                is WriteDecision.NOT_ENABLED
+            )
+            assert (
+                decide(name, enabled=frozenset(), ceiling=SIDE_EFFECT_TOOLS)
+                is WriteDecision.NOT_ENABLED
+            )
         # Code execution is not something a user can turn on at all.
-        assert decide("execute_typescript", enabled=frozenset(), ceiling=None) is WriteDecision.NOT_OFFERED
+        assert (
+            decide("execute_typescript", enabled=frozenset(), ceiling=None)
+            is WriteDecision.NOT_OFFERED
+        )
 
 
 class TestRealRegistry:
@@ -136,33 +178,55 @@ class TestRealRegistry:
         assert visible, "no tools registered; the check would pass vacuously"
         assert visible <= READ
 
-    async def test_the_visible_writes_are_exactly_allowed_and_switched_on(self, all_flags_on) -> None:
-        allowed = "send_message,submit_assignment,create_assignment,mark_module_item_done"
-        enabled = {"send_message", "create_assignment", "delete_page", "execute_typescript"}
+    async def test_the_visible_writes_are_exactly_allowed_and_switched_on(
+        self, all_flags_on
+    ) -> None:
+        allowed = (
+            "send_message,submit_assignment,create_assignment,mark_module_item_done"
+        )
+        enabled = {
+            "send_message",
+            "create_assignment",
+            "delete_page",
+            "execute_typescript",
+        }
         mcp, ceiling = await _stack(allowed, enabled)
         visible = await _visible(mcp)
         assert visible - READ == {"send_message", "create_assignment"}
         assert visible - READ == (ceiling & enabled)
 
-    async def test_switching_on_every_write_tool_cannot_exceed_the_allowlist(self, all_flags_on) -> None:
+    async def test_switching_on_every_write_tool_cannot_exceed_the_allowlist(
+        self, all_flags_on
+    ) -> None:
         mcp, ceiling = await _stack("send_message", set(SIDE_EFFECT_TOOLS))
         assert (await _visible(mcp)) - READ == {"send_message"} == set(ceiling)
 
-    async def test_a_hidden_or_unallowed_tool_is_refused_when_called_by_name(self, all_flags_on) -> None:
+    async def test_a_hidden_or_unallowed_tool_is_refused_when_called_by_name(
+        self, all_flags_on
+    ) -> None:
         mcp, _ = await _stack("send_message", {"submit_assignment", "delete_page"})
         async with Client(mcp) as client:
-            for name in ("send_message", "submit_assignment", "delete_page", "execute_typescript"):
+            for name in (
+                "send_message",
+                "submit_assignment",
+                "delete_page",
+                "execute_typescript",
+            ):
                 result = await client.call_tool(name, {}, raise_on_error=False)
                 assert result.is_error, name
 
-    async def test_the_operator_ceiling_all_still_leaves_code_execution_out(self, all_flags_on) -> None:
+    async def test_the_operator_ceiling_all_still_leaves_code_execution_out(
+        self, all_flags_on
+    ) -> None:
         mcp, _ = await _stack("all", set(SIDE_EFFECT_TOOLS))
         assert "execute_typescript" not in await _visible(mcp)
 
 
 class TestNoToolCanChangeTheSwitches:
     def test_no_registered_tool_module_touches_the_preferences(self) -> None:
-        pattern = re.compile(r"set_tool_prefs|get_tool_prefs|ToolPrefsCache|user_tool_prefs|enabled_write_tools")
+        pattern = re.compile(
+            r"set_tool_prefs|get_tool_prefs|ToolPrefsCache|user_tool_prefs|enabled_write_tools"
+        )
         offenders = [
             str(path.relative_to(SRC))
             for path in sorted((SRC / "tools").rglob("*.py"))
@@ -170,26 +234,35 @@ class TestNoToolCanChangeTheSwitches:
         ]
         assert offenders == []
 
-    def test_only_the_account_pages_write_the_switches(self) -> None:
+    def test_only_the_account_core_writes_the_switches(self) -> None:
         writers = sorted(
             str(path.relative_to(SRC)).replace("\\", "/")
             for path in SRC.rglob("*.py")
             if "set_tool_prefs(" in path.read_text(encoding="utf-8")
             or "set_tool_prefs," in path.read_text(encoding="utf-8")
         )
-        assert writers == ["core/selfhost/account_web.py", "core/selfhost/token_store.py"]
+        assert writers == [
+            "core/selfhost/account_core.py",
+            "core/selfhost/token_store.py",
+        ]
 
-    def test_the_account_pages_are_the_only_route_that_saves_them(self) -> None:
-        text = (SRC / "core" / "selfhost" / "account_web.py").read_text(encoding="utf-8")
-        assert text.count("self.store.set_tool_prefs") == 1
-        assert "async def save_write_tools" in text
-        # Behind the same guard as every other POST: session, Origin, CSRF.
-        body = text[text.index("async def save_write_tools") :]
-        assert "self._guard_post(request" in body.split("self.store.set_tool_prefs")[0]
+    def test_the_native_account_api_guards_the_only_switch_save_route(self) -> None:
+        core = (SRC / "core/selfhost/account_core.py").read_text(encoding="utf-8")
+        assert core.count("self.store.set_tool_prefs") == 1
+        text = (SRC / "core/selfhost/account_api.py").read_text(encoding="utf-8")
+        assert text.count("self.app.apply_write_tools(") == 1
+        guard = text[text.index("async def _handle(") : text.index("def _linking_off(")]
+        assert "endpoint.mutating or endpoint.csrf" in guard
+        assert "self.app._csrf_ok(session, supplied)" in guard
+        assert "self._check_origin(request, mutating=endpoint.mutating)" in guard
+        assert "self.put_write_tools, mutating=True" in text
+        assert "self.delete_write_tools, mutating=True" in text
 
     async def test_no_registered_tool_is_about_preferences(self, all_flags_on) -> None:
         mcp = FastMCP("names")
         register_all_tools(mcp, role="all")
         for tool in await mcp.list_tools(run_middleware=False):
             haystack = f"{tool.name} {tool.description or ''}".lower()
-            assert "preference" not in haystack and "write_tools" not in haystack, tool.name
+            assert "preference" not in haystack and "write_tools" not in haystack, (
+                tool.name
+            )

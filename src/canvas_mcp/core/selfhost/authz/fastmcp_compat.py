@@ -72,14 +72,18 @@ DOC_UNSUPPORTED_AUTH_METHOD = "unsupported_auth_method"
 # -- endpoints -----------------------------------------------------------------------
 
 
-def authorization_endpoint(provider: Any, *, base_url: str, issuer_url: str) -> Endpoint:
+def authorization_endpoint(
+    provider: Any, *, base_url: str, issuer_url: str
+) -> Endpoint:
     """FastMCP's ``/authorize`` handler: the SDK's, plus ``iss`` on every error redirect.
 
     Pinned: it answers an unknown client with 400 and no ``Location``, and a provider
     that raises ``AuthorizeError`` gets a 302 with ``error``, ``state`` and exactly one
     ``iss`` equal to ``issuer_url`` byte for byte.
     """
-    handler = AuthorizationHandler(provider=provider, base_url=base_url, issuer_url=issuer_url)
+    handler = AuthorizationHandler(
+        provider=provider, base_url=base_url, issuer_url=issuer_url
+    )
     return handler.handle
 
 
@@ -90,7 +94,9 @@ def token_endpoint(provider: Any) -> Endpoint:
     ``invalid_grant`` to 401 and an unknown client to 401 ``invalid_client``, and does
     **not** look at the ``resource`` form field (our wrapper does).
     """
-    handler = TokenHandler(provider=provider, client_authenticator=ClientAuthenticator(provider))
+    handler = TokenHandler(
+        provider=provider, client_authenticator=ClientAuthenticator(provider)
+    )
     return handler.handle
 
 
@@ -109,7 +115,9 @@ def client_redirect(url: str, params: Mapping[str, str], *, iss: str) -> str:
     return build_client_redirect(url, dict(params), iss=iss)
 
 
-def redirect_allowed_for_application_type(uri: str, application_type: str | None) -> bool:
+def redirect_allowed_for_application_type(
+    uri: str, application_type: str | None
+) -> bool:
     """RFC 7591 ``application_type`` rules: ``web`` needs https off loopback; ``native`` may use loopback http."""
     return is_redirect_uri_allowed_for_application_type(uri, application_type)
 

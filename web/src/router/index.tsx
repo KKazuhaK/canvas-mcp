@@ -10,6 +10,7 @@ import SignInView from '@/views/SignInView'
 import { NotFoundView, RouteError } from '@/views/StateViews'
 import TokenView from '@/views/TokenView'
 import WriteToolsView from '@/views/WriteToolsView'
+import AdminSettingsView from '@/views/admin/AdminSettingsView'
 import AdminAccountsView from '@/views/admin/AdminAccountsView'
 import AdminAuditView from '@/views/admin/AdminAuditView'
 import AdminEnrollmentsView from '@/views/admin/AdminEnrollmentsView'
@@ -29,7 +30,7 @@ export const routes: RouteObject[] = [
       {
         element: <PublicLayout />,
         children: [
-          // The server-side sign-in lives at /account/login and /account/callback (not
+          // The server-side sign-in lives at /auth/login and /auth/callback (not
           // routes of this app); this page is where a failed sign-in comes back to.
           { path: 'sign-in', element: <SignInView />, handle: { titleKey: 'common:actions.signIn' } },
         ],
@@ -50,14 +51,9 @@ export const routes: RouteObject[] = [
             ],
           },
           {
-            element: <RequireFeature feature="connected_apps" />,
-            children: [
-              {
-                path: 'connected-apps',
-                element: <ConnectedAppsView />,
-                handle: { titleKey: 'common:nav.connectedApps' },
-              },
-            ],
+            path: 'connected-apps',
+            element: <ConnectedAppsView />,
+            handle: { titleKey: 'common:nav.connectedApps' },
           },
           {
             element: <RequireFeature feature="identities" />,
@@ -79,6 +75,7 @@ export const routes: RouteObject[] = [
                 children: [
                   { index: true, element: <AdminAccountsView />, handle: { titleKey: 'admin:accounts.title' } },
                   { path: 'enrollments', element: <AdminEnrollmentsView />, handle: { titleKey: 'admin:enrollments.title' } },
+                  { path: 'settings', element: <AdminSettingsView />, handle: { titleKey: 'admin:settings.title' } },
                   { path: 'audit', element: <AdminAuditView />, handle: { titleKey: 'admin:audit.title' } },
                 ],
               },

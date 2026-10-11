@@ -10,8 +10,8 @@ that turns a stored host into an API URL:
   private or cloud-metadata address;
 * a client for Instructure's public school directory, the same one the Canvas
   mobile app uses (:class:`SchoolDirectory`);
-* the operator's :class:`SchoolPolicy`: a default school (``CANVAS_API_URL``),
-  featured schools, and whether the directory search is enabled.
+* the database-owned :class:`SchoolPolicy`: featured schools, explicit private
+  exceptions, and whether the directory search is enabled.
 
 Nothing here performs I/O at import time or at settings load time.
 """
@@ -24,7 +24,6 @@ import socket
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal, Protocol
-from urllib.parse import urlsplit
 
 import anyio
 import anyio.to_thread
@@ -86,7 +85,12 @@ def parse_hostname(raw: str) -> str | None:
     if not host or len(host) > _MAX_HOST_CHARS or not host.isascii():
         return None
     for ch in host:
-        if ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F or ch in _FORBIDDEN_HOST_CHARS:
+        if (
+            ch.isspace()
+            or ord(ch) < 0x20
+            or ord(ch) == 0x7F
+            or ch in _FORBIDDEN_HOST_CHARS
+        ):
             return None
     if host.endswith("."):
         return None
@@ -194,7 +198,9 @@ class DirectoryEntry:
 
 
 class SchoolDirectoryLike(Protocol):
-    async def search(self, term: str, *, limit: int = SEARCH_RESULTS) -> list[DirectoryEntry]: ...
+    async def search(
+        self, term: str, *, limit: int = SEARCH_RESULTS
+    ) -> list[DirectoryEntry]: ...
 
     async def confirm(self, host: str) -> DirectoryEntry | None: ...
 
@@ -218,7 +224,9 @@ class SchoolDirectory:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
 
-    async def search(self, term: str, *, limit: int = SEARCH_RESULTS) -> list[DirectoryEntry]:
+    async def search(
+        self, term: str, *, limit: int = SEARCH_RESULTS
+    ) -> list[DirectoryEntry]:
         try:
             async with self._client_factory() as client:
                 resp = await client.get(
@@ -247,7 +255,9 @@ class SchoolDirectory:
             if domain is None or domain in seen:
                 continue
             seen.add(domain)
-            entries.append(DirectoryEntry(_clean_name(item.get("name"), domain), domain))
+            entries.append(
+                DirectoryEntry(_clean_name(item.get("name"), domain), domain)
+            )
             if len(entries) >= limit:
                 break
         return entries
@@ -265,62 +275,20 @@ class SchoolDirectory:
 
 
 @dataclass(frozen=True)
-class FeaturedSchool:
-    """An operator-listed school as written in ``CANVAS_FEATURED_SCHOOLS``."""
-
-    host: str
-    name: str = ""
-
-
-@dataclass(frozen=True)
 class School:
     host: str
     api_url: str
     name: str
-    is_default: bool = False
+    allow_private: bool = False
 
 
 @dataclass(frozen=True)
 class SchoolPolicy:
-    """Which schools this server offers and how a stored host maps to an API URL."""
+    """Database-owned schools; no implicit default or environment seed."""
 
-    default: School | None
-    featured: tuple[School, ...]
-    search_enabled: bool
-
-    @classmethod
-    def build(
-        cls,
-        canvas_api_url: str,
-        featured: Sequence[FeaturedSchool] = (),
-        search: bool = False,
-    ) -> SchoolPolicy:
-        names = {item.host: item.name for item in featured if item.name}
-        default: School | None = None
-        schools: list[School] = []
-        seen: set[str] = set()
-        url = (canvas_api_url or "").strip()
-        if url:
-            try:
-                host = (urlsplit(url).hostname or "").lower()
-            except ValueError:
-                host = ""
-            if host:
-                default = School(host, url, names.get(host) or host, is_default=True)
-                schools.append(default)
-                seen.add(host)
-        for item in featured:
-            if item.host in seen:
-                continue
-            seen.add(item.host)
-            schools.append(
-                School(item.host, f"https://{item.host}/api/v1", item.name or item.host)
-            )
-        return cls(default=default, featured=tuple(schools), search_enabled=bool(search))
-
-    @classmethod
-    def pinned(cls, url: str) -> SchoolPolicy:
-        return cls.build(url, (), False)
+    featured: tuple[School, ...] = ()
+    search_enabled: bool = True
+    private: tuple[School, ...] = ()
 
     @property
     def picker_enabled(self) -> bool:
@@ -328,27 +296,17 @@ class SchoolPolicy:
 
     @property
     def sole_school(self) -> School | None:
-        if self.picker_enabled or not self.featured:
-            return None
-        return self.featured[0]
+        return self.featured[0] if not self.picker_enabled and self.featured else None
 
     def featured_school(self, host: str) -> School | None:
-        for school in self.featured:
-            if school.host == host:
-                return school
-        return None
+        return next((school for school in self.featured if school.host == host), None)
 
     def resolve_stored(self, host: str | None) -> School | None:
-        """The school a stored row belongs to, or None when it is no longer allowed.
-
-        ``None`` (a legacy row) belongs to the default school. Searched schools
-        are honoured only while the search is enabled.
-        """
         if host is None:
-            return self.default
-        if self.default is not None and host == self.default.host:
-            return self.default
-        school = self.featured_school(host)
+            return None
+        school = self.featured_school(host) or next(
+            (s for s in self.private if s.host == host), None
+        )
         if school is not None:
             return school
         if (

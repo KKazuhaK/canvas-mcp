@@ -1,10 +1,10 @@
 """Alembic environment of the self-hosted token database.
 
-Run programmatically by ``db.migrate`` (there is no ``alembic.ini``): the caller
-hands in a connection that is already inside its own transaction, through
-``config.attributes['connection']``, so the whole migration commits or rolls back
-as one unit on both SQLite and PostgreSQL. Offline mode (``--sql``) renders the
-DDL for the dialect named in ``config.attributes['dialect']``.
+Run programmatically by ``db.migrations.runner`` (there is no ``alembic.ini``): the caller
+hands in a dedicated connection through ``config.attributes['connection']``.
+Ordinary upgrades and imports use one caller-owned transaction. Flagged
+PostgreSQL revisions use Alembic-owned per-file transactions and explicit
+autocommit blocks for concurrent indexes. Offline mode renders the named dialect.
 """
 
 from __future__ import annotations
@@ -46,12 +46,14 @@ def run_migrations_online() -> None:
         connection=connection,
         target_metadata=target_metadata,
         version_table=schema.VERSION_TABLE,
-        # SQLite DDL is transactional too; the caller's BEGIN IMMEDIATE makes the
-        # whole adoption one unit, so a crash leaves the file unchanged.
+        # The caller's SQLite BEGIN IMMEDIATE keeps the whole upgrade atomic.
         transactional_ddl=True,
-        transaction_per_migration=False,
+        transaction_per_migration=config.attributes.get(
+            "transaction_per_migration", False
+        ),
         compare_type=True,
         include_object=_include_object,
+        on_version_apply=config.attributes.get("on_version_apply"),
     )
     with context.begin_transaction():
         context.run_migrations()

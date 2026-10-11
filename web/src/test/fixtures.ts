@@ -6,6 +6,7 @@ import type { ApiErrorCode, CanvasTokenStatus, MeResponse } from '@/api/types'
 
 export function canvasFixture(overrides: Partial<CanvasTokenStatus> = {}): CanvasTokenStatus {
   return {
+    custody: { notice_version: 1, acknowledged_version: null, acknowledged_at: null, current: false },
     state: 'none',
     canvas_user_id: null,
     canvas_user_name: null,
@@ -39,6 +40,7 @@ export function meFixture(
       status: 'active',
       ...overrides,
     },
+    custody_ack_required: false,
     csrf_token: 'test-csrf-token',
     session: {
       issued_at: '2026-01-01T00:00:00Z',
@@ -55,8 +57,8 @@ export function meFixture(
       write_tools: true,
       admin: false,
       identities: false,
-      connected_apps: false,
-      consent: false,
+
+
       logout_everywhere: false,
       role_management: false,
     },

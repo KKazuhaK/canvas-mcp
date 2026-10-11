@@ -1,15 +1,8 @@
-"""Outcome types of the account operations shared by the HTML pages and the JSON API.
+"""Outcome types for shared account operations behind the JSON API.
 
-The security-critical sequences of ``/account`` (enrolling or replacing a token,
-re-checking it, saving the write-tool switches, the owner's access actions) are
-written once, as methods of :class:`~.account_web._AccountApp`. They return the
-types below instead of rendering anything. The legacy pages turn an outcome into
-today's HTML message and status; :mod:`.account_api` turns the same outcome into a
-JSON error code. A check can therefore not be dropped from one surface and kept in
-the other.
-
-A refusal carries a code from the closed API code set (``account_api.API_ERROR_CODES``)
-and scalar parameters only. It never carries upstream text.
+AccountCore implements enrollment, verification, write preferences and owner
+operations once. Refusals contain closed codes and scalar parameters, never
+upstream response text.
 """
 
 from __future__ import annotations
@@ -114,7 +107,7 @@ class Unlinked:
 class IdentityView:
     """One linked identity as the sign-in methods screen shows it."""
 
-    id: int
+    id: str
     provider_id: str
     username: str
     email: str | None

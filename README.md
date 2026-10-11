@@ -4,6 +4,8 @@
 
 # Canvas MCP Server
 
+This is an independent fork of [vishalsachdev/canvas-mcp](https://github.com/vishalsachdev/canvas-mcp), not endorsed by upstream; the self-hosted deployment is maintained here and only small core improvements are offered upstream.
+
 <!--mcp-name: io.github.vishalsachdev/canvas-mcp-->
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![skills.sh](https://img.shields.io/badge/skills.sh-canvas--mcp-blue)](https://skills.sh)

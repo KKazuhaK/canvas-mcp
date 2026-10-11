@@ -266,7 +266,7 @@ class FakeOidcIdp:
         assert q["response_type"] == "code" and q["client_id"] == self.client_id, q
         assert q["code_challenge_method"] == "S256" and len(q["code_challenge"]) == 43, q
         assert "openid" in q["scope"].split() and q["state"] and q["nonce"], q
-        assert "response_mode" not in q and "id_token" not in q.get("response_type", ""), q
+        assert q.get("response_mode", "query") == "query" and "id_token" not in q.get("response_type", ""), q
         callback = q["redirect_uri"]
         params: dict[str, str] = {"state": q["state"]}
         if error is not None:

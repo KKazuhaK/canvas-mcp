@@ -1,14 +1,9 @@
 """One-time login state behind an interface.
 
-The OIDC ``state``, ``nonce`` and PKCE verifier of the Entra ``/account`` sign-in travel in an
-AES-GCM sealed ``__Host-`` cookie (see ``account_web``) and need no server-side state.
-The server's own authorization server (``SELFHOST_AUTH_MODE=local``) does: an
-``/authorize`` request has to survive the redirects through the sign-in and the consent
-page, so it is stored here (``authz.transactions.SqlLoginStateStore`` is the database
-implementation; the in-process one below serves tests and one-process uses). The same store
-holds the ceremonies of the other sign-in providers (Google, GitHub, generic OpenID Connect:
-kind ``login_flow``, popped exactly once at the callback) and the server-side record of an
-Entra link (kind ``account_link``); see ``login.ceremony``.
+The authorization server stores browser-bound authorization transactions here.
+All sign-in and link ceremonies also use this store for single-use PKCE verifier,
+nonce and continuation records. The sealed flow cookie carries only the state,
+provider and binding secret; it cannot replace the server-side record.
 
 Contract of :class:`LoginStateStore`:
 
@@ -42,7 +37,12 @@ MAX_PAYLOAD_BYTES = 4096
 
 class LoginStateStore(Protocol):
     async def put(
-        self, kind: str, payload: bytes, ttl_s: float, *, binding_hash: str | None = None
+        self,
+        kind: str,
+        payload: bytes,
+        ttl_s: float,
+        *,
+        binding_hash: str | None = None,
     ) -> str:
         """Store ``payload`` under a new random id and return the id."""
 
@@ -75,9 +75,18 @@ class InMemoryLoginStateStore:
         self._lock = asyncio.Lock()
 
     async def put(
-        self, kind: str, payload: bytes, ttl_s: float, *, binding_hash: str | None = None
+        self,
+        kind: str,
+        payload: bytes,
+        ttl_s: float,
+        *,
+        binding_hash: str | None = None,
     ) -> str:
-        if not kind or not 0 < ttl_s <= MAX_TTL_SECONDS or len(payload) > MAX_PAYLOAD_BYTES:
+        if (
+            not kind
+            or not 0 < ttl_s <= MAX_TTL_SECONDS
+            or len(payload) > MAX_PAYLOAD_BYTES
+        ):
             raise ValueError("invalid login state")
         state_id = secrets.token_urlsafe(32)
         async with self._lock:
@@ -85,7 +94,11 @@ class InMemoryLoginStateStore:
             self._purge(now)
             while len(self._entries) >= self._max_entries:
                 self._entries.popitem(last=False)
-            self._entries[(kind, state_id)] = (now + ttl_s, bytes(payload), binding_hash)
+            self._entries[(kind, state_id)] = (
+                now + ttl_s,
+                bytes(payload),
+                binding_hash,
+            )
         return state_id
 
     async def pop(
@@ -117,5 +130,7 @@ class InMemoryLoginStateStore:
             return payload
 
     def _purge(self, now: float) -> None:
-        for key in [k for k, (expires, _, _) in self._entries.items() if expires <= now]:
+        for key in [
+            k for k, (expires, _, _) in self._entries.items() if expires <= now
+        ]:
             del self._entries[key]

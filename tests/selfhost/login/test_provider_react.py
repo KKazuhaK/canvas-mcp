@@ -8,23 +8,23 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from ..authz.stack import ALICE, Browser
-from ..test_account_spa import make_dist
+from ..spa_fixture import make_dist
 from .fake_idp import GitHubUser
 from .stack_providers import ProviderStack, provider_stack
 
-CALLBACK_PATHS = {"/account/callback/google", "/account/callback/github", "/account/callback/oidc/school"}
+CALLBACK_PATHS = {"/auth/callback/google", "/auth/callback/github", "/auth/callback/oidc/school"}
 
 
 @pytest.fixture
 def ps(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
-    env = {"ACCOUNT_UI": "react", "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist"))}
+    env = { "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist"))}
     with provider_stack(tmp_path / "app", monkeypatch, env=env) as stack:
         yield stack
 
 
 def test_react_registers_the_start_and_callback_of_every_provider_and_no_legacy_page(ps: ProviderStack) -> None:
     client = ps.stack.client
-    for path in ("/account/login/google", "/account/login/github", "/account/login/oidc/school", "/account/login/entra"):
+    for path in ("/auth/login/google", "/auth/login/github", "/auth/login/oidc/school", "/auth/login/entra"):
         assert client.get(path).status_code == 302
     page = client.get("/account/")
     assert page.status_code == 200 and 'id="root"' in page.text
@@ -34,22 +34,22 @@ def test_react_registers_the_start_and_callback_of_every_provider_and_no_legacy_
 
 def test_login_sends_the_single_page_app_to_its_chooser_carrying_only_validated_values(ps: ProviderStack) -> None:
     client = ps.stack.client
-    plain = client.get("/account/login")
+    plain = client.get("/auth/login")
     assert plain.status_code == 303 and plain.headers["location"] == "/account/sign-in"
-    carried = client.get("/account/login", params={"reauth": "1", "return_to": "/account/schools"})
+    carried = client.get("/auth/login", params={"reauth": "1", "return_to": "/account/schools"})
     query = parse_qs(urlsplit(carried.headers["location"]).query)
     assert query == {"reauth": ["1"], "return_to": ["/account/schools"]}
-    evil = client.get("/account/login", params={"return_to": "//evil.example/x", "reauth": "no"})
+    evil = client.get("/auth/login", params={"return_to": "//evil.example/x", "reauth": "no"})
     assert evil.headers["location"] == "/account/sign-in"
 
 
 def test_the_providers_endpoint_lists_every_provider_with_a_built_in_icon(ps: ProviderStack) -> None:
-    body = ps.stack.client.get("/account/api/providers").json()
+    body = ps.stack.client.get("/api/v1/providers").json()
     assert body["providers"] == [
-        {"id": "entra", "kind": "oidc", "name": "Microsoft", "icon": "microsoft", "start_url": "/account/login/entra"},
-        {"id": "google", "kind": "oidc", "name": "Google", "icon": "google", "start_url": "/account/login/google"},
-        {"id": "github", "kind": "oauth2", "name": "GitHub", "icon": "github", "start_url": "/account/login/github"},
-        {"id": "oidc:school", "kind": "oidc", "name": "school", "icon": "key", "start_url": "/account/login/oidc/school"},
+        {"id": "entra", "kind": "oidc", "name": "Microsoft", "icon": "microsoft", "start_url": "/auth/login/entra"},
+        {"id": "google", "kind": "oidc", "name": "Google", "icon": "google", "start_url": "/auth/login/google"},
+        {"id": "github", "kind": "oauth2", "name": "GitHub", "icon": "github", "start_url": "/auth/login/github"},
+        {"id": "oidc:school", "kind": "oidc", "name": "school", "icon": "key", "start_url": "/auth/login/oidc/school"},
     ]
 
 
@@ -73,7 +73,7 @@ def test_return_to_is_kept_and_sanitised(ps: ProviderStack) -> None:
     start = person.start("github", return_to="/account/write-tools")
     done = person.get(person.callback_url("github", start))
     assert done.headers["location"] == "/account/write-tools"
-    for bad in ("//evil.example", "/account/login/google", "/account/callback/github", "https://evil.example/", "/%2e%2e/x"):
+    for bad in ("//evil.example", "/auth/login/google", "/auth/callback/github", "https://evil.example/", "/%2e%2e/x"):
         other = ps.person()
         started = other.start("github", return_to=bad)
         landed = other.get(other.callback_url("github", started))
@@ -95,7 +95,7 @@ def test_failures_are_closed_codes_on_the_sign_in_page(ps: ProviderStack, provid
 
 
 def test_every_failure_kind_has_a_code_the_page_knows(ps: ProviderStack) -> None:
-    from canvas_mcp.core.selfhost.account_web import SIGN_IN_ERROR_CODES
+    from canvas_mcp.core.selfhost.account_core import SIGN_IN_ERROR_CODES
 
     person = ps.person()
     # state_invalid: no cookie
@@ -105,7 +105,7 @@ def test_every_failure_kind_has_a_code_the_page_knows(ps: ProviderStack) -> None
     seen = {urlsplit(person.get(callback).headers["location"]).query}
     # sign_in_incomplete: no code
     start = person.start("github")
-    seen.add(urlsplit(person.get("/account/callback/github", params={"state": parse_qs(urlsplit(start.headers["location"]).query)["state"][0]}).headers["location"]).query)
+    seen.add(urlsplit(person.get("/auth/callback/github", params={"state": parse_qs(urlsplit(start.headers["location"]).query)["state"][0]}).headers["location"]).query)
     # rate_limited: the start bucket
     client = ps.stack.new_client()
     from .test_entra_only_golden import account_app
@@ -113,7 +113,7 @@ def test_every_failure_kind_has_a_code_the_page_knows(ps: ProviderStack) -> None
     bucket = account_app(ps.stack).logins.start_buckets["github"]
     while bucket.take() == 0:
         pass
-    last = client.get("/account/login/github")
+    last = client.get("/auth/login/github")
     seen.add(urlsplit(last.headers["location"]).query)
     assert seen == {"error=state_invalid", "error=sign_in_incomplete", "error=rate_limited"}
     assert {"state_invalid", "sign_in_incomplete", "rate_limited"} <= SIGN_IN_ERROR_CODES
@@ -121,7 +121,7 @@ def test_every_failure_kind_has_a_code_the_page_knows(ps: ProviderStack) -> None
 
 def test_a_refused_account_gets_access_denied_on_the_page(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env = {
-        "ACCOUNT_UI": "react", "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist")),
+         "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist")),
         "ACCESS_POLICY": "rules", "ACCESS_RULES": "github:user:1",
     }
     with provider_stack(tmp_path / "app", monkeypatch, env=env, providers="github", policy={}) as ps:
@@ -136,7 +136,7 @@ def test_an_app_waiting_for_the_sign_in_is_carried_to_the_consent_screen(ps: Pro
     txn = parse_qs(urlsplit(login).query)["txn"][0]
     chooser = person.get(login)
     assert chooser.status_code == 303 and chooser.headers["location"] == f"/account/sign-in?txn={txn}"
-    start = person.get("/account/login/google", params={"txn": txn})
+    start = person.get("/auth/login/google", params={"txn": txn})
     callback = person.get(person.callback_url("google", start))
     assert callback.status_code == 303 and callback.headers["location"] == f"/account/consent?txn={txn}"
     assert client_id and verifier

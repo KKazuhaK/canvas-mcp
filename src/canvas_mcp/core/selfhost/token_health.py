@@ -34,13 +34,12 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import anyio.to_thread
 import httpx
 
 from .. import audit
 from ..credentials import RequestCredentials
 from ..logging import log_warning
-from .request_context import token_rejected_message
+from .db.workers import run_store
 from .token_store import (
     REASON_CANVAS_TOKEN_REJECTED,
     STATUS_INVALID,
@@ -111,6 +110,8 @@ class TokenHealth:
         )
         if verdict != REJECTED:
             return None
+        from .request_context import token_rejected_message
+
         return token_rejected_message(self._account_url)
 
     async def note_success(
@@ -127,11 +128,13 @@ class TokenHealth:
             return
         if len(self._verified_at) >= _MAX_TRACKED:
             cutoff = now - self._verified_interval
-            self._verified_at = {k: v for k, v in self._verified_at.items() if v > cutoff}
+            self._verified_at = {
+                k: v for k, v in self._verified_at.items() if v > cutoff
+            }
             if len(self._verified_at) >= _MAX_TRACKED:
                 self._verified_at.clear()
         self._verified_at[principal_key] = now
-        await anyio.to_thread.run_sync(
+        await run_store(
             functools.partial(
                 self._store.mark_verified,
                 principal_key,
@@ -166,7 +169,7 @@ class TokenHealth:
         actor: str | None = None,
     ) -> bool:
         """Mark a row invalid and audit it; False if it was not active (or was replaced)."""
-        changed = await anyio.to_thread.run_sync(
+        changed = await run_store(
             functools.partial(
                 self._store.mark_invalid,
                 principal_key,
@@ -177,7 +180,9 @@ class TokenHealth:
             )
         )
         if changed:
-            log_warning("Canvas token marked invalid", principal=principal_key, reason=reason)
+            log_warning(
+                "Canvas token marked invalid", principal=principal_key, reason=reason
+            )
             audit.log_token_event(
                 "admin_marked_invalid" if actor else "invalidated",
                 principal_key,
@@ -197,7 +202,9 @@ class TokenHealth:
     ) -> str:
         key = (
             principal_key,
-            credential_generation if credential_generation is not None else token_version,
+            credential_generation
+            if credential_generation is not None
+            else token_version,
         )
         now = self._clock()
         flight = self._flights.get(key)
@@ -224,7 +231,9 @@ class TokenHealth:
         try:
             verdict = await self._probe(credentials)
             if verdict == REJECTED:
-                verdict = await self._record_rejected(key, token_version, credential_generation)
+                verdict = await self._record_rejected(
+                    key, token_version, credential_generation
+                )
             elif verdict == OK:
                 await self.note_success(key[0], credential_generation)
         except asyncio.CancelledError:
@@ -258,7 +267,7 @@ class TokenHealth:
             return REJECTED
         # Not changed: already invalid (fine, same verdict), replaced by a newer
         # token or deleted (the rejected token is no longer the stored one).
-        info = await anyio.to_thread.run_sync(self._store.info, principal_key)
+        info = await run_store(self._store.info, principal_key)
         if (
             info is not None
             and info.status == STATUS_INVALID
@@ -266,7 +275,8 @@ class TokenHealth:
             and (
                 credential_generation is None
                 # The invalidation itself raised the generation by one.
-                or info.credential_generation in (credential_generation, credential_generation + 1)
+                or info.credential_generation
+                in (credential_generation, credential_generation + 1)
             )
         ):
             return REJECTED
@@ -306,4 +316,6 @@ class TokenHealth:
             if f.finished_at is None or f.finished_at > cutoff
         }
         if len(self._flights) >= _MAX_TRACKED:
-            self._flights = {k: f for k, f in self._flights.items() if f.finished_at is None}
+            self._flights = {
+                k: f for k, f in self._flights.items() if f.finished_at is None
+            }

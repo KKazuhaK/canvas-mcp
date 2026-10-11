@@ -1,12 +1,12 @@
 // Redirect safety. `return_to` arrives in the query string, which anyone can craft,
 // so it is not used until it passes sanitizeReturnTo. These are the same rules the
-// server applies to /account/login?return_to= (sanitize_return_to in account_web.py),
+// server applies to /auth/login?return_to= (sanitize_return_to in account_web.py),
 // which checks again before sealing the value into the sign-in cookie.
 
 const SITE_PREFIX = '/account'
 const MAX_LENGTH = 512
 /** Server routes that are not SPA pages, so they are never a place to return to. */
-const FORBIDDEN_PREFIXES = ['/account/api', '/account/login', '/account/callback']
+const FORBIDDEN_PREFIXES = ['/api/v1', '/auth/login', '/auth/callback']
 // C0 controls, DEL and the C1 range: browsers strip some of these inside URLs,
 // which is how '/\t/evil.example' becomes '//evil.example'.
 // eslint-disable-next-line no-control-regex
@@ -63,7 +63,7 @@ export function safeHttpsUrl(raw: string | null | undefined): string | null {
 /** Where the SPA is mounted. The router basename is stripped from its locations. */
 export const SITE_BASE = SITE_PREFIX
 
-/** The SPA's own sign-in page; the server-side redirect lives at /account/login. */
+/** The SPA's own sign-in page; the server-side redirect lives at /auth/login. */
 export const SIGN_IN_PATH = '/sign-in'
 
 /**

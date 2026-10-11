@@ -63,17 +63,25 @@ class ProviderStack:
         return self.stack.clock
 
     def person(self, *, fresh_client: bool = True) -> Person:
-        person = Person(self, self.stack.new_client() if fresh_client else self.stack.client)
+        person = Person(
+            self, self.stack.new_client() if fresh_client else self.stack.client
+        )
         self.people.append(person)
         return person
 
     def enroll_canvas(self, key: str) -> str:
         """Give an account a Canvas token (the tool call of the stack needs one) and return the key."""
+        from canvas_mcp.core.selfhost.custody import CustodyAcknowledgement
+
         from ..authz.stack import CANVAS_HOST
 
         self.store.put(
-            principal_key=key, api_token="canvas-pat-" + key[-12:] + "-0123456789abcdef",
-            canvas_user_id="1", canvas_user_name="Someone", canvas_host=CANVAS_HOST,
+            principal_key=key,
+            api_token="canvas-pat-" + key[-12:] + "-0123456789abcdef",
+            canvas_user_id="1",
+            canvas_user_name="Someone",
+            canvas_host=CANVAS_HOST,
+            custody=CustodyAcknowledgement(1, int(self.clock())),
         )
         return key
 
@@ -94,28 +102,26 @@ class Person:
         self.last = self.client.get(url, **kw)
         return self.last
 
-    def post(self, path: str, data: Mapping[str, str], **headers: str) -> httpx.Response:
-        self.last = self.client.post(path, data=dict(data), headers={**ORIGIN, **headers})
+    def post(
+        self, path: str, data: Mapping[str, str], **headers: str
+    ) -> httpx.Response:
+        self.last = self.client.post(
+            path, data=dict(data), headers={**ORIGIN, **headers}
+        )
         return self.last
 
     def csrf(self) -> str:
-        """The CSRF token of the legacy pages (read from the sign-in methods page)."""
-        page = self.get("/account/sign-in-methods")
-        assert page.status_code == 200, page.text
-        import re
-
-        match = re.search(r'name="csrf" value="([^"]+)"', page.text)
-        assert match, page.text[:300]
-        return match.group(1)
+        """The native API's session-bound CSRF token."""
+        return Browser(self.ps.stack, client=self.client).csrf_token()
 
     # -- starting and finishing a sign-in ----------------------------------------------------
 
     def start(self, provider: str, **params: str) -> httpx.Response:
         path = {
-            "google": "/account/login/google",
-            "github": "/account/login/github",
-            "school": "/account/login/oidc/school",
-            "entra": "/account/login/entra",
+            "google": "/auth/login/google",
+            "github": "/auth/login/github",
+            "school": "/auth/login/oidc/school",
+            "entra": "/auth/login/entra",
         }[provider]
         return self.get(path, params=params)
 
@@ -131,7 +137,9 @@ class Person:
             return self.ps.github.authorize(location, **options)
         raise AssertionError(provider)
 
-    def sign_in(self, provider: str, *, user: Any = None, **params: str) -> httpx.Response:
+    def sign_in(
+        self, provider: str, *, user: Any = None, **params: str
+    ) -> httpx.Response:
         """Run a whole sign-in with ``provider`` and return the callback response."""
         if provider == "google" and user is not None:
             self.ps.google.user = user
@@ -144,28 +152,27 @@ class Person:
 
     def sign_in_entra(self, user: User, **claims: Any) -> httpx.Response:
         browser = Browser(self.ps.stack, client=self.client)
-        login = browser.get("/account/login/entra")
+        login = browser.get("/auth/login/entra")
         return browser.entra_login(user, login, **claims)
 
     # -- linking ---------------------------------------------------------------------------------
 
-    def post_link(self, provider: str, *, csrf: str | None = None, **headers: str) -> httpx.Response:
-        """POST /account/identities/link (the page's form)."""
+    def post_link(
+        self, provider: str, *, csrf: str | None = None, **headers: str
+    ) -> httpx.Response:
+        """Start linking through the native API."""
         provider_id = "oidc:school" if provider == "school" else provider
-        return self.post(
-            "/account/identities/link",
-            {"csrf": self.csrf() if csrf is None else csrf, "provider": provider_id},
+        return Browser(self.ps.stack, client=self.client).api(
+            "POST",
+            "/me/identities/link",
+            body={"provider": provider_id},
+            csrf=self.csrf() if csrf is None else csrf,
             **headers,
         )
 
     @staticmethod
     def meta_url(page: httpx.Response) -> str:
-        import html
-        import re
-
-        match = re.search(r'<meta http-equiv="refresh" content="0;url=([^"]+)"', page.text)
-        assert match, page.text[:400]
-        return html.unescape(match.group(1))
+        return str(page.json()["redirect_to"])
 
     def finish_link(
         self, provider: str, page: httpx.Response, *, user: Any = None, **options: Any
@@ -176,16 +183,22 @@ class Person:
         if provider == "entra":
             nonce = query_of(url)["nonce"]
             self.ps.stack.idp.set_user(user, nonce)
-            return self.get(
-                "/account/callback", params={"code": "entra-code", "state": query_of(url)["state"]}
-            )
+            return self.get(self.ps.stack.idp.authorize(url))
         if user is not None:
             self.set_user(provider, user)
-        idp = {"google": self.ps.google, "github": self.ps.github, "school": self.ps.school}[provider]
+        idp = {
+            "google": self.ps.google,
+            "github": self.ps.github,
+            "school": self.ps.school,
+        }[provider]
         return self.get(idp.authorize(url, **options))
 
-    def link(self, provider: str, *, user: Any = None, **options: Any) -> httpx.Response:
-        return self.finish_link(provider, self.post_link(provider), user=user, **options)
+    def link(
+        self, provider: str, *, user: Any = None, **options: Any
+    ) -> httpx.Response:
+        return self.finish_link(
+            provider, self.post_link(provider), user=user, **options
+        )
 
     def identities(self) -> list[Any]:
         return list(self.ps.store.list_identities(self.account()))
@@ -197,7 +210,7 @@ class Person:
         return self._account_from_session(cookie)
 
     def _account_from_session(self, cookie: str) -> str:
-        from canvas_mcp.core.selfhost.account_web import SESSION_COOKIE, _CookieCodec
+        from canvas_mcp.core.selfhost.account_core import SESSION_COOKIE, _CookieCodec
 
         codec = _CookieCodec(self.ps.stack.settings.account_session_secret)
         payload = codec.unseal(SESSION_COOKIE, cookie)
@@ -211,15 +224,22 @@ class Person:
         stack = self.ps.stack
         client_id = stack.register()
         verifier, challenge = pkce()
-        response = Browser(stack, client=self.client).start(stack.authorize_params(client_id, challenge))
+        response = Browser(stack, client=self.client).start(
+            stack.authorize_params(client_id, challenge)
+        )
         assert response.status_code in (302, 303), response.text
         parts = urlsplit(response.headers["location"])
         location = parts.path + "?" + parts.query
-        assert location.startswith("/account/login?txn="), location
+        assert location.startswith("/auth/login?txn="), location
         return client_id, verifier, location
 
     def connect(
-        self, provider: str, *, user: Any = None, decision: str = "approve", reauth: bool = False
+        self,
+        provider: str,
+        *,
+        user: Any = None,
+        decision: str = "approve",
+        reauth: bool = False,
     ) -> tuple[Landed, str, str]:
         """Authorize an app by signing in with ``provider``. Returns (landing, client id, verifier)."""
         client_id, verifier, login = self.begin_connect()
@@ -228,13 +248,19 @@ class Person:
         params = {"txn": txn, **({"reauth": "1"} if reauth else {})}
         if provider == "entra":
             assert user is not None
-            chooser = self.get("/account/login/entra", params=params)
-            callback = chooser if chooser.status_code == 303 else browser.entra_login(user, chooser)
+            chooser = self.get("/auth/login/entra", params=params)
+            callback = (
+                chooser
+                if chooser.status_code == 303
+                else browser.entra_login(user, chooser)
+            )
         else:
             if user is not None:
                 self.set_user(provider, user)
             start = self.start(provider, **params)
-            if start.status_code == 303:  # already signed in: straight to the consent page
+            if (
+                start.status_code == 303
+            ):  # already signed in: straight to the consent page
                 callback = start
             elif start.status_code != 302:
                 return Landed(str(start.request.url), {}, start), client_id, verifier
@@ -242,13 +268,11 @@ class Person:
                 callback = self.get(self.callback_url(provider, start))
         if callback.status_code != 303:
             return Landed(str(callback.request.url), {}, callback), client_id, verifier
-        page = self.get(callback.headers["location"])
-        if page.status_code != 200 or 'name="decision"' not in page.text:
-            return Landed(str(page.request.url), {}, page), client_id, verifier
-        done = browser.decide(page, decision)
-        assert done.status_code == 303, done.text
-        target = done.headers["location"]
-        return Landed(target, query_of(target), done), client_id, verifier
+        return (
+            browser.decide_api(callback.headers["location"], decision),
+            client_id,
+            verifier,
+        )
 
     def set_user(self, provider: str, user: Any) -> None:
         if provider == "google":
@@ -262,8 +286,12 @@ class Person:
         from ..authz.stack import AUDIENCE, CLAUDE_REDIRECT
 
         response = self.ps.stack.token(
-            grant_type="authorization_code", code=landed.query["code"], client_id=client_id,
-            redirect_uri=CLAUDE_REDIRECT, code_verifier=verifier, resource=AUDIENCE,
+            grant_type="authorization_code",
+            code=landed.query["code"],
+            client_id=client_id,
+            redirect_uri=CLAUDE_REDIRECT,
+            code_verifier=verifier,
+            resource=AUDIENCE,
         )
         assert response.status_code == 200, response.text
         return dict(response.json())
@@ -274,9 +302,9 @@ class Person:
         return "__Host-cmcp_session" in self.client.cookies
 
     def session_account(self) -> str | None:
-        """The account key of the current session, read through the signed-in account page."""
-        response = self.get("/account/sign-in-methods")
-        return None if response.status_code != 200 else "ok"
+        """The native account key read through the session API."""
+        response = Browser(self.ps.stack, client=self.client).api("GET", "/me")
+        return None if response.status_code != 200 else response.json()["account"]["id"]
 
 
 @contextmanager
@@ -321,9 +349,13 @@ def provider_stack(
         # Without Entra nobody becomes an owner through the provider: the operator promotes one.
         options.setdefault("SELFHOST_BOOTSTRAP_OWNER", "token_admin")
     with local_stack(
-        tmp_path, monkeypatch, env=options, account_options={"login_transport": net.transport},
+        tmp_path,
+        monkeypatch,
+        env=options,
+        account_options={"login_transport": net.transport},
         **stack_kw,
     ) as stack:
+        net.handlers.update(stack.idp.net.handlers)
         for idp in (google, school):
             idp.now = stack.clock
         yield ProviderStack(stack, net, google, github, school)

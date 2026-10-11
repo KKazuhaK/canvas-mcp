@@ -1,4 +1,4 @@
-"""Environment contract of the self-hosted Entra OAuth mode.
+"""Environment contract of the self-hosted server.
 
 Every variable is parsed here and every problem is collected, so one failed
 start shows the operator everything that needs fixing. Messages name the
@@ -28,10 +28,10 @@ from .db.url import (
     sqlite_target,
 )
 from .login.config import LoginProvidersConfig, parse_login_providers
-from .schools import MAX_FEATURED, FeaturedSchool, parse_hostname
+from .profile import PILOT_DISABLED_TOOLS, read_profile
 
 AUTH_MODE_ENV = "MCP_AUTH_MODE"
-AUTH_MODE_ENTRA = "entra-oauth"
+AUTH_MODE_SELFHOST = "selfhost"
 AUTH_MODE_LEGACY = "legacy"
 
 COURSE_STATE_ENV = "SELFHOST_COURSE_STATE"
@@ -42,7 +42,7 @@ DEFAULT_COURSE_STATE = COURSE_STATE_REQUEST_LOCAL
 
 DISABLED_TOOLS_ENV = "SELFHOST_DISABLED_TOOLS"
 
-DEFAULT_API_SCOPE = "Canvas.Access"
+DEFAULT_MCP_SCOPE = "Canvas.Access"
 DEFAULT_REQUIRED_ROLE = "Canvas.User"
 DEFAULT_OWNER_ROLE = "Canvas.Owner"
 DEFAULT_REDIRECT_URIS: tuple[str, ...] = (
@@ -61,24 +61,25 @@ STATE_BACKEND_ENV = "SELFHOST_STATE_BACKEND"
 STATE_BACKEND_MEMORY = "memory"
 STATE_BACKEND_REDIS = "redis"
 
-#: Which authorization server signs MCP clients in: the FastMCP OAuth proxy in front of
-#: Entra (the default, proven with claude.ai), or this server's own (``local``).
-AUTHZ_MODE_ENV = "SELFHOST_AUTH_MODE"
-AUTHZ_MODE_ENTRA_PROXY = "entra_proxy"
-AUTHZ_MODE_LOCAL = "local"
-AUTHZ_MODES = (AUTHZ_MODE_ENTRA_PROXY, AUTHZ_MODE_LOCAL)
+# Old settings are refused by presence, including an explicitly empty value.
+REMOVED_SETTINGS = {
+    "SELFHOST_AUTH_MODE": "removed in v1: the built-in authorization server is always used; delete this variable",
+    "OAUTH_JWT_SIGNING_KEY": "removed in v1: JWT keys derive from CANVAS_TOKEN_KEYS; delete this variable",
+    "GRANT_STATUS_CACHE_S": "removed in v1: authorization status is read on each request; delete this variable",
+    "CANVAS_FEATURED_SCHOOLS": "removed in v1: manage featured schools in account administration",
+    "CANVAS_SCHOOL_SEARCH": "removed in v1: manage directory search in account administration",
+    "CANVAS_API_URL": "removed in v1: each account selects its own Canvas school; delete this variable",
+    "ACCOUNT_UI": "removed in v1: the React UI is the only account UI; delete this variable",
+    "ENTRA_API_SCOPE": "renamed in v1: use MCP_SCOPE (same format, default Canvas.Access)",
+}
 
 DEFAULT_ACCESS_TOKEN_TTL = 3600
 DEFAULT_REFRESH_ABSOLUTE_TTL = 30 * 86400
 DEFAULT_REFRESH_REUSE_GRACE_S = 30
-DEFAULT_GRANT_STATUS_CACHE_S = 30
 DEFAULT_CIMD_FETCH_TIMEOUT_S = 3
 DEFAULT_CIMD_STALE_MAX = 7 * 86400
 DEFAULT_MAX_UPSTREAM_AUTH_AGE = 14 * 86400
 
-ACCOUNT_UI_ENV = "ACCOUNT_UI"
-ACCOUNT_UI_LEGACY = "legacy"
-ACCOUNT_UI_REACT = "react"
 ACCOUNT_WEB_DIST_ENV = "ACCOUNT_WEB_DIST"
 #: Where the container image keeps the built account UI.
 DEFAULT_ACCOUNT_WEB_DIST = "/app/web-dist"
@@ -96,11 +97,9 @@ _LOOPBACK_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 MIN_CLIENT_SECRET_CHARS = 16
-MIN_SIGNING_KEY_CHARS = 32
 MIN_SESSION_SECRET_BYTES = 32
 MIN_SESSION_TTL_SECONDS = 60
 MAX_SESSION_TTL_SECONDS = 3600
-MAX_FEATURED_NAME_CHARS = 80
 
 
 class SelfhostConfigError(Exception):
@@ -113,11 +112,9 @@ class SelfhostConfigError(Exception):
 
 @dataclass(frozen=True)
 class AuthzSettings:
-    """Tunables of the server's own authorization server (``SELFHOST_AUTH_MODE=local``).
+    """Tunables of the built-in authorization server.
 
-    All durations are seconds. The values are parsed and validated in both modes (a typo
-    fails closed) and used only in ``local`` mode. The defaults are what the design
-    recommends; a settings object built by hand gets them.
+    All durations are seconds. Invalid values refuse startup.
     """
 
     #: Lifetime of an access token (a JWT), 5 minutes to 24 hours.
@@ -127,8 +124,6 @@ class AuthzSettings:
     #: A replay of a just-used code or refresh token inside this window is a benign
     #: duplicate, not theft; 0 means strict.
     refresh_reuse_grace_s: int = DEFAULT_REFRESH_REUSE_GRACE_S
-    #: How long a grant's status (live, account active) is reused in this process.
-    grant_status_cache_s: int = DEFAULT_GRANT_STATUS_CACHE_S
     #: Resolve client ids that are URLs (Client ID Metadata Documents).
     cimd_enabled: bool = True
     cimd_fetch_timeout_s: int = DEFAULT_CIMD_FETCH_TIMEOUT_S
@@ -140,7 +135,7 @@ class AuthzSettings:
 
 @dataclass(frozen=True)
 class SelfhostSettings:
-    """Validated configuration of the ``entra-oauth`` mode."""
+    """Validated configuration of the ``selfhost`` mode."""
 
     public_base_url: str
     public_host: str
@@ -150,15 +145,11 @@ class SelfhostSettings:
     api_scope: str
     required_role: str
     owner_role: str
-    oauth_jwt_signing_key: str = field(repr=False)
     allowed_client_redirect_uris: tuple[str, ...]
     account_session_secret: bytes = field(repr=False)
     account_session_ttl_seconds: int
     canvas_token_keys_raw: str = field(repr=False)
     data_dir: Path
-    fastmcp_home: Path
-    featured_schools: tuple[FeaturedSchool, ...] = ()
-    school_search: bool = False
     # Whether course metadata, policy decisions, pseudonyms and discussion hints
     # live only inside one request (the default; stricter than upstream, which keeps
     # policies, pseudonyms and hints in process-wide maps shared by all callers)
@@ -174,21 +165,15 @@ class SelfhostSettings:
     # It can only remove tools: it never registers one and never widens what
     # ``ALLOWED_WRITE_TOOLS`` or a user's own switches allow.
     disabled_tools: tuple[str, ...] = ()
+    profile: str = ""
     # Who is admitted and who is an owner (see :mod:`.accounts`). The default is the
     # first release's behaviour: the two Entra app roles, nothing else.
     # ``None`` (a settings object built by hand) means that default.
     access_policy: AccessPolicy = field(default=None)  # type: ignore[assignment]
-    # Which /account UI is served: the server-rendered pages (the default) or the built
-    # single-page app found in ``account_web_dist`` (it falls back to the pages when that
-    # build is missing or unusable).
-    account_ui: Literal["legacy", "react"] = "legacy"
     account_web_dist: Path = Path(DEFAULT_ACCOUNT_WEB_DIST)
-    # Who signs MCP clients in: the FastMCP OAuth proxy (default) or this server's own
-    # authorization server. ``authz`` only matters in ``local`` mode.
-    authz_mode: Literal["entra_proxy", "local"] = "entra_proxy"
     authz: AuthzSettings = field(default_factory=AuthzSettings)
     # The sign-in providers (``SELFHOST_LOGIN_PROVIDERS``). The default is Entra alone, which
-    # is the first release's behaviour; the others need ``authz_mode == "local"``. Without
+    # is the default. Without
     # Entra, ``tenant_id``, ``client_id`` and ``client_secret`` are empty strings.
     login_providers: LoginProvidersConfig = field(default_factory=LoginProvidersConfig)
 
@@ -196,10 +181,14 @@ class SelfhostSettings:
 
     def __post_init__(self) -> None:
         if self.database is None:
-            object.__setattr__(self, "database", sqlite_target(default_sqlite_path(self.data_dir)))
+            object.__setattr__(
+                self, "database", sqlite_target(default_sqlite_path(self.data_dir))
+            )
         if getattr(self, "access_policy", None) is None:
             object.__setattr__(
-                self, "access_policy", default_policy(self.required_role, self.owner_role)
+                self,
+                "access_policy",
+                default_policy(self.required_role, self.owner_role),
             )
 
     @property
@@ -225,20 +214,24 @@ class SelfhostSettings:
         return self.database
 
 
-def auth_mode(env: Mapping[str, str] | None = None) -> Literal["legacy", "entra-oauth"]:
+def auth_mode(env: Mapping[str, str] | None = None) -> Literal["legacy", "selfhost"]:
     """The selected mode: unset, empty or ``legacy`` keep today's behaviour.
 
-    Anything but the exact opt-in value ``entra-oauth`` is refused rather than
+    Anything but the exact opt-in value ``selfhost`` is refused rather than
     guessed at, so a typo can never silently select the wrong authentication.
     """
     source = os.environ if env is None else env
     value = (source.get(AUTH_MODE_ENV) or "").strip()
     if value in ("", AUTH_MODE_LEGACY):
         return "legacy"
-    if value == AUTH_MODE_ENTRA:
-        return "entra-oauth"
+    if value == AUTH_MODE_SELFHOST:
+        return "selfhost"
+    if value == "entra-oauth":
+        raise SelfhostConfigError(
+            ["MCP_AUTH_MODE renamed in v1: use MCP_AUTH_MODE=selfhost"]
+        )
     raise SelfhostConfigError(
-        [f"{AUTH_MODE_ENV} must be unset, 'legacy' or '{AUTH_MODE_ENTRA}'"]
+        [f"{AUTH_MODE_ENV} must be unset, 'legacy' or '{AUTH_MODE_SELFHOST}'"]
     )
 
 
@@ -251,7 +244,9 @@ def _is_absolute(value: str) -> bool:
 def _parse_public_base_url(raw: str, problems: list[str]) -> tuple[str, str] | None:
     name = "PUBLIC_BASE_URL"
     if not raw:
-        problems.append(f"{name} is required (the public https origin, e.g. https://canvas.example.com)")
+        problems.append(
+            f"{name} is required (the public https origin, e.g. https://canvas.example.com)"
+        )
         return None
     if any(ch.isspace() for ch in raw) or "?" in raw or "#" in raw:
         problems.append(f"{name} must not contain whitespace, a query or a fragment")
@@ -285,7 +280,9 @@ def _guid(name: str, raw: str, problems: list[str]) -> str:
         problems.append(f"{name} is required (a GUID)")
         return ""
     if not _GUID_RE.match(raw):
-        problems.append(f"{name} must be a GUID such as 00000000-0000-0000-0000-000000000000")
+        problems.append(
+            f"{name} must be a GUID such as 00000000-0000-0000-0000-000000000000"
+        )
         return ""
     return raw.lower()
 
@@ -317,7 +314,12 @@ def _parse_redirect_uris(raw: str, problems: list[str]) -> tuple[str, ...]:
 
 
 def _redirect_entry_ok(entry: str) -> bool:
-    if "*" in entry or any(ch.isspace() for ch in entry) or "?" in entry or "#" in entry:
+    if (
+        "*" in entry
+        or any(ch.isspace() for ch in entry)
+        or "?" in entry
+        or "#" in entry
+    ):
         return False
     try:
         parts = urlsplit(entry)
@@ -345,7 +347,9 @@ def _decode_session_secret(raw: str) -> bytes | None:
         return None
 
 
-def _parse_int(name: str, raw: str, default: int, low: int, high: int, problems: list[str]) -> int:
+def _parse_int(
+    name: str, raw: str, default: int, low: int, high: int, problems: list[str]
+) -> int:
     if not raw:
         return default
     try:
@@ -391,7 +395,9 @@ def _parse_duration(
     return seconds
 
 
-def _parse_bool_default(name: str, raw: str, default: bool, problems: list[str]) -> bool:
+def _parse_bool_default(
+    name: str, raw: str, default: bool, problems: list[str]
+) -> bool:
     """A true/false switch whose unset value is ``default`` (``_parse_bool`` is False when unset)."""
     word = raw.strip().lower()
     if not word:
@@ -404,103 +410,76 @@ def _parse_bool_default(name: str, raw: str, default: bool, problems: list[str])
     return default
 
 
-def _parse_authz_mode(raw: str, problems: list[str]) -> Literal["entra_proxy", "local"]:
-    """``SELFHOST_AUTH_MODE``: unset or ``entra_proxy`` (the default) or ``local``."""
-    word = raw.strip().lower()
-    if word in ("", AUTHZ_MODE_ENTRA_PROXY):
-        return "entra_proxy"
-    if word == AUTHZ_MODE_LOCAL:
-        return "local"
-    problems.append(
-        f"{AUTHZ_MODE_ENV} must be unset, '{AUTHZ_MODE_ENTRA_PROXY}' or '{AUTHZ_MODE_LOCAL}'"
-    )
-    return "entra_proxy"
-
-
-def _parse_authz_settings(get: Callable[[str], str], problems: list[str]) -> AuthzSettings:
-    """The tunables of the local authorization server (checked in both modes)."""
+def _parse_authz_settings(
+    get: Callable[[str], str], problems: list[str]
+) -> AuthzSettings:
+    """The tunables of the built-in authorization server."""
     defaults = AuthzSettings()
     access_ttl = _parse_duration(
-        "ACCESS_TOKEN_TTL", get("ACCESS_TOKEN_TTL"),
-        defaults.access_token_ttl, 300, 24 * 3600, problems,
+        "ACCESS_TOKEN_TTL",
+        get("ACCESS_TOKEN_TTL"),
+        defaults.access_token_ttl,
+        300,
+        24 * 3600,
+        problems,
     )
     refresh_ttl = _parse_duration(
-        "REFRESH_ABSOLUTE_TTL", get("REFRESH_ABSOLUTE_TTL"),
-        defaults.refresh_absolute_ttl, 3600, 90 * 86400, problems,
+        "REFRESH_ABSOLUTE_TTL",
+        get("REFRESH_ABSOLUTE_TTL"),
+        defaults.refresh_absolute_ttl,
+        3600,
+        90 * 86400,
+        problems,
     )
     if access_ttl is not None and refresh_ttl is not None and refresh_ttl <= access_ttl:
         problems.append("REFRESH_ABSOLUTE_TTL must be longer than ACCESS_TOKEN_TTL")
     stale_max = _parse_duration(
-        "CIMD_STALE_MAX", get("CIMD_STALE_MAX"), defaults.cimd_stale_max, 0, 30 * 86400, problems
+        "CIMD_STALE_MAX",
+        get("CIMD_STALE_MAX"),
+        defaults.cimd_stale_max,
+        0,
+        30 * 86400,
+        problems,
     )
     upstream_age = _parse_duration(
-        "MAX_UPSTREAM_AUTH_AGE", get("MAX_UPSTREAM_AUTH_AGE"),
-        defaults.max_upstream_auth_age, 3600, 90 * 86400, problems,
+        "MAX_UPSTREAM_AUTH_AGE",
+        get("MAX_UPSTREAM_AUTH_AGE"),
+        defaults.max_upstream_auth_age,
+        3600,
+        90 * 86400,
+        problems,
     )
     return AuthzSettings(
-        access_token_ttl=access_ttl if access_ttl is not None else defaults.access_token_ttl,
+        access_token_ttl=access_ttl
+        if access_ttl is not None
+        else defaults.access_token_ttl,
         refresh_absolute_ttl=(
             refresh_ttl if refresh_ttl is not None else defaults.refresh_absolute_ttl
         ),
         refresh_reuse_grace_s=_parse_int(
-            "REFRESH_REUSE_GRACE_S", get("REFRESH_REUSE_GRACE_S"),
-            defaults.refresh_reuse_grace_s, 0, 120, problems,
+            "REFRESH_REUSE_GRACE_S",
+            get("REFRESH_REUSE_GRACE_S"),
+            defaults.refresh_reuse_grace_s,
+            0,
+            120,
+            problems,
         ),
-        grant_status_cache_s=_parse_int(
-            "GRANT_STATUS_CACHE_S", get("GRANT_STATUS_CACHE_S"),
-            defaults.grant_status_cache_s, 0, 60, problems,
+        cimd_enabled=_parse_bool_default(
+            "CIMD_ENABLED", get("CIMD_ENABLED"), True, problems
         ),
-        cimd_enabled=_parse_bool_default("CIMD_ENABLED", get("CIMD_ENABLED"), True, problems),
         cimd_fetch_timeout_s=_parse_int(
-            "CIMD_FETCH_TIMEOUT_S", get("CIMD_FETCH_TIMEOUT_S"),
-            defaults.cimd_fetch_timeout_s, 1, 5, problems,
+            "CIMD_FETCH_TIMEOUT_S",
+            get("CIMD_FETCH_TIMEOUT_S"),
+            defaults.cimd_fetch_timeout_s,
+            1,
+            5,
+            problems,
         ),
         cimd_stale_max=stale_max if stale_max is not None else defaults.cimd_stale_max,
         max_upstream_auth_age=(
             upstream_age if upstream_age is not None else defaults.max_upstream_auth_age
         ),
     )
-
-
-def _parse_featured_schools(raw: str, problems: list[str]) -> tuple[FeaturedSchool, ...]:
-    """``host`` or ``host=Display Name`` entries, comma-separated. Syntax only."""
-    name = "CANVAS_FEATURED_SCHOOLS"
-    if not raw:
-        return ()
-    schools: list[FeaturedSchool] = []
-    seen: set[str] = set()
-    index = 0
-    for item in raw.split(","):
-        if not item.strip():
-            continue
-        index += 1
-        host_part, _, label = item.partition("=")
-        host = parse_hostname(host_part)
-        if host is None:
-            problems.append(
-                f"{name} entry {index} must be a host name such as canvas.school.edu "
-                "(no https://, port or path)"
-            )
-            continue
-        label = label.strip()
-        if len(label) > MAX_FEATURED_NAME_CHARS or any(
-            ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in label
-        ):
-            problems.append(
-                f"{name} entry {index} has a display name that is too long "
-                f"(over {MAX_FEATURED_NAME_CHARS} characters) or has control characters"
-            )
-            continue
-        if host in seen:
-            problems.append(f"{name} entry {index} repeats a school that is already listed")
-            continue
-        seen.add(host)
-        schools.append(FeaturedSchool(host, label))
-    if index > MAX_FEATURED:
-        problems.append(f"{name} lists more than {MAX_FEATURED} schools")
-    elif index == 0:
-        problems.append(f"{name} is set but lists no school")
-    return tuple(schools)
 
 
 _TRUE_WORDS = frozenset({"true", "1", "yes"})
@@ -530,6 +509,8 @@ def _parse_course_state(
         f"or '{COURSE_STATE_PER_PRINCIPAL}'"
     )
     return "request_local"
+
+
 def _parse_auto_migrate(raw: str, problems: list[str]) -> bool:
     """``DATABASE_AUTO_MIGRATE``: true unless explicitly switched off."""
     word = raw.strip().lower()
@@ -539,17 +520,6 @@ def _parse_auto_migrate(raw: str, problems: list[str]) -> bool:
         return False
     problems.append(f"{AUTO_MIGRATE_ENV} must be true or false")
     return True
-
-
-def _parse_account_ui(raw: str, problems: list[str]) -> Literal["legacy", "react"]:
-    """``ACCOUNT_UI``: unset or ``legacy`` (the default) or ``react``; the value is never echoed."""
-    word = raw.strip().lower()
-    if word in ("", ACCOUNT_UI_LEGACY):
-        return "legacy"
-    if word == ACCOUNT_UI_REACT:
-        return "react"
-    problems.append(f"{ACCOUNT_UI_ENV} must be unset, '{ACCOUNT_UI_LEGACY}' or '{ACCOUNT_UI_REACT}'")
-    return "legacy"
 
 
 def _parse_state_backend(raw: str, problems: list[str]) -> Literal["memory"]:
@@ -562,7 +532,9 @@ def _parse_state_backend(raw: str, problems: list[str]) -> Literal["memory"]:
             "(this server is a single instance)"
         )
     else:
-        problems.append(f"{STATE_BACKEND_ENV} must be unset or '{STATE_BACKEND_MEMORY}'")
+        problems.append(
+            f"{STATE_BACKEND_ENV} must be unset or '{STATE_BACKEND_MEMORY}'"
+        )
     return "memory"
 
 
@@ -602,18 +574,27 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
         return (source.get(name) or "").strip()
 
     problems: list[str] = []
+    removed = set(REMOVED_SETTINGS) & source.keys()
+    removed.update(
+        name for name in source if re.fullmatch(r"OIDC_[A-Z0-9_]+_DISPLAY_NAME", name)
+    )
+    for name in sorted(removed):
+        hint = REMOVED_SETTINGS.get(
+            name,
+            "removed in v1: manage provider display names in account administration",
+        )
+        problems.append(f"{name}: {hint}")
+    # Removed variables must produce one clear problem, rather than being parsed again.
+    source = {name: value for name, value in source.items() if name not in removed}
 
     base = _parse_public_base_url(get("PUBLIC_BASE_URL"), problems)
-    authz_mode = _parse_authz_mode(get(AUTHZ_MODE_ENV), problems)
     authz = _parse_authz_settings(get, problems)
-    if authz_mode == "local" and base is not None and base[0].endswith(":443"):
+    if base is not None and base[0].endswith(":443"):
         # The issuer and the token audience are compared as exact strings, so the one
         # spelling of this origin has to be the one every client derives from the URL.
-        problems.append(
-            "PUBLIC_BASE_URL must not include the default port when SELFHOST_AUTH_MODE=local"
-        )
+        problems.append("PUBLIC_BASE_URL must not include the default port")
 
-    login = parse_login_providers(source, problems, authz_mode=authz_mode)
+    login = parse_login_providers(source, problems)
 
     tenant_id = ""
     client_id = ""
@@ -637,15 +618,13 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
                 f"ENTRA_CLIENT_SECRET must be at least {MIN_CLIENT_SECRET_CHARS} characters"
             )
 
-    # With Entra in the list this is the Entra scope; without it, the name of the scope the
-    # local authorization server advertises to MCP clients.
-    api_scope = get("ENTRA_API_SCOPE") or DEFAULT_API_SCOPE
+    # This scope belongs to this authorization server, independently of sign-in providers.
+    api_scope = get("MCP_SCOPE") or DEFAULT_MCP_SCOPE
     if not _SCOPE_RE.match(api_scope):
-        problems.append("ENTRA_API_SCOPE must match [A-Za-z0-9._-] and be 1 to 64 characters")
+        problems.append("MCP_SCOPE must match [A-Za-z0-9._-] and be 1 to 64 characters")
     elif api_scope.lower() in _OIDC_SCOPES:
         problems.append(
-            "ENTRA_API_SCOPE must be the custom scope exposed by the app, "
-            "not an OpenID Connect scope"
+            "MCP_SCOPE must be a custom MCP scope, not an OpenID Connect scope"
         )
 
     required_role = get("ENTRA_REQUIRED_ROLE") or DEFAULT_REQUIRED_ROLE
@@ -660,20 +639,18 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
                 "ENTRA_OWNER_ROLE must match [A-Za-z0-9._-] and be 1 to 120 characters"
             )
         if required_role == owner_role:
-            problems.append("ENTRA_REQUIRED_ROLE and ENTRA_OWNER_ROLE must be different roles")
-
-    signing_key = get("OAUTH_JWT_SIGNING_KEY")
-    if not signing_key:
-        problems.append("OAUTH_JWT_SIGNING_KEY is required (generate one with: openssl rand -base64 48)")
-    elif len(signing_key) < MIN_SIGNING_KEY_CHARS:
-        problems.append(f"OAUTH_JWT_SIGNING_KEY must be at least {MIN_SIGNING_KEY_CHARS} characters")
+            problems.append(
+                "ENTRA_REQUIRED_ROLE and ENTRA_OWNER_ROLE must be different roles"
+            )
 
     redirect_uris = _parse_redirect_uris(get("OAUTH_ALLOWED_REDIRECT_URIS"), problems)
 
     session_raw = get("ACCOUNT_SESSION_SECRET")
     session_secret = b""
     if not session_raw:
-        problems.append("ACCOUNT_SESSION_SECRET is required (base64 of at least 32 random bytes)")
+        problems.append(
+            "ACCOUNT_SESSION_SECRET is required (base64 of at least 32 random bytes)"
+        )
     else:
         decoded = _decode_session_secret(session_raw)
         if decoded is None:
@@ -686,13 +663,19 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
             session_secret = decoded
 
     ttl = _parse_int(
-        "ACCOUNT_SESSION_TTL_SECONDS", get("ACCOUNT_SESSION_TTL_SECONDS"),
-        DEFAULT_SESSION_TTL_SECONDS, MIN_SESSION_TTL_SECONDS, MAX_SESSION_TTL_SECONDS, problems,
+        "ACCOUNT_SESSION_TTL_SECONDS",
+        get("ACCOUNT_SESSION_TTL_SECONDS"),
+        DEFAULT_SESSION_TTL_SECONDS,
+        MIN_SESSION_TTL_SECONDS,
+        MAX_SESSION_TTL_SECONDS,
+        problems,
     )
 
     token_keys = get("CANVAS_TOKEN_KEYS")
     if not token_keys:
-        problems.append("CANVAS_TOKEN_KEYS is required (kid:base64key[,kid2:base64key])")
+        problems.append(
+            "CANVAS_TOKEN_KEYS is required (kid:base64key[,kid2:base64key])"
+        )
 
     data_dir_raw = get("SELFHOST_DATA_DIR") or DEFAULT_DATA_DIR
     if not _is_absolute(data_dir_raw):
@@ -707,24 +690,19 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
     )
     auto_migrate = _parse_auto_migrate(get(AUTO_MIGRATE_ENV), problems)
     state_backend = _parse_state_backend(get(STATE_BACKEND_ENV), problems)
-    account_ui = _parse_account_ui(get(ACCOUNT_UI_ENV), problems)
     web_dist_raw = get(ACCOUNT_WEB_DIST_ENV) or DEFAULT_ACCOUNT_WEB_DIST
     if not _is_absolute(web_dist_raw):
         problems.append(f"{ACCOUNT_WEB_DIST_ENV} must be an absolute path")
 
-    home_raw = get("FASTMCP_HOME")
-    if not home_raw:
-        problems.append(
-            "FASTMCP_HOME is required and must be set explicitly, so OAuth state "
-            "is not silently ephemeral"
-        )
-    elif not _is_absolute(home_raw):
-        problems.append("FASTMCP_HOME must be an absolute path")
-
-    featured = _parse_featured_schools(get("CANVAS_FEATURED_SCHOOLS"), problems)
-    school_search = _parse_bool("CANVAS_SCHOOL_SEARCH", get("CANVAS_SCHOOL_SEARCH"), problems)
     course_state = _parse_course_state(get(COURSE_STATE_ENV), problems)
     disabled_tools = _parse_disabled_tools(get(DISABLED_TOOLS_ENV), problems)
+    try:
+        profile = read_profile(source)
+    except ValueError as exc:
+        problems.append(str(exc))
+        profile = ""
+    if profile == "pilot":
+        disabled_tools = tuple(sorted(set(disabled_tools) | PILOT_DISABLED_TOOLS))
     access_policy = parse_access_settings(
         source,
         tenant_id=tenant_id,
@@ -747,24 +725,19 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
         api_scope=api_scope,
         required_role=required_role,
         owner_role=owner_role,
-        oauth_jwt_signing_key=signing_key,
         allowed_client_redirect_uris=redirect_uris,
         account_session_secret=session_secret,
         account_session_ttl_seconds=ttl,
         canvas_token_keys_raw=token_keys,
         data_dir=Path(data_dir_raw),
-        fastmcp_home=Path(home_raw),
-        featured_schools=featured,
-        school_search=school_search,
         course_state=course_state,
         database=database,
         auto_migrate=auto_migrate,
         state_backend=state_backend,
         disabled_tools=disabled_tools,
+        profile=profile,
         access_policy=access_policy,
-        account_ui=account_ui,
         account_web_dist=Path(web_dist_raw),
-        authz_mode=authz_mode,
         authz=authz,
         login_providers=login,
     )

@@ -38,6 +38,7 @@
   "unchanged": "没有变化。",
   "accounts": {
     "title": "账户",
+    "searchScope": "搜索仅涵盖已加载的账户；加载更多可包含较早的账户。",
     "search": "搜索姓名或用户名",
     "statusFilter": "状态",
     "allStatuses": "全部",
@@ -151,11 +152,22 @@
       "token_marked_invalid": "标记令牌失效",
       "write_tools_changed": "更改写入工具",
       "schema_migrated": "数据库已升级",
+      "account_deleted": "删除账户",
       "pending_purged": "清理待审批账户",
       "other": "其他",
       "grant_revoked": "断开了一个已连接的应用",
       "grants_revoked_for_account": "断开了账户的全部已连接应用",
-      "jwt_key_rotated": "作废了应用访问令牌"
+      "jwt_key_rotated": "作废了应用访问令牌",
+      "custody_notice_acknowledged": "确认令牌托管告知",
+      "identity_linked": "关联登录方式",
+      "identity_unlinked": "解除登录方式",
+      "identity_unlinked_by_owner": "管理员解除登录方式",
+      "identity_unlinked_by_operator": "运营者解除登录方式",
+      "owner_loss_refused_last_owner": "保留最后一位可用管理员",
+      "sign_in_method_renamed": "更改登录名称",
+      "featured_schools_changed": "更改推荐学校",
+      "setting_changed": "更改设置",
+      "school_access_changed": "更改学校地址策略"
     },
     "operator": "服务器运维",
     "system": "系统",
@@ -178,7 +190,49 @@
         "school": "学校",
         "version": "版本",
         "client_kind": "应用类型",
-        "epoch": "代次"
+        "epoch": "代次",
+        "custody_notice_version": "托管告知版本",
+        "old": "先前版本",
+        "new": "新版本"
+      },
+      "values": {
+        "role": {
+          "user": "用户",
+          "owner": "管理员"
+        },
+        "status": {
+          "active": "正常",
+          "pending": "待审批",
+          "disabled": "已停用"
+        },
+        "source": {
+          "rules": "访问规则",
+          "bootstrap": "初始管理员配置",
+          "operator": "服务器运维人员"
+        },
+        "admitted_via": {
+          "rules": "访问规则",
+          "open": "开放注册",
+          "approval": "管理员审批",
+          "operator": "服务器运维人员",
+          "bootstrap": "初始管理员配置"
+        },
+        "via": {
+          "sign_in": "登录"
+        },
+        "client_kind": {
+          "dcr": "已注册应用",
+          "cimd": "应用元数据地址"
+        },
+        "reason": {
+          "admin_disabled": "管理员停用",
+          "operator_disabled": "运维人员停用",
+          "approval_denied": "审批未通过",
+          "canvas_token_rejected": "Canvas 拒绝了令牌",
+          "decrypt_failed": "令牌无法解密",
+          "revoked_by_admin": "管理员撤销",
+          "last_owner": "最后一位可用管理员"
+        }
       }
     }
   },
@@ -194,5 +248,34 @@
     "returnsTo": "回到",
     "connected": "连接于",
     "lastUsed": "最近使用"
+  },
+  "settings": {
+    "title": "设置",
+    "providers": "登录名称",
+    "reset": "重置名称",
+    "saveNames": "保存名称",
+    "featured": "推荐学校",
+    "host": "学校域名",
+    "name": "显示名称",
+    "check": "检查学校",
+    "add": "添加学校",
+    "remove": "删除 {{host}}",
+    "up": "上移 {{host}}",
+    "down": "下移 {{host}}",
+    "saveSchools": "保存学校",
+    "private": "运维人员已允许私有地址",
+    "enrollments": "{{count}} 个绑定",
+    "confirmTitle": "确认删除学校",
+    "confirmBody": "受影响的绑定会停止工作，重新开放学校后恢复。加密凭据会保留。",
+    "confirm": "确认删除",
+    "directory": "学校目录搜索",
+    "directoryHelp": "开启后，学校搜索词会发送到 canvas.instructure.com。",
+    "saveSearch": "保存搜索设置",
+    "noSchools": "目前没有可用学校，请添加推荐学校或开启目录搜索。",
+    "reload": "重新加载设置",
+    "valid": "地址检查通过。",
+    "notDirectory": "公共目录中未列出该学校，仍可设为推荐学校。",
+    "directoryUnknown": "暂时无法检查公共目录。",
+    "cancel": "取消"
   }
 }

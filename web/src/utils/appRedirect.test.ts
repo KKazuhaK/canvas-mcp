@@ -55,7 +55,7 @@ describe('the request id and its sign-in link', () => {
   })
 
   it('builds the server-side sign-in path, with the request id as a query value', () => {
-    expect(consentLoginPath('A'.repeat(43))).toBe(`/account/login?txn=${'A'.repeat(43)}`)
-    expect(consentLoginPath('A'.repeat(43), { reauth: true })).toBe(`/account/login?txn=${'A'.repeat(43)}&reauth=1`)
+    expect(consentLoginPath('A'.repeat(43))).toBe(`/auth/login?txn=${'A'.repeat(43)}`)
+    expect(consentLoginPath('A'.repeat(43), { reauth: true })).toBe(`/auth/login?txn=${'A'.repeat(43)}&reauth=1`)
   })
 })

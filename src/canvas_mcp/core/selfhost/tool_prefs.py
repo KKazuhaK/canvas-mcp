@@ -28,7 +28,6 @@ for the model, not a boundary).
 from __future__ import annotations
 
 import threading
-import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Collection, Iterable
 from enum import StrEnum
@@ -57,8 +56,7 @@ WRITE_TOOL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 OTHER_GROUP = "other"
 
-DEFAULT_CACHE_SECONDS = 30.0
-_MAX_CACHED_USERS = 2048
+_MAX_CACHED_USERS = 4096
 _MAX_TOOL_NAME_IN_MESSAGE = 64
 
 
@@ -95,7 +93,9 @@ def offered_write_tools(
     )
 
 
-def effective_write_tools(offered: Collection[str], enabled: Collection[str]) -> frozenset[str]:
+def effective_write_tools(
+    offered: Collection[str], enabled: Collection[str]
+) -> frozenset[str]:
     """``offered ∩ enabled``: stored names the server does not offer are ignored."""
     return frozenset(name for name in enabled if name in offered)
 
@@ -130,7 +130,11 @@ def _printable_name(name: str) -> str:
 
 def write_tool_off_message(tool: str, account_url: str | None) -> str:
     """The refusal for a write tool the user has not switched on."""
-    where = f"{account_url} (Write tools)" if account_url else "your account page (Write tools)"
+    where = (
+        f"{account_url} (Write tools)"
+        if account_url
+        else "your account page (Write tools)"
+    )
     return (
         f"The write tool '{_printable_name(tool)}' is turned off for your account. "
         f"You can turn it on at {where}. "
@@ -158,59 +162,48 @@ class ToolPrefsSource(Protocol):
 
 
 class ToolPrefsCache:
-    """Per-principal cache of the switched-on tool names, valid for a short time.
-
-    ``enabled`` reads the database at most once per ``ttl_seconds`` per user, and
-    :meth:`invalidate` drops a user at once when they change a switch. With several
-    server processes a change reaches the other processes within the TTL.
-    Failures are never cached and propagate, so the caller can fail closed.
-    Synchronous and thread-safe; async callers use ``anyio.to_thread.run_sync``.
-    """
+    """Bounded LRU keyed by the account's committed preference version, with no TTL."""
 
     def __init__(
-        self,
-        source: ToolPrefsSource,
-        *,
-        ttl_seconds: float = DEFAULT_CACHE_SECONDS,
-        clock: Callable[[], float] = time.monotonic,
-        max_entries: int = _MAX_CACHED_USERS,
+        self, source: ToolPrefsSource, *, max_entries: int = _MAX_CACHED_USERS
     ) -> None:
         self._source = source
-        self._ttl = ttl_seconds
-        self._clock = clock
         self._max = max_entries
         self._lock = threading.Lock()
-        self._entries: OrderedDict[str, tuple[float, frozenset[str]]] = OrderedDict()
-        # Bumped by every invalidation, so a read that started before one cannot
-        # store its (possibly old) result afterwards.
-        self._epoch = 0
+        self._entries: OrderedDict[tuple[str, int], frozenset[str]] = OrderedDict()
 
-    def enabled(self, principal_key: str) -> frozenset[str]:
-        """The names this principal has switched on (empty if never saved)."""
-        now = self._clock()
+    def enabled(self, principal_key: str, version: int) -> frozenset[str]:
+        if type(version) is not int or version < 0:
+            raise ValueError("invalid preference version")
+        key = (principal_key, version)
         with self._lock:
-            entry = self._entries.get(principal_key)
-            if entry is not None and entry[0] > now:
-                return entry[1]
-            epoch = self._epoch
-        prefs = self._source.get_tool_prefs(principal_key)
-        names = prefs.enabled_write_tools if prefs is not None else frozenset()
+            cached = self._entries.get(key)
+            if cached is not None:
+                self._entries.move_to_end(key)
+                return cached
+        names: frozenset[str]
+        if version == 0:
+            names = frozenset()
+        else:
+            prefs = self._source.get_tool_prefs(principal_key)
+            names = prefs.enabled_write_tools if prefs is not None else frozenset()
+            # A concurrent save must never populate an older version's cache entry.
+            if prefs is None or prefs.version != version:
+                return names
         with self._lock:
-            if epoch == self._epoch:
-                self._entries[principal_key] = (self._clock() + self._ttl, names)
-                self._entries.move_to_end(principal_key)
-                while len(self._entries) > self._max:
-                    self._entries.popitem(last=False)
+            self._entries[key] = names
+            self._entries.move_to_end(key)
+            while len(self._entries) > self._max:
+                self._entries.popitem(last=False)
         return names
 
     def invalidate(self, principal_key: str | None = None) -> None:
-        """Forget one principal (or everyone) so the next read goes to the database."""
         with self._lock:
-            self._epoch += 1
             if principal_key is None:
                 self._entries.clear()
             else:
-                self._entries.pop(principal_key, None)
+                for key in [key for key in self._entries if key[0] == principal_key]:
+                    del self._entries[key]
 
 
 class WriteToolCatalog:
@@ -226,7 +219,9 @@ class WriteToolCatalog:
         ceiling: Collection[str] | None,
         list_registered: Callable[[], Awaitable[Iterable[str]]],
     ) -> None:
-        self.ceiling: frozenset[str] | None = None if ceiling is None else frozenset(ceiling)
+        self.ceiling: frozenset[str] | None = (
+            None if ceiling is None else frozenset(ceiling)
+        )
         self._list_registered = list_registered
 
     async def offered(self) -> frozenset[str]:

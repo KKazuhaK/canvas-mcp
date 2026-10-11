@@ -29,7 +29,8 @@
     "adminEnrollments": "Enrollments",
     "adminAudit": "Audit log",
     "connectedApps": "Connected apps",
-    "signInMethods": "Sign-in methods"
+    "signInMethods": "Sign-in methods",
+    "adminSettings": "Settings"
   },
   "language": {
     "names": {

@@ -1,102 +1,57 @@
-"""End to end through the real HTTP stack: FastMCP auth, our middleware, the gate,
-the encrypted token store and the Canvas client, with only Entra and Canvas faked."""
+"""Native Local AS → MCP → Canvas integration, with only outside providers faked."""
 
-import base64
 import json
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import fastmcp
 import httpx
 import pytest
 import respx
-from fastmcp import FastMCP
-from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
-from starlette.testclient import TestClient
+from dbbackend import raw_connection
 
-pytest.importorskip("canvas_mcp.core.selfhost.token_store")
-pytest.importorskip("canvas_mcp.core.selfhost.account_web")
+from canvas_mcp.tools import register_course_tools
 
-from dbbackend import raw_connection, stack_env
-
-from canvas_mcp.core.selfhost.app import (  # noqa: E402
-    build_selfhost_asgi_app,
-    install_selfhost,
-    prepare_selfhost,
-)
-from canvas_mcp.core.selfhost.settings import load_selfhost_settings  # noqa: E402
-from canvas_mcp.tools import register_course_tools  # noqa: E402
-
-from .conftest import CLIENT, OID_A, OID_B, TENANT, acct_key, store_put  # noqa: E402
+from .account_fixture import _display_in_utc, build_harness, put_row  # noqa: F401
+from .authz.stack import User
+from .conftest import OID_A, OID_B, acct_key
 
 BASE = "https://canvas.example.test"
 CANVAS = "https://canvas.example.edu"
-OID_C = "cccccccc-0000-4000-8000-00000000000c"  # allowed, never enrolled
-OID_W = "dddddddd-0000-4000-8000-00000000000d"  # wrong tenant
-OID_N = "eeeeeeee-0000-4000-8000-00000000000e"  # no role
-OID_X = "ffffffff-0000-4000-8000-00000000000f"  # wrong client
-CANVAS_TOKEN = {OID_A: "canvas-token-for-user-A-0123456789", OID_B: "canvas-token-for-user-B-0123456789"}
-COURSES = {
-    CANVAS_TOKEN[OID_A]: [{"id": 101, "name": "Intermediate Python", "course_code": "ICS 33"}],
-    CANVAS_TOKEN[OID_B]: [{"id": 202, "name": "Single Variable Calculus", "course_code": "MATH 2B"}],
+OID_C = "cccccccc-0000-4000-8000-00000000000c"
+CANVAS_TOKEN = {
+    OID_A: "canvas-token-for-user-A-0123456789",
+    OID_B: "canvas-token-for-user-B-0123456789",
 }
-
-
-def _entra(oid: str, *, tid: str = TENANT, azp: str = CLIENT, roles: list[str] | None = None) -> dict[str, Any]:
-    return {
-        "client_id": azp, "scopes": ["Canvas.Access"], "tid": tid, "oid": oid, "azp": azp,
-        "roles": ["Canvas.User"] if roles is None else roles, "name": f"user {oid[:4]}",
-    }
-
-
-TOKENS = {
-    "bearer-A": _entra(OID_A),
-    "bearer-B": _entra(OID_B),
-    "bearer-C": _entra(OID_C),
-    "bearer-W": _entra(OID_W, tid="99999999-9999-9999-9999-999999999999"),
-    "bearer-N": _entra(OID_N, roles=[]),
-    "bearer-X": _entra(OID_X, azp="12345678-1234-1234-1234-123456789012"),
+COURSES = {
+    CANVAS_TOKEN[OID_A]: [
+        {"id": 101, "name": "Intermediate Python", "course_code": "ICS 33"}
+    ],
+    CANVAS_TOKEN[OID_B]: [
+        {"id": 202, "name": "Single Variable Calculus", "course_code": "MATH 2B"}
+    ],
 }
 
 
 @pytest.fixture(params=["request_local", "per_principal"])
 def stack(
-    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_course_list: None
+    request: pytest.FixtureRequest, tmp_path: Path, real_course_list: None
 ) -> Iterator[SimpleNamespace]:
-    monkeypatch.setattr(fastmcp.settings, "home", tmp_path / "fastmcp")
-    monkeypatch.setenv("CANVAS_API_URL", CANVAS)
-    for name in ("CANVAS_API_TOKEN", "CANVAS_ROLE"):
-        monkeypatch.delenv(name, raising=False)
-    from canvas_mcp.core.config import reset_config
-
-    reset_config()
-    settings = load_selfhost_settings({
-        "PUBLIC_BASE_URL": BASE,
-        "ENTRA_TENANT_ID": TENANT,
-        "ENTRA_CLIENT_ID": CLIENT,
-        "ENTRA_CLIENT_SECRET": "entra-client-secret-0123456789",
-        "OAUTH_JWT_SIGNING_KEY": "jwt-signing-key-" + "z" * 40,
-        "ACCOUNT_SESSION_SECRET": base64.b64encode(bytes(range(32))).decode(),
-        "CANVAS_TOKEN_KEYS": "k1:" + base64.b64encode(bytes(32)).decode(),
-        "FASTMCP_HOME": str(tmp_path / "fastmcp"),
-        "SELFHOST_DATA_DIR": str(tmp_path / "data"),
-        "SELFHOST_COURSE_STATE": request.param,
-        **stack_env(),
-    })
-    runtime = prepare_selfhost(settings)
+    h = build_harness(
+        tmp_path,
+        runtime_env={"SELFHOST_COURSE_STATE": request.param},
+        register_tools=register_course_tools,
+    )
+    tokens = {}
+    users = {
+        label: User(label, oid)
+        for label, oid in (("A", OID_A), ("B", OID_B), ("C", OID_C))
+    }
+    for label, user in users.items():
+        tokens["bearer-" + label] = h.stack.tokens_for(user)[1]["access_token"]
     for oid, token in CANVAS_TOKEN.items():
-        store_put(runtime.store,
-            tenant_id=TENANT, object_id=oid, api_token=token, canvas_user_id=oid[:2],
-            canvas_user_name="n", entra_display_name="n", entra_upn="n@example.test",
-        )
-
-    config: Any = SimpleNamespace(canvas_api_url=f"{CANVAS}/api/v1")
-    mcp = FastMCP("integration", auth=StaticTokenVerifier(TOKENS, required_scopes=["Canvas.Access"]))
-    register_course_tools(mcp)
-    install_selfhost(mcp, runtime, config)
-    app = build_selfhost_asgi_app(mcp, runtime, config)
+        put_row(h.store, oid, token=token, name="n", canvas_user_id=oid[:2])
 
     seen: list[tuple[str, str]] = []
 
@@ -109,16 +64,31 @@ def stack(
             return httpx.Response(200, json=COURSES[token])
         return httpx.Response(404, json={"errors": [{"message": "not found"}]})
 
-    with respx.mock(assert_all_called=False) as router, TestClient(app, base_url=BASE) as client:
+    with respx.mock(assert_all_called=False) as router:
         router.route(host="canvas.example.edu").mock(side_effect=canvas)
-        yield SimpleNamespace(client=client, runtime=runtime, seen=seen, course_state=request.param)
-    reset_config()
+        yield SimpleNamespace(
+            client=h.client,
+            runtime=h.stack.runtime,
+            seen=seen,
+            course_state=request.param,
+            tokens=tokens,
+            native=h.stack,
+            users=users,
+        )
 
 
-def rpc(stack: SimpleNamespace, bearer: str | None, method: str, params: dict[str, Any] | None = None) -> httpx.Response:
-    headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+def rpc(
+    stack: SimpleNamespace,
+    bearer: str | None,
+    method: str,
+    params: dict[str, Any] | None = None,
+) -> httpx.Response:
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
     if bearer:
-        headers["Authorization"] = f"Bearer {bearer}"
+        headers["Authorization"] = f"Bearer {stack.tokens.get(bearer, bearer)}"
     body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
     return stack.client.post("/mcp", json=body, headers=headers)
 
@@ -127,15 +97,24 @@ def result_of(response: httpx.Response) -> dict[str, Any]:
     assert response.status_code == 200, response.text
     text = response.text
     if response.headers["content-type"].startswith("text/event-stream"):
-        data = [line[5:].strip() for line in text.splitlines() if line.startswith("data:")]
+        data = [
+            line[5:].strip() for line in text.splitlines() if line.startswith("data:")
+        ]
         text = data[-1]
     payload = json.loads(text)
     assert "error" not in payload, payload
     return payload["result"]
 
 
-def call_tool(stack: SimpleNamespace, bearer: str, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-    return result_of(rpc(stack, bearer, "tools/call", {"name": name, "arguments": arguments or {}}))
+def call_tool(
+    stack: SimpleNamespace,
+    bearer: str,
+    name: str,
+    arguments: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return result_of(
+        rpc(stack, bearer, "tools/call", {"name": name, "arguments": arguments or {}})
+    )
 
 
 def text_of(result: dict[str, Any]) -> str:
@@ -153,16 +132,20 @@ class TestAuthentication:
         assert rpc(stack, "bearer-nobody", "tools/list").status_code == 401
 
     @pytest.mark.parametrize("bearer", ["bearer-W", "bearer-N", "bearer-X"])
-    def test_wrong_tenant_role_or_client_is_403_and_nothing_runs(self, stack, bearer):
-        response = rpc(stack, bearer, "tools/call", {"name": "list_courses", "arguments": {}})
-        assert response.status_code == 403
-        assert response.json()["error"]
+    def test_external_bearer_is_not_a_local_access_token(self, stack, bearer):
+        response = rpc(
+            stack, bearer, "tools/call", {"name": "list_courses", "arguments": {}}
+        )
+        assert response.status_code == 401
         assert stack.seen == []
 
 
 class TestEnrollment:
     def test_listing_tools_works_without_enrollment(self, stack):
-        names = {tool["name"] for tool in result_of(rpc(stack, "bearer-C", "tools/list"))["tools"]}
+        names = {
+            tool["name"]
+            for tool in result_of(rpc(stack, "bearer-C", "tools/list"))["tools"]
+        }
         assert "list_courses" in names
 
     def test_a_call_without_enrollment_gets_the_account_message(self, stack):
@@ -181,10 +164,15 @@ class TestEnrollment:
 
     def test_an_unreadable_stored_token_gets_the_enroll_again_message(self, stack):
         with raw_connection(stack.runtime.store) as conn:
-            conn.execute("UPDATE canvas_tokens SET ciphertext = ? WHERE principal_key = ?", (b"x" * 40, acct_key(OID_A)))
-        result = call_tool(stack, "bearer-A", "list_courses")
-        assert result["isError"] is True
-        assert "could not be read" in text_of(result)
+            conn.execute(
+                "UPDATE canvas_credentials SET ciphertext = ? WHERE account_id = ?",
+                (b"x" * 40, acct_key(OID_A)),
+            )
+        response = rpc(
+            stack, "bearer-A", "tools/call", {"name": "list_courses", "arguments": {}}
+        )
+        assert response.status_code == 503
+        assert "could not be read" in response.json()["error"]
         assert stack.seen == []
 
 
@@ -201,9 +189,10 @@ class TestDisablement:
         stack.runtime.store.disable_principal(
             acct_key(oid), actor=OPERATOR, reason=DISABLE_REASON_OPERATOR
         )
-        stack.runtime.access.invalidate()
 
-    def test_a_disabled_user_is_refused_on_every_request_and_canvas_is_never_called(self, stack):
+    def test_a_disabled_user_is_refused_on_every_request_and_canvas_is_never_called(
+        self, stack
+    ):
         assert call_tool(stack, "bearer-A", "list_courses")["isError"] is False
         stack.seen.clear()
         self._disable(stack)
@@ -213,8 +202,7 @@ class TestDisablement:
             ("initialize", {}),
         ):
             response = rpc(stack, "bearer-A", method, params)
-            assert response.status_code == 403, method
-            assert "disabled by an administrator" in response.json()["error"]
+            assert response.status_code == 401, method
         assert stack.seen == []
 
     def test_other_users_keep_working(self, stack):
@@ -224,34 +212,36 @@ class TestDisablement:
     def test_removing_the_enrollment_of_a_disabled_user_changes_nothing(self, stack):
         self._disable(stack)
         assert stack.runtime.store.delete(acct_key(OID_A)) is True
-        response = rpc(stack, "bearer-A", "tools/call", {"name": "list_courses", "arguments": {}})
-        assert response.status_code == 403
+        response = rpc(
+            stack, "bearer-A", "tools/call", {"name": "list_courses", "arguments": {}}
+        )
+        assert response.status_code == 401
 
-    def test_a_change_from_another_process_is_noticed_within_the_cache_ttl(self, stack, monkeypatch):
+    def test_a_change_without_cache_invalidation_is_noticed_on_the_next_request(
+        self, stack
+    ):
         from canvas_mcp.core.selfhost.token_store import (
             DISABLE_REASON_OPERATOR,
             OPERATOR,
         )
 
-        clock = {"now": 1000.0}
-        monkeypatch.setattr(stack.runtime.access, "_clock", lambda: clock["now"])
         assert call_tool(stack, "bearer-A", "list_courses")["isError"] is False
-        # The operator CLI is a second process: it cannot invalidate our cache.
         stack.runtime.store.disable_principal(
             acct_key(OID_A), actor=OPERATOR, reason=DISABLE_REASON_OPERATOR
         )
-        clock["now"] += 1
-        assert call_tool(stack, "bearer-A", "list_courses")["isError"] is False  # inside the bound
-        clock["now"] += 10
-        response = rpc(stack, "bearer-A", "tools/call", {"name": "list_courses", "arguments": {}})
-        assert response.status_code == 403
+        stack.seen.clear()
+        assert rpc(stack, "bearer-A", "tools/list").status_code == 401
+        assert stack.seen == []
 
-    def test_enabling_restores_the_kept_enrollment(self, stack):
+    def test_enabling_requires_a_new_grant_and_keeps_the_enrollment(self, stack):
         from canvas_mcp.core.selfhost.token_store import OPERATOR
 
         self._disable(stack)
         stack.runtime.store.enable_principal(acct_key(OID_A), actor=OPERATOR)
-        stack.runtime.access.invalidate()
+        assert rpc(stack, "bearer-A", "tools/list").status_code == 401
+        stack.tokens["bearer-A"] = stack.native.tokens_for(stack.users["A"])[1][
+            "access_token"
+        ]
         assert call_tool(stack, "bearer-A", "list_courses")["isError"] is False
 
 
@@ -262,13 +252,16 @@ class TestPerUserCredentialsAndIsolation:
         assert "ICS 33" in text_a and "MATH 2B" not in text_a
         assert "MATH 2B" in text_b and "ICS 33" not in text_b
         assert [token for path, token in stack.seen if path == "/api/v1/courses"] == [
-            CANVAS_TOKEN[OID_A], CANVAS_TOKEN[OID_B],
+            CANVAS_TOKEN[OID_A],
+            CANVAS_TOKEN[OID_B],
         ]
 
     def test_a_course_cached_for_one_user_does_not_resolve_for_another(self, stack):
         call_tool(stack, "bearer-A", "list_courses")
         stack.seen.clear()
-        result = call_tool(stack, "bearer-B", "get_course_details", {"course_identifier": "ICS 33"})
+        result = call_tool(
+            stack, "bearer-B", "get_course_details", {"course_identifier": "ICS 33"}
+        )
         assert not any("/courses/101" in path for path, _ in stack.seen)
         assert not any(token == CANVAS_TOKEN[OID_A] for _, token in stack.seen)
         assert "Intermediate Python" not in text_of(result)
@@ -276,7 +269,9 @@ class TestPerUserCredentialsAndIsolation:
     def test_the_account_holder_reads_back_their_own_course_by_code(self, stack):
         call_tool(stack, "bearer-A", "list_courses")
         stack.seen.clear()
-        call_tool(stack, "bearer-A", "get_course_details", {"course_identifier": "ICS 33"})
+        call_tool(
+            stack, "bearer-A", "get_course_details", {"course_identifier": "ICS 33"}
+        )
         assert ("/api/v1/courses/101", CANVAS_TOKEN[OID_A]) in stack.seen
 
     def test_last_used_is_recorded_for_the_caller_only(self, stack):
@@ -288,6 +283,8 @@ class TestPerUserCredentialsAndIsolation:
 
     def test_the_canvas_token_never_appears_in_a_response(self, stack):
         for bearer in ("bearer-A", "bearer-B", "bearer-C"):
-            response = rpc(stack, bearer, "tools/call", {"name": "list_courses", "arguments": {}})
+            response = rpc(
+                stack, bearer, "tools/call", {"name": "list_courses", "arguments": {}}
+            )
             for token in CANVAS_TOKEN.values():
                 assert token not in response.text

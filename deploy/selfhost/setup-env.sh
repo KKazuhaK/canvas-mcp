@@ -8,13 +8,10 @@
 # input is reserved for the client secret).
 #
 # What it does:
-#   - Generates three random secrets with the local openssl: OAUTH_JWT_SIGNING_KEY,
-#     ACCOUNT_SESSION_SECRET and CANVAS_TOKEN_KEYS. They are written to .env only and
-#     are never printed;
-#   - Asks for the public address, the Entra tenant ID and client ID, and the Canvas
-#     address. They can also be supplied up front through environment variables of the
-#     same names (PUBLIC_BASE_URL, ENTRA_TENANT_ID, ENTRA_CLIENT_ID, CANVAS_API_URL);
-#     anything already supplied is not asked again;
+#   - Generates ACCOUNT_SESSION_SECRET and CANVAS_TOKEN_KEYS with local openssl;
+#     writes them privately and never prints them;
+#   - Asks for the public origin, Entra tenant/client IDs and reviewed v1 image;
+#     non-secret values can be supplied through corresponding environment variables;
 #   - Reads the Entra client secret from standard input without echoing it to the
 #     terminal. It deliberately accepts neither a command-line argument nor an
 #     environment variable, so the secret never reaches the shell history or the
@@ -36,7 +33,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: bash setup-env.sh [--enable-writes] [--real-names] [--school-search] [--output FILE]
+Usage: bash setup-env.sh [--enable-writes] [--real-names] [--output FILE]
 
 Generate the .env for self-hosted multi-user mode in the deployment directory
 (for example /opt/canvas-mcp).
@@ -48,14 +45,11 @@ Generate the .env for self-hosted multi-user mode in the deployment directory
                    for the risks see README.md ("Prompt-injection risk of write tools").
   --real-names     Turn data anonymization off (ENABLE_DATA_ANONYMIZATION=false; the
                    image default is on).
-  --school-search  Let each user pick their own school: writes CANVAS_SCHOOL_SEARCH=true and
-                   CANVAS_FEATURED_SCHOOLS=<host of CANVAS_API_URL>. Search terms are sent to
-                   Instructure's public school directory; see README.md (multiple schools).
   --output FILE    Output file, default ./.env
   -h, --help       Show this help
 
 Non-secret values can be supplied up front through environment variables:
-PUBLIC_BASE_URL, ENTRA_TENANT_ID, ENTRA_CLIENT_ID, CANVAS_API_URL. The client secret is
+PUBLIC_BASE_URL, ENTRA_TENANT_ID, ENTRA_CLIENT_ID, CANVAS_MCP_IMAGE. The client secret is
 read from the terminal only (not echoed).
 
 Run it only once: to change settings later, edit .env and run docker compose up -d.
@@ -71,13 +65,11 @@ die() {
 OUTPUT=".env"
 ENABLE_WRITES=false
 REAL_NAMES=false
-SCHOOL_SEARCH=false
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --enable-writes) ENABLE_WRITES=true ;;
     --real-names) REAL_NAMES=true ;;
-    --school-search) SCHOOL_SEARCH=true ;;
     --output)
       [ "$#" -ge 2 ] || die "--output needs a file name"
       OUTPUT="$2"
@@ -127,12 +119,9 @@ GUID_RE='^[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}$'
 HOST_RE='[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?'
 # https, a host name and an optional port; no path, query string or trailing slash.
 BASE_URL_RE="^https://${HOST_RE}\$"
-# https, a host name and an optional port, followed only by / or /api/v<N> (the server uses only that part; any other path is dropped).
-CANVAS_URL_RE="^https://${HOST_RE}(/|/api/v[0-9]+/?)?\$"
-
-ask PUBLIC_BASE_URL "Public address of the service (for example https://canvas.example.com, no trailing slash)"
+ask PUBLIC_BASE_URL "Public address of the service (for example https://mcp.example.com, no trailing slash)"
 [[ "$PUBLIC_BASE_URL" =~ $BASE_URL_RE ]] \
-  || die "PUBLIC_BASE_URL must be https://host-name with no path, query string or trailing slash"
+  || die "PUBLIC_BASE_URL must be https://mcp.example.com with no path, query string or trailing slash"
 check_port PUBLIC_BASE_URL "$PUBLIC_BASE_URL"
 
 ask ENTRA_TENANT_ID "Entra directory (tenant) ID"
@@ -144,15 +133,10 @@ ask ENTRA_CLIENT_ID "Entra application (client) ID"
 [ "${ENTRA_TENANT_ID,,}" != "${ENTRA_CLIENT_ID,,}" ] \
   || die "ENTRA_CLIENT_ID and ENTRA_TENANT_ID are the same: copy the two different IDs from the app's Overview page"
 
-ask CANVAS_API_URL "Canvas address (for example https://canvas.school.edu)"
-[[ "$CANVAS_API_URL" =~ $CANVAS_URL_RE ]] \
-  || die "CANVAS_API_URL must be https://canvas-host-name (optionally with /api/v1); do not paste a full address such as a course page"
-check_port CANVAS_API_URL "$CANVAS_API_URL"
-CANVAS_API_URL="${CANVAS_API_URL%/}"
-# Host of the default school: no scheme, port or path, lowercase (a CANVAS_FEATURED_SCHOOLS entry).
-CANVAS_HOST=""
-[[ "$CANVAS_API_URL" =~ ^https://([^/:]+) ]] && CANVAS_HOST="${BASH_REMATCH[1],,}"
-[ -n "$CANVAS_HOST" ] || die "Could not read the host name from CANVAS_API_URL"
+ask CANVAS_MCP_IMAGE "Reviewed v1 image tag/digest (or canvas-mcp:selfhost-v1-local for a source build)"
+IMAGE_RE='^([a-z0-9][a-z0-9.-]*(:[0-9]+)?/)?[a-z0-9]+([._/-][a-z0-9]+)*(:[a-z0-9][a-z0-9_.-]*|@sha256:[0-9a-f]{64})$'
+[[ "$CANVAS_MCP_IMAGE" =~ $IMAGE_RE ]] \
+  || die "CANVAS_MCP_IMAGE must be a lowercase image tag or digest without whitespace"
 
 ENTRA_CLIENT_SECRET=""
 if [ -t 0 ]; then
@@ -172,10 +156,9 @@ case "$ENTRA_CLIENT_SECRET" in
   *[[:space:]\"\'\$\\\`]*) die "The client secret contains whitespace, a quote, \$, a backslash or a backtick, which is not what Entra generates; copy the Value again" ;;
 esac
 
-OAUTH_JWT_SIGNING_KEY="$(openssl rand -base64 48 | tr -d '\r\n')"
 ACCOUNT_SESSION_SECRET="$(openssl rand -base64 32 | tr -d '\r\n')"
 CANVAS_TOKEN_KEY="$(openssl rand -base64 32 | tr -d '\r\n')"
-[ "${#OAUTH_JWT_SIGNING_KEY}" -eq 64 ] && [ "${#ACCOUNT_SESSION_SECRET}" -eq 44 ] \
+[ "${#ACCOUNT_SESSION_SECRET}" -eq 44 ] \
   && [ "${#CANVAS_TOKEN_KEY}" -eq 44 ] || die "openssl generated a key of the wrong length"
 
 STUDENT_WRITE_TOOLS_ALL="submit_assignment,comment_on_my_submission,mark_module_item_done,create_planner_note,update_planner_note,delete_planner_note,mark_planner_item_complete,create_personal_calendar_event,delete_personal_calendar_event,send_message,reply_to_conversation"
@@ -189,18 +172,17 @@ render() {
 # Do not rerun setup-env.sh: it would replace the secrets below and the enrolled Canvas tokens could no longer be decrypted.
 # See env.example and README.md for what each setting means.
 
-MCP_AUTH_MODE=entra-oauth
+MCP_AUTH_MODE=selfhost
+CANVAS_MCP_IMAGE=${CANVAS_MCP_IMAGE}
 PUBLIC_BASE_URL=${PUBLIC_BASE_URL}
 
 ENTRA_TENANT_ID=${ENTRA_TENANT_ID}
 ENTRA_CLIENT_ID=${ENTRA_CLIENT_ID}
 ENTRA_CLIENT_SECRET=${ENTRA_CLIENT_SECRET}
 
-OAUTH_JWT_SIGNING_KEY=${OAUTH_JWT_SIGNING_KEY}
 ACCOUNT_SESSION_SECRET=${ACCOUNT_SESSION_SECRET}
 CANVAS_TOKEN_KEYS=k1:${CANVAS_TOKEN_KEY}
 
-CANVAS_API_URL=${CANVAS_API_URL}
 CANVAS_ROLE=student
 TIMEZONE=America/Los_Angeles
 MCP_MAX_RESULT_CHARS=140000
@@ -210,7 +192,7 @@ MCP_MAX_RESULT_CHARS=140000
 # next line and run docker compose up -d (README.md, "Course state").
 # SELFHOST_COURSE_STATE=per_principal
 
-FASTMCP_HOME=/data/fastmcp
+SELFHOST_DATA_DIR=/data
 EOF
   if [ "$ENABLE_WRITES" = true ]; then
     cat <<EOF
@@ -235,26 +217,11 @@ EOF
 # COURSE_AGENT_POLICY_DEFAULT=allow
 EOF
   fi
-  if [ "$SCHOOL_SEARCH" = true ]; then
-    cat <<EOF
+  cat <<EOF
 
-# Multiple schools: enabled (--school-search). Users pick a school on /account.
-# CANVAS_FEATURED_SCHOOLS lists the quick picks (host names only, comma separated,
-# optionally host=Display Name). CANVAS_SCHOOL_SEARCH=true also lets users search
-# Instructure's public school directory; the search terms are sent to Instructure
-# and enrollment then needs outbound HTTPS to canvas.instructure.com.
-CANVAS_FEATURED_SCHOOLS=${CANVAS_HOST}
-CANVAS_SCHOOL_SEARCH=true
+# Schools: no featured school; directory search is enabled in a new database.
+# Manage schools in Admin > Settings after signing in; no implicit default school.
 EOF
-  else
-    cat <<EOF
-
-# Multiple schools: off (every user is on CANVAS_API_URL). To let users pick their
-# own school, remove the leading "# " from the two lines below, then docker compose up -d.
-# CANVAS_FEATURED_SCHOOLS=${CANVAS_HOST}
-# CANVAS_SCHOOL_SEARCH=true
-EOF
-  fi
   if [ "$REAL_NAMES" = true ]; then
     cat <<EOF
 
@@ -281,23 +248,20 @@ if ! ln -- "$TMP_FILE" "$OUTPUT" 2>/dev/null; then
 fi
 rm -f -- "$TMP_FILE"
 trap - EXIT
-unset ENTRA_CLIENT_SECRET OAUTH_JWT_SIGNING_KEY ACCOUNT_SESSION_SECRET CANVAS_TOKEN_KEY
+unset ENTRA_CLIENT_SECRET ACCOUNT_SESSION_SECRET CANVAS_TOKEN_KEY
 
 writes_label="off (read-only)"
 [ "$ENABLE_WRITES" = true ] && writes_label="all enabled"
 names_label="anonymized (image default)"
 [ "$REAL_NAMES" = true ] && names_label="real names"
-schools_label="Single school (CANVAS_API_URL)"
-[ "$SCHOOL_SEARCH" = true ] && schools_label="Users pick a school; directory search on"
-
 cat >&2 <<EOF
 
 Wrote $OUTPUT (mode 600).
   Public address   $PUBLIC_BASE_URL
-  Canvas           $CANVAS_API_URL (the server uses /api/v1)
+  Image            $CANVAS_MCP_IMAGE
   Write tools      $writes_label
   Name display     $names_label
-  Schools          $schools_label
+  Schools          Configure in Admin > Settings
 
 Next steps:
   1. Keep an offline copy of $OUTPUT (password manager).

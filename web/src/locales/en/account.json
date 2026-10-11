@@ -13,7 +13,8 @@
     "search": "Search",
     "searching": "Searching…",
     "results": "Search results",
-    "noResults": "No school matched that search."
+    "noResults": "No school matched that search.",
+    "none": "No school is offered. Contact the server owner."
   },
   "enroll": {
     "title": "Add your Canvas token",
@@ -281,5 +282,13 @@
     "linkFailed": "The sign-in method was not added",
     "lastOne": "An account must keep at least one sign-in method.",
     "effects": "Removing a sign-in method ends all of your browser sessions. Connected apps stay connected; end them under Connected apps."
+  },
+  "custody": {
+    "v1": "The operator of this server can technically decrypt the Canvas token you store here and could use it to act as you in Canvas. Create a token for this server only, and give it an expiry date. To revoke it, delete it in Canvas under Account > Settings > Approved Integrations, and delete it here with Delete token, which removes the stored copy immediately.",
+    "read": "I have read this notice",
+    "acknowledge": "Acknowledge",
+    "banner": "Please acknowledge the updated Canvas token custody notice before using Canvas tools.",
+    "open": "Read notice",
+    "reload": "This notice version needs an updated account app. Reload this page before acknowledging."
   }
 }

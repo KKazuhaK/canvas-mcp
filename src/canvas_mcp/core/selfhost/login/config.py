@@ -11,8 +11,7 @@ messages name variables and never echo values, and client secrets are ``repr=Fal
     github                   GitHub (OAuth 2.0)                  GITHUB_CLIENT_ID / _SECRET
     oidc:<slug>              any OpenID Connect provider         OIDC_<SLUG>_ISSUER / ...
 
-Everything but ``entra`` needs ``SELFHOST_AUTH_MODE=local``: with ``entra_proxy`` the MCP
-connection itself always signs in through Entra.
+The built-in authorization server supports each configured sign-in provider.
 """
 
 from __future__ import annotations
@@ -44,21 +43,21 @@ ENTRA_ONLY_ENV = (
 MAX_PROVIDERS = 8
 MIN_CLIENT_SECRET_CHARS = 16
 MAX_ISSUER_CHARS = 255
-MAX_DISPLAY_NAME_CHARS = 40
 MAX_SCOPES = 10
 DEFAULT_OIDC_SCOPES = ("openid", "email", "profile")
 TOKEN_AUTH_METHODS = ("client_secret_basic", "client_secret_post")
 
-_GOOGLE_CLIENT_ID_RE = re.compile(r"^[0-9A-Za-z-]{1,200}\.apps\.googleusercontent\.com$")
+_GOOGLE_CLIENT_ID_RE = re.compile(
+    r"^[0-9A-Za-z-]{1,200}\.apps\.googleusercontent\.com$"
+)
 _GITHUB_CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9._-]{8,64}$")
 _OIDC_VAR_RE = re.compile(
-    r"^OIDC_[A-Z0-9_]+_(ISSUER|CLIENT_ID|CLIENT_SECRET|DISPLAY_NAME|SCOPES|TOKEN_AUTH_METHOD|USERINFO)$"
+    r"^OIDC_[A-Z0-9_]+_(ISSUER|CLIENT_ID|CLIENT_SECRET|SCOPES|TOKEN_AUTH_METHOD|USERINFO)$"
 )
 _OIDC_SUFFIXES = (
     "ISSUER",
     "CLIENT_ID",
     "CLIENT_SECRET",
-    "DISPLAY_NAME",
     "SCOPES",
     "TOKEN_AUTH_METHOD",
     "USERINFO",
@@ -94,7 +93,6 @@ class OidcConfig:
     issuer: str
     client_id: str
     client_secret: str = field(repr=False)
-    display_name: str = ""
     scopes: tuple[str, ...] = DEFAULT_OIDC_SCOPES
     #: ``client_secret_basic`` or ``client_secret_post``; ``None`` follows the discovery document.
     token_auth_method: str | None = None
@@ -107,7 +105,7 @@ class OidcConfig:
 
     @property
     def label(self) -> str:
-        return self.display_name or self.slug
+        return self.slug
 
 
 @dataclass(frozen=True)
@@ -221,8 +219,6 @@ def _issuer_problem(raw: str) -> bool:
 def parse_login_providers(
     env: Mapping[str, str],
     problems: list[str],
-    *,
-    authz_mode: str,
 ) -> LoginProvidersConfig:
     """Parse ``SELFHOST_LOGIN_PROVIDERS`` and the per-provider variables.
 
@@ -243,7 +239,9 @@ def parse_login_providers(
         if not entries:
             problems.append(f"{LOGIN_PROVIDERS_ENV} is set but lists no provider")
         if len(entries) > MAX_PROVIDERS:
-            problems.append(f"{LOGIN_PROVIDERS_ENV} lists more than {MAX_PROVIDERS} providers")
+            problems.append(
+                f"{LOGIN_PROVIDERS_ENV} lists more than {MAX_PROVIDERS} providers"
+            )
         for index, entry in enumerate(entries[: MAX_PROVIDERS + 1], start=1):
             if entry in (PROVIDER_ENTRA, PROVIDER_GOOGLE, PROVIDER_GITHUB):
                 provider_id = entry
@@ -266,18 +264,12 @@ def parse_login_providers(
                 continue
             order.append(provider_id)
 
-    others = [p for p in order if p != PROVIDER_ENTRA]
-    if others and authz_mode != "local":
-        problems.append(
-            f"{LOGIN_PROVIDERS_ENV} lists {', '.join(others)}: sign-in providers other than "
-            "entra need SELFHOST_AUTH_MODE=local (with entra_proxy every MCP connection signs "
-            "in through Entra)"
-        )
-
     if PROVIDER_ENTRA not in order:
         for name in ENTRA_ONLY_ENV:
             if get(name):
-                problems.append(f"{name} is set but {LOGIN_PROVIDERS_ENV} does not list entra")
+                problems.append(
+                    f"{name} is set but {LOGIN_PROVIDERS_ENV} does not list entra"
+                )
 
     # A deployment that never set SELFHOST_LOGIN_PROVIDERS (every one from before the variable
     # existed) keeps starting whatever else its environment holds, such as a shared env file with
@@ -286,8 +278,12 @@ def parse_login_providers(
     strict = bool(raw)
     google = _parse_google(get, PROVIDER_GOOGLE in order, problems, strict)
     github = _parse_github(get, PROVIDER_GITHUB in order, problems, strict)
-    oidc = _parse_oidc(env, get, [p[5:] for p in order if p.startswith("oidc:")], problems, strict)
-    return LoginProvidersConfig(order=tuple(order), google=google, github=github, oidc=oidc)
+    oidc = _parse_oidc(
+        env, get, [p[5:] for p in order if p.startswith("oidc:")], problems, strict
+    )
+    return LoginProvidersConfig(
+        order=tuple(order), google=google, github=github, oidc=oidc
+    )
 
 
 def _secret(name: str, value: str, problems: list[str]) -> str:
@@ -302,9 +298,13 @@ def _secret(name: str, value: str, problems: list[str]) -> str:
 
 def _unlisted(name: str, provider: str, problems: list[str], strict: bool) -> None:
     if strict:
-        problems.append(f"{name} is set but {LOGIN_PROVIDERS_ENV} does not list {provider}")
+        problems.append(
+            f"{name} is set but {LOGIN_PROVIDERS_ENV} does not list {provider}"
+        )
     else:
-        logger.warning("%s is set but %s is unset: it is ignored", name, LOGIN_PROVIDERS_ENV)
+        logger.warning(
+            "%s is set but %s is unset: it is ignored", name, LOGIN_PROVIDERS_ENV
+        )
 
 
 def _parse_google(
@@ -313,7 +313,10 @@ def _parse_google(
     client_id = get(GOOGLE_CLIENT_ID_ENV)
     client_secret = get(GOOGLE_CLIENT_SECRET_ENV)
     if not listed:
-        for name, value in ((GOOGLE_CLIENT_ID_ENV, client_id), (GOOGLE_CLIENT_SECRET_ENV, client_secret)):
+        for name, value in (
+            (GOOGLE_CLIENT_ID_ENV, client_id),
+            (GOOGLE_CLIENT_SECRET_ENV, client_secret),
+        ):
             if value:
                 _unlisted(name, "google", problems, strict)
         return None
@@ -340,7 +343,10 @@ def _parse_github(
     client_secret = get(GITHUB_CLIENT_SECRET_ENV)
     if not listed:
         # Only these two exact names: other GITHUB_* variables (CI sets several) are ignored.
-        for name, value in ((GITHUB_CLIENT_ID_ENV, client_id), (GITHUB_CLIENT_SECRET_ENV, client_secret)):
+        for name, value in (
+            (GITHUB_CLIENT_ID_ENV, client_id),
+            (GITHUB_CLIENT_SECRET_ENV, client_secret),
+        ):
             if value:
                 _unlisted(name, "github", problems, strict)
         return None
@@ -370,11 +376,21 @@ def _parse_oidc(
     # A variable of the OIDC_*_ISSUER family that belongs to no listed slug is refused, by name.
     known = {env_prefix(slug) + suffix for slug in slugs for suffix in _OIDC_SUFFIXES}
     for name in sorted(env):
-        if _OIDC_VAR_RE.match(name) and name not in known and (env.get(name) or "").strip():
+        if (
+            _OIDC_VAR_RE.match(name)
+            and name not in known
+            and (env.get(name) or "").strip()
+        ):
             if strict:
-                problems.append(f"{name} is set but {LOGIN_PROVIDERS_ENV} does not list its provider")
+                problems.append(
+                    f"{name} is set but {LOGIN_PROVIDERS_ENV} does not list its provider"
+                )
             else:
-                logger.warning("%s is set but %s is unset: it is ignored", name, LOGIN_PROVIDERS_ENV)
+                logger.warning(
+                    "%s is set but %s is unset: it is ignored",
+                    name,
+                    LOGIN_PROVIDERS_ENV,
+                )
 
     parsed: list[OidcConfig] = []
     for slug in slugs:
@@ -396,19 +412,10 @@ def _parse_oidc(
         if not client_id:
             problems.append(f"{prefix}CLIENT_ID is required")
         elif len(client_id) > 255 or not _VISIBLE_ASCII_RE.match(client_id):
-            problems.append(f"{prefix}CLIENT_ID must be 1 to 255 visible ASCII characters")
-        secret = _secret(f"{prefix}CLIENT_SECRET", var("CLIENT_SECRET"), problems)
-
-        display = var("DISPLAY_NAME")
-        if display and (
-            len(display) > MAX_DISPLAY_NAME_CHARS
-            or any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in display)
-        ):
             problems.append(
-                f"{prefix}DISPLAY_NAME must be 1 to {MAX_DISPLAY_NAME_CHARS} characters "
-                "without control characters"
+                f"{prefix}CLIENT_ID must be 1 to 255 visible ASCII characters"
             )
-            display = ""
+        secret = _secret(f"{prefix}CLIENT_SECRET", var("CLIENT_SECRET"), problems)
 
         scopes: tuple[str, ...] = DEFAULT_OIDC_SCOPES
         scopes_raw = var("SCOPES")
@@ -451,7 +458,6 @@ def _parse_oidc(
                     issuer=issuer,
                     client_id=client_id,
                     client_secret=secret,
-                    display_name=display,
                     scopes=scopes,
                     token_auth_method=method,
                     userinfo=userinfo,

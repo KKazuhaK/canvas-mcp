@@ -8,6 +8,7 @@ import LogoutIcon from '@mui/icons-material/Logout'
 import MenuIcon from '@mui/icons-material/Menu'
 import TuneIcon from '@mui/icons-material/Tune'
 import AppBar from '@mui/material/AppBar'
+import Alert from '@mui/material/Alert'
 import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
 import Container from '@mui/material/Container'
@@ -48,9 +49,7 @@ function navFor(features: Features): NavItem[] {
     ...(features.write_tools
       ? [{ to: '/write-tools', labelKey: 'common:nav.writeTools', Icon: TuneIcon }]
       : []),
-    ...(features.connected_apps
-      ? [{ to: '/connected-apps', labelKey: 'common:nav.connectedApps', Icon: AppsIcon }]
-      : []),
+    { to: '/connected-apps', labelKey: 'common:nav.connectedApps', Icon: AppsIcon },
     ...(features.identities
       ? [{ to: '/sign-in-methods', labelKey: 'common:nav.signInMethods', Icon: LoginIcon }]
       : []),
@@ -220,6 +219,7 @@ export default function AccountLayout({ me, children }: { me: MeResponse; childr
           maxWidth="md"
           sx={{ flex: 1, minWidth: 0, py: 3, px: 2 }}
         >
+          {me.custody_ack_required ? <Alert severity="warning" sx={{ mb: 2 }}>{t('account:custody.banner')} <Button component={RouterLink} to="/token">{t('account:custody.open')}</Button></Alert> : null}
           {children ?? <Outlet />}
         </Container>
       </Box>

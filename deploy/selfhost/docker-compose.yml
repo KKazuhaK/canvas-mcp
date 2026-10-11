@@ -1,4 +1,4 @@
-# canvas-mcp self-hosted multi-user deployment (Entra ID sign-in + a separate Canvas token per user).
+# canvas-mcp v1 multi-user deployment (local authorization server and per-user Canvas credentials).
 #
 # Deploy without cloning the repository:
 #   mkdir -p /opt/canvas-mcp && cd /opt/canvas-mcp
@@ -14,15 +14,9 @@
 
 services:
   canvas-mcp:
-    # Image channels:
-    #   :latest    the latest stable release (recommended, the default). It exists only
-    #              after a stable tag v<x.y.z>-uci.<n> (for example v1.13.0-uci.1) has been
-    #              pushed; before the first stable tag is published, pulling it fails with
-    #              "manifest unknown", so use :edge until then.
-    #   :beta      the latest build of any kind (including pre-releases)
-    #   :edge      every commit on the uci-student branch (newest, least stable)
-    #   :<version> pin to one version, for example :1.13.0-uci.1
-    image: ghcr.io/kkazuhak/canvas-mcp:latest
+    # Select the reviewed v1 version or immutable digest in .env. Pre-v1 images
+    # use a different configuration/schema and cannot run this deployment.
+    image: ${CANVAS_MCP_IMAGE:?Set CANVAS_MCP_IMAGE to the reviewed v1 image tag or digest}
     container_name: canvas-mcp
     restart: unless-stopped
     # Every `docker compose up -d` pulls the image the chosen tag points to again.
@@ -36,14 +30,10 @@ services:
     ports:
       - "127.0.0.1:8819:8819"
 
-    # /data holds the encrypted Canvas token store, the OAuth proxy state and the audit log.
+    # /data holds the SQL database (SQLite by default), encrypted credentials,
+    # audit files and backups. With PostgreSQL, account/protocol state is in PG.
     volumes:
       - canvas-mcp-data:/data
-      # Optional: put the OAuth proxy state in a separate volume so it is kept apart
-      # from the Canvas token store (see "Disk and abuse protection" in the README).
-      # To use it, uncomment the line below and also the canvas-mcp-oauth volume at
-      # the end of the file:
-      #   - canvas-mcp-oauth:/data/fastmcp
 
     # Hardening: read-only root filesystem, an in-memory /tmp, and no extra privileges.
     read_only: true
@@ -75,6 +65,4 @@ volumes:
   # with no error at all.
   canvas-mcp-data:
     name: canvas-mcp-data
-  # canvas-mcp-oauth:
-  #   name: canvas-mcp-oauth
 

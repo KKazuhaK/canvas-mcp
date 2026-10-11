@@ -39,6 +39,7 @@
   "accounts": {
     "title": "Accounts",
     "search": "Search name or username",
+    "searchScope": "Search applies to loaded accounts. Load more to include older accounts.",
     "statusFilter": "Status",
     "allStatuses": "All",
     "counts": "Totals",
@@ -151,11 +152,22 @@
       "token_marked_invalid": "Marked token invalid",
       "write_tools_changed": "Changed write tools",
       "schema_migrated": "Database upgraded",
+      "account_deleted": "Deleted account",
       "pending_purged": "Cleared pending accounts",
       "other": "Other",
       "grant_revoked": "Ended a connected app",
       "grants_revoked_for_account": "Ended all connected apps of an account",
-      "jwt_key_rotated": "Invalidated app access tokens"
+      "jwt_key_rotated": "Invalidated app access tokens",
+      "custody_notice_acknowledged": "Acknowledged token custody notice",
+      "identity_linked": "Linked sign-in method",
+      "identity_unlinked": "Unlinked sign-in method",
+      "identity_unlinked_by_owner": "Owner unlinked sign-in method",
+      "identity_unlinked_by_operator": "Operator unlinked sign-in method",
+      "owner_loss_refused_last_owner": "Preserved the last usable owner",
+      "sign_in_method_renamed": "Changed sign-in name",
+      "featured_schools_changed": "Changed featured schools",
+      "setting_changed": "Changed setting",
+      "school_access_changed": "Changed school address policy"
     },
     "operator": "Server operator",
     "system": "System",
@@ -178,7 +190,49 @@
         "school": "School",
         "version": "Version",
         "client_kind": "App kind",
-        "epoch": "Epoch"
+        "epoch": "Epoch",
+        "custody_notice_version": "Custody notice version",
+        "old": "Previous version",
+        "new": "New version"
+      },
+      "values": {
+        "role": {
+          "user": "User",
+          "owner": "Owner"
+        },
+        "status": {
+          "active": "Active",
+          "pending": "Pending approval",
+          "disabled": "Disabled"
+        },
+        "source": {
+          "rules": "Access rules",
+          "bootstrap": "Initial owner configuration",
+          "operator": "Server operator"
+        },
+        "admitted_via": {
+          "rules": "Access rules",
+          "open": "Open admission",
+          "approval": "Owner approval",
+          "operator": "Server operator",
+          "bootstrap": "Initial owner configuration"
+        },
+        "via": {
+          "sign_in": "Sign-in"
+        },
+        "client_kind": {
+          "dcr": "Registered app",
+          "cimd": "App metadata URL"
+        },
+        "reason": {
+          "admin_disabled": "Disabled by owner",
+          "operator_disabled": "Disabled by operator",
+          "approval_denied": "Approval denied",
+          "canvas_token_rejected": "Canvas rejected the token",
+          "decrypt_failed": "Token could not be decrypted",
+          "revoked_by_admin": "Revoked by owner",
+          "last_owner": "Last usable owner"
+        }
       }
     }
   },
@@ -194,5 +248,34 @@
     "returnsTo": "Returns to",
     "connected": "Connected",
     "lastUsed": "Last used"
+  },
+  "settings": {
+    "title": "Settings",
+    "providers": "Sign-in names",
+    "reset": "Reset name",
+    "saveNames": "Save names",
+    "featured": "Featured schools",
+    "host": "School host",
+    "name": "Display name",
+    "check": "Check school",
+    "add": "Add school",
+    "remove": "Remove {{host}}",
+    "up": "Move {{host}} up",
+    "down": "Move {{host}} down",
+    "saveSchools": "Save schools",
+    "private": "Private addresses allowed by operator",
+    "enrollments": "{{count}} bindings",
+    "confirmTitle": "Confirm school removal",
+    "confirmBody": "Affected bindings will stop working until the school is offered again. Encrypted credentials are kept.",
+    "confirm": "Confirm removal",
+    "directory": "School directory search",
+    "directoryHelp": "When enabled, school search queries are sent to canvas.instructure.com.",
+    "saveSearch": "Save search setting",
+    "noSchools": "No schools are offered. Add a featured school or enable directory search.",
+    "reload": "Reload settings",
+    "valid": "Address checks passed.",
+    "notDirectory": "Not listed in the public directory; it can still be featured.",
+    "directoryUnknown": "The public directory could not be checked.",
+    "cancel": "Cancel"
   }
 }

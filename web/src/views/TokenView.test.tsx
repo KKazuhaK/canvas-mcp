@@ -1,8 +1,10 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderApp } from '@/test/renderWithProviders'
 import { recordRequests } from '@/test/fixtures'
+import { http } from '@/api/client'
+import { AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
 
 vi.mock('@/utils/navigate', () => ({ hardNavigate: vi.fn() }))
 
@@ -21,8 +23,66 @@ describe('Canvas token form', () => {
     vi.clearAllMocks()
   })
 
+  it('requires the notice checkbox for every newly mounted form', async () => {
+    const user = userEvent.setup()
+    await renderApp('/token', 'featured')
+    const seen = recordRequests()
+    await user.type(await tokenInput(), GOOD)
+    const save = screen.getByRole('button', { name: 'Verify and save' })
+    expect(screen.getByRole('checkbox', { name: 'I have read this notice' })).not.toBeChecked()
+    expect(save).toBeDisabled()
+    fireEvent.submit(save.closest('form')!)
+    expect(seen.filter((r) => r.method === 'PUT')).toHaveLength(0)
+    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
+    expect(save).toBeEnabled()
+    await user.click(save)
+    await screen.findByText('Canvas token enrolled')
+    await user.click(screen.getByRole('button', { name: 'Replace token' }))
+    expect(screen.getByRole('checkbox', { name: 'I have read this notice' })).not.toBeChecked()
+  })
+
+  it('re-acknowledges an outdated notice without entering a token', async () => {
+    const user = userEvent.setup()
+    await renderApp('/token', 'custody_outdated')
+    const seen = recordRequests()
+    expect(await screen.findByText(/Please acknowledge the updated Canvas token custody notice/)).toBeInTheDocument()
+    const acknowledge = screen.getByRole('button', { name: /^Acknowledge$/ })
+    expect(acknowledge).toBeDisabled()
+    expect(screen.queryByLabelText(/Canvas access token/)).toBeNull()
+    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
+    await user.click(acknowledge)
+    await waitFor(() => expect(screen.queryByRole('button', { name: /^Acknowledge$/ })).toBeNull())
+    const request = seen.find((r) => r.url === '/me/canvas-token/acknowledge')
+    expect(bodyOf(request)).toEqual({ notice_version: 1 })
+    expect(request?.headers['x-csrf-token']).toBe('mock-csrf-token-not-a-secret')
+    expect(seen.filter((r) => r.method === 'PUT')).toHaveLength(0)
+    expect(screen.queryByText(/Please acknowledge the updated Canvas token custody notice/)).toBeNull()
+  })
+
+  it('unticks and refetches the notice when its version changes before saving', async () => {
+    const user = userEvent.setup()
+    await renderApp('/token', 'featured', () => {
+      const inner = http.defaults.adapter as (config: InternalAxiosRequestConfig) => Promise<AxiosResponse>
+      http.defaults.adapter = async (config) => {
+        if (config.method?.toUpperCase() !== 'PUT' || config.url !== '/me/canvas-token') return inner(config)
+        const response: AxiosResponse = { status: 409, statusText: '', headers: {}, config,
+          data: { error: { code: 'custody_notice_outdated', params: { notice_version: 2 } } } }
+        throw new AxiosError('failed', 'ERR_BAD_REQUEST', config, {}, response)
+      }
+    })
+    const seen = recordRequests()
+    await user.type(await tokenInput(), GOOD)
+    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
+    await user.click(screen.getByRole('button', { name: 'Verify and save' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('The custody notice has changed')
+    expect(screen.getByRole('checkbox', { name: 'I have read this notice' })).not.toBeChecked()
+    expect(screen.getByRole('button', { name: 'Verify and save' })).toBeDisabled()
+    expect(seen.some((request) => request.method === 'GET' && request.url === '/me')).toBe(true)
+    expect((await tokenInput()).value).toBe('')
+  })
+
   it('is a write-only password field with autocomplete and spellcheck off', async () => {
-    await renderApp('/token', 'fresh')
+    await renderApp('/token', 'featured')
     const input = await tokenInput()
     expect(input).toHaveAttribute('type', 'password')
     expect(input).toHaveAttribute('autocomplete', 'off')
@@ -37,23 +97,25 @@ describe('Canvas token form', () => {
 
   it('shows the one school of a single-school server and sends no school', async () => {
     const user = userEvent.setup()
-    await renderApp('/token', 'fresh')
+    await renderApp('/token', 'featured')
     const seen = recordRequests()
     expect(await screen.findByText('Example University')).toBeInTheDocument()
     await user.type(await tokenInput(), GOOD)
+    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
     await user.click(screen.getByRole('button', { name: 'Verify and save' }))
     await screen.findByText('Canvas token enrolled')
-    expect(bodyOf(seen.find((r) => r.method === 'PUT'))).toEqual({ canvas_token: GOOD })
+    expect(bodyOf(seen.find((r) => r.method === 'PUT'))).toEqual({ canvas_token: GOOD, custody: { acknowledged: true, notice_version: 1 } })
   })
 
   it('saves a valid token, sends the CSRF header, never echoes it and keeps it out of caches', async () => {
     const user = userEvent.setup()
-    const { client } = await renderApp('/token', 'fresh')
+    const { client } = await renderApp('/token', 'featured')
     const seen = recordRequests()
     const input = await tokenInput()
 
     await user.type(input, GOOD)
     expect(input.value).toBe(GOOD) // controlled field holds it only while typing
+    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
     await user.click(screen.getByRole('button', { name: 'Verify and save' }))
 
     expect(await screen.findByText('Canvas token enrolled')).toBeInTheDocument()
@@ -73,27 +135,35 @@ describe('Canvas token form', () => {
 
   it('sends the optional expiry date when one is entered', async () => {
     const user = userEvent.setup()
-    await renderApp('/token', 'fresh')
+    await renderApp('/token', 'featured')
     const seen = recordRequests()
     await user.type(await tokenInput(), GOOD)
     await user.type(screen.getByLabelText(/Expiry date/), '2031-02-03')
+    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
     await user.click(screen.getByRole('button', { name: 'Verify and save' }))
     await screen.findByText('Canvas token enrolled')
     expect(bodyOf(seen.find((r) => r.method === 'PUT'))).toEqual({
       canvas_token: GOOD,
+      custody: { acknowledged: true, notice_version: 1 },
       expires_on: '2031-02-03',
     })
     expect(screen.getByText('Expires')).toBeInTheDocument()
   })
 
-  it('points at the expiry date when the server refuses it, and offers today as the earliest', async () => {
+  it('leaves a day for server timezone differences and shows server expiry refusals', async () => {
     const user = userEvent.setup()
-    await renderApp('/token', 'fresh')
+    await renderApp('/token', 'featured')
     const token = await tokenInput()
     const expiry = screen.getByLabelText(/Expiry date/)
     expect(expiry).toHaveAttribute('min', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/))
+    // A server whose calendar is still yesterday must remain able to accept its current date.
+    const yesterday = new Date()
+    yesterday.setDate(yesterday.getDate() - 1)
+    const date = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`
+    expect(expiry.getAttribute('min')! <= date).toBe(true)
     await user.type(token, GOOD)
     await user.type(expiry, '2020-01-01')
+    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
     await user.click(screen.getByRole('button', { name: 'Verify and save' }))
 
     expect(
@@ -112,9 +182,10 @@ describe('Canvas token form', () => {
 
   it('clears the field after a server failure and shows the localized reason', async () => {
     const user = userEvent.setup()
-    await renderApp('/token', 'fresh')
+    await renderApp('/token', 'featured')
     const input = await tokenInput()
     await user.type(input, 'this-token-was-rejected-by-canvas-1234')
+    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
     await user.click(screen.getByRole('button', { name: 'Verify and save' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Canvas rejected that token')
@@ -124,10 +195,11 @@ describe('Canvas token form', () => {
 
   it('checks the shape locally without sending anything, and clears the field', async () => {
     const user = userEvent.setup()
-    await renderApp('/token', 'fresh')
+    await renderApp('/token', 'featured')
     const seen = recordRequests()
     const input = await tokenInput()
     await user.type(input, 'too short')
+    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
     await user.click(screen.getByRole('button', { name: 'Verify and save' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('does not look like a Canvas access token')
     expect(input.value).toBe('')
@@ -136,8 +208,9 @@ describe('Canvas token form', () => {
 
   it('maps canvas_unavailable', async () => {
     const user = userEvent.setup()
-    await renderApp('/token', 'fresh')
+    await renderApp('/token', 'featured')
     await user.type(await tokenInput(), 'canvas-is-offline-token-1234567890')
+    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
     await user.click(screen.getByRole('button', { name: 'Verify and save' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not reach Canvas')
   })
@@ -146,6 +219,7 @@ describe('Canvas token form', () => {
     const user = userEvent.setup()
     await renderApp('/token', 'error-503')
     await user.type(await tokenInput(), GOOD)
+    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
     await user.click(screen.getByRole('button', { name: 'Verify and save' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('token store is unavailable')
   })
@@ -154,26 +228,29 @@ describe('Canvas token form', () => {
     const user = userEvent.setup()
     await renderApp('/token', 'rate-limited')
     await user.type(await tokenInput(), GOOD)
+    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
     await user.click(screen.getByRole('button', { name: 'Verify and save' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('Try again in 30 seconds')
   })
 })
 
 describe('school picker', () => {
-  it('lists the featured schools, starts on the server default and sends the host without a signature', async () => {
+  it('lists featured schools without an implicit selection and sends the chosen host without a signature', async () => {
     const user = userEvent.setup()
     await renderApp('/token', 'picker')
     const seen = recordRequests()
     const select = await screen.findByRole('combobox', { name: 'School' })
-    expect(select).toHaveTextContent('Example University (canvas.example.edu)')
+    expect(select).not.toHaveTextContent('Example University (canvas.example.edu)')
 
     await user.click(select)
     await user.click(await screen.findByRole('option', { name: 'Sample College (learn.sample.edu)' }))
     await user.type(await tokenInput(), GOOD)
+    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
     await user.click(screen.getByRole('button', { name: 'Verify and save' }))
     await screen.findByText('Canvas token enrolled')
     expect(bodyOf(seen.find((r) => r.method === 'PUT'))).toEqual({
       canvas_token: GOOD,
+      custody: { acknowledged: true, notice_version: 1 },
       school: 'learn.sample.edu',
     })
     expect(screen.getByText('Sample College')).toBeInTheDocument()
@@ -195,10 +272,12 @@ describe('school picker', () => {
     await user.click(hit)
     expect(screen.getByRole('combobox', { name: 'School' })).toHaveTextContent('Demo State University')
     await user.type(await tokenInput(), GOOD)
+    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
     await user.click(screen.getByRole('button', { name: 'Verify and save' }))
     await screen.findByText('Canvas token enrolled')
     expect(bodyOf(seen.find((r) => r.method === 'PUT'))).toEqual({
       canvas_token: GOOD,
+      custody: { acknowledged: true, notice_version: 1 },
       school: 'canvas.demo.edu',
       school_sig: 'sig-canvas.demo.edu',
     })
@@ -226,7 +305,7 @@ describe('school picker', () => {
   })
 
   it('has no search box when the server does not allow searching', async () => {
-    await renderApp('/token', 'fresh')
+    await renderApp('/token', 'featured')
     await tokenInput()
     expect(screen.queryByLabelText('Search for another school')).toBeNull()
   })
@@ -241,6 +320,7 @@ describe('replacing a token for a different Canvas user', () => {
     const seen = recordRequests()
     const input = await tokenInput()
     await user.type(input, GOOD)
+    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
     await user.click(screen.getByRole('button', { name: 'Verify and replace' }))
 
     const dialog = await screen.findByRole('dialog')
@@ -251,7 +331,7 @@ describe('replacing a token for a different Canvas user', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Replace the token' }))
     await waitFor(() => expect(seen.filter((r) => r.method === 'PUT')).toHaveLength(2))
     const second = bodyOf(seen.filter((r) => r.method === 'PUT')[1])
-    expect(second).toEqual({ canvas_token: GOOD, confirm_identity_change: 'mock-confirmation' })
+    expect(second).toEqual({ canvas_token: GOOD, custody: { acknowledged: true, notice_version: 1 }, school: 'canvas.example.edu', confirm_identity_change: 'mock-confirmation' })
 
     expect(await screen.findByText('Zed Example', { exact: false })).toBeInTheDocument()
     expect(document.body.innerHTML).not.toContain(GOOD)
@@ -265,6 +345,7 @@ describe('replacing a token for a different Canvas user', () => {
     const seen = recordRequests()
     const input = await tokenInput()
     await user.type(input, GOOD)
+    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
     await user.click(screen.getByRole('button', { name: 'Verify and replace' }))
     const dialog = await screen.findByRole('dialog')
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))

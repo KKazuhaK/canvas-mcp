@@ -1,6 +1,6 @@
 """The state of one sign-in (or link) ceremony, stored server side for ten minutes.
 
-A ceremony starts at ``/account/login/<provider>``: the server stores a :class:`FlowRecord`
+A ceremony starts at ``/auth/login/<provider>``: the server stores a :class:`FlowRecord`
 (PKCE verifier, nonce, what the sign-in is for) in the one-time ``login_states`` table under an
 unguessable id, which becomes the OAuth ``state``, and gives the browser a sealed
 ``__Host-cmcp_flow`` cookie holding the state, a random binding secret and the provider. The
@@ -78,9 +78,19 @@ class FlowRecord:
     def to_json(self) -> bytes:
         raw = json.dumps(
             {
-                "v": self.v, "p": self.p, "cv": self.cv, "n": self.n, "pp": self.pp,
-                "txn": self.txn, "rt": self.rt, "rz": self.rz, "ru": self.ru,
-                "la": self.la, "le": self.le, "li": self.li, "iat": self.iat,
+                "v": self.v,
+                "p": self.p,
+                "cv": self.cv,
+                "n": self.n,
+                "pp": self.pp,
+                "txn": self.txn,
+                "rt": self.rt,
+                "rz": self.rz,
+                "ru": self.ru,
+                "la": self.la,
+                "le": self.le,
+                "li": self.li,
+                "iat": self.iat,
             },
             separators=(",", ":"),
         ).encode("utf-8")
@@ -118,7 +128,9 @@ class FlowRecord:
             )
         except (KeyError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
             raise ValueError("invalid flow record") from None
-        if record.pp == "link" and (record.la is None or record.le is None or record.li is None):
+        if record.pp == "link" and (
+            record.la is None or record.le is None or record.li is None
+        ):
             raise ValueError("link without a session")
         return record
 
@@ -132,7 +144,12 @@ def new_cookie_payload(
     consent, an expired state) still send a link ceremony back to the Sign-in methods screen.
     """
     return {
-        "v": FLOW_COOKIE_VERSION, "s": state, "b": binding, "p": provider_id, "pp": purpose, "iat": now,
+        "v": FLOW_COOKIE_VERSION,
+        "s": state,
+        "b": binding,
+        "p": provider_id,
+        "pp": purpose,
+        "iat": now,
     }
 
 
@@ -142,8 +159,8 @@ class FlowCookie:
     binding: str
     provider_id: str
     iat: int
-    #: What the ceremony is for; a cookie without the field (an older one) is a sign-in.
-    purpose: Purpose = "sign_in"
+    #: What this ceremony is for. The native cookie always carries this field.
+    purpose: Purpose
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any] | None) -> FlowCookie | None:
@@ -151,7 +168,10 @@ class FlowCookie:
         if payload is None or payload.get("v") != FLOW_COOKIE_VERSION:
             return None
         state, binding, provider, iat = (
-            payload.get("s"), payload.get("b"), payload.get("p"), payload.get("iat"),
+            payload.get("s"),
+            payload.get("b"),
+            payload.get("p"),
+            payload.get("iat"),
         )
         if (
             not isinstance(state, str)
@@ -163,7 +183,7 @@ class FlowCookie:
             or not binding
         ):
             return None
-        purpose = payload.get("pp", "sign_in")
+        purpose = payload.get("pp")
         if purpose not in _PURPOSES:
             return None
         return cls(state, binding, provider, iat, purpose)

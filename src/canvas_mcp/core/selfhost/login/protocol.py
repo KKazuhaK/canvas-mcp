@@ -16,7 +16,14 @@ from .metadata import ProviderUnavailable
 IconName = Literal["microsoft", "google", "github", "key"]
 
 #: What a refused ceremony step is called (a closed set; never provider text).
-REJECT_CODES = ("provider_error", "sign_in_unverified", "sign_in_incomplete")
+REJECT_CODES = (
+    "provider_error",
+    "sign_in_unverified",
+    "sign_in_incomplete",
+    "wrong_tenant",
+    "bad_subject",
+    "bad_roles",
+)
 
 
 @dataclass(frozen=True)
@@ -60,7 +67,9 @@ class LoginProvider(Protocol):
     ) -> str:
         """The URL to send the browser to. ``reauth`` forces the provider to ask the person again."""
 
-    async def finish(self, *, code: str, code_verifier: str, nonce: str) -> ExternalClaims:
+    async def finish(
+        self, *, code: str, code_verifier: str, nonce: str
+    ) -> ExternalClaims:
         """Exchange the code and return the verified identity, or raise :class:`SignInRejected`."""
 
 

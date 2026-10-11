@@ -55,11 +55,11 @@ describe('Connected apps', () => {
     ])
   })
 
-  it('is not a page when the server does not have the feature', async () => {
+  it('offers connected apps on every self-hosted deployment', async () => {
     await renderApp('/connected-apps', 'enrolled')
-    expect(await screen.findByText('Page not found')).toBeInTheDocument()
-    const nav = screen.getByRole('navigation', { name: 'Main navigation' })
-    expect(nav.querySelector('a[href="/connected-apps"]')).toBeNull()
+    const nav = await screen.findByRole('navigation', { name: 'Main navigation' })
+    expect(nav.querySelector('a[href="/connected-apps"]')).not.toBeNull()
+    expect(screen.queryByText('Page not found')).toBeNull()
   })
 
   it('is not a page for an account that waits for approval', async () => {
@@ -106,7 +106,7 @@ describe('Connected apps', () => {
     await renderApp('/connected-apps', 'local', () => {
       scriptAdapter((request) => {
         if (request.url === '/me') {
-          return { status: 200, data: meFixture({}, { features: { ...meFixture().features, connected_apps: true } }) }
+          return { status: 200, data: meFixture() }
         }
         if (request.method === 'DELETE') return { status: 503, data: errorBody('token_store_unavailable') }
         return {
@@ -139,7 +139,7 @@ describe('Connected apps', () => {
     await renderApp('/connected-apps', 'local', () => {
       scriptAdapter((request) => {
         if (request.url === '/me') {
-          return { status: 200, data: meFixture({}, { features: { ...meFixture().features, connected_apps: true } }) }
+          return { status: 200, data: meFixture() }
         }
         if (request.method === 'DELETE') {
           listed = false
@@ -174,7 +174,7 @@ describe('Connected apps', () => {
     await renderApp('/connected-apps', 'local', () => {
       scriptAdapter((request) =>
         request.url === '/me'
-          ? { status: 200, data: meFixture({}, { features: { ...meFixture().features, connected_apps: true } }) }
+          ? { status: 200, data: meFixture() }
           : { status: 200, data: { grants: [] } },
       )
     })
@@ -185,7 +185,7 @@ describe('Connected apps', () => {
     await renderApp('/connected-apps', 'local', () => {
       scriptAdapter((request) =>
         request.url === '/me'
-          ? { status: 200, data: meFixture({}, { features: { ...meFixture().features, connected_apps: true } }) }
+          ? { status: 200, data: meFixture() }
           : { status: 503, data: errorBody('token_store_unavailable') },
       )
     })
@@ -197,7 +197,7 @@ describe('Connected apps', () => {
     const { router } = await renderApp('/connected-apps', 'local', () => {
       scriptAdapter((request) =>
         request.url === '/me'
-          ? { status: 200, data: meFixture({}, { features: { ...meFixture().features, connected_apps: true } }) }
+          ? { status: 200, data: meFixture() }
           : { status: 401, data: errorBody('not_authenticated') },
       )
     })

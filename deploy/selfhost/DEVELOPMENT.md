@@ -1,5 +1,15 @@
 # canvas-mcp self-hosted mode: developer handoff
 
+This document records the original handoff inventory. For implementation and
+validation completed since that snapshot, read [V1-PROGRESS.md](V1-PROGRESS.md)
+and [B0-REVIEW.md](B0-REVIEW.md). The v1 work is still in progress. Both Docker
+architectures pass SQLite and PostgreSQL container smoke; the complete runtime
+matrix and live staging validation remain outstanding. All schema upgrades, backups and
+database transfer tooling are isolated under
+`src/canvas_mcp/core/selfhost/db/migrations/`. Its README describes the removal
+boundary, contract backups and concurrent-index recovery. See
+[PAGINATION.md](PAGINATION.md) for the completed bounded list contract.
+
 Snapshot date: 2026-10-11. Audience: a developer who has never seen this project and must continue it alone. The document is written in English so it can be committed. Location: `deploy/selfhost/DEVELOPMENT.md`. Its companion, the v1 consolidation design, is `deploy/selfhost/V1-DESIGN.md`; this document calls it "V1-DESIGN" and cites its sections as "V1-DESIGN 4.6".
 
 Conventions in this document:

@@ -24,7 +24,7 @@ def service(document) -> dict:
 
 
 def test_image_and_pull_policy(service):
-    assert service["image"].startswith("ghcr.io/kkazuhak/canvas-mcp:")
+    assert service["image"].startswith("${CANVAS_MCP_IMAGE:?")
     assert service["pull_policy"] == "always"
     assert service["restart"] == "unless-stopped"
 
@@ -62,3 +62,13 @@ def test_the_data_volume_has_a_fixed_name(document):
     """Without `name:` Compose creates <project>_canvas-mcp-data, and the documented
     `docker run -v canvas-mcp-data:/data` backup silently targets a new empty volume."""
     assert document["volumes"]["canvas-mcp-data"] == {"name": "canvas-mcp-data"}
+
+
+def test_source_build_override_uses_the_reviewed_checkout_without_pulling():
+    override = yaml.safe_load(COMPOSE.with_name("docker-compose.build.yml").read_text(encoding="utf-8"))
+    assert set(override["services"]) == {"canvas-mcp"}
+    app = override["services"]["canvas-mcp"]
+    assert app["pull_policy"] == "build"
+    assert app["build"]["dockerfile"] == "Dockerfile.selfhost"
+    assert (COMPOSE.parent / app["build"]["context"]).resolve() == COMPOSE.parents[2]
+    assert set(app) == {"build", "pull_policy"}

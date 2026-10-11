@@ -1,3 +1,4 @@
+import LoadMore from '@/components/LoadMore'
 import Typography from '@mui/material/Typography'
 import Chip from '@mui/material/Chip'
 import { useTranslation } from 'react-i18next'
@@ -69,9 +70,10 @@ export default function LoginHistory({ label }: { label: string }) {
           label={label}
           columns={columns}
           rows={history.data.events}
-          rowKey={(e) => `${e.at}|${e.provider_id}|${e.outcome}|${e.reason}`}
+          rowKey={(e) => String(e.id)}
         />
       ) : null}
+      <LoadMore query={history} />
     </>
   )
 }

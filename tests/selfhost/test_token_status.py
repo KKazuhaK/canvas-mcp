@@ -187,6 +187,6 @@ class TestVerifiedAndHint:
         _put(store, canvas_host="canvas.example.edu")
         _put(store, principal_key=acct_key(OID_B), canvas_host="canvas.example.edu")
         store.mark_invalid(PK_A, reason=REASON_REVOKED_BY_ADMIN)
-        listed = {row.principal_key: row for row in store.list_enrollments()}
+        listed = {row.principal_key: row for row in store.iter_enrollments()}
         assert listed[PK_A].status == STATUS_INVALID
         assert listed[acct_key(OID_B)].status == STATUS_ACTIVE

@@ -46,13 +46,17 @@ from canvas_mcp.core.selfhost.app import (
     prepare_selfhost,
 )
 from canvas_mcp.core.selfhost.authz import fastmcp_compat as compat
-from canvas_mcp.core.selfhost.authz.runtime import build_authz_runtime
-from canvas_mcp.core.selfhost.oauth import build_auth_provider
+from canvas_mcp.core.selfhost.authz.runtime import (
+    build_auth_provider,
+    build_authz_runtime,
+)
+from canvas_mcp.core.selfhost.custody import CustodyAcknowledgement
 from canvas_mcp.core.selfhost.settings import SelfhostSettings, load_selfhost_settings
 from canvas_mcp.core.selfhost.token_store import Keyring
 
 from ..conftest import CLIENT as ENTRA_CLIENT_ID
 from ..conftest import TENANT as ENTRA_TENANT
+from ..spa_fixture import make_dist
 
 BASE = "https://canvas.example.test"
 ISSUER = BASE + "/"
@@ -78,10 +82,20 @@ class User:
         return f"{self.name.lower()}@example.test"
 
 
-ALICE = User("Alice", "aaaaaaaa-0000-4000-8000-00000000000a", canvas_token="canvas-pat-alice-0123456789abcdef")
-BOB = User("Bob", "bbbbbbbb-0000-4000-8000-00000000000b", canvas_token="canvas-pat-bob-0123456789abcdefgh")
+ALICE = User(
+    "Alice",
+    "aaaaaaaa-0000-4000-8000-00000000000a",
+    canvas_token="canvas-pat-alice-0123456789abcdef",
+)
+BOB = User(
+    "Bob",
+    "bbbbbbbb-0000-4000-8000-00000000000b",
+    canvas_token="canvas-pat-bob-0123456789abcdefgh",
+)
 OWNER = User(
-    "Olive", "eeeeeeee-0000-4000-8000-00000000000e", roles=("Canvas.Owner",),
+    "Olive",
+    "eeeeeeee-0000-4000-8000-00000000000e",
+    roles=("Canvas.Owner",),
     canvas_token="canvas-pat-olive-0123456789abcdefg",
 )
 
@@ -100,33 +114,42 @@ class Clock:
 
 
 class FakeIdp:
-    """Entra as far as ``/account`` can see it: the claims of the id token, set by the test."""
+    """Entra discovery, JWKS and a PKCE-protected token endpoint, entirely offline."""
 
     def __init__(self, clock: Clock) -> None:
-        self.clock = clock
-        self.claims: dict[str, Any] = {}
-        self.token_requests = 0
+        from canvas_mcp.core.selfhost.accounts import entra_issuer
+
+        from ..login.fake_idp import FakeNetwork, FakeOidcIdp
+
+        self.net = FakeNetwork()
+        self.provider = FakeOidcIdp(
+            self.net,
+            entra_issuer(ENTRA_TENANT),
+            client_id=ENTRA_CLIENT_ID,
+            client_secret="entra-client-secret-0123456789",
+        )
+        self.provider.now = clock
+
+    @property
+    def token_requests(self) -> int:
+        return self.provider.counts["token"]
 
     def set_user(self, user: User, nonce: str, **overrides: Any) -> None:
-        now = int(self.clock())
-        self.claims = {
-            "tid": ENTRA_TENANT, "oid": user.oid, "name": user.name,
-            "preferred_username": user.upn, "roles": list(user.roles), "nonce": nonce,
-            "iat": now, "exp": now + 3600, "aud": ENTRA_CLIENT_ID,
-        }
+        from ..login.fake_idp import IdpUser
+
+        extra = {"tid": ENTRA_TENANT, "oid": user.oid, "roles": list(user.roles)}
         if not user.roles:
-            self.claims.pop("roles")
-        self.claims.update(overrides)
+            extra.pop("roles")
+        extra.update(overrides)
+        self.provider.user = IdpUser(
+            sub=user.oid,
+            name=user.name,
+            preferred_username=user.upn,
+            extra=extra,
+        )
 
-    async def verify(self, _token: str) -> Mapping[str, Any] | None:
-        return dict(self.claims)
-
-    def factory(self) -> httpx.AsyncClient:
-        def handler(request: httpx.Request) -> httpx.Response:
-            self.token_requests += 1
-            return httpx.Response(200, json={"id_token": "fake-id-token"})
-
-        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    def authorize(self, url: str) -> str:
+        return self.provider.authorize(url)
 
 
 class FakeCimd:
@@ -140,7 +163,13 @@ class FakeCimd:
 
     def serve(self, url: str, doc: Mapping[str, Any] | bytes, **headers: str) -> None:
         raw = doc if isinstance(doc, bytes) else json.dumps(doc).encode()
-        self.documents[url] = (raw, {"cache-control": "max-age=300", **{k.replace("_", "-"): v for k, v in headers.items()}})
+        self.documents[url] = (
+            raw,
+            {
+                "cache-control": "max-age=300",
+                **{k.replace("_", "-"): v for k, v in headers.items()},
+            },
+        )
         self.errors.pop(url, None)
 
     def fail(self, url: str, error: Exception) -> None:
@@ -175,7 +204,11 @@ def cimd_document(url: str, **overrides: Any) -> dict[str, Any]:
 
 def pkce() -> tuple[str, str]:
     verifier = secrets.token_urlsafe(48)
-    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+        .decode()
+        .rstrip("=")
+    )
     return verifier, challenge
 
 
@@ -202,7 +235,7 @@ class Stack:
     @property
     def react(self) -> bool:
         """Whether the account UI is the single-page app (consent through the JSON API)."""
-        return bool(self.settings.account_ui == "react")
+        return True
 
     @property
     def authz(self) -> Any:
@@ -210,7 +243,11 @@ class Stack:
         return self.runtime.authz
 
     def account_of(self, user: User) -> str:
-        key = self.store.resolve_legacy_key(f"entra:{ENTRA_TENANT}:{user.oid}".lower())
+        key = self.store.lookup_identity(
+            "entra",
+            f"https://login.microsoftonline.com/{ENTRA_TENANT}/v2.0",
+            user.oid.lower(),
+        )
         assert key is not None, "the user has no account yet"
         return str(key)
 
@@ -220,8 +257,12 @@ class Stack:
         browser.sign_in(user)
         key = self.account_of(user)
         self.store.put(
-            principal_key=key, api_token=user.canvas_token, canvas_user_id="1",
-            canvas_user_name=user.name, canvas_host=CANVAS_HOST,
+            principal_key=key,
+            api_token=user.canvas_token,
+            canvas_user_id="1",
+            canvas_user_name=user.name,
+            canvas_host=CANVAS_HOST,
+            custody=CustodyAcknowledgement(1, int(self.clock())),
         )
         return key
 
@@ -241,13 +282,24 @@ class Stack:
         return str(response.json()["client_id"])
 
     def authorize_params(
-        self, client_id: str, challenge: str, *, redirect_uri: str = CLAUDE_REDIRECT,
-        state: str | None = "state-1", **overrides: str | None,
+        self,
+        client_id: str,
+        challenge: str,
+        *,
+        redirect_uri: str = CLAUDE_REDIRECT,
+        state: str | None = "state-1",
+        **overrides: str | None,
     ) -> dict[str, str]:
         params: dict[str, str | None] = {
-            "response_type": "code", "client_id": client_id, "redirect_uri": redirect_uri,
-            "code_challenge": challenge, "code_challenge_method": "S256", "state": state,
-            "scope": SCOPE, "resource": AUDIENCE, **overrides,
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "state": state,
+            "scope": SCOPE,
+            "resource": AUDIENCE,
+            **overrides,
         }
         return {k: v for k, v in params.items() if v is not None}
 
@@ -255,15 +307,23 @@ class Stack:
         return self.client.post("/token", data=form)
 
     def code_for(
-        self, user: User, *, client_id: str | None = None, browser: Browser | None = None,
-        redirect_uri: str = CLAUDE_REDIRECT, **overrides: str | None,
+        self,
+        user: User,
+        *,
+        client_id: str | None = None,
+        browser: Browser | None = None,
+        redirect_uri: str = CLAUDE_REDIRECT,
+        **overrides: str | None,
     ) -> tuple[str, str, str, Browser]:
         """Run the browser part for ``user``. Returns (client id, verifier, code, browser)."""
         client_id = client_id or self.register(redirect_uri)
         verifier, challenge = pkce()
         browser = browser or Browser(self, react=self.react)
         result = browser.connect(
-            self.authorize_params(client_id, challenge, redirect_uri=redirect_uri, **overrides), user
+            self.authorize_params(
+                client_id, challenge, redirect_uri=redirect_uri, **overrides
+            ),
+            user,
         )
         assert "code" in result.query, result
         return client_id, verifier, result.query["code"], browser
@@ -271,19 +331,35 @@ class Stack:
     def tokens_for(self, user: User, **kw: Any) -> tuple[str, dict[str, Any]]:
         client_id, verifier, code, _ = self.code_for(user, **kw)
         response = self.token(
-            grant_type="authorization_code", code=code, client_id=client_id,
-            redirect_uri=kw.get("redirect_uri", CLAUDE_REDIRECT), code_verifier=verifier, resource=AUDIENCE,
+            grant_type="authorization_code",
+            code=code,
+            client_id=client_id,
+            redirect_uri=kw.get("redirect_uri", CLAUDE_REDIRECT),
+            code_verifier=verifier,
+            resource=AUDIENCE,
         )
         assert response.status_code == 200, response.text
         return client_id, response.json()
 
-    def refresh(self, client_id: str, refresh_token: str, **extra: str) -> httpx.Response:
-        return self.token(grant_type="refresh_token", refresh_token=refresh_token, client_id=client_id, **extra)
+    def refresh(
+        self, client_id: str, refresh_token: str, **extra: str
+    ) -> httpx.Response:
+        return self.token(
+            grant_type="refresh_token",
+            refresh_token=refresh_token,
+            client_id=client_id,
+            **extra,
+        )
 
     # -- MCP ------------------------------------------------------------------------------------
 
-    def rpc(self, bearer: str | None, method: str, params: dict[str, Any] | None = None) -> httpx.Response:
-        headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+    def rpc(
+        self, bearer: str | None, method: str, params: dict[str, Any] | None = None
+    ) -> httpx.Response:
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        }
         if bearer:
             headers["Authorization"] = f"Bearer {bearer}"
         body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
@@ -293,11 +369,17 @@ class Stack:
         return self.rpc(bearer, "tools/list").status_code
 
     def whoami(self, bearer: str) -> str:
-        response = self.rpc(bearer, "tools/call", {"name": "list_courses", "arguments": {}})
+        response = self.rpc(
+            bearer, "tools/call", {"name": "list_courses", "arguments": {}}
+        )
         assert response.status_code == 200, response.text
         text = response.text
         if response.headers["content-type"].startswith("text/event-stream"):
-            text = [line[5:].strip() for line in text.splitlines() if line.startswith("data:")][-1]
+            text = [
+                line[5:].strip()
+                for line in text.splitlines()
+                if line.startswith("data:")
+            ][-1]
         payload = json.loads(text)
         assert "error" not in payload, payload
         result = payload["result"]
@@ -317,7 +399,7 @@ class Landed:
 class Browser:
     """A scripted user agent (own cookie jar) that follows /authorize through sign-in and consent."""
 
-    def __init__(self, stack: Stack, *, client: Any = None, react: bool = False) -> None:
+    def __init__(self, stack: Stack, *, client: Any = None, react: bool = True) -> None:
         self.stack = stack
         self.client = client or stack.new_client()
         #: Decide on a request through the single-page UI's JSON API (``ACCOUNT_UI=react``)
@@ -327,22 +409,30 @@ class Browser:
 
     def get(self, url: str, **kw: Any) -> httpx.Response:
         response = self.client.get(url, **kw)
-        self.trail.append(f"{response.status_code} {urlsplit(str(response.request.url)).path}")
+        self.trail.append(
+            f"{response.status_code} {urlsplit(str(response.request.url)).path}"
+        )
         return response
 
     # -- /account sign-in -----------------------------------------------------------------------
 
-    def entra_login(self, user: User, response: httpx.Response, **claim_overrides: Any) -> httpx.Response:
+    def entra_login(
+        self, user: User, response: httpx.Response, **claim_overrides: Any
+    ) -> httpx.Response:
         """Given the redirect to Entra, 'sign in' as ``user`` and return the callback response."""
+        if response.status_code == 303 and response.headers["location"].startswith(
+            "/auth/login/entra"
+        ):
+            response = self.get(response.headers["location"])
         assert response.status_code == 302, response.text
         location = urlsplit(response.headers["location"])
         assert location.netloc == "login.microsoftonline.com", location
         query = {k: v[0] for k, v in parse_qs(location.query).items()}
         self.stack.idp.set_user(user, query["nonce"], **claim_overrides)
-        return self.get("/account/callback", params={"code": "entra-code", "state": query["state"]})
+        return self.get(self.stack.idp.authorize(response.headers["location"]))
 
     def sign_in(self, user: User, **claim_overrides: Any) -> httpx.Response:
-        login = self.get("/account/login")
+        login = self.get("/auth/login/entra")
         return self.entra_login(user, login, **claim_overrides)
 
     # -- the app's request ------------------------------------------------------------------------
@@ -356,24 +446,37 @@ class Browser:
         assert csrf and txn, page.text[:500]
         return csrf.group(1), txn.group(1)
 
-    def decide(self, page: httpx.Response, decision: str = "approve", **headers: str) -> httpx.Response:
+    def decide(
+        self, page: httpx.Response, decision: str = "approve", **headers: str
+    ) -> httpx.Response:
         csrf, txn = self.consent_form(page)
         return self.client.post(
-            "/account/consent", data={"csrf": csrf, "txn": txn, "decision": decision},
+            "/account/consent",
+            data={"csrf": csrf, "txn": txn, "decision": decision},
             headers={**ORIGIN, **headers},
         )
 
     # -- the single-page UI's JSON API ----------------------------------------------------------
 
     def api(
-        self, method: str, path: str, *, body: Any = None, csrf: str | None = None, **headers: str
+        self,
+        method: str,
+        path: str,
+        *,
+        body: Any = None,
+        csrf: str | None = None,
+        **headers: str,
     ) -> httpx.Response:
-        """A call to ``/account/api`` as the page makes it (cookie jar, Origin and CSRF header)."""
+        """A call to ``/api/v1`` as the page makes it (cookie jar, Origin and CSRF header)."""
         sent = {"Origin": BASE, "Sec-Fetch-Site": "same-origin", **headers}
         if csrf is not None:
             sent["X-CSRF-Token"] = csrf
-        response = self.client.request(method, "/account/api" + path, json=body, headers=sent)
-        self.trail.append(f"{response.status_code} api {method} {path.split('/')[1] if '/' in path else path}")
+        response = self.client.request(
+            method, "/api/v1" + path, json=body, headers=sent
+        )
+        self.trail.append(
+            f"{response.status_code} api {method} {path.split('/')[1] if '/' in path else path}"
+        )
         return response
 
     def csrf_token(self) -> str:
@@ -387,17 +490,23 @@ class Browser:
         csrf = self.csrf_token()
         shown = self.api("GET", f"/consent?txn={txn}")
         assert shown.status_code == 200, shown.text
-        done = self.api("POST", "/consent", body={"txn": txn, "decision": decision}, csrf=csrf)
+        done = self.api(
+            "POST", "/consent", body={"txn": txn, "decision": decision}, csrf=csrf
+        )
         assert done.status_code == 200, done.text
         target = str(done.json()["redirect_to"])
         return Landed(target, query_of(target))
 
-    def connect(self, params: Mapping[str, str], user: User, *, decision: str = "approve") -> Landed:
+    def connect(
+        self, params: Mapping[str, str], user: User, *, decision: str = "approve"
+    ) -> Landed:
         """/authorize, sign in if needed, decide on the consent page; stop at the app's redirect."""
         response = self.start(params)
         for _ in range(8):
             if response.status_code in (301, 302, 303):
-                location = urljoin(str(response.request.url), response.headers["location"])
+                location = urljoin(
+                    str(response.request.url), response.headers["location"]
+                )
                 if not location.startswith(BASE):
                     split = urlsplit(location)
                     query = {k: v[0] for k, v in parse_qs(split.query).items()}
@@ -405,14 +514,21 @@ class Browser:
                 path = urlsplit(location).path
                 if path == "/account/consent" and self.react:
                     return self.decide_api(location, decision)
-                if path == "/account/login":
+                if path in ("/auth/login", "/auth/login/entra"):
                     response = self.get(location)
-                    if response.status_code == 302 and "login.microsoftonline.com" in response.headers["location"]:
+                    if (
+                        response.status_code == 302
+                        and "login.microsoftonline.com" in response.headers["location"]
+                    ):
                         response = self.entra_login(user, response)
                     continue
                 response = self.get(location)
                 continue
-            if response.status_code == 200 and "/account/consent" in response.text and 'name="decision"' in response.text:
+            if (
+                response.status_code == 200
+                and "/account/consent" in response.text
+                and 'name="decision"' in response.text
+            ):
                 response = self.decide(response, decision)
                 continue
             return Landed(str(response.request.url), {}, response)
@@ -425,12 +541,10 @@ def default_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
         "ENTRA_TENANT_ID": ENTRA_TENANT,
         "ENTRA_CLIENT_ID": ENTRA_CLIENT_ID,
         "ENTRA_CLIENT_SECRET": "entra-client-secret-0123456789",
-        "OAUTH_JWT_SIGNING_KEY": "jwt-signing-key-" + "z" * 40,
         "ACCOUNT_SESSION_SECRET": SESSION_SECRET,
         "CANVAS_TOKEN_KEYS": TOKEN_KEYS,
-        "FASTMCP_HOME": str(tmp_path / "fastmcp"),
         "SELFHOST_DATA_DIR": str(tmp_path / "data"),
-        "SELFHOST_AUTH_MODE": "local",
+        "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist")),
         **stack_env(),
     }
     env.update(overrides)
@@ -444,6 +558,7 @@ def _build(
     clock: Clock | None,
     tools: bool,
     account_options: Mapping[str, Any] | None = None,
+    register_tools: Callable[[FastMCP], None] | None = None,
 ) -> tuple[Any, Stack]:
     """The app and a Stack around it (without a client yet).
 
@@ -463,15 +578,18 @@ def _build(
     cimd = FakeCimd()
     idp = FakeIdp(clock)
     runtime = prepare_selfhost(settings)
+    runtime.store._clock = clock
     # The same runtime, but with the test clock and the fake CIMD host.
     from dataclasses import replace
 
-    if settings.authz_mode == "local":
-        authz = build_authz_runtime(
-            settings, runtime.store, Keyring.parse(settings.canvas_token_keys_raw), runtime.access,
-            clock=clock, fetch=cimd,
-        )
-        runtime = replace(runtime, authz=authz)
+    authz = build_authz_runtime(
+        settings,
+        runtime.store,
+        Keyring.parse(settings.canvas_token_keys_raw),
+        clock=clock,
+        fetch=cimd,
+    )
+    runtime = replace(runtime, authz=authz)
     config: Any = SimpleNamespace(canvas_api_url=f"https://{CANVAS_HOST}/api/v1")
     mcp = FastMCP("local-authz", auth=build_auth_provider(settings, runtime))
     if tools:
@@ -482,10 +600,26 @@ def _build(
             principal = get_request_principal()
             return principal.key if principal is not None else "anonymous"
 
+    tool_policy = None
+    if register_tools is not None:
+        import asyncio
+
+        from canvas_mcp.core.config import get_config
+        from canvas_mcp.core.selfhost.app import apply_disabled_tools
+        from canvas_mcp.core.tool_policy import apply_tool_policy, resolve_tool_policy
+
+        config = get_config()
+        register_tools(mcp)
+        tool_policy = resolve_tool_policy(config.allowed_write_tools, "http")
+        asyncio.run(apply_tool_policy(mcp, tool_policy))
+        asyncio.run(apply_disabled_tools(mcp, settings.disabled_tools))
     install_selfhost(
-        mcp, runtime, config,
-        id_token_verifier=idp.verify, http_client_factory=idp.factory, clock=clock,
-        **dict(account_options or {}),
+        mcp,
+        runtime,
+        config,
+        tool_policy=tool_policy,
+        clock=clock,
+        **{"login_transport": idp.net.transport, **dict(account_options or {})},
     )
     app = build_selfhost_asgi_app(mcp, runtime, config)
     return app, Stack(None, runtime, settings, mcp, idp, cimd, clock, tmp_path)
@@ -500,12 +634,17 @@ def local_stack(
     clock: Clock | None = None,
     tools: bool = True,
     account_options: Mapping[str, Any] | None = None,
+    register_tools: Callable[[FastMCP], None] | None = None,
 ) -> Iterator[Stack]:
     """Start the app in local mode and yield the stack (a context manager: it stops the app)."""
-    app, stack = _build(tmp_path, monkeypatch, env, clock, tools, account_options)
+    app, stack = _build(
+        tmp_path, monkeypatch, env, clock, tools, account_options, register_tools
+    )
     with TestClient(app, base_url=BASE, follow_redirects=False) as client:
         stack.client = client
-        stack.new_client = lambda: TestClient(app, base_url=BASE, follow_redirects=False)
+        stack.new_client = lambda: TestClient(
+            app, base_url=BASE, follow_redirects=False
+        )
         yield stack
 
 
@@ -522,9 +661,13 @@ class Runner:
     """uvicorn in a thread, on a socket we own, with the lifespan on."""
 
     def __init__(self, app: Any, sock: socket.socket) -> None:
-        self.server = uvicorn.Server(uvicorn.Config(app, log_level="warning", lifespan="on"))
+        self.server = uvicorn.Server(
+            uvicorn.Config(app, log_level="warning", lifespan="on")
+        )
         self.sock = sock
-        self.thread = threading.Thread(target=lambda: self.server.run(sockets=[sock]), daemon=True)
+        self.thread = threading.Thread(
+            target=lambda: self.server.run(sockets=[sock]), daemon=True
+        )
 
     def start(self) -> None:
         self.thread.start()
@@ -554,8 +697,11 @@ class RewriteTransport(httpx2.HTTPTransport):
 
     def handle_request(self, request: httpx2.Request) -> httpx2.Response:
         forwarded = httpx2.Request(
-            request.method, _rewrite(request.url, self.port), headers=request.headers,
-            stream=request.stream, extensions=request.extensions,
+            request.method,
+            _rewrite(request.url, self.port),
+            headers=request.headers,
+            stream=request.stream,
+            extensions=request.extensions,
         )
         return super().handle_request(forwarded)
 
@@ -567,8 +713,11 @@ class AsyncRewriteTransport(httpx2.AsyncHTTPTransport):
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         forwarded = httpx2.Request(
-            request.method, _rewrite(request.url, self.port), headers=request.headers,
-            stream=request.stream, extensions=request.extensions,
+            request.method,
+            _rewrite(request.url, self.port),
+            headers=request.headers,
+            stream=request.stream,
+            extensions=request.extensions,
         )
         return await super().handle_async_request(forwarded)
 
@@ -599,7 +748,10 @@ def served_stack(
 
     def new_client() -> httpx2.Client:
         return httpx2.Client(
-            transport=RewriteTransport(port), base_url=BASE, follow_redirects=False, timeout=20
+            transport=RewriteTransport(port),
+            base_url=BASE,
+            follow_redirects=False,
+            timeout=20,
         )
 
     stack.new_client = new_client
@@ -617,4 +769,3 @@ def query_of(url: str) -> dict[str, str]:
 
 def with_query(path: str, **params: str) -> str:
     return f"{path}?{urlencode(params)}"
-

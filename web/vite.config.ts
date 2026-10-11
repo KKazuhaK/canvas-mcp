@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react'
 import path from 'node:path'
 
 // `npm run dev:mock` only: the sign-in is a full-page navigation to the server's
-// /account/login redirect, which has no mock behind it. This stub just bounces back
+// /auth/login redirect, which has no mock behind it. This stub just bounces back
 // into the app (honouring a valid return_to, else the account page).
 function mockLoginBounce(): Plugin {
   return {
@@ -11,7 +11,7 @@ function mockLoginBounce(): Plugin {
     apply: 'serve',
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
-        if (req.url && /^\/account\/login(?:[/?#]|$)/.test(req.url)) {
+        if (req.url && /^\/auth\/login(?:\/[a-z0-9/-]+)?(?:[?#]|$)/.test(req.url)) {
           const raw = new URL(req.url, 'http://localhost').searchParams.get('return_to')
           const back = raw && !raw.includes('..') && /^\/account(?:\/[A-Za-z0-9._~%/-]*)?$/.test(raw) ? raw : '/account/'
           res.statusCode = 302
@@ -25,9 +25,8 @@ function mockLoginBounce(): Plugin {
   }
 }
 
-// The Python server (ACCOUNT_UI=react) mounts the built app at /account/ (assets
-// under /account/assets/) and answers every other GET below /account/ that is not
-// /account/api/* with index.html. Because the mount path is fixed, assets use
+// The Python server requires the built app at /account/ (assets under
+// /account/assets/) and serves its registered pages; /api/v1 remains JSON. Because the mount path is fixed, assets use
 // absolute URLs and no <base href> trick is needed for deep links.
 export default defineConfig(({ mode }) => ({
   base: '/account/',
@@ -44,15 +43,15 @@ export default defineConfig(({ mode }) => ({
       // Session cookies are passed through unchanged. Not used in mock mode.
       // The JSON API, and the two server-side halves of the sign-in (the redirect to
       // the identity provider and the callback it returns to).
-      '/account/api': {
+      '/api/v1': {
         target: process.env.CANVAS_MCP_DEV_PROXY_TARGET || 'http://127.0.0.1:8819',
         changeOrigin: false,
       },
-      '/account/login': {
+      '/auth/login': {
         target: process.env.CANVAS_MCP_DEV_PROXY_TARGET || 'http://127.0.0.1:8819',
         changeOrigin: false,
       },
-      '/account/callback': {
+      '/auth/callback': {
         target: process.env.CANVAS_MCP_DEV_PROXY_TARGET || 'http://127.0.0.1:8819',
         changeOrigin: false,
       },

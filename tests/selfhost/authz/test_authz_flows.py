@@ -12,7 +12,6 @@ from dbbackend import raw_sql
 
 from canvas_mcp.core.selfhost.authz import tokens as tk
 from canvas_mcp.core.selfhost.db.errors import StoreUnavailable
-from canvas_mcp.core.selfhost.token_store import OPERATOR
 
 from .stack import (
     ALICE,
@@ -21,11 +20,8 @@ from .stack import (
     BOB,
     CLAUDE_REDIRECT,
     ISSUER,
-    LOOPBACK_REDIRECT,
     Browser,
     Stack,
-    cimd_document,
-    local_stack,
     pkce,
     query_of,
 )
@@ -110,13 +106,13 @@ class TestAuthorize:
                 "/authorize", params=stack.authorize_params(client_id, challenge, resource=resource)
             )
             assert response.status_code == 302, resource
-            assert response.headers["location"].startswith(f"{BASE}/account/login?txn="), resource
+            assert response.headers["location"].startswith(f"{BASE}/auth/login?txn="), resource
 
     def test_a_missing_scope_defaults_to_the_clients(self, stack: Stack) -> None:
         client_id = stack.register(CLAUDE_REDIRECT)
         _, challenge = pkce()
         response = stack.client.get("/authorize", params=stack.authorize_params(client_id, challenge, scope=None))
-        assert response.status_code == 302 and "/account/login?txn=" in response.headers["location"]
+        assert response.status_code == 302 and "/auth/login?txn=" in response.headers["location"]
 
     def test_success_goes_to_the_sign_in_with_a_browser_binding_cookie(self, stack: Stack) -> None:
         client_id = stack.register(CLAUDE_REDIRECT)
@@ -124,7 +120,7 @@ class TestAuthorize:
         response = stack.client.get("/authorize", params=stack.authorize_params(client_id, challenge))
         assert response.status_code == 302
         location = response.headers["location"]
-        assert re.fullmatch(rf"{re.escape(BASE)}/account/login\?txn=[A-Za-z0-9_-]{{43}}", location)
+        assert re.fullmatch(rf"{re.escape(BASE)}/auth/login\?txn=[A-Za-z0-9_-]{{43}}", location)
         cookie = set_cookie(response, "__Host-cmcp_bind")
         for needle in ("HttpOnly", "Secure", "SameSite=lax", "Path=/", "Max-Age=600"):
             assert needle.lower() in cookie.lower(), needle
@@ -147,8 +143,10 @@ class TestAuthorize:
         txn = query_of(response.headers["location"])["txn"]
         binding = set_cookie(response, "__Host-cmcp_bind").split(";")[0].split("=", 1)[1]
         rows = raw_sql(stack.store, "SELECT id_hash, binding_hash, payload FROM login_states")
-        assert len(rows) == 1 and txn not in rows[0][0] and binding not in rows[0][1]
-        assert rows[0][1] == tk.hash_secret(binding)
+        assert len(rows) == 1
+        assert bytes(rows[0][0]).hex() == tk.hash_secret(txn)
+        assert bytes(rows[0][1]).hex() == tk.hash_secret(binding)
+        assert txn not in repr(rows[0][2]) and binding not in repr(rows[0][2])
 
     def test_a_storage_failure_is_a_redirected_temporarily_unavailable(self, stack: Stack, monkeypatch) -> None:
         async def failing(*a: Any, **k: Any) -> str:
@@ -176,7 +174,7 @@ class TestAuthorize:
         client_id = stack.register(CLAUDE_REDIRECT)
         _, challenge = pkce()
         response = stack.client.post("/authorize", data=stack.authorize_params(client_id, challenge))
-        assert response.status_code == 302 and "/account/login?txn=" in response.headers["location"]
+        assert response.status_code == 302 and "/auth/login?txn=" in response.headers["location"]
 
     def test_head_authorize_with_a_form_body_creates_no_transaction(self, stack: Stack) -> None:
         client_id = stack.register(CLAUDE_REDIRECT)
@@ -188,7 +186,7 @@ class TestAuthorize:
         assert raw_sql(stack.store, "SELECT COUNT(*) FROM login_states")[0][0] == 0
 
 
-# ------------------------------------------------------------------------- /account/login?txn
+# ------------------------------------------------------------------------- /auth/login?txn
 
 
 def start_request(stack: Stack, browser: Browser | None = None, **kw: Any) -> tuple[Browser, str, str]:
@@ -199,7 +197,7 @@ def start_request(stack: Stack, browser: Browser | None = None, **kw: Any) -> tu
     response = browser.start(stack.authorize_params(client_id, challenge, **kw))
     assert response.status_code == 302, response.text
     url = response.headers["location"]
-    return browser, query_of(url)["txn"], url
+    return browser, query_of(url)["txn"], url.replace("/auth/login?", "/auth/login/entra?", 1)
 
 
 class TestLoginContinuation:
@@ -207,24 +205,23 @@ class TestLoginContinuation:
         _, _, url = start_request(stack)
         stranger = Browser(stack)
         response = stranger.get(url)
-        assert response.status_code == 400
-        assert "expired or was opened in another browser" in response.text
-        assert "location" not in response.headers
+        assert response.status_code == 303
+        assert response.headers["location"] == "/account/sign-in?error=authorization_invalid"
 
     def test_a_browser_with_a_different_binding_is_refused(self, stack: Stack) -> None:
         _, _, url = start_request(stack)
         other, _, _ = start_request(stack)  # has its own binding cookie
-        assert other.get(url).status_code == 400
+        assert other.get(url).headers["location"] == "/account/sign-in?error=authorization_invalid"
 
     @pytest.mark.parametrize("txn", ["", "x", "A" * 43, "../../etc", "A" * 500])
     def test_a_bogus_transaction_is_refused(self, stack: Stack, txn: str) -> None:
         browser, _, _ = start_request(stack)
-        assert browser.get("/account/login", params={"txn": txn}).status_code == 400
+        assert browser.get("/auth/login/entra", params={"txn": txn}).headers["location"] == "/account/sign-in?error=authorization_invalid"
 
     def test_an_expired_transaction_is_refused(self, stack: Stack) -> None:
         browser, _, url = start_request(stack)
         stack.clock.advance(601)
-        assert browser.get(url).status_code == 400
+        assert browser.get(url).headers["location"] == "/account/sign-in?error=authorization_invalid"
 
     def test_the_owner_of_the_request_is_sent_to_microsoft_and_comes_back_to_consent(self, stack: Stack) -> None:
         browser, txn, url = start_request(stack)
@@ -252,11 +249,8 @@ class TestLoginContinuation:
     def test_a_failed_sign_in_does_not_reach_consent(self, stack: Stack) -> None:
         browser, _, url = start_request(stack)
         response = browser.entra_login(ALICE, browser.get(url), tid="99999999-8888-7777-6666-555555555555")
-        assert response.status_code == 403 and "/account/consent" not in response.headers.get("location", "")
+        assert response.status_code == 303 and "wrong_tenant" in response.headers["location"]
 
-    def test_without_the_local_mode_the_txn_parameter_means_nothing(self, proxy_stack: Stack) -> None:
-        response = proxy_stack.client.get("/account/login", params={"txn": "A" * 43})
-        assert response.status_code == 302 and "login.microsoftonline.com" in response.headers["location"]
 
     def test_the_code_belongs_to_the_account_that_is_signed_in_when_the_user_decides(self, stack: Stack) -> None:
         alice_key = stack.enroll(ALICE)
@@ -267,18 +261,18 @@ class TestLoginContinuation:
         _, challenge = pkce()
         landed = browser.connect(stack.authorize_params(client_id, challenge), BOB)
         record = stack.authz.store.load_code(tk.hash_secret(landed.query["code"]))
-        assert record is not None and f"acct:{record.account_id}" == alice_key  # Alice's session was valid
+        assert record is not None and record.account_id == alice_key  # Alice's session was valid
         # "Use a different account": the sign-in is run again, now as Bob
         browser2, txn, url = start_request(stack, Browser(stack))
         browser2.sign_in(ALICE)
         response = browser2.get(url + "&reauth=1")
         callback = browser2.entra_login(BOB, response)
         assert callback.headers["location"] == f"/account/consent?txn={txn}"
-        page = browser2.get(callback.headers["location"])
-        assert "Bob" in page.text
-        landed2 = browser2.decide(page, "approve")
-        record2 = stack.authz.store.load_code(tk.hash_secret(query(landed2)["code"][0]))
-        assert record2 is not None and f"acct:{record2.account_id}" == bob_key
+        page = browser2.api("GET", f"/consent?txn={txn}")
+        assert page.json()["account"]["display_name"] == "Bob"
+        landed2 = browser2.decide_api(callback.headers["location"], "approve")
+        record2 = stack.authz.store.load_code(tk.hash_secret(landed2.query["code"]))
+        assert record2 is not None and record2.account_id == bob_key
 
 
 class TestAdmissionLost:
@@ -288,13 +282,13 @@ class TestAdmissionLost:
         assert stack.mcp_status(tokens["access_token"]) == 200
         browser = Browser(stack)
         # Alice signs in again, but Entra no longer shows the role that admitted her
-        response = browser.entra_login(replace(ALICE, roles=()), browser.get("/account/login"))
-        assert response.status_code == 403
+        response = browser.entra_login(replace(ALICE, roles=()), browser.get("/auth/login/entra"))
+        assert response.status_code == 303 and "access_denied" in response.headers["location"]
         rows = raw_sql(stack.store, "SELECT revoked_reason, revoked_by FROM oauth_grants")
-        assert rows == [("admission_lost", "system")]
+        assert rows == [("admission_lost", None)]
         assert stack.mcp_status(tokens["access_token"]) == 401  # in this process: at once
         assert any(
-            e.action == "grants_revoked_for_account" and e.target == alice for e in stack.store.list_audit()
+            e.action == "grants_revoked_for_account" and e.target == alice and e.actor == "system" for e in list(stack.store.iter_audit())
         )
 
     def test_a_session_that_was_still_open_cannot_connect_again_without_the_identity_provider(
@@ -304,8 +298,8 @@ class TestAdmissionLost:
         browser_a = Browser(stack)
         browser_a.sign_in(ALICE)  # an /account session that is still valid
         elsewhere = Browser(stack)
-        refused = elsewhere.entra_login(replace(ALICE, roles=()), elsewhere.get("/account/login"))
-        assert refused.status_code == 403
+        refused = elsewhere.entra_login(replace(ALICE, roles=()), elsewhere.get("/auth/login/entra"))
+        assert refused.status_code == 303 and "access_denied" in refused.headers["location"]
         _, _, url = start_request(stack, browser_a)
         response = browser_a.get(url)
         # not "straight to consent": the session ended, so it is the Entra round trip again
@@ -315,8 +309,8 @@ class TestAdmissionLost:
         stack.enroll(ALICE)
         client_id, verifier, code, _ = stack.code_for(ALICE)
         elsewhere = Browser(stack)
-        refused = elsewhere.entra_login(replace(ALICE, roles=()), elsewhere.get("/account/login"))
-        assert refused.status_code == 403
+        refused = elsewhere.entra_login(replace(ALICE, roles=()), elsewhere.get("/auth/login/entra"))
+        assert refused.status_code == 303 and "access_denied" in refused.headers["location"]
         response = stack.token(
             grant_type="authorization_code", code=code, client_id=client_id, redirect_uri=CLAUDE_REDIRECT,
             code_verifier=verifier, resource=AUDIENCE,
@@ -329,123 +323,14 @@ class TestAdmissionLost:
         stack.enroll(ALICE)
         stack.tokens_for(ALICE)
         browser = Browser(stack)
-        response = browser.entra_login(replace(BOB, roles=()), browser.get("/account/login"))
-        assert response.status_code == 403
+        response = browser.entra_login(replace(BOB, roles=()), browser.get("/auth/login/entra"))
+        assert response.status_code == 303 and "access_denied" in response.headers["location"]
         assert raw_sql(stack.store, "SELECT revoked_reason FROM oauth_grants") == [(None,)]
 
 
 # ------------------------------------------------------------------------------- consent: GET
 
 
-class TestConsentPage:
-    def test_without_a_session_it_goes_to_the_sign_in(self, stack: Stack) -> None:
-        browser, txn, _ = start_request(stack)
-        response = browser.get(f"/account/consent?txn={txn}")
-        assert response.status_code == 303
-        assert response.headers["location"] == f"/account/login?txn={txn}"
-
-    def test_without_the_binding_cookie_it_is_refused(self, stack: Stack) -> None:
-        _, txn, _ = start_request(stack)
-        other = Browser(stack)
-        other.sign_in(ALICE)
-        response = other.get(f"/account/consent?txn={txn}")
-        assert response.status_code == 400 and "another browser" in response.text
-
-    def test_a_dcr_app_is_shown_as_unverified_with_its_escaped_name(self, stack: Stack) -> None:
-        client_id = stack.register(CLAUDE_REDIRECT, client_name='<script>alert("x")</script> Claude')
-        browser = Browser(stack)
-        browser.sign_in(ALICE)
-        _, txn, _ = start_request(stack, browser, client_id=client_id)
-        page = browser.get(f"/account/consent?txn={txn}")
-        assert page.status_code == 200
-        assert "<script>" not in page.text and "&lt;script&gt;" in page.text
-        assert "Unverified" in page.text
-        assert "claude.ai" in page.text  # where the answer goes
-        assert "alice@example.test" in page.text and "Alice" in page.text
-        assert "Use a different account" in page.text
-        assert f"/account/login?txn={txn}&amp;reauth=1" in page.text
-
-    def test_a_cimd_app_is_shown_by_its_verified_host(self, stack: Stack) -> None:
-        stack.cimd.serve(CIMD_URL, cimd_document(CIMD_URL, client_name="Totally Claude"))
-        browser = Browser(stack)
-        browser.sign_in(ALICE)
-        _, txn, _ = start_request(stack, browser, client_id=CIMD_URL)
-        page = browser.get(f"/account/consent?txn={txn}")
-        assert page.status_code == 200
-        assert "client.example" in page.text and "verified domain" in page.text
-        assert "Totally Claude" in page.text
-        assert "Unverified" not in page.text
-
-    def test_a_loopback_redirect_carries_a_warning(self, stack: Stack) -> None:
-        stack.cimd.serve(CIMD_URL, cimd_document(CIMD_URL, redirect_uris=["http://127.0.0.1/callback"]))
-        browser = Browser(stack)
-        browser.sign_in(ALICE)
-        _, txn, _ = start_request(stack, browser, client_id=CIMD_URL, redirect_uri=LOOPBACK_REDIRECT)
-        page = browser.get(f"/account/consent?txn={txn}")
-        assert page.status_code == 200 and "on this computer" in page.text and "127.0.0.1" in page.text
-
-    def test_the_security_headers_have_no_form_action_and_forbid_framing(self, stack: Stack) -> None:
-        browser = Browser(stack)
-        browser.sign_in(ALICE)
-        _, txn, _ = start_request(stack, browser)
-        page = browser.get(f"/account/consent?txn={txn}")
-        csp = page.headers["content-security-policy"]
-        assert "form-action" not in csp
-        assert "frame-ancestors 'none'" in csp and "default-src 'none'" in csp and "base-uri 'none'" in csp
-        assert page.headers["x-frame-options"] == "DENY"
-        assert page.headers["cache-control"] == "no-store"
-        assert "<script" not in page.text.lower() and "http://" not in page.text.replace("http://127", "")
-
-    def test_the_other_account_pages_keep_their_form_action(self, stack: Stack) -> None:
-        browser = Browser(stack)
-        browser.sign_in(ALICE)
-        assert "form-action 'self'" in browser.get("/account").headers["content-security-policy"]
-
-    def test_a_pending_account_sees_the_request_but_can_only_cancel(self, tmp_path, monkeypatch) -> None:
-        with local_stack(tmp_path, monkeypatch, env={"ACCESS_POLICY": "approval"}) as stack:
-            browser = Browser(stack)
-            _, txn, url = start_request(stack, browser)
-            assert browser.get(url).status_code == 302
-            browser.entra_login(ALICE, browser.get(url))
-            page = browser.get(f"/account/consent?txn={txn}")
-            assert page.status_code == 200
-            assert "waiting for the server owner to approve" in page.text
-            assert 'value="approve"' not in page.text and 'value="deny"' in page.text and "Cancel" in page.text
-
-    def test_a_waiting_account_can_switch_to_another_account(self, tmp_path, monkeypatch) -> None:
-        with local_stack(tmp_path, monkeypatch, env={"ACCESS_POLICY": "approval"}) as stack:
-            other = Browser(stack)
-            other.sign_in(BOB)  # waiting, until the operator approves
-            bob_key = stack.account_of(BOB)
-            assert stack.store.approve_account(bob_key, actor=OPERATOR)
-            browser = Browser(stack)
-            _, txn, url = start_request(stack, browser)
-            browser.entra_login(ALICE, browser.get(url))  # Alice is waiting for approval
-            assert browser.get(url).status_code == 303  # the link without reauth stays on consent
-            page = browser.get(f"/account/consent?txn={txn}")
-            assert f"txn={txn}&amp;reauth=1" in page.text or f"txn={txn}&reauth=1" in page.text
-            switch = browser.get(url + "&reauth=1")
-            assert switch.status_code == 302 and "login.microsoftonline.com" in switch.headers["location"]
-            callback = browser.entra_login(BOB, switch)
-            assert callback.headers["location"] == f"/account/consent?txn={txn}"
-            landed = browser.decide(browser.get(callback.headers["location"]), "approve")
-            record = stack.authz.store.load_code(tk.hash_secret(query(landed)["code"][0]))
-            assert record is not None and f"acct:{record.account_id}" == bob_key
-
-    def test_a_language_switch_keeps_the_transaction(self, stack: Stack) -> None:
-        browser = Browser(stack)
-        browser.sign_in(ALICE)
-        _, txn, _ = start_request(stack, browser)
-        page = browser.get(f"/account/consent?txn={txn}&lang=zh")
-        # the Chinese page (written as escapes: this file stays English-only)
-        assert page.status_code == 200 and 'lang="zh-CN"' in page.text and "\u8fde\u63a5" in page.text
-        assert f"/account/consent?txn={txn}&amp;lang=en" in page.text
-
-    def test_a_malformed_transaction_id_is_refused(self, stack: Stack) -> None:
-        browser = Browser(stack)
-        browser.sign_in(ALICE)
-        assert browser.get("/account/consent?txn=<b>").status_code == 400
-        assert browser.get("/account/consent").status_code == 400
 
 
 # ------------------------------------------------------------------------------ consent: POST
@@ -461,148 +346,6 @@ def consent_page(stack: Stack, **kw: Any) -> tuple[Browser, Any, str]:
     return browser, page, txn
 
 
-class TestConsentDecision:
-    def test_approve_redirects_with_code_state_and_a_single_iss(self, stack: Stack) -> None:
-        browser, page, _ = consent_page(stack)
-        response = browser.decide(page, "approve")
-        assert response.status_code == 303
-        assert response.headers["location"].startswith(CLAUDE_REDIRECT + "?")
-        q = query(response)
-        assert set(q) == {"code", "state", "iss"} and q["state"] == ["state-1"] and q["iss"] == [ISSUER]
-        assert tk.CODE_RE.fullmatch(q["code"][0])
-        assert "form-action" not in response.headers["content-security-policy"]
-
-    def test_a_redirect_uri_with_a_query_can_not_exist_so_an_iss_in_it_can_not_either(self, stack: Stack) -> None:
-        # The allowlist has no queries, and a registration must match it exactly; so the
-        # "an iss already in the redirect URI" case of RFC 9207 never reaches a redirect.
-        response = stack.client.post(
-            "/register",
-            json={"redirect_uris": [CLAUDE_REDIRECT + "?iss=attacker"], "client_name": "x"},
-        )
-        assert response.status_code == 400 and response.json()["error"] == "invalid_redirect_uri"
-
-    def test_deny_redirects_with_access_denied_state_and_iss(self, stack: Stack) -> None:
-        browser, page, _ = consent_page(stack)
-        response = browser.decide(page, "deny")
-        assert response.status_code == 303
-        q = query(response)
-        assert q["error"] == ["access_denied"] and q["state"] == ["state-1"] and q["iss"] == [ISSUER]
-        assert "code" not in q
-        assert ("oauth", "consent_denied", "denied") in raw_sql(stack.store, "SELECT surface, reason, outcome FROM auth_events")
-
-    def test_the_transaction_is_single_use(self, stack: Stack) -> None:
-        browser, page, _ = consent_page(stack)
-        assert browser.decide(page, "approve").status_code == 303
-        again = browser.decide(page, "approve")
-        assert again.status_code == 400 and "location" not in again.headers
-        # a double click: the person is told the app may already be connected
-        assert "pressed the button twice" in again.text and "may already be connected" in again.text
-        assert raw_sql(stack.store, "SELECT COUNT(*) FROM oauth_codes")[0][0] == 1
-
-    def test_an_expired_transaction_cannot_be_decided(self, stack: Stack) -> None:
-        browser, page, _ = consent_page(stack)
-        stack.clock.advance(601)
-        assert browser.decide(page, "approve").status_code == 400
-
-    def test_a_missing_or_wrong_csrf_token_is_refused_and_the_request_survives(self, stack: Stack) -> None:
-        browser, page, txn = consent_page(stack)
-        for csrf in (None, "wrong", ""):
-            data = {"txn": txn, "decision": "approve", **({} if csrf is None else {"csrf": csrf})}
-            response = browser.client.post("/account/consent", data=data, headers={"Origin": BASE})
-            assert response.status_code == 403
-        assert browser.decide(page, "approve").status_code == 303
-
-    def test_a_session_that_ended_before_the_button_resumes_the_sign_in_of_this_request(
-        self, stack: Stack
-    ) -> None:
-        browser, page, txn = consent_page(stack)
-        csrf, _ = browser.consent_form(page)
-        browser.client.cookies.delete("__Host-cmcp_session")
-        response = browser.client.post(
-            "/account/consent", data={"csrf": csrf, "txn": txn, "decision": "approve"}, headers={"Origin": BASE}
-        )
-        assert response.status_code == 303 and response.headers["location"] == f"/account/login?txn={txn}"
-        # a malformed id is not echoed anywhere: plain /account
-        other = browser.client.post("/account/consent", data={"txn": "../x"}, headers={"Origin": BASE})
-        assert other.status_code == 303 and other.headers["location"] == "/account"
-
-    def test_a_foreign_or_missing_origin_is_refused(self, stack: Stack) -> None:
-        browser, page, _ = consent_page(stack)
-        csrf, txn = browser.consent_form(page)
-        for headers in ({"Origin": "https://evil.example"}, {}):
-            response = browser.client.post(
-                "/account/consent", data={"csrf": csrf, "txn": txn, "decision": "approve"}, headers=headers
-            )
-            assert response.status_code == 403
-
-    def test_a_post_from_a_browser_without_the_binding_is_refused(self, stack: Stack) -> None:
-        browser, page, _ = consent_page(stack)
-        csrf, txn = browser.consent_form(page)
-        thief = Browser(stack)
-        thief.sign_in(ALICE)
-        response = thief.client.post(
-            "/account/consent", data={"csrf": thief_csrf(thief), "txn": txn, "decision": "approve"},
-            headers={"Origin": BASE},
-        )
-        assert response.status_code == 400
-        assert csrf  # the rightful browser can still decide
-        assert browser.decide(page, "approve").status_code == 303
-
-    @pytest.mark.parametrize("decision", ["", "maybe", "APPROVE", "approve deny"])
-    def test_an_unknown_decision_is_refused(self, stack: Stack, decision: str) -> None:
-        browser, page, _ = consent_page(stack)
-        csrf, txn = browser.consent_form(page)
-        response = browser.client.post(
-            "/account/consent", data={"csrf": csrf, "txn": txn, "decision": decision}, headers={"Origin": BASE}
-        )
-        assert response.status_code == 400
-
-    def test_a_pending_account_cannot_approve_but_can_cancel(self, tmp_path, monkeypatch) -> None:
-        with local_stack(tmp_path, monkeypatch, env={"ACCESS_POLICY": "approval"}) as stack:
-            browser = Browser(stack)
-            _, txn, url = start_request(stack, browser)
-            browser.entra_login(ALICE, browser.get(url))
-            page = browser.get(f"/account/consent?txn={txn}")
-            csrf, _ = browser.consent_form(page)
-            refused = browser.client.post(
-                "/account/consent", data={"csrf": csrf, "txn": txn, "decision": "approve"}, headers={"Origin": BASE}
-            )
-            assert refused.status_code == 403 and "location" not in refused.headers
-            assert raw_sql(stack.store, "SELECT COUNT(*) FROM oauth_codes")[0][0] == 0
-            cancelled = browser.client.post(
-                "/account/consent", data={"csrf": csrf, "txn": txn, "decision": "deny"}, headers={"Origin": BASE}
-            )
-            assert cancelled.status_code == 303 and query(cancelled)["error"] == ["access_denied"]
-
-    def test_a_disabled_account_cannot_get_here(self, stack: Stack) -> None:
-        browser, page, _ = consent_page(stack)
-        key = stack.account_of(ALICE)
-        stack.store.disable_principal(key, actor=OPERATOR, reason="operator_disabled")
-        response = browser.decide(page, "approve")
-        assert response.status_code in (303, 403) and "code=" not in response.headers.get("location", "")
-        assert raw_sql(stack.store, "SELECT COUNT(*) FROM oauth_codes")[0][0] == 0
-
-    def test_a_registration_that_expired_before_the_decision_gets_no_redirect(self, stack: Stack) -> None:
-        browser, page, _ = consent_page(stack)
-        raw_sql(stack.store, "UPDATE oauth_clients SET expires_at = 1")
-        response = browser.decide(page, "approve")
-        assert response.status_code == 409 and "location" not in response.headers
-
-    def test_an_allowlist_that_no_longer_has_the_uri_gets_no_redirect(self, stack: Stack) -> None:
-        browser, page, _ = consent_page(stack)
-        stack.authz.clients._allowlist = ("https://other.example/cb",)
-        response = browser.decide(page, "approve")
-        assert response.status_code == 409 and "location" not in response.headers
-        assert raw_sql(stack.store, "SELECT COUNT(*) FROM oauth_codes")[0][0] == 0
-
-    def test_the_decision_is_noted_for_the_operator_but_not_in_the_sign_in_history(self, stack: Stack) -> None:
-        browser, page, _ = consent_page(stack)
-        browser.decide(page, "approve")
-        assert ("oauth", "consent_granted", "success") in raw_sql(
-            stack.store, "SELECT surface, reason, outcome FROM auth_events"
-        )
-        key = stack.account_of(ALICE)
-        assert all(e.surface != "oauth" for e in stack.store.list_auth_events(key))
 
 
 def thief_csrf(browser: Browser) -> str:

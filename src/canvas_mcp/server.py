@@ -35,7 +35,7 @@ from .core.credentials import (
 )
 from .core.logging import log_error, log_info, log_warning, scrub_third_party_logs
 from .core.selfhost.settings import (
-    AUTH_MODE_ENTRA,
+    AUTH_MODE_SELFHOST,
     SelfhostConfigError,
     SelfhostSettings,
     auth_mode,
@@ -585,11 +585,9 @@ def _cmd_revoke(args: argparse.Namespace) -> int:
 
 def _authz_summary(settings: SelfhostSettings) -> str:
     """The MCP authorization line of --config (the tunables are shown only when they apply)."""
-    if settings.authz_mode != "local":
-        return "  MCP authorization: entra_proxy (FastMCP OAuth proxy); local-mode settings ignored"
     authz = settings.authz
     return (
-        "  MCP authorization: local (own authorization server; "
+        "  MCP authorization: built-in authorization server ( "
         f"CIMD {'on' if authz.cimd_enabled else 'off'}; "
         f"access {format_duration(authz.access_token_ttl)}; "
         f"refresh cap {format_duration(authz.refresh_absolute_ttl)}; "
@@ -642,12 +640,11 @@ def _selfhost_summary(settings: SelfhostSettings) -> list[str]:
         else []
     )
     return [
-        f"  Auth mode: {AUTH_MODE_ENTRA}",
+        f"  Auth mode: {AUTH_MODE_SELFHOST}",
         f"  Public URL: {settings.public_base_url}",
         f"  MCP endpoint: {settings.mcp_url}",
         f"  Account page: {settings.account_url}",
-        f"  Account UI: {settings.account_ui}"
-        + (f" (built app from {settings.account_web_dist})" if settings.account_ui == "react" else ""),
+        f"  Account UI: React (built app from {settings.account_web_dist})",
         *_providers_summary(settings),
         *entra_lines,
         f"  API scope: {settings.api_scope}",
@@ -657,12 +654,9 @@ def _selfhost_summary(settings: SelfhostSettings) -> list[str]:
         "  Database migrations: "
         + ("automatic at start" if settings.auto_migrate else "manual (token_admin db upgrade)"),
         f"  Rate limits and one-time state: {settings.state_backend} (single instance)",
-        f"  FastMCP home: {settings.fastmcp_home}",
         _authz_summary(settings),
         f"  Redirect URIs: {', '.join(settings.allowed_client_redirect_uris)}",
-        "  Canvas schools: featured="
-        + (", ".join(school.host for school in settings.featured_schools) or "none")
-        + f", search={'on' if settings.school_search else 'off'}",
+        "  Canvas schools and public sign-in names: database-managed (Admin > Settings)",
         f"  Course state: {settings.course_state}",
         "  Disabled tools: " + (", ".join(settings.disabled_tools) or "none"),
     ]
@@ -678,21 +672,21 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
         prepare_selfhost,
         validate_selfhost_startup,
     )
-    from .core.selfhost.oauth import build_auth_provider
+    from .core.selfhost.authz.runtime import build_auth_provider
 
     admin_hint = "use python -m canvas_mcp.core.selfhost.token_admin instead"
     if args.transport != "streamable-http":
         log_error(
-            f"MCP_AUTH_MODE={AUTH_MODE_ENTRA} needs --transport streamable-http "
+            f"MCP_AUTH_MODE={AUTH_MODE_SELFHOST} needs --transport streamable-http "
             "(stdio has no sign-in)"
         )
         sys.exit(1)
     if args.test:
-        log_error(f"--test is not available in {AUTH_MODE_ENTRA} mode (no server Canvas token)")
+        log_error(f"--test is not available in {AUTH_MODE_SELFHOST} mode (no server Canvas token)")
         sys.exit(1)
     if args.list_grants or args.revoke:
         log_error(
-            f"--list-grants and --revoke are not available in {AUTH_MODE_ENTRA} mode; "
+            f"--list-grants and --revoke are not available in {AUTH_MODE_SELFHOST} mode; "
             f"{admin_hint}"
         )
         sys.exit(1)
@@ -747,10 +741,16 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
     register_all_tools(mcp, role=role)
     removed_tools = asyncio.run(apply_tool_policy(mcp, tool_policy))
     disabled_tools = asyncio.run(apply_disabled_tools(mcp, settings.disabled_tools))
-    account_ui = install_selfhost(mcp, runtime, config, tool_policy=tool_policy)
+    try:
+        account_ui = install_selfhost(mcp, runtime, config, tool_policy=tool_policy)
+    except SelfhostConfigError as exc:
+        runtime.store.close()
+        for problem in exc.problems:
+            log_error(problem)
+        sys.exit(1)
 
     log_info(
-        f"Starting Canvas MCP server in {AUTH_MODE_ENTRA} mode on {args.host}:{args.port}",
+        f"Starting Canvas MCP server in {AUTH_MODE_SELFHOST} mode on {args.host}:{args.port}",
         public_url=settings.public_base_url,
         tenant=settings.tenant_id,
         client=settings.client_id,
@@ -765,7 +765,6 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
         removed_tools=len(removed_tools),
         disabled_tools=len(disabled_tools),
         account_ui=account_ui,
-        authz_mode=settings.authz_mode,
         token_store=settings.database_target.description,
         enrollments=runtime.store.count(),
     )
@@ -846,7 +845,7 @@ def main() -> None:
         for problem in exc.problems:
             log_error(problem)
         sys.exit(1)
-    if mode == AUTH_MODE_ENTRA:
+    if mode == AUTH_MODE_SELFHOST:
         _main_selfhost(args, config)
         return
 

@@ -49,11 +49,7 @@ class RequestPrincipal:
     """
 
     key: str
-    tenant_id: str
-    object_id: str
     display_name: str
-    upn: str
-    roles: frozenset[str]
     is_owner: bool
     provider_id: str = "entra"
     issuer: str = ""
@@ -197,10 +193,10 @@ def uses_request_local_course_state() -> bool:
 
     That is every HTTP request without a verified principal (the upstream
     ``X-Canvas-Token`` / access-key / Easy Auth modes), and every request of a
-    verified principal in the self-hosted ``entra-oauth`` mode when it runs with
+    verified principal in the self-hosted ``selfhost`` mode when it runs with
     ``SELFHOST_COURSE_STATE=request_local`` (the default). Each such request
     resolves course aliases and labels under its own Canvas credential and
-    publishes nothing into process-wide state. Only ``entra-oauth`` with the
+    publishes nothing into process-wide state. Only ``selfhost`` with the
     explicit opt-in ``SELFHOST_COURSE_STATE=per_principal`` keeps a per-principal
     course cache across requests, and stdio (no HTTP request) keeps its single
     process-wide cache.

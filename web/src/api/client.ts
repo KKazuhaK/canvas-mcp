@@ -12,7 +12,7 @@ import { toApiError } from './errors'
  *   code and numeric/short params. The axios error (and its `config.data`, which
  *   may carry a Canvas token) is dropped.
  */
-export const API_BASE_URL = '/account/api'
+export const API_BASE_URL = '/api/v1'
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 

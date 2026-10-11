@@ -1,4 +1,4 @@
-// DEV-ONLY mock of the /account/api contract.
+// DEV-ONLY mock of the /api/v1 contract.
 //
 // Loaded exclusively through `await import('./dev/mockServer')` in main.tsx,
 // behind `import.meta.env.DEV && import.meta.env.VITE_MOCK === '1'`. In a
@@ -25,6 +25,7 @@ import type { ResponseOf, RouteKey } from '@/api/contract'
 import { splitRoute } from '@/api/contract'
 import type {
   AdminAccount,
+  AdminSettingsResponse,
   AdminAction,
   AdminActionResponse,
   AdminIdentity,
@@ -51,6 +52,7 @@ import type {
 
 export const MOCK_SCENARIOS = [
   'enrolled',
+  'featured',
   'fresh',
   'signed-out',
   'pending',
@@ -71,6 +73,7 @@ export const MOCK_SCENARIOS = [
   'local-pending',
   // Two or more sign-in providers: the chooser, Sign-in methods and the owner's per-account list.
   'multi',
+  'custody_outdated',
   'multi-owner',
   'multi-stale',
 ] as const
@@ -96,10 +99,10 @@ export const MOCK_TXN = {
 } as const
 
 const MULTI_PROVIDERS: Provider[] = [
-  { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/account/login/entra' },
-  { id: 'google', kind: 'oidc', name: 'Google', icon: 'google', start_url: '/account/login/google' },
-  { id: 'github', kind: 'oauth2', name: 'GitHub', icon: 'github', start_url: '/account/login/github' },
-  { id: 'oidc:school', kind: 'oidc', name: 'School SSO', icon: 'key', start_url: '/account/login/oidc/school' },
+  { id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/auth/login/entra' },
+  { id: 'google', kind: 'oidc', name: 'Google', icon: 'google', start_url: '/auth/login/google' },
+  { id: 'github', kind: 'oauth2', name: 'GitHub', icon: 'github', start_url: '/auth/login/github' },
+  { id: 'oidc:school', kind: 'oidc', name: 'School SSO', icon: 'key', start_url: '/auth/login/oidc/school' },
 ]
 const IDENTITY_ID = /^[1-9][0-9]{0,17}$/
 
@@ -114,6 +117,7 @@ const SEARCHABLE = [
 
 function emptyCanvas(): CanvasTokenStatus {
   return {
+    custody: { notice_version: 1, acknowledged_version: null, acknowledged_at: null, current: false },
     state: 'none',
     canvas_user_id: null,
     canvas_user_name: null,
@@ -133,6 +137,7 @@ function emptyCanvas(): CanvasTokenStatus {
 
 function activeCanvas(): CanvasTokenStatus {
   return {
+    custody: { notice_version: 1, acknowledged_version: 1, acknowledged_at: ago(60), current: true },
     state: 'active',
     canvas_user_id: '1234567',
     canvas_user_name: 'Ada Example',
@@ -194,6 +199,7 @@ interface MockState {
   canvas: CanvasTokenStatus
   tools: MockTool[]
   hasCatalog: boolean
+  settings: AdminSettingsResponse
   schools: SchoolsResponse
   history: LoginEvent[]
   accounts: AdminAccount[]
@@ -256,9 +262,14 @@ function enrollmentOf(
   invalid: InvalidReason | null,
 ): NonNullable<AdminAccount['enrollment']> {
   return {
+    id: acct(Number(id)),
+    is_primary: true,
+    custody_notice_version: 1,
+    custody_ack_at: ago(60),
+    custody_current: true,
     canvas_user_name: name,
     canvas_user_id: id,
-    school: { ...SCHOOL, is_default: true },
+    school: { ...SCHOOL },
     state: invalid ? 'invalid' : 'active',
     invalid_reason: invalid,
     invalid_since: invalid ? ago(60 * 29) : null,
@@ -334,13 +345,13 @@ function buildState(scenario: MockScenario): MockState {
     scenario === 'owner' ||
     scenario === 'stale-owner' ||
     scenario === 'local-owner' ||
-    scenario === 'multi-owner'
+    scenario === 'multi-owner' || scenario === 'featured'
   const pending = scenario === 'pending' || scenario === 'local-pending'
-  const picker = scenario === 'picker'
+  const picker = !['featured', 'error-503', 'rate-limited'].includes(scenario)
   const multi = scenario.startsWith('multi')
 
   const canvas =
-    scenario === 'fresh' || scenario === 'picker' || scenario === 'error-503' || scenario === 'rate-limited'
+    scenario === 'featured' || scenario === 'fresh' || scenario === 'picker' || scenario === 'error-503' || scenario === 'rate-limited'
       ? emptyCanvas()
       : scenario === 'invalid' || scenario === 'token-invalid'
         ? invalidCanvas('canvas_token_rejected')
@@ -352,14 +363,16 @@ function buildState(scenario: MockScenario): MockState {
               ? emptyCanvas()
               : activeCanvas()
 
+  if (scenario === 'custody_outdated') canvas.custody = { ...canvas.custody, acknowledged_version: 0, current: false }
+
   const features: Features = {
     school_picker: picker,
     school_search: picker,
     write_tools: !pending && scenario !== 'no-write-tools',
     admin: owner,
     identities: multi && !pending,
-    connected_apps: local,
-    consent: local,
+
+
     logout_everywhere: false,
     role_management: false,
   }
@@ -372,6 +385,7 @@ function buildState(scenario: MockScenario): MockState {
   }))
   const fresh = scenario !== 'stale-owner' && scenario !== 'multi-stale'
   const me: MeResponse = {
+    custody_ack_required: false,
     account: {
       id: SELF_ID,
       key: `acct:${SELF_ID}`,
@@ -396,24 +410,9 @@ function buildState(scenario: MockScenario): MockState {
     server: { mcp_url: `${window.location.origin}/mcp`, display_timezone: 'America/Los_Angeles' },
   }
 
-  const schools: SchoolsResponse = picker
-    ? {
-        mode: 'picker',
-        choices: [
-          { host: 'canvas.example.edu', name: 'Example University', source: 'featured' },
-          { host: 'learn.sample.edu', name: 'Sample College', source: 'featured' },
-        ],
-        selected: 'canvas.example.edu',
-        sole: null,
-        search_enabled: true,
-      }
-    : {
-        mode: 'fixed',
-        choices: [],
-        selected: null,
-        sole: { host: SCHOOL.host, name: SCHOOL.name },
-        search_enabled: false,
-      }
+  const schools: SchoolsResponse = !picker
+    ? { mode: 'sole', choices: [], selected: null, sole: { host: SCHOOL.host, name: SCHOOL.name }, search_enabled: false }
+    : scenario === 'picker' ? { mode: 'picker', choices: [{ host: 'canvas.example.edu', name: 'Example University', source: 'featured' }, { host: 'learn.sample.edu', name: 'Sample College', source: 'featured' }], selected: null, sole: null, search_enabled: true } : { mode: 'picker', choices: canvas.school ? [{ host: canvas.school.host, name: canvas.school.name, source: 'enrolled' }] : [], selected: canvas.school?.host ?? null, sole: null, search_enabled: true }
 
   const selfRow = accountRow(1, 'Ada Example', 'ada@example.edu', 'active', {
     id: SELF_ID,
@@ -462,15 +461,21 @@ function buildState(scenario: MockScenario): MockState {
     tools,
     hasCatalog: scenario !== 'no-write-tools',
     schools,
+    settings: {
+      revision: 1,
+      sign_in_methods: (multi ? MULTI_PROVIDERS : [MULTI_PROVIDERS[0]]).map((p) => ({ id: p.id, protocol: p.id.startsWith('oidc:') ? 'oidc' : p.id, icon: p.icon, configured: true, default_name: p.name, display_name: null, effective_name: p.name })),
+      schools: { directory_search: picker, featured: !picker ? [{ host: SCHOOL.host, display_name: SCHOOL.name, rank: 1, enrollments: 1, allow_private: false }] : [], warnings: [] },
+      retention: { auth_events_days: 90, audit_days: 0 },
+    },
     history: [
-      { at: ago(3), provider_id: 'entra', outcome: 'success', reason: null },
-      { at: ago(60 * 20), provider_id: 'entra', outcome: 'refused', reason: 'signups_paused' },
-      { at: ago(60 * 24 * 6), provider_id: 'entra', outcome: 'pending', reason: 'account_created' },
+      { id: 99, at: ago(3), provider_id: 'entra', outcome: 'success', reason: null },
+      { id: 98, at: ago(60 * 20), provider_id: 'entra', outcome: 'refused', reason: 'signups_paused' },
+      { id: 97, at: ago(60 * 24 * 6), provider_id: 'entra', outcome: 'pending', reason: 'account_created' },
     ],
     accounts,
     audit,
     grants: local ? seedGrants(SELF_ID) : new Map(),
-    txns: new Set(local ? Object.values(MOCK_TXN) : []),
+    txns: new Set(Object.values(MOCK_TXN)),
     multi,
     providers: multi ? MULTI_PROVIDERS : [MULTI_PROVIDERS[0]],
     identities: [
@@ -533,6 +538,7 @@ function meView(state: MockState): MeResponse {
   const offered = state.tools.filter((tool) => tool.offered)
   return {
     ...state.me,
+    custody_ack_required: !pending && state.canvas.state !== 'none' && !state.canvas.custody.current,
     canvas: pending ? null : state.canvas,
     write_tools:
       pending || !state.hasCatalog
@@ -578,6 +584,9 @@ const STATUS: Partial<Record<ApiErrorCode, number>> = {
   canvas_unavailable: 503,
   identity_change_required: 409,
   recheck_not_allowed: 409,
+  custody_ack_required: 422,
+  custody_notice_outdated: 409,
+  not_enrolled: 404,
   school_required: 422,
   school_invalid: 422,
   school_not_offered: 422,
@@ -588,6 +597,9 @@ const STATUS: Partial<Record<ApiErrorCode, number>> = {
   directory_unavailable: 503,
   write_tool_not_allowed: 422,
   write_tools_unavailable: 503,
+  settings_conflict: 409,
+  pilot_profile_restricted: 409,
+  confirmation_required: 409,
   last_owner: 409,
   cannot_disable_self: 409,
   identity_in_use: 409,
@@ -674,12 +686,64 @@ function syncSelf(state: MockState): void {
 
 route('GET /providers', 'public', (_c, s) =>
   ok({
-    providers: s.multi
-      ? s.providers
-      : [{ id: 'entra', kind: 'oidc', name: 'Microsoft', icon: 'microsoft', start_url: '/account/login' }],
+    providers: s.providers.map((p) => ({ ...p, start_url: s.multi ? p.start_url : '/auth/login', name: s.settings.sign_in_methods.find((m) => m.id === p.id)?.effective_name ?? p.name })),
     mcp_url: s.me.server.mcp_url,
   }),
 )
+
+function settingsConflict(c: Ctx, s: MockState): Fail | null {
+  return c.body.revision !== s.settings.revision ? fail('settings_conflict') : null
+}
+function refreshSchools(s: MockState) {
+  const featured = s.settings.schools.featured
+  const search = s.settings.schools.directory_search
+  s.settings.schools.warnings = !search && !featured.length ? ['no_schools_offered'] : []
+  const choices: SchoolsResponse['choices'] = featured.map((school) => ({ host: school.host, name: school.display_name || school.host, source: 'featured' }))
+  const enrolled = s.canvas.school
+  if (search && enrolled && !choices.some((school) => school.host === enrolled.host)) choices.push({ host: enrolled.host, name: enrolled.name, source: 'enrolled' })
+  s.schools = { mode: search || featured.length > 1 ? 'picker' : featured.length ? 'sole' : 'none', choices, selected: enrolled && choices.some((school) => school.host === enrolled.host) ? enrolled.host : null, sole: !search && featured.length === 1 ? { host: featured[0].host, name: featured[0].display_name || featured[0].host } : null, search_enabled: search }
+}
+route('GET /admin/settings', 'owner', (_c, s) => ok(s.settings))
+route('PUT /admin/settings/sign-in-methods', 'owner', (c, s) => {
+  const conflict = settingsConflict(c, s)
+  if (conflict) return conflict
+  const names = c.body.names as Record<string, string | null> | undefined
+  if (!names || typeof names !== 'object' || Array.isArray(names) || Object.keys(names).some((id) => !s.settings.sign_in_methods.some((p) => p.id === id && p.configured))) return fail('validation_failed')
+  const providers = s.settings.sign_in_methods.map((p) => {
+    const name = Object.hasOwn(names, p.id) ? (names[p.id]?.trim() || null) : p.display_name
+    return { ...p, display_name: name, effective_name: name ?? p.default_name }
+  })
+  if (new Set(providers.filter((p) => p.configured).map((p) => p.effective_name.toLowerCase())).size !== providers.filter((p) => p.configured).length) return fail('validation_failed')
+  s.settings.sign_in_methods = providers
+  s.settings.revision++
+  return ok(s.settings)
+})
+route('PUT /admin/settings/directory-search', 'owner', (c, s) => {
+  const conflict = settingsConflict(c, s)
+  if (conflict) return conflict
+  if (typeof c.body.enabled !== 'boolean') return fail('validation_failed')
+  s.settings.schools.directory_search = c.body.enabled
+  s.settings.revision++
+  refreshSchools(s)
+  return ok(s.settings)
+})
+route('POST /admin/settings/schools/check', 'owner', (c) => {
+  const valid = typeof c.body.host === 'string' && /^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(c.body.host) && !c.body.host.endsWith('.internal')
+  return ok({ valid, ...(valid ? {} : { reason: 'school_invalid' as const }), suggested_name: null, in_directory: valid ? false : null })
+})
+route('PUT /admin/settings/schools', 'owner', (c, s) => {
+  const conflict = settingsConflict(c, s)
+  if (conflict) return conflict
+  const featured = c.body.featured as { host: string; display_name: string }[] | undefined
+  const confirmed = c.body.confirm_affected as string[] | undefined
+  if (!Array.isArray(featured) || featured.length > 50 || !Array.isArray(confirmed)) return fail('validation_failed')
+  const affected = Object.fromEntries(s.settings.schools.featured.filter((school) => !featured.some((next) => next.host === school.host) && school.enrollments > 0).map((school) => [school.host, school.enrollments]))
+  if (!s.settings.schools.directory_search && Object.keys(affected).some((host) => !confirmed.includes(host))) return fail('confirmation_required', { affected })
+  s.settings.schools.featured = featured.map((school, index) => ({ ...school, rank: index + 1, enrollments: s.canvas.school?.host === school.host ? 1 : 0, allow_private: false }))
+  s.settings.revision++
+  refreshSchools(s)
+  return ok({ ...s.settings, affected_enrollments: affected })
+})
 
 route('GET /me', 'session', (_c, s) => ok(meView(s)))
 
@@ -692,8 +756,12 @@ route('PUT /me/canvas-token', 'active', (c, s) => {
     'school_sig',
     'expires_on',
     'confirm_identity_change',
+    'custody',
   ])
   if (bad) return bad
+  const ack = c.body.custody as { acknowledged?: unknown; notice_version?: unknown } | undefined
+  if (!ack || ack.acknowledged !== true) return fail('custody_ack_required')
+  if (ack.notice_version !== s.canvas.custody.notice_version) return fail('custody_notice_outdated', { notice_version: s.canvas.custody.notice_version })
   if (s.scenario === 'rate-limited') return fail('rate_limited', { retry_after_s: 30 })
   const token = typeof c.body.canvas_token === 'string' ? c.body.canvas_token : ''
   if (!/^[A-Za-z0-9~._-]{20,512}$/.test(token)) return fail('token_invalid_format')
@@ -742,6 +810,7 @@ route('PUT /me/canvas-token', 'active', (c, s) => {
 
   const now = ago(0)
   s.canvas = {
+    custody: { notice_version: s.canvas.custody.notice_version, acknowledged_version: s.canvas.custody.notice_version, acknowledged_at: now, current: true },
     state: 'active',
     canvas_user_id: canvasId,
     canvas_user_name: name,
@@ -758,6 +827,15 @@ route('PUT /me/canvas-token', 'active', (c, s) => {
     last_verified_at: now,
   }
   syncSelf(s)
+  return ok(s.canvas)
+})
+
+route('POST /me/canvas-token/acknowledge', 'active', (c, s) => {
+  const bad = onlyFields(c.body, ['notice_version'])
+  if (bad) return bad
+  if (c.body.notice_version !== s.canvas.custody.notice_version) return fail('custody_notice_outdated', { notice_version: s.canvas.custody.notice_version })
+  if (s.canvas.state === 'none') return fail('not_enrolled')
+  s.canvas.custody = { ...s.canvas.custody, acknowledged_version: s.canvas.custody.notice_version, acknowledged_at: ago(0), current: true }
   return ok(s.canvas)
 })
 
@@ -825,7 +903,25 @@ route('DELETE /me/write-tools', 'active', (_c, s) => {
   return ok({ result: changed ? 'saved' : 'unchanged', ...writeToolsView(s) })
 })
 
-route('GET /me/login-history', 'session', (_c, s) => ok({ events: s.history }))
+function pageRows<T>(c: Ctx, rows: T[], scope: string, key: (row: T) => string | number) {
+  const limit = Number(c.query.get('limit') ?? 50)
+  let before: string | number | null = null
+  const cursor = c.query.get('cursor')
+  if (cursor) {
+    const decoded = JSON.parse(atob(cursor.replace(/-/g, '+').replace(/_/g, '/')))
+    if (decoded[0] !== 1 || decoded[1] !== scope) throw new Error('invalid cursor')
+    before = decoded[2]
+  }
+  const ordered = [...rows].sort((a, b) => key(a) < key(b) ? 1 : key(a) > key(b) ? -1 : 0)
+  const selected = ordered.filter(row => before === null || key(row) < before).slice(0, limit + 1)
+  const items = selected.slice(0, limit)
+  const next_cursor = selected.length > limit
+    ? btoa(JSON.stringify([1, scope, key(items[items.length - 1])])).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+    : null
+  return { items, next_cursor }
+}
+
+route('GET /me/login-history', 'session', (c, s) => { const page = pageRows(c, s.history, 'auth-events/' + s.me.account.id, e => e.id); return ok({ events: page.items, next_cursor: page.next_cursor }) })
 
 // ---- sign-in methods (multi scenarios only; not_found otherwise, like the server) -------------
 
@@ -888,8 +984,10 @@ route('GET /admin/accounts', 'owner', (c, s) => {
   const shown = s.accounts
     .filter((a) => status === null || a.status === status)
     .sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1))
+  const page = pageRows(c, shown, "accounts/" + (status ?? "None"), a => a.id)
   return ok({
-    accounts: shown.map((a) => ({ ...a })),
+    accounts: page.items,
+    next_cursor: page.next_cursor,
     counts: {
       total: s.accounts.length,
       active: s.accounts.filter((a) => a.status === 'active').length,
@@ -908,10 +1006,12 @@ route('GET /admin/enrollments', 'owner', (c, s) => {
   const rows =
     filter === 'needs_reenroll'
       ? needing
-      : [...withToken, ...s.accounts.filter((a) => a.enrollment === null && a.status !== 'active')]
+      : withToken
   rows.sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1))
+  const page = pageRows(c, rows, "enrollments/" + (filter === "needs_reenroll" ? "True" : "False"), a => a.enrollment?.id ?? a.id)
   return ok({
-    rows: rows.map((a) => ({ ...a })),
+    rows: page.items,
+    next_cursor: page.next_cursor,
     counts: {
       needing: needing.length,
       total_enrollments: withToken.length,
@@ -1019,16 +1119,9 @@ route('DELETE /admin/enrollments/{id}', 'owner', (c, s) => {
   return ok({ changed, account: { ...row } })
 })
 
-const AUDIT_PAGE = 3
 route('GET /admin/audit', 'owner', (c, s) => {
-  const raw = c.query.get('before')
-  if (raw !== null && !/^\d{1,14}$/.test(raw)) return fail('validation_failed', { field: 'before' })
-  const older = s.audit.filter((entry) => raw === null || entry.id < Number(raw))
-  const page = older.slice(0, AUDIT_PAGE)
-  return ok({
-    entries: page,
-    next_cursor: page.length >= AUDIT_PAGE ? String(page[page.length - 1].id) : null,
-  })
+  const page = pageRows(c, s.audit, 'audit/None', e => e.id)
+  return ok({ entries: page.items, next_cursor: page.next_cursor })
 })
 
 // ---- apps (local scenarios only) ---------------------------------------------------------
@@ -1053,7 +1146,6 @@ function consentView(txn: string, state: MockState): ConsentResponse {
 }
 
 route('GET /consent', 'session', (c, s) => {
-  if (!s.me.features.consent) return fail('not_found')
   const txn = c.query.get('txn') ?? ''
   if (!TXN_SHAPE.test(txn) || !s.txns.has(txn)) return fail('authorization_invalid')
   if (txn === MOCK_TXN.unavailable) return fail('client_unavailable')
@@ -1061,7 +1153,6 @@ route('GET /consent', 'session', (c, s) => {
 })
 
 route('POST /consent', 'session', (c, s) => {
-  if (!s.me.features.consent) return fail('not_found')
   const bad = onlyFields(c.body, ['txn', 'decision'])
   if (bad) return bad
   const decision = c.body.decision
@@ -1080,13 +1171,12 @@ route('POST /consent', 'session', (c, s) => {
   return ok({ redirect_to: `${base}?${query}` })
 })
 
-route('GET /me/grants', 'active', (_c, s) => {
-  if (!s.me.features.connected_apps) return fail('not_found')
-  return ok({ grants: s.grants.get(SELF_ID) ?? [] })
+route('GET /me/grants', 'active', (c, s) => {
+  const page = pageRows(c, s.grants.get(SELF_ID) ?? [], 'grants/' + SELF_ID + '/False', g => g.id)
+  return ok({ grants: page.items, next_cursor: page.next_cursor })
 })
 
 route('DELETE /me/grants/{id}', 'active', (c, s) => {
-  if (!s.me.features.connected_apps) return fail('not_found')
   const id = decodeURIComponent(c.match[1])
   if (!UUID.test(id)) return fail('validation_failed', { field: 'id' })
   const mine = s.grants.get(SELF_ID) ?? []
@@ -1096,14 +1186,13 @@ route('DELETE /me/grants/{id}', 'active', (c, s) => {
 })
 
 route('GET /admin/accounts/{id}/grants', 'owner', (c, s) => {
-  if (!s.me.features.connected_apps) return fail('not_found')
   const id = decodeURIComponent(c.match[1])
   if (!UUID.test(id)) return fail('validation_failed', { field: 'id' })
-  return ok({ grants: s.grants.get(id) ?? [] })
+  const page = pageRows(c, s.grants.get(id) ?? [], 'grants/' + id + '/False', g => g.id)
+  return ok({ grants: page.items, next_cursor: page.next_cursor })
 })
 
 route('DELETE /admin/grants/{id}', 'owner', (c, s) => {
-  if (!s.me.features.connected_apps) return fail('not_found')
   const id = decodeURIComponent(c.match[1])
   if (!UUID.test(id)) return fail('validation_failed', { field: 'id' })
   let changed = false

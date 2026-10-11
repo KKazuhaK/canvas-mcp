@@ -64,7 +64,7 @@ export function useWriteTools(enabled = true) {
 }
 
 export function useLoginHistory() {
-  return useQuery({ queryKey: keys.loginHistory, queryFn: getLoginHistory })
+  return useInfiniteQuery({ queryKey: keys.loginHistory, queryFn: ({ pageParam }) => getLoginHistory(pageParam ? { cursor: pageParam } : {}), initialPageParam: null as string | null, getNextPageParam: (last) => last.next_cursor, select: (data) => ({ ...data, events: data.pages.flatMap(page => page.events) }) })
 }
 
 // ---- sign-in methods (two or more providers) -------------------------------------------
@@ -170,16 +170,20 @@ export function useLogout() {
 // ---- admin -----------------------------------------------------------------
 
 export function useAdminAccounts(status: AdminStatusFilter | '') {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: keys.adminAccounts(status),
-    queryFn: () => adminListAccounts(status || undefined),
+    queryFn: ({ pageParam }) => adminListAccounts(status || undefined, pageParam ? { cursor: pageParam } : {}),
+    initialPageParam: null as string | null, getNextPageParam: (last) => last.next_cursor,
+    select: (data) => ({ ...data, accounts: data.pages.flatMap(page => page.accounts), counts: data.pages[0].counts }),
   })
 }
 
 export function useAdminEnrollments(filter: AdminEnrollmentFilter) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: keys.adminEnrollments(filter),
-    queryFn: () => adminListEnrollments(filter),
+    queryFn: ({ pageParam }) => adminListEnrollments(filter, pageParam ? { cursor: pageParam } : {}),
+    initialPageParam: null as string | null, getNextPageParam: (last) => last.next_cursor,
+    select: (data) => ({ ...data, rows: data.pages.flatMap(page => page.rows), counts: data.pages[0].counts }),
   })
 }
 
@@ -259,7 +263,7 @@ export function useDecideConsent(txn: string) {
 }
 
 export function useGrants(enabled = true) {
-  return useQuery({ queryKey: keys.grants, queryFn: getGrants, enabled })
+  return useInfiniteQuery({ queryKey: keys.grants, queryFn: ({ pageParam }) => getGrants(pageParam ? { cursor: pageParam } : {}), enabled, initialPageParam: null as string | null, getNextPageParam: (last) => last.next_cursor, select: (data) => ({ ...data, grants: data.pages.flatMap(page => page.grants) }) })
 }
 
 export function useRevokeGrant() {
@@ -272,10 +276,11 @@ export function useRevokeGrant() {
 }
 
 export function useAdminGrants(accountId: string, enabled: boolean) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: keys.adminGrants(accountId),
-    queryFn: () => adminGrants(accountId),
-    enabled,
+    queryFn: ({ pageParam }) => adminGrants(accountId, pageParam ? { cursor: pageParam } : {}),
+    enabled, initialPageParam: null as string | null, getNextPageParam: (last) => last.next_cursor,
+    select: (data) => ({ ...data, grants: data.pages.flatMap(page => page.grants) }),
   })
 }
 

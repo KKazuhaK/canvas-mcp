@@ -25,10 +25,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
 
-import anyio.to_thread
-
+from ..db.authz_repos import SqlLoginStateRepo
 from ..db.engine import Database
-from ..db.repos import Repositories
+from ..db.workers import run_store
 
 TXN_KIND = "mcp_txn"
 TXN_TTL_S = 600
@@ -173,7 +172,7 @@ class SqlLoginStateStore:
         pause_hook: Callable[[str], None] | None = None,
     ) -> None:
         self._db = db
-        self._repos = Repositories(db.kind)
+        self._repo = SqlLoginStateRepo()
         self._clock = clock
         self.pause_hook = pause_hook
 
@@ -183,15 +182,24 @@ class SqlLoginStateStore:
     # -- synchronous core (used by the async protocol methods and by the race tests) -------
 
     def put_sync(
-        self, kind: str, payload: bytes, ttl_s: float, *, binding_hash: str | None = None
+        self,
+        kind: str,
+        payload: bytes,
+        ttl_s: float,
+        *,
+        binding_hash: str | None = None,
     ) -> str:
-        if not kind or not 0 < ttl_s <= MAX_TTL_SECONDS or len(payload) > MAX_PAYLOAD_BYTES:
+        if (
+            not kind
+            or not 0 < ttl_s <= MAX_TTL_SECONDS
+            or len(payload) > MAX_PAYLOAD_BYTES
+        ):
             raise ValueError("invalid login state")
         text = payload.decode("utf-8")  # raises ValueError for non-text payloads
         state_id = secrets.token_urlsafe(32)
         now = self._now()
         with self._db.row_write() as conn:
-            self._repos.login_states.insert(
+            self._repo.insert(
                 conn,
                 kind=kind,
                 id_hash=sha256(state_id.encode("utf-8")).hexdigest(),
@@ -202,11 +210,13 @@ class SqlLoginStateStore:
             )
         return state_id
 
-    def peek_sync(self, kind: str, state_id: str, *, binding_hash: str | None = None) -> bytes | None:
+    def peek_sync(
+        self, kind: str, state_id: str, *, binding_hash: str | None = None
+    ) -> bytes | None:
         if not token_ok(state_id):
             return None
         with self._db.read() as conn:
-            value = self._repos.login_states.peek(
+            value = self._repo.peek(
                 conn,
                 kind=kind,
                 id_hash=sha256(state_id.encode("utf-8")).hexdigest(),
@@ -215,44 +225,46 @@ class SqlLoginStateStore:
             )
         return None if value is None else value.encode("utf-8")
 
-    def pop_sync(self, kind: str, state_id: str, *, binding_hash: str | None = None) -> bytes | None:
+    def pop_sync(
+        self, kind: str, state_id: str, *, binding_hash: str | None = None
+    ) -> bytes | None:
         if not token_ok(state_id):
             return None
         id_hash = sha256(state_id.encode("utf-8")).hexdigest()
         now = self._now()
         with self._db.row_write() as conn:
-            value = self._repos.login_states.peek(
-                conn, kind=kind, id_hash=id_hash, binding_hash=binding_hash, now=now
-            )
             if self.pause_hook is not None:
-                self.pause_hook("after_txn_select")
-            if value is None:
-                return None
-            won = self._repos.login_states.delete_matching(
+                self.pause_hook("before_txn_pop")
+            value = self._repo.pop(
                 conn, kind=kind, id_hash=id_hash, binding_hash=binding_hash, now=now
             )
-        return value.encode("utf-8") if won else None
+        return None if value is None else value.encode("utf-8")
 
     # -- the LoginStateStore protocol ------------------------------------------------------
 
     async def put(
-        self, kind: str, payload: bytes, ttl_s: float, *, binding_hash: str | None = None
+        self,
+        kind: str,
+        payload: bytes,
+        ttl_s: float,
+        *,
+        binding_hash: str | None = None,
     ) -> str:
-        return await anyio.to_thread.run_sync(
+        return await run_store(
             lambda: self.put_sync(kind, payload, ttl_s, binding_hash=binding_hash)
         )
 
     async def pop(
         self, kind: str, state_id: str, *, binding_hash: str | None = None
     ) -> bytes | None:
-        return await anyio.to_thread.run_sync(
+        return await run_store(
             lambda: self.pop_sync(kind, state_id, binding_hash=binding_hash)
         )
 
     async def peek(
         self, kind: str, state_id: str, *, binding_hash: str | None = None
     ) -> bytes | None:
-        return await anyio.to_thread.run_sync(
+        return await run_store(
             lambda: self.peek_sync(kind, state_id, binding_hash=binding_hash)
         )
 

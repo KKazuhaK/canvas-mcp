@@ -16,5 +16,6 @@ export const keys = {
   admin: ['admin'] as const,
   adminAccounts: (status: AdminStatusFilter | '') => ['admin', 'accounts', status] as const,
   adminEnrollments: (filter: AdminEnrollmentFilter) => ['admin', 'enrollments', filter] as const,
+  adminSettings: ['admin', 'settings'] as const,
   adminAudit: ['admin', 'audit'] as const,
 }
