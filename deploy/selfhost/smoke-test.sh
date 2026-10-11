@@ -163,7 +163,7 @@ expect_refusal() {
   set -e
   docker rm -f "$REFUSAL" >/dev/null 2>&1 || true
   [ "$result" != 0 ] && [ "$result" != 124 ] || fail "$label did not refuse startup"
-  grep -qiE 'configuration|requires|refus|missing|invalid|removed|unusable' "$WORKDIR/refusal" || fail "$label had an unexpected failure"
+  grep -qiE 'configuration|requires|refus|missing|invalid|removed|renamed|unusable' "$WORKDIR/refusal" || fail "$label had an unexpected failure"
   ok "$label refuses startup"
 }
 for removed in SELFHOST_AUTH_MODE OAUTH_JWT_SIGNING_KEY GRANT_STATUS_CACHE_S CANVAS_API_URL CANVAS_FEATURED_SCHOOLS CANVAS_SCHOOL_SEARCH ACCOUNT_UI ENTRA_API_SCOPE; do
