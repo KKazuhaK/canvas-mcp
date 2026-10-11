@@ -2,9 +2,9 @@ name: Canvas MCP Enhancement Testing
 
 on:
   push:
-    branches: [ main, development, uci-student, 'feature/**', 'fix/**', 'ci/**' ]
+    branches: [ main, development, selfhost, 'feature/**', 'fix/**', 'ci/**' ]
   pull_request:
-    branches: [ main, uci-student ]
+    branches: [ main, selfhost ]
   workflow_dispatch:
 
 permissions:

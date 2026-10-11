@@ -1,11 +1,22 @@
 # canvas-mcp self-hosted mode: v1 consolidation design
 
-Status: design, ready to implement. The owner decisions D1-D14 of 2026-10-11 (1.1) are authoritative. Audience: the developer who implements it. It is committed as `deploy/selfhost/V1-DESIGN.md`, next to the developer handoff `deploy/selfhost/DEVELOPMENT.md` . Read handoff sections 2 to 4 first: runtimes, commands, invariants.
+Status: original design snapshot. Implementation and current acceptance evidence
+are recorded in `V1-PROGRESS.md`. On 2026-10-11 the owner approved publishing
+`v1.14.0-beta.3` for staging before live acceptance; live checks remain required
+before a stable release or client compatibility claims. The development branch
+is `selfhost`, and branch labels below use that current name. Historical commit
+IDs remain unchanged.
+
+The owner decisions D1-D14 of 2026-10-11 (1.1) are authoritative for the technical
+design. Audience: the developer who implements it. It is committed as
+`deploy/selfhost/V1-DESIGN.md`, next to the developer handoff
+`deploy/selfhost/DEVELOPMENT.md`. Read handoff sections 2 to 4 first: runtimes,
+commands, invariants.
 
 Conventions:
 - `selfhost/` means `src/canvas_mcp/core/selfhost/`. Other paths are relative to the repository root.
 - "P7" means the branch `feature/p7-login-providers`, HEAD `53b86dd` (clean, unpushed). Its last fix round (bootstrap and re-sourced owners get `admitted_via` set, `token_admin` uses the intersection of the recorded and environment provider lists, the `owner_re_sourced` event) passed the full test matrix but has not been independently reviewed. Merge P7 only after one more independent review (6.0).
-- Line numbers are approximate and refer to `uci-student` at `71602e6` (the P7 worktree shifts many of them, for example `deploy/selfhost/env.example` has `OAUTH_JWT_SIGNING_KEY` at line 155 there and 202 on P7). Function and constant names are the stable anchors.
+- Line numbers are approximate and refer to `selfhost` at `71602e6` (the P7 worktree shifts many of them, for example `deploy/selfhost/env.example` has `OAUTH_JWT_SIGNING_KEY` at line 155 there and 202 on P7). Function and constant names are the stable anchors.
 - "A" and "B" are the two candidate designs this document reconciles: A is extensibility-first, B is performance-first.
 - Measurements quoted here come from the surveys and candidates. They are single runs on one Windows machine against PostgreSQL 16.2 and SQLite 3.50.4 with synthetic stress data. Read them as plan evidence, not as benchmarks. At the real scale (tens of accounts) every statement is sub-millisecond.
 
@@ -35,7 +46,7 @@ This document supersedes the following parts of the handoff (the handoff has bee
 | D8 | One custom name per sign-in method, shared by English and Chinese, editable by the owner in the admin panel (not hardcoded, not env-only). | 4.3.3, 5 |
 | D9 | Renames now: `MCP_AUTH_MODE=entra-oauth` becomes `MCP_AUTH_MODE=selfhost`, `ENTRA_API_SCOPE` becomes `MCP_SCOPE` (default `Canvas.Access` kept). The old names refuse startup with a message naming the replacement. | 2.2, 2.3, 2.5, step 1, step 8 |
 | D10 | Before a Canvas token is enrolled, the user sees a custody notice and must tick a required checkbox. The acknowledgement is recorded server-side with time and notice version; a changed notice version requires a new acknowledgement. | 3.2, 4.3.8, 4.5.1, step 6b |
-| D11 | Repo docs and the nginx/Caddy examples use neutral examples (`mcp.example.com`, `canvas.example.edu`) instead of the owner's real domain and UCI's Canvas host. | step 8 |
+| D11 | Repo docs and the nginx/Caddy examples use neutral examples (`mcp.example.com`, `canvas.example.edu`) instead of the owner's real domain and the former school-specific Canvas host. | step 8 |
 | D12 | The name stays `canvas-mcp`. The docs state that this is an independent fork of `vishalsachdev/canvas-mcp`, not endorsed by upstream. Only small core improvements go upstream. | step 8 |
 | D13 | Canvas OAuth (institutional Developer Key) is rejected for now and only reserved. | 4.14 |
 | D14 | Python plus React/TypeScript stay; MUI 9 stays the UI library. | 1.1 |
@@ -1635,10 +1646,10 @@ Add the new codes to `account_api.ERROR_STATUS`, `web/src/api/errors.ts` and `lo
 
 ### 6.0 Prerequisites
 
-- **P7 merged** into `uci-student` (handoff 6.1 [B0], findings F1-F4 closed). P7 is at `53b86dd`; its last fix round passed the full matrix but has not been independently reviewed, and every earlier review round found new owner-recovery edge cases. Merge it only after one more independent review of that round. v1 touches the same files (`accounts.py`, `identity.py`, `token_store.py`, `app.py`, `settings.py`, `request_context.py`, `account_web.py`, `login/*`, README, smoke test). Building v1 first would make P7 a rewrite.
-- Branch `feature/v1-consolidation` from `uci-student`, in worktree `.worktrees/v1`.
-- **One step (D1).** Steps 1 to 8 are an order of work inside one consolidation, not separate releases. Their pull requests target `feature/v1-consolidation`; it merges into `uci-student` once, when the step 8 release gate is green. No step ships alone, and there are no aliases, compatibility shims or transition releases.
-- Do not push half-finished work to `uci-student`, because it publishes `:edge`.
+- **P7 merged** into `selfhost` (handoff 6.1 [B0], findings F1-F4 closed). P7 is at `53b86dd`; its last fix round passed the full matrix but has not been independently reviewed, and every earlier review round found new owner-recovery edge cases. Merge it only after one more independent review of that round. v1 touches the same files (`accounts.py`, `identity.py`, `token_store.py`, `app.py`, `settings.py`, `request_context.py`, `account_web.py`, `login/*`, README, smoke test). Building v1 first would make P7 a rewrite.
+- Branch `feature/v1-consolidation` from `selfhost`, in worktree `.worktrees/v1`.
+- **One step (D1).** Steps 1 to 8 are an order of work inside one consolidation, not separate releases. Their pull requests target `feature/v1-consolidation`; it merges into `selfhost` once, when the step 8 release gate is green. No step ships alone, and there are no aliases, compatibility shims or transition releases.
+- Do not push half-finished work to `selfhost`, because it publishes `:edge`.
 - The owner decisions D1-D14 (1.1) settle every design question; nothing in section 7 blocks step 1. Implementer decisions with recommended defaults are listed in 7.1.
 
 ### 6.1 Test matrix (every step)
@@ -1859,7 +1870,7 @@ The schema columns are in the baseline (4.3.8) and the store put takes the ackno
   - Protocols in `db/ports.py` (`CanvasCredentialRepo`, `CanvasOAuthAppRepo`), `login/registry.py` (`ProviderConfigSource`), `account_core.py` or `account_web.py` (`SessionStore`), `limits.py` (`QuotaPolicy`).
   - `deploy/selfhost/README.md`: architecture, Entra step 1 (2.5, including inviting friends as B2B guests with `Canvas.User`), routes, settings (featured schools start empty, directory search ON, both in Admin > Settings), the custody notice (D10), the renamed and removed settings with their replacements (2.3, D9), upgrading ("v1 starts from a fresh database"), backup ("schools, sign-in names and custody acknowledgements live in the database").
   - `env.example`, `setup-env.sh` (writes `MCP_AUTH_MODE=selfhost` and, only if asked, `MCP_SCOPE`), `Dockerfile.selfhost`, `docker-compose*.yml`, `CHANGELOG.md` (the v1 entry lists every rename and removal), `web/README.md`, `tests/test_selfhost_docs.py` (reduced).
-  - **Neutral examples (D11).** In `deploy/selfhost/*` (README, `nginx.conf.example`, `Caddyfile.example`, `env.example`, `setup-env.sh`, `smoke-test.sh`), `web/README.md` and the fork-owned docs, the public host is `mcp.example.com` and the Canvas host is `canvas.example.edu`. At P7 `53b86dd` this replaces the owner's real host (15 occurrences in `deploy/selfhost/README.md`, 5 in `nginx.conf.example`, 1 in `Caddyfile.example`), UCI's Canvas host (2 in `deploy/selfhost/README.md`) and the placeholder `canvas.school.edu` (`README.md`, `env.example`, `setup-env.sh`). Re-run the search at the merge commit. The root `README.md` is upstream text and keeps its hosts; web test fixtures may keep their placeholder hosts.
+  - **Neutral examples (D11).** In `deploy/selfhost/*` (README, `nginx.conf.example`, `Caddyfile.example`, `env.example`, `setup-env.sh`, `smoke-test.sh`), `web/README.md` and the fork-owned docs, the public host is `mcp.example.com` and the Canvas host is `canvas.example.edu`. At P7 `53b86dd` this replaces the owner's real host (15 occurrences in `deploy/selfhost/README.md`, 5 in `nginx.conf.example`, 1 in `Caddyfile.example`), the former school-specific Canvas host (2 in `deploy/selfhost/README.md`) and the placeholder `canvas.school.edu` (`README.md`, `env.example`, `setup-env.sh`). Re-run the search at the merge commit. The root `README.md` is upstream text and keeps its hosts; web test fixtures may keep their placeholder hosts.
   - **Fork statement (D12).** The name stays `canvas-mcp`. The first paragraph of `deploy/selfhost/README.md` says that this is an independent fork of `vishalsachdev/canvas-mcp`, not endorsed by upstream, and that only small core improvements are offered upstream. Recommended: the same one-line notice at the top of the fork's root `README.md`.
   - The two design documents (`deploy/selfhost/DEVELOPMENT.md`, `deploy/selfhost/V1-DESIGN.md`) are excluded from the route contract test and from the doc pin tests, because they name old paths on purpose. They stay English and ASCII-only and use no closing keywords.
 - **Tests:** the reserved tables are never written (a repo audit test); `test_selfhost_docs.py` documents every setting and every rename; the image smoke test passes. New host-allowlist test (D11): every host name in `deploy/selfhost/*` and `web/README.md` is under `example.com`, `example.edu` or `example.org`, is `localhost`, or is on a short list of public services the docs must name (`login.microsoftonline.com`, `canvas.instructure.com`, `claude.ai`, `claude.com`, Google and GitHub endpoints, upstream documentation sites). The test lists allowed hosts, so it never contains the owner's real domain.

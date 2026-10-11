@@ -4,18 +4,18 @@ name: Self-hosted image
 # The root Dockerfile (upstream's Azure image) is untouched. There is no
 # pull_request or pull_request_target trigger: nothing here runs for code from
 # a fork, and the only secret used is the job's own GITHUB_TOKEN. Every job
-# also requires the ref to be uci-student or a v* tag, so a manual run from any
+# also requires the ref to be selfhost or a v* tag, so a manual run from any
 # other branch does nothing instead of pushing untagged digests to the registry.
 #
 # Channels:
-#   :edge     every push to uci-student
-#   :<ver>    a tag v<major>.<minor>.<patch>-uci.<n>[-suffix]
-#   :latest   a stable tag (no suffix after -uci.<n>)
+#   :edge     every push to selfhost
+#   :<ver>    v<major>.<minor>.<patch>[-alpha.<n>|-beta.<n>|-rc.<n>]
+#   :latest   a stable tag (no prerelease suffix)
 #   :beta     every tag, stable or not
 on:
   push:
-    branches: [uci-student]
-    tags: ['v*-uci.*']
+    branches: [selfhost]
+    tags: ['v[0-9]*']
     # Nothing here goes into the image or gates it. (Path filters are not
     # evaluated for tag pushes, so a release tag always builds.)
     paths-ignore:
@@ -43,7 +43,7 @@ env:
 jobs:
   meta:
     name: Compute version
-    if: ${{ github.repository == 'KKazuhaK/canvas-mcp' && (github.ref == 'refs/heads/uci-student' || startsWith(github.ref, 'refs/tags/v')) }}
+    if: ${{ github.repository == 'KKazuhaK/canvas-mcp' && (github.ref == 'refs/heads/selfhost' || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -62,15 +62,14 @@ jobs:
           set -euo pipefail
           if [[ "$REF" == refs/tags/* ]]; then
             version="${REF_NAME#v}"
-            re='^[0-9]+\.[0-9]+\.[0-9]+-uci\.[0-9]+(-[0-9A-Za-z.]+)?$'
+            re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$'
             if [[ ! "$version" =~ $re ]]; then
-              echo "tag '${REF_NAME}' is not v<x.y.z>-uci.<n>[-suffix]" >&2
+              echo "tag '${REF_NAME}' must be v<x.y.z>[-alpha.<n>|-beta.<n>|-rc.<n>]" >&2
               exit 1
             fi
-            # Stable means nothing follows -uci.<n>.
+            # Only an unsuffixed version moves latest.
             stable=true
-            sfx='-uci\.[0-9]+-'
-            if [[ "$version" =~ $sfx ]]; then stable=false; fi
+            if [[ "$version" == *-* ]]; then stable=false; fi
             is_tag=true
           else
             version=""
@@ -90,7 +89,7 @@ jobs:
   build:
     name: Build and push (${{ matrix.slug }})
     needs: meta
-    if: ${{ github.repository == 'KKazuhaK/canvas-mcp' && (github.ref == 'refs/heads/uci-student' || startsWith(github.ref, 'refs/tags/v')) }}
+    if: ${{ github.repository == 'KKazuhaK/canvas-mcp' && (github.ref == 'refs/heads/selfhost' || startsWith(github.ref, 'refs/tags/v')) }}
     strategy:
       fail-fast: true
       matrix:
@@ -189,7 +188,7 @@ jobs:
   publish:
     name: Publish multi-arch image
     needs: [meta, build]
-    if: ${{ github.repository == 'KKazuhaK/canvas-mcp' && (github.ref == 'refs/heads/uci-student' || startsWith(github.ref, 'refs/tags/v')) }}
+    if: ${{ github.repository == 'KKazuhaK/canvas-mcp' && (github.ref == 'refs/heads/selfhost' || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -220,7 +219,7 @@ jobs:
         with:
           images: ghcr.io/kkazuhak/canvas-mcp
           tags: |
-            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/uci-student' }}
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/selfhost' }}
             type=raw,value=${{ needs.meta.outputs.version }},enable=${{ needs.meta.outputs.is_tag == 'true' }}
             type=raw,value=latest,enable=${{ needs.meta.outputs.is_tag == 'true' && needs.meta.outputs.stable == 'true' }}
             type=raw,value=beta,enable=${{ needs.meta.outputs.is_tag == 'true' }}

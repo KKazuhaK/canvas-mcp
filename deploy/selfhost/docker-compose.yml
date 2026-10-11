@@ -2,8 +2,8 @@
 #
 # Deploy without cloning the repository:
 #   mkdir -p /opt/canvas-mcp && cd /opt/canvas-mcp
-#   curl -fsSLO https://raw.githubusercontent.com/KKazuhaK/canvas-mcp/uci-student/deploy/selfhost/docker-compose.yml
-#   curl -fsSL https://raw.githubusercontent.com/KKazuhaK/canvas-mcp/uci-student/deploy/selfhost/env.example -o .env
+#   curl -fsSLO https://raw.githubusercontent.com/KKazuhaK/canvas-mcp/selfhost/deploy/selfhost/docker-compose.yml
+#   curl -fsSL https://raw.githubusercontent.com/KKazuhaK/canvas-mcp/selfhost/deploy/selfhost/env.example -o .env
 #   chmod 600 .env
 #   # Edit .env and fill in every setting marked "Required." (see README.md)
 #   docker compose up -d

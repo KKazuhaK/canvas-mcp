@@ -157,5 +157,5 @@ If an institution provides a Developer Key, option 2 is preferable. If it does n
 - Whether request headers are offered to individual (Free/Pro/Max) accounts.
 - Canvas PKCE support, refresh-token lifetime, who may call the token-deletion API, and whether the Developer Key scopes in #236 are enforced.
 - Whether claude.ai supports MCP revision 2026-07-28.
-- UCI's position on PAT creation and storage.
+- The selected institution's position on PAT creation and storage.
 - Whether Instructure has an approval route for MCP servers under clause 3(i).

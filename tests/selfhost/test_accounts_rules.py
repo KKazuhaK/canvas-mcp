@@ -309,7 +309,7 @@ class TestSettingsGrammar:
             ("ACCESS_RULES", "entra:role:bad value", "role value"),
             ("ACCESS_RULES", "entra:role", "unknown rule kind"),
             ("ACCESS_RULES", "justaword", "not '<provider>"),
-            ("ACCESS_RULES", "google:hd:uci.edu", "not enabled in this release"),
+            ("ACCESS_RULES", "google:hd:example.edu", "not enabled in this release"),
             ("ACCESS_RULES", "github:org:Kazuha", "not enabled in this release"),
             (
                 "ACCESS_RULES",

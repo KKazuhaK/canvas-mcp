@@ -2,7 +2,7 @@
 title: "Stage A: self-hosted multi-user pilot (MCP_AUTH_MODE=entra-oauth)"
 status: historical record; upstream pilot not pursued; G1 and G2 unmet
 issue: vishalsachdev/canvas-mcp#484
-implementation: KKazuhaK/canvas-mcp, branch uci-student at f32b9d3 (pushed; merge base with upstream main 8f1b0ae (3170ca6 plus one README commit))
+implementation: KKazuhaK/canvas-mcp, branch selfhost at f32b9d3 (pushed; merge base with upstream main 8f1b0ae (3170ca6 plus one README commit))
 reviewed-revision: 230788e (your review on #484)
 evidence: stage-a-appendix.md
 date: 2026-10-09
@@ -179,7 +179,7 @@ uv run --locked pytest -q tests/selfhost tests/test_multiuser_e2e.py tests/test_
 | Item | Proposal |
 |---|---|
 | Owner, backup | @KKazuhaK until the Stage C decision, at most six months after the pilot starts. **No backup; bus factor 1**, so upstream should own nothing yet. |
-| Dependencies, security contact | Lock and image refreshed within 7 days of a security release; Dependabot version updates run weekly against the fork's default branch `main`, not `uci-student`, and Dependabot security updates are off; the author refreshes `uci-student`'s `uv.lock` and the image digest by hand. Private vulnerability reporting is enabled on the fork: <https://github.com/KKazuhaK/canvas-mcp/security/advisories/new> |
+| Dependencies, security contact | Lock and image refreshed within 7 days of a security release; Dependabot version updates run weekly against the fork's default branch `main`, not `selfhost`, and Dependabot security updates are off; the author refreshes `selfhost`'s `uv.lock` and the image digest by hand. Private vulnerability reporting is enabled on the fork: <https://github.com/KKazuhaK/canvas-mcp/security/advisories/new> |
 | Incident | Target (single operator, no backup): within 24 h, disable everyone and stop the container; within 72 h, notify users and post on #484. An unreachable operator means the pilot is stopped; the author stops the container before any absence over 24 h. |
 | G1 reviewer | Not identified, and the author has no candidate. Please recommend someone with OAuth/Entra experience who has not contributed to this code, or approve one the author proposes later (scope: appendix §G.3). |
 | If Stage C proceeds | No Stage C commitment is made now. The code stays in the fork and the author maintains it there; Stage C is proposed again only after the pilot and the independent review. |

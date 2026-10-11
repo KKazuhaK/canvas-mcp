@@ -1,6 +1,6 @@
 # P7 independent review and integration evidence
 
-Review date: 2026-10-11. Scope: `feature/p7-login-providers`, from `53b86dd` through the repair commit `be36a025190bd00bd1a8f7c20d93e3d149c8c5f8` and CI completion commit `e62deb9d72b5ea9edc2eb2672e223844a50cb64c`. The branch is published in the independent fork; fork PR [4](https://github.com/KKazuhaK/canvas-mcp/pull/4) targets `uci-student`.
+Review date: 2026-10-11. Scope: `feature/p7-login-providers`, from `53b86dd` through the repair commit `be36a025190bd00bd1a8f7c20d93e3d149c8c5f8` and CI completion commit `e62deb9d72b5ea9edc2eb2672e223844a50cb64c`. The branch is published in the independent fork; fork PR [4](https://github.com/KKazuhaK/canvas-mcp/pull/4) targets `selfhost`.
 
 ## Findings and repairs
 
@@ -31,7 +31,7 @@ Fork PR 4 was merged at its reviewed head `e62deb9`, producing
 `09c676e8f9fc10658e2a5cda3527aae97f195ffa`. Its tree exactly matches the tested
 merge preview (`4af06d1e2e582e8b41f322a4039483d09a0b6927`). The seven upstream
 commits through `63f4222` were then merged, producing
-`3926f04934dc56cfd1f025cb4f37fb4e1168fa0b` on `uci-student`.
+`3926f04934dc56cfd1f025cb4f37fb4e1168fa0b` on `selfhost`.
 
 Post-merge CI [38125252305](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38125252305)
 is fully green. Image run

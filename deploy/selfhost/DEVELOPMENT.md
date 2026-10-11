@@ -2,12 +2,18 @@
 
 This document records the original handoff inventory. For implementation and
 validation completed since that snapshot, read [V1-PROGRESS.md](V1-PROGRESS.md)
-and [B0-REVIEW.md](B0-REVIEW.md). P7 and v1 are merged into `uci-student`.
+and [B0-REVIEW.md](B0-REVIEW.md). P7 and v1 are merged into `selfhost`.
 Both complete final-head CI matrices passed, and the native amd64/arm64 Docker
 image passed SQLite and PostgreSQL container smoke and is published for staging.
 V1-PROGRESS records its immutable digest and the separate post-merge CI run.
 Real staging/client/IdP/proxy and multiday refresh acceptance remain outstanding
-and gate the first v1 tag. All schema upgrades, backups and
+are required for production/client compatibility claims. On 2026-10-11 the owner
+approved an early v1 beta for staging acceptance. The development/publishing
+branch is now `selfhost`; `main` remains the upstream mirror. New release tags
+use `vX.Y.Z-beta.N` (or an unsuffixed stable version), with no school suffix.
+Branch labels in the original inventory below are normalized to the current
+name; historical commit IDs and previously published tags remain unchanged.
+All schema upgrades, backups and
 database transfer tooling are isolated under
 `src/canvas_mcp/core/selfhost/db/migrations/`. Its README describes the removal
 boundary, contract backups and concurrent-index recovery. See
@@ -20,7 +26,7 @@ Conventions in this original snapshot (use V1-PROGRESS for current status):
 - "P7 branch" means code that exists only on `feature/p7-login-providers`.
 - "v1" means the consolidation the owner decided on 2026-10-11 (decisions D1-D14, section 5). It is designed (V1-DESIGN) but not started. Sections 3 and 4 describe the code as it is today and mark what v1 removes or renames.
 - "(unverified)" means it was read or inferred but not run or confirmed.
-- Line numbers are approximate; function and constant names are the stable anchors. Line numbers for `account_web.py`, `account_api.py`, `token_admin.py`, `deploy/selfhost/README.md` and `tests/selfhost/login/*` refer to the P7 branch (the checkout on `uci-student` has fewer lines: `account_web.py` 4129 vs about 4890, README "Multiple schools" at ~730 vs ~845, "Proven with claude.ai" row at ~436 vs ~438).
+- Line numbers are approximate; function and constant names are the stable anchors. Line numbers for `account_web.py`, `account_api.py`, `token_admin.py`, `deploy/selfhost/README.md` and `tests/selfhost/login/*` refer to the P7 branch (the checkout on `selfhost` has fewer lines: `account_web.py` 4129 vs about 4890, README "Multiple schools" at ~730 vs ~845, "Proven with claude.ai" row at ~436 vs ~438).
 
 ---
 
@@ -38,18 +44,18 @@ This repository (`KKazuhaK/canvas-mcp`) is an **independent fork** of `vishalsac
 | Multi-school (featured list + Instructure directory search) | Done, merged, env-configured; v1 moves both to the admin panel (D6, D7) | `schools.py`, `settings.py`, `app.selfhost_school_policy` |
 | P5 React `/account` UI + `/account/api` | Done, merged, opt-in today (`ACCOUNT_UI=react`); v1 makes it the only UI and moves the API to `/api/v1` (D3, D5) | `web/`, `account_api.py`, `account_spa.py` |
 | P6 own MCP authorization server | Done, merged, opt-in today (`SELFHOST_AUTH_MODE=local`; default `entra_proxy`); v1 makes it the only path and deletes `entra_proxy` (D2) | `core/selfhost/authz/`, migration `0003_oauth_authz` |
-| P7+P8 Google, GitHub, generic OIDC sign-in, linking, per-provider admission, "usable owner" rule | UNMERGED branch at `53b86dd` (clean, unpushed, 32 commits ahead of `uci-student`). The last fix round passed the full matrix but has NOT been independently reviewed. Merge only after one more independent review (6.1) | `.worktrees/p7-providers`, `core/selfhost/login/` |
+| P7+P8 Google, GitHub, generic OIDC sign-in, linking, per-provider admission, "usable owner" rule | UNMERGED branch at `53b86dd` (clean, unpushed, 32 commits ahead of `selfhost`). The last fix round passed the full matrix but has NOT been independently reviewed. Merge only after one more independent review (6.1) | `.worktrees/p7-providers`, `core/selfhost/login/` |
 | v1 consolidation (D1-D10) | Designed, not started | V1-DESIGN; backlog 6.1a |
 | Custody notice and acknowledgement (D10) | Notice partial (legacy pages only); acknowledgement not started | 6.4 |
 | README independent-fork framing (D12), neutral examples (D11) | Not started | 6.5 |
 | Maintainer's #484 items (pilot profile, tested-clients table) | Not started | 6.6 |
 | Upstream PRs #490, #491 | Open, review required, no comments; listed by upstream triage for the maintainer's decision | 6.7 |
 | Upstream issue #489 (caller boundaries in HTTP caches) | Opened by the maintainer 2026-10-11; #491 covers only the course-policy half | 6.7 |
-| Upstream sync | `uci-student` is 7 commits behind the local `origin/main` ref (not re-fetched for this snapshot) | 6.1 step 6 |
+| Upstream sync | `selfhost` is 7 commits behind the local `origin/main` ref (not re-fetched for this snapshot) | 6.1 step 6 |
 | Design documents | This handoff and V1-DESIGN exist outside the repository; to be committed (homes above) | |
 | Release | Latest tag `v1.14.0-uci.1-beta.2`; next tag after v1 (6.10) | `.github/workflows/selfhost-image.yml` |
 | Live verification (real clients, real IdPs, proxies) | None done; gates the first v1 tag | 6.12 |
-| CI | Green on `uci-student` at `71602e6` | `.github/workflows/canvas-mcp-testing.yml`, `selfhost-image.yml` |
+| CI | Green on `selfhost` at `71602e6` | `.github/workflows/canvas-mcp-testing.yml`, `selfhost-image.yml` |
 
 ---
 
@@ -58,16 +64,16 @@ This repository (`KKazuhaK/canvas-mcp`) is an **independent fork** of `vishalsac
 ### 2.1 Repository, branches, remotes, worktrees
 
 - Remotes in the owner's clone: `fork` = `KKazuhaK/canvas-mcp` (push here), `origin` = `vishalsachdev/canvas-mcp` (upstream; never push fork work here). A fresh clone of the fork names it `origin`; add upstream as a second remote and adapt the commands below.
-- Main fork branch: `uci-student`. HEAD at snapshot: `71602e6` ("Merge upstream main (2026-10-10, triage notes) into uci-student"). The fork's GitHub default branch is `main`, which is not the working branch (dependabot runs there).
+- Main fork branch: `selfhost`. HEAD at snapshot: `71602e6` ("Merge upstream main (2026-10-10, triage notes) into selfhost"). The fork's GitHub default branch is `main`, which is not the working branch (dependabot runs there).
 - Worktrees (`git worktree list`):
 
 | Worktree | Branch | Purpose |
 |---|---|---|
-| repo root | `uci-student` | main line |
-| `.worktrees/p7-providers` | `feature/p7-login-providers` | P7+P8; HEAD `53b86dd`, clean, not pushed, 32 commits ahead of `uci-student` |
+| repo root | `selfhost` | main line |
+| `.worktrees/p7-providers` | `feature/p7-login-providers` | P7+P8; HEAD `53b86dd`, clean, not pushed, 32 commits ahead of `selfhost` |
 | `.worktrees/up-repr` | `fix/request-credentials-repr` | upstream PR #490 (HEAD `ee843f5`) |
 | `.worktrees/up-policy` | `test/course-policy-caller-boundary` | upstream PR #491 (HEAD `6b64885`) |
-| `.worktrees/v1` (to create) | `feature/v1-consolidation` from `uci-student` after B0 | v1 (V1-DESIGN 6.0) |
+| `.worktrees/v1` (to create) | `feature/v1-consolidation` from `selfhost` after B0 | v1 (V1-DESIGN 6.0) |
 
 - Tags: `v1.13.0-uci.1`, `v1.14.0-uci.1-beta.1`, `v1.14.0-uci.1-beta.2`.
 - Install the commit hook once per clone: `bash scripts/install-hooks.sh` (sets `core.hooksPath .githooks`; `commit-msg` refuses closing keywords).
@@ -140,7 +146,7 @@ Elsewhere, any PostgreSQL 16+ reachable at that URL works (Docker `postgres:16` 
 
 ### 2.5 CI (`.github/workflows/canvas-mcp-testing.yml`)
 
-Runs on pushes to `main`, `development`, `uci-student`, `feature/**`, `fix/**`, `ci/**`, PRs into `main`/`uci-student`, and manual dispatch.
+Runs on pushes to `main`, `development`, `selfhost`, `feature/**`, `fix/**`, `ci/**`, PRs into `main`/`selfhost`, and manual dispatch.
 
 | Job | Checks |
 |---|---|
@@ -160,20 +166,20 @@ Other workflows: `closing-keyword-guard.yml`; `selfhost-image.yml` (section 8); 
 
 | Symptom | Cause | Action |
 |---|---|---|
-| Some `test_closing_keyword_guard.py` hook tests fail locally | they need a real `.git`, POSIX exec bits and a working `dirname` on PATH (upstream's CLAUDE.md records 3 `test_hook_rejects_commit_without_usable_python` cases failing in a primary checkout that has a wrapper hook). All 56 tests passed in both the `uci-student` checkout and the P7 worktree on the owner's machine at snapshot, so a failure there is new | compare with a run on the base commit; CI is the authority |
+| Some `test_closing_keyword_guard.py` hook tests fail locally | they need a real `.git`, POSIX exec bits and a working `dirname` on PATH (upstream's CLAUDE.md records 3 `test_hook_rejects_commit_without_usable_python` cases failing in a primary checkout that has a wrapper hook). All 56 tests passed in both the `selfhost` checkout and the P7 worktree on the owner's machine at snapshot, so a failure there is new | compare with a run on the base commit; CI is the authority |
 | `test_setup_env_script.py` skipped | no bash found | run from Git for Windows bash |
 | run aborts at start with a PostgreSQL error | backend requested but server not running | start the server or unset the backend variable |
 | authz tests pass on one venv, fail on the other | SDK internals drift | real bug: fix inside `authz/fastmcp_compat.py` only |
 | `uv lock --check` fails | `pyproject.toml` changed without `uv lock` | run `uv lock` and commit `uv.lock` |
 | `claude-review` red on a fork PR to upstream | fork PRs cannot read upstream's secret (upstream workflow issue) | nothing to fix |
-| Docker smoke test | only runs in CI (`selfhost-image.yml`) | push to `uci-student` or a tag and watch the run |
+| Docker smoke test | only runs in CI (`selfhost-image.yml`) | push to `selfhost` or a tag and watch the run |
 | encoding failures on Windows | missing `PYTHONUTF8=1`, or a text read/write without `encoding=` | set the variable; `test_text_encoding_guard.py` requires explicit encodings |
 
 ---
 
 ## 3. Architecture map (self-hosted mode)
 
-This section describes the code at `uci-student` plus the P7 branch. Section 3.0 lists what v1 removes or renames; the subsections mark it with "(v1: ...)".
+This section describes the code at `selfhost` plus the P7 branch. Section 3.0 lists what v1 removes or renames; the subsections mark it with "(v1: ...)".
 
 ### 3.0 What disappears or changes in v1
 
@@ -225,7 +231,7 @@ This section describes the code at `uci-student` plus the P7 branch. Section 3.0
 - `schools.py`: `parse_hostname`, `is_blocked_hostname`, `check_public_host` (SSRF-style checks), `SchoolDirectory` (Instructure directory), `FeaturedSchool`, `School`, `SchoolPolicy` (`build`, `pinned`, `resolve_stored`, `picker_enabled`, `sole_school`), `MAX_FEATURED = 50`. (v1: `SchoolPolicy` built from the settings snapshot, no default school.)
 - `limits.py`, `login_state.py`: rate limits and one-time state; memory backend only.
 - `oauth.py`: Entra proxy provider (default `entra_proxy`) and OAuth state cull. (v1: deleted; `build_auth_provider` moves to `authz/runtime.py`.)
-- `account_web.py` (4129 lines on `uci-student`, ~4890 on the P7 branch): legacy server-rendered `/account`, plus shared account logic: routes, sealed cookie sessions, CSRF/Origin (`_guard_post`), `_bi(zh, en)` strings, `_signed_in_recently`, `_FRESH_SIGN_IN_SECONDS = 600`, `_MAX_BODY_BYTES = 8192`. (v1: HTML deleted; shared logic moves to `account_core.py`, D5.)
+- `account_web.py` (4129 lines on `selfhost`, ~4890 on the P7 branch): legacy server-rendered `/account`, plus shared account logic: routes, sealed cookie sessions, CSRF/Origin (`_guard_post`), `_bi(zh, en)` strings, `_signed_in_recently`, `_FRESH_SIGN_IN_SECONDS = 600`, `_MAX_BODY_BYTES = 8192`. (v1: HTML deleted; shared logic moves to `account_core.py`, D5.)
 - `account_api.py`: JSON API at `/account/api` (v1: `/api/v1`); `route_table()` of `(path, {METHOD: endpoint})` with `access=public|session|active|owner` (default `active`), `mutating`, `csrf`, `body`, `local_authz` (v1: removed) and (P7) `linking`. Unknown paths give JSON 404. `providers()` ~line 730-754.
 - `account_ops.py`: outcome types shared by HTML and JSON surfaces (v1: used by the API only).
 - `account_spa.py`: serves `ACCOUNT_WEB_DIST` under `/account/` with CSP and SPA fallback (v1: an unusable bundle refuses startup).
@@ -288,7 +294,7 @@ All env parsing: `settings.py` (+ `login/config.py`). Documented in `deploy/self
 - Schools: `CANVAS_API_URL`, `CANVAS_FEATURED_SCHOOLS`, `CANVAS_SCHOOL_SEARCH` (v1: all three removed in self-host mode, D6, D7; upstream modes keep `CANVAS_API_URL`).
 - Authz tuning: `ACCESS_TOKEN_TTL`, `REFRESH_ABSOLUTE_TTL`, `REFRESH_REUSE_GRACE_S`, `GRANT_STATUS_CACHE_S` (v1: removed), `CIMD_ENABLED`, `CIMD_FETCH_TIMEOUT_S`, `CIMD_STALE_MAX`, `MAX_UPSTREAM_AUTH_AGE`.
 - P7: `SELFHOST_LOGIN_PROVIDERS` (unset = `entra` alone), `GOOGLE_*`, `GITHUB_*`, `OIDC_<SLUG>_*` (incl. `OIDC_<SLUG>_DISPLAY_NAME`, 40 characters at most; v1: removed, D8). Today every provider except `entra` needs `SELFHOST_AUTH_MODE=local` (startup problem otherwise; `login/config.py`; v1: the check goes with the mode), at most 8 providers. `SELFHOST_BOOTSTRAP_OWNER=token_admin` is also a P7 value.
-- Refused at startup today: `CANVAS_API_TOKEN`, `MCP_ACCESS_KEYS`, `ENTRA_AUTH_ENABLED`, `MCP_ALLOW_UNAUTHENTICATED`, `ACCESS_REQUEST_ENABLED` (`app.validate_selfhost_startup`), `FASTMCP_SSRF_TRUST_PROXY` (`app._ssrf_trust_proxy_enabled`), `TRUSTED_PROXY_CIDRS` (reserved; `accounts.parse_access_settings`), `SELFHOST_STATE_BACKEND=redis`, enabling `execute_typescript`; P7 only: `ACCOUNT_LINK_BY_VERIFIED_EMAIL` (reserved; `accounts.LINK_BY_EMAIL_ENV` does not exist on `uci-student`). All stay refused in v1.
+- Refused at startup today: `CANVAS_API_TOKEN`, `MCP_ACCESS_KEYS`, `ENTRA_AUTH_ENABLED`, `MCP_ALLOW_UNAUTHENTICATED`, `ACCESS_REQUEST_ENABLED` (`app.validate_selfhost_startup`), `FASTMCP_SSRF_TRUST_PROXY` (`app._ssrf_trust_proxy_enabled`), `TRUSTED_PROXY_CIDRS` (reserved; `accounts.parse_access_settings`), `SELFHOST_STATE_BACKEND=redis`, enabling `execute_typescript`; P7 only: `ACCOUNT_LINK_BY_VERIFIED_EMAIL` (reserved; `accounts.LINK_BY_EMAIL_ENV` does not exist on `selfhost`). All stay refused in v1.
 - No admin-editable server configuration exists today. v1 adds it (V1-DESIGN 5).
 
 ---
@@ -325,7 +331,7 @@ Repository text:
 Process:
 - Every self-hosted change passes {dev, locked} x {SQLite, PostgreSQL}.
 - Every user-visible change gets a CHANGELOG `[Unreleased]` entry; every new setting goes into `env.example` and `deploy/selfhost/README.md`.
-- Pushing `uci-student` publishes `:edge`; do not push half-finished work there. v1 lives on `feature/v1-consolidation` until it is complete.
+- Pushing `selfhost` publishes `:edge`; do not push half-finished work there. v1 lives on `feature/v1-consolidation` until it is complete.
 - Every new feature is built once, in the React UI and `/api/v1` (D5).
 
 ---
@@ -357,12 +363,12 @@ Owner decisions are authoritative. A later row supersedes an earlier one where i
 | 2026-10-11 | D3: Routes `/auth/login`, `/auth/login/{provider}`, `/auth/callback/{provider}` (Entra: `/auth/callback/entra`), per RFC 9700 section 4.4.2.2; JSON API moves to `/api/v1`; `/account` is the React UI | V1-DESIGN 3 |
 | 2026-10-11 | D4: Squash all revisions into one clean v1 baseline designed for extensibility and performance | V1-DESIGN 4 |
 | 2026-10-11 | D5: The React UI becomes the ONLY account UI; legacy server-rendered pages are removed (V1-DESIGN step 2 is mandatory); every new feature is built once | answers the former V1-DESIGN open question 1 and Q-UI |
-| 2026-10-11 | D6: Featured schools come only from the admin panel; the list starts empty (no preset, not UCI, not UBC); `CANVAS_FEATURED_SCHOOLS` is removed | V1-DESIGN 5. V1-DESIGN also gives the same code path a headless `token_admin schools` twin (audited as operator); it adds no other source, and the owner may drop it |
+| 2026-10-11 | D6: Featured schools come only from the admin panel; the list starts empty (no preset institution); `CANVAS_FEATURED_SCHOOLS` is removed | V1-DESIGN 5. V1-DESIGN also gives the same code path a headless `token_admin schools` twin (audited as operator); it adds no other source, and the owner may drop it |
 | 2026-10-11 | D7: The school directory search switch is admin-editable, ON by default; `CANVAS_SCHOOL_SEARCH` is removed | supersedes the earlier "keep search env-only" recommendation (Q-R2-4) |
 | 2026-10-11 | D8: Custom sign-in method names: one name per method, shared by English and Chinese; editable by the owner in the admin panel (not hardcoded, not env-only) | answers Q-R1-1 and the former V1-DESIGN open question 3; `OIDC_<SLUG>_DISPLAY_NAME` removed; V1-DESIGN also offers `token_admin providers rename` as a twin of the panel |
 | 2026-10-11 | D9: Rename now: `MCP_AUTH_MODE=entra-oauth` -> `MCP_AUTH_MODE=selfhost`; `ENTRA_API_SCOPE` -> `MCP_SCOPE` (default value `Canvas.Access` kept); old names refused at startup with a message naming the replacement | answers the former V1-DESIGN open question 2; done in V1-DESIGN step 1 |
 | 2026-10-11 | D10: Custody acknowledgement before a Canvas token is enrolled: a notice (the operator can technically decrypt stored tokens; create tokens with an expiry; how to revoke in Canvas and delete here) plus a REQUIRED checkbox; recorded server-side with time and notice version; a changed notice version requires a new acknowledgement | answers Q-CUST; 6.4 |
-| 2026-10-11 | D11: Repo docs and nginx/Caddy examples use neutral examples (`mcp.example.com`, `canvas.example.edu`) instead of the owner's real domain and UCI's Canvas host | answers Q-README; 6.5 |
+| 2026-10-11 | D11: Repo docs and nginx/Caddy examples use neutral examples (`mcp.example.com`, `canvas.example.edu`) instead of the owner's real domain and the former school-specific Canvas host | answers Q-README; 6.5 |
 | 2026-10-11 | D12: Keep the name canvas-mcp; state clearly that this is an independent fork of `vishalsachdev/canvas-mcp`, not endorsed by upstream; only small core improvements go upstream | 6.5 |
 | 2026-10-11 | D13: Canvas OAuth (institutional Developer Key) is rejected for now and only reserved | reserved schema and routes in V1-DESIGN 4.14 |
 | 2026-10-11 | D14: Stay on Python + React/TypeScript; MUI 9 stays the UI library | V1-DESIGN 1.1 |
@@ -416,7 +422,7 @@ Answered (kept for the identifiers that other documents cite):
 
 ### 6.1 [B0] Independent review and merge of P7; upstream sync
 
-- **Goal:** `feature/p7-login-providers` reviewed independently, merged into `uci-student`, then `origin/main` merged in.
+- **Goal:** `feature/p7-login-providers` reviewed independently, merged into `selfhost`, then `origin/main` merged in.
 - **Why:** v1 starts on top of P7 (V1-DESIGN 6.0); building v1 first would make P7 a rewrite.
 - **Current state:** HEAD `53b86dd`, clean, not pushed. The last fix round (`53b86dd`, on top of `ae015d5`) changed 12 files (+400/-51) and passed the full test matrix, but has NOT been independently reviewed. Every earlier review round found new owner-recovery edge cases, so treat this one as unreviewed code. What `53b86dd` claims to fix:
   - F1: a bootstrap owner, or an owner re-sourced to bootstrap or operator, whose account the access rules no longer admit kept `admitted_via = "rules"`, got one session, and was then denied while still counting as a usable owner. `decide()` now sets `admitted_via` to `bootstrap` when the bootstrap raises, re-sources or admits an active account that was not personally admitted; `_apply_role` writes and audits it; `promote_owner` does the same (`operator`) when it re-sources an unusable owner. A plain promotion is unchanged.
@@ -424,12 +430,12 @@ Answered (kept for the identifiers that other documents cite):
   - F3: an Entra-only bootstrap admitted while rules deny with zero owners (differed from base). Not named in the `53b86dd` message; the reviewer must confirm its state (touched in `accounts.py`, `app.py`, `tests/selfhost/login/test_bootstrap_startup.py` in `ae015d5` or earlier; unverified).
   - F4: a re-source is recorded as `owner_re_sourced` instead of `owner_gained`; the audited `unusable_owners` count no longer includes the account itself.
 - **Steps:**
-  1. Independent review by someone (or an agent) who did not write the fix rounds. Scope: the diff `uci-student..53b86dd`, with depth on `ae015d5..53b86dd`. Focus: every path that can leave zero usable owners or lock an owner out (bootstrap, re-source, `admitted_via`, rules that stop admitting, unlink, disable, demote, startup refusal, `token_admin` with a differing environment). Each finding needs a failing-before/passing-after test.
+  1. Independent review by someone (or an agent) who did not write the fix rounds. Scope: the diff `selfhost..53b86dd`, with depth on `ae015d5..53b86dd`. Focus: every path that can leave zero usable owners or lock an owner out (bootstrap, re-source, `admitted_via`, rules that stop admitting, unlink, disable, demote, startup refusal, `token_admin` with a differing environment). Each finding needs a failing-before/passing-after test.
   2. If the review finds anything: fix on the branch, rerun the full matrix, and review again (at least the new diff). Repeat until a round finds nothing.
   3. Full matrix (2.4), web checks, `test_english_only.py`, closing-keyword tests, `test_course_cache_isolation.py` unchanged, `uv lock --check`.
-  4. `git checkout uci-student && git merge --ff-only feature/p7-login-providers` (if `uci-student` moved, use a merge commit and expect CHANGELOG conflicts).
-  5. Push `fork uci-student`; confirm `canvas-mcp-testing.yml` and `selfhost-image.yml` (incl. the smoke test) are green.
-  6. Upstream sync (7.2). The local `origin/main` ref is 7 commits ahead of `uci-student`: `d2de3af` (#486 docs: Canvas OAuth scope inventory, `tools/oauth/*`), `6111789` (#463 claude-code-action bump), `4ec9dbb` (#453 @types/node bump), and the triage commits `5cef947`, `615aa2e`, `156c58c`, `63f4222` (#492, `internal/issue-triage/2026-10-11.md`). The combined diff touches no selfhost file (`.github/workflows/claude*.yml`, `weekly-maintenance.yml`, `package*.json`, `tools/`, `internal/issue-triage/`). Fetch first; more may have landed.
+  4. `git checkout selfhost && git merge --ff-only feature/p7-login-providers` (if `selfhost` moved, use a merge commit and expect CHANGELOG conflicts).
+  5. Push `fork selfhost`; confirm `canvas-mcp-testing.yml` and `selfhost-image.yml` (incl. the smoke test) are green.
+  6. Upstream sync (7.2). The local `origin/main` ref is 7 commits ahead of `selfhost`: `d2de3af` (#486 docs: Canvas OAuth scope inventory, `tools/oauth/*`), `6111789` (#463 claude-code-action bump), `4ec9dbb` (#453 @types/node bump), and the triage commits `5cef947`, `615aa2e`, `156c58c`, `63f4222` (#492, `internal/issue-triage/2026-10-11.md`). The combined diff touches no selfhost file (`.github/workflows/claude*.yml`, `weekly-maintenance.yml`, `package*.json`, `tools/`, `internal/issue-triage/`). Fetch first; more may have landed.
 - **Acceptance:**
   - [ ] An independent review round with no open findings; F1-F4 each covered by a test that fails on `ae015d5` (or the base) and passes after.
   - [ ] Full matrix green; CI green on the merge commit; image smoke test green.
@@ -443,7 +449,7 @@ Answered (kept for the identifiers that other documents cite):
 The former 6.1a design (a `server_settings` JSON table in a separate Alembic revision `0004_server_settings`, per-row versions, a 5 s TTL cache, env-seeded lists) is SUPERSEDED and deleted. The authoritative design is V1-DESIGN; this item only sequences it and records how the owner's decisions apply. Do not duplicate the design here.
 
 - **Prerequisites (V1-DESIGN 6.0):** 6.1 done; branch `feature/v1-consolidation` in `.worktrees/v1`; the former V1-DESIGN open questions are answered (D5, D8, D9), so no step is conditional.
-- **One step (D1, V1-DESIGN 6.0):** steps 1 to 8 are an order of work inside one consolidation, not releases. Their pull requests target `feature/v1-consolidation`, which merges into `uci-student` once, when the step 8 release gate is green. No aliases, shims or transition releases.
+- **One step (D1, V1-DESIGN 6.0):** steps 1 to 8 are an order of work inside one consolidation, not releases. Their pull requests target `feature/v1-consolidation`, which merges into `selfhost` once, when the step 8 release gate is green. No aliases, shims or transition releases.
 - **Test matrix for every step:** V1-DESIGN 6.1.
 - **Steps (V1-DESIGN section 6):**
 
@@ -545,7 +551,7 @@ Former R2. SUPERSEDED parts: the env seed and "Use environment list" (`DELETE`),
 
 - **Goal:** readers immediately see this is an independent fork; no fork-owned doc or example names the owner's real domain or a real school's Canvas host.
 - **Where it is specified:** V1-DESIGN step 8 ("Neutral examples (D11)", "Fork statement (D12)", the host-allowlist test). Do it there, in the same pass as the route and settings doc changes, so the proxy examples are edited once.
-- **Current state:** `README.md` is upstream's; self-hosting appears at ~line 30, 308 (custody), 316. The owner's production domain appears in `deploy/selfhost/README.md`, `nginx.conf.example`, `Caddyfile.example`, `tests/test_selfhost_docs.py` (5 lines) and `proposals/selfhost-pilot/stage-a-appendix.md` (1); `deploy/selfhost/README.md` also uses UCI's Canvas host (line 5 and ~63); counts at P7 are in V1-DESIGN step 8. Locate with `git grep -n -i -e uci.edu -e <owner domain>` at the merge commit.
+- **Current state:** `README.md` is upstream's; self-hosting appears at ~line 30, 308 (custody), 316. The owner's production domain appears in `deploy/selfhost/README.md`, `nginx.conf.example`, `Caddyfile.example`, `tests/test_selfhost_docs.py` (5 lines) and `proposals/selfhost-pilot/stage-a-appendix.md` (1); `deploy/selfhost/README.md` also uses the former school-specific Canvas host (line 5 and ~63); counts at P7 are in V1-DESIGN step 8. Locate with `git grep -n -i -e example.edu -e <owner domain>` at the merge commit.
 - **Design (summary of V1-DESIGN step 8, plus fork-level items it does not cover):**
   - D11: `mcp.example.com` for the server and `canvas.example.edu` for a school in `deploy/selfhost/*`, `web/README.md` and the fork-owned docs; the docs-test pins that contain the real domain are rewritten (the new host-allowlist test lists allowed hosts, so it never contains the real domain). The root `README.md` is upstream text and keeps its own hosts. `proposals/` files are history (V1-DESIGN 2.2); default: replace the hostname there too.
   - D12: the first paragraph of `deploy/selfhost/README.md` states the independent fork of `vishalsachdev/canvas-mcp`, not endorsed by upstream, only small core improvements offered upstream. Recommended: the same one-line notice under the title of the root `README.md`, with where to report issues (the fork's tracker) and a link to `deploy/selfhost/README.md`. On #484 the maintainer said the full stack stays out of upstream; say nothing that implies otherwise.
@@ -585,11 +591,11 @@ Keep every upstream change independent of the fork's hosting stack, one concern 
 - **#489** (opened by the maintainer 2026-10-11, labels bug, security) "Audit caller boundaries in HTTP course-policy and discussion caches". Acceptance criteria: two HTTP credentials, same course id, different outcomes; both caller orders, concurrent calls and credential changes; a cached denial must not poison another caller and a cached verdict must not skip caller-specific checks; audit the discussion REST availability hints (`tools/discussions.py` `_unservable_topics`, keyed by `(prefix, topic_id)`, ~391-440 on `origin/main`) under two callers; use the request-local boundary; preserve stdio and #480; verify forbidden side effects and outgoing requests, not only response text; anonymization map sharing is assessed separately (out of scope here).
 - **Decision (Q-UP-489, 2026-10-11): option C, both A and B.** Work in progress at the time of writing: A as new commits on the #491 branch (worktree `.worktrees/up-policy`), B on branch `test/discussion-hint-caller-boundary` from `origin/main` (worktree `.worktrees/up-discussions`). Check `gh pr view 491` and the branch before continuing. The options as originally considered:
   - A. Strengthen #491 to meet the course-policy half of #489: add both caller orders, concurrent calls, a credential change between calls, "cached denial does not poison", "cached verdict does not skip caller checks", and assertions on outgoing requests (respx call lists) and side effects, not only response text; keep stdio and #480 behaviour pinned. Push to the same branch; say in a PR comment what was added and what was not verified.
-  - B. A second upstream PR for the discussion half: a regression test with two HTTP callers sharing `_unservable_topics` (both orders, concurrency, credential change; outgoing requests asserted), then the smallest fix that keys or bypasses the hint per request-local boundary. Branch from `origin/main` (7.1), not from `uci-student`.
+  - B. A second upstream PR for the discussion half: a regression test with two HTTP callers sharing `_unservable_topics` (both orders, concurrency, credential change; outgoing requests asserted), then the smallest fix that keys or bypasses the hint per request-local boundary. Branch from `origin/main` (7.1), not from `selfhost`.
   - C. Both A and B.
   - D. Neither: leave #489 to the maintainer; #491 stays as is.
   - For any option, if upstream `main` moves, rebase only on conflict; answer review comments with facts, evidence and what was not verified; if asked about the red `claude-review` check, point to the secret restriction (upstream's triage already calls it an upstream workflow issue).
-- **After merge upstream:** the next sync (7.2) brings them into `uci-student`; check the fork has no duplicate copy.
+- **After merge upstream:** the next sync (7.2) brings them into `selfhost`; check the fork has no duplicate copy.
 - **Size:** S each (A, B).
 
 ### 6.8 [PROP] Proposals update: gateway evaluation and Stage A status
@@ -612,11 +618,11 @@ Keep every upstream change independent of the fork's hosting stack, one concern 
 
 ### 6.10 [REL] Beta release
 
-- **When:** after V1-DESIGN step 8 and the live checks of 6.12 (the first v1 tag is gated on them). Nothing is deployed (D1), so no tag is needed between B0 and v1; staging can run `:edge` or a digest from a `uci-student` push. The owner may still tag an earlier beta.
-- **Name:** `v<upstream x.y.z>-uci.1-beta.<n>`; today that is `v1.14.0-uci.1-beta.3` unless the upstream version moved with the sync.
+- **When:** after V1-DESIGN step 8 and the live checks of 6.12 (the first v1 tag is gated on them). Nothing is deployed (D1), so no tag is needed between B0 and v1; staging can run `:edge` or a digest from a `selfhost` push. The owner may still tag an earlier beta.
+- **Name:** `v<upstream x.y.z>-beta.<n>`; today that is `v1.14.0-beta.3` unless the upstream version moved with the sync.
 - **Steps:**
   1. CHANGELOG `[Unreleased]` covers all user-visible changes, incl. the "v1 consolidation (breaking)" entry.
-  2. CI green on the exact commit of `uci-student`.
+  2. CI green on the exact commit of `selfhost`.
   3. `git tag -a <tag> -m "<tag>: <summary> (beta)"`.
   4. `git push fork <tag>` (in the owner's clone `origin` is upstream; never push the tag there).
   5. Watch `selfhost-image.yml`; record the multi-arch index digest.
@@ -665,7 +671,7 @@ None of these has been done. They gate the first v1 tag (V1-DESIGN 2.4, step 8).
 
 ### 7.1 Sending a small PR upstream
 
-1. `git fetch origin && git worktree add .worktrees/up-<topic> -b fix/<topic> origin/main` (never from `uci-student`; no selfhost, web or PostgreSQL code).
+1. `git fetch origin && git worktree add .worktrees/up-<topic> -b fix/<topic> origin/main` (never from `selfhost`; no selfhost, web or PostgreSQL code).
 2. One concern; minimal diff; regression test that fails before and passes after. Do not touch `tests/security/test_course_cache_isolation.py`.
 3. Run what upstream CI runs: `ruff check src/ tests/`, `mypy src/` (CI runs it on Linux with no `--platform` flag; on Windows add `--platform linux` yourself to match), `pytest tests/ -q`.
 4. PR body: `## What` / `## Why` / `## Tests` / `## Scope` (audits: summary, scope and method, findings per mode, fix, cost, what tests pin, out of scope, checks). State evidence and what was not verified; report test counts honestly, including unrelated failures. Reference "Part of the staged discussion in #484" or the relevant issue without a closing keyword. No attribution.
@@ -674,12 +680,12 @@ None of these has been done. They gate the first v1 tag (V1-DESIGN 2.4, step 8).
 
 ### 7.2 Syncing upstream into the fork
 
-1. `git fetch origin`; `git rev-list --count uci-student..origin/main` (7 at snapshot, before fetching).
-2. On a clean `uci-student` (or a branch from it): `git merge origin/main -m "Merge upstream main (YYYY-MM-DD, <topic>) into uci-student"`. Real merge commits, no rebase.
+1. `git fetch origin`; `git rev-list --count selfhost..origin/main` (7 at snapshot, before fetching).
+2. On a clean `selfhost` (or a branch from it): `git merge origin/main -m "Merge upstream main (YYYY-MM-DD, <topic>) into selfhost"`. Real merge commits, no rebase.
 3. Conflicts: take upstream as the base and re-apply fork hooks (principal-keyed course cache in `core/cache.py`, `tool_policy.py`, `untrusted_content.py` additions, role counts, docs). For big merges, record per-file decisions in the commit body (see `ab6450b`). Regenerate `uv.lock` with `uv lock` instead of hand-merging.
 4. Recompute tool counts if the registry changed; full matrix; ruff, mypy, `uv lock --check`; `test_course_cache_isolation.py` identical to upstream.
-5. `git push fork uci-student` (publishes `:edge`).
-6. During v1, merge `uci-student` into `feature/v1-consolidation` after each sync rather than letting the branch drift.
+5. `git push fork selfhost` (publishes `:edge`).
+6. During v1, merge `selfhost` into `feature/v1-consolidation` after each sync rather than letting the branch drift.
 
 ### 7.3 What the maintainer expects (from #484, 2026-10-10, and #489, 2026-10-11)
 
@@ -709,8 +715,8 @@ These gates were for an upstream-blessed pilot. The owner's deployment does not 
 
 Reference: `deploy/selfhost/README.md` (do not duplicate it).
 - Tag format `v<x.y.z>-uci.<n>[-suffix]`, regex `^[0-9]+\.[0-9]+\.[0-9]+-uci\.[0-9]+(-[0-9A-Za-z.]+)?$` (enforced in the `meta` job). `x.y.z` = the upstream version synced (`pyproject.toml` 1.14.0).
-- `selfhost-image.yml`: triggers on push to `uci-student` (paths-ignore for markdown/docs/tests/examples), tags `v*-uci.*` (always build), manual dispatch; no pull_request trigger; jobs only in `KKazuhaK/canvas-mcp`; only `GITHUB_TOKEN`. Jobs: `meta`; `build` (native amd64 + arm64, builds `Dockerfile.selfhost`, runs `deploy/selfhost/smoke-test.sh`, pushes by digest only after the smoke test); `publish` (multi-arch index, annotations, provenance attestation). Policy pinned by `tests/security/test_selfhost_workflow.py`; unchanged by v1 (the smoke test's content changes, V1-DESIGN 3.8).
-- Image `ghcr.io/kkazuhak/canvas-mcp` channels: `:edge` every `uci-student` push; `:<version>` per tag; `:beta` every tag; `:latest` stable tags only (no suffix). The stable tag `v1.13.0-uci.1` exists and its image run succeeded (run 37572192539, 2026-10-07), so `:latest` very probably points at that old image (unverified: the registry was not queried); every other tag is a `-beta.N` pre-release. The deployment README and `test_selfhost_docs.py` still describe `:latest` as missing (stale; 6.11).
+- `selfhost-image.yml`: triggers on push to `selfhost` (paths-ignore for markdown/docs/tests/examples), tags `v*-uci.*` (always build), manual dispatch; no pull_request trigger; jobs only in `KKazuhaK/canvas-mcp`; only `GITHUB_TOKEN`. Jobs: `meta`; `build` (native amd64 + arm64, builds `Dockerfile.selfhost`, runs `deploy/selfhost/smoke-test.sh`, pushes by digest only after the smoke test); `publish` (multi-arch index, annotations, provenance attestation). Policy pinned by `tests/security/test_selfhost_workflow.py`; unchanged by v1 (the smoke test's content changes, V1-DESIGN 3.8).
+- Image `ghcr.io/kkazuhak/canvas-mcp` channels: `:edge` every `selfhost` push; `:<version>` per tag; `:beta` every tag; `:latest` stable tags only (no suffix). The stable tag `v1.13.0-uci.1` exists and its image run succeeded (run 37572192539, 2026-10-07), so `:latest` very probably points at that old image (unverified: the registry was not queried); every other tag is a `-beta.N` pre-release. The deployment README and `test_selfhost_docs.py` still describe `:latest` as missing (stale; 6.11).
 - Upgrade path: pin a version or digest; `docker compose pull && docker compose up -d`; migrations run per `DATABASE_AUTO_MIGRATE` or `token_admin db upgrade`; an older image refuses a too-new database, so roll back by restoring the backup, not by downgrading the image alone. v1 refuses any pre-v1 database (nothing is deployed, so start fresh). After v1, expand-only releases allow an application rollback without a restore (V1-DESIGN 4.12).
 - `create-release.yml` fires on `v*` tags but its jobs require `vishalsachdev/canvas-mcp`, so nothing happens in the fork.
 
@@ -757,7 +763,7 @@ Design documents:
   - `gateway-evaluation-draft.md`: gateway vs portal (English; to be copied, 6.8).
 
 Commits:
-- `71602e6` `uci-student` HEAD (merge upstream 2026-10-10); `ab6450b` merge upstream v1.14.0 (per-file resolution notes); `ef70fb4`, `ba9e2e3`, `83a8d6f`, `be810b2` earlier syncs.
+- `71602e6` `selfhost` HEAD (merge upstream 2026-10-10); `ab6450b` merge upstream v1.14.0 (per-file resolution notes); `ef70fb4`, `ba9e2e3`, `83a8d6f`, `be810b2` earlier syncs.
 - `51ed351` revocation as authorization; `d91e7ca` credential generation; `3cf72ad`, `4e27d1c` dependencies and custody; `5b89477` request-local course state default; `40d4b4e` codes bound to the session epoch.
 - `f32b9d3` state described by Stage A; `d40a2e1` Stage A docs as posted.
 - P7: `53b86dd` (HEAD, unreviewed fix round), `ae015d5`, `ac40be7`, `11575c5`, `c736e0d`.

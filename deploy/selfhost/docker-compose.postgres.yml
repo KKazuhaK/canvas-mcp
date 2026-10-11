@@ -3,7 +3,7 @@
 #
 # Use it as an override on top of docker-compose.yml:
 #
-#   curl -fsSLO https://raw.githubusercontent.com/KKazuhaK/canvas-mcp/uci-student/deploy/selfhost/docker-compose.postgres.yml
+#   curl -fsSLO https://raw.githubusercontent.com/KKazuhaK/canvas-mcp/selfhost/deploy/selfhost/docker-compose.postgres.yml
 #   # In .env, add (see env.example, "Database"):
 #   #   POSTGRES_PASSWORD=<a long random value; openssl rand -hex 32>
 #   #   DATABASE_URL=postgresql+psycopg://canvas:<the same password>@postgres:5432/canvas_mcp

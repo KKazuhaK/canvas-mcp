@@ -3,7 +3,7 @@ title: "Stage A appendix: evidence for the self-hosted multi-user pilot"
 status: historical record; upstream pilot not pursued; G1 and G2 unmet
 issue: vishalsachdev/canvas-mcp#484
 main-document: stage-a-main.md
-implementation: KKazuhaK/canvas-mcp, branch uci-student at f32b9d3, pushed and CI-green. 76aa7ba merges upstream main 8f1b0ae (3170ca6 plus one README commit) into uci-student; G3 and G4 are 76aa7ba..c8a4a28; P3 (the optional PostgreSQL data layer) is c8a4a28..3dd0954; the restart test (bf703a6), the tool switch SELFHOST_DISABLED_TOOLS (ff230fa) and a test-class rename (f32b9d3) follow.
+implementation: KKazuhaK/canvas-mcp, branch selfhost at f32b9d3, pushed and CI-green. 76aa7ba merges upstream main 8f1b0ae (3170ca6 plus one README commit) into selfhost; G3 and G4 are 76aa7ba..c8a4a28; P3 (the optional PostgreSQL data layer) is c8a4a28..3dd0954; the restart test (bf703a6), the tool switch SELFHOST_DISABLED_TOOLS (ff230fa) and a test-class rename (f32b9d3) follow.
 date: 2026-10-09
 ---
 
@@ -157,7 +157,7 @@ SELFHOST_DISABLED_TOOLS=read_course_file_text
 ### C.2 Consent and authority
 
 - **Owner and users.** The operator and pilot owner is the fork author (@KKazuhaK). The proposed test users are the author plus at most five named students who reply "I agree" to the text below. Names are not posted publicly; the count is. The author using the fork alone, with only the author's own accounts, is not the pilot and involves no other person's credentials. The pilot starts with the first other user, only after G1 and G2.
-- **Canvas.** One institution's Canvas, to be named on #484 before anyone else enrolls (the README examples use `canvas.eee.uci.edu`). This document records **no institutional approval** for storing student personal access tokens on a third-party server. G2 blocks other users until that institution's position, and its rules on education records (FERPA in the US), are recorded.
+- **Canvas.** One institution's Canvas, to be named on #484 before anyone else enrolls (the README examples use `canvas.example.edu`). This document records **no institutional approval** for storing student personal access tokens on a third-party server. G2 blocks other users until that institution's position, and its rules on education records (FERPA in the US), are recorded.
 - **Third-party content.** Student-role tools return content from people who did not consent: classmates' discussion posts, peer-review material, instructor messages and announcements. The server is not designed to write Canvas content to disk: the container's root filesystem is read-only and `/tmp` is a tmpfs (`deploy/selfhost/docker-compose.yml`, checked by `test_selfhost_compose.py::test_container_is_hardened`), and the hosted file-write tool is removed. The `/data` volume is writable (token store, OAuth state, audit log), and no test shows that no Canvas content reaches it. Anonymization is on, but whether it covers all of this output is unverified. The consent text asks users not to share that content.
 - **Tenant.** The operator's tenant only, with "Assignment required = Yes" (README § 1.8). B2B guests are allowed only when the operator invites one individually and assigns the role (README § 1.9). There are no tenant-wide or self-service grants. Guest tokens are expected to carry the pilot tenant's `tid` (unverified live).
 
@@ -362,7 +362,7 @@ Trust zones T1 to T5 are as in the main document's diagram.
 
 ### G.1 Closed before the pilot (G3)
 
-Done on `uci-student` at `c8a4a28` (CI run 37913379074), and still green at `f32b9d3` (CI run 37919990444).
+Done on `selfhost` at `c8a4a28` (CI run 37913379074), and still green at `f32b9d3` (CI run 37919990444).
 
 - [x] `validate_selfhost_startup` refuses `FASTMCP_SSRF_TRUST_PROXY`. Commit `8d8ee28`.
 - [x] A test replays an MCP authorization code at `/token` and expects `invalid_grant`. Commit `1f3a97d`.
@@ -735,7 +735,7 @@ A docs drift test in `tests/test_selfhost_docs.py` pins the env.example entry an
 
 ## M. Commits and local verification
 
-`76aa7ba..f32b9d3` is **on `uci-student`, pushed**, and CI-green (run 37919990444; image run 37919990428). The G3 and G4 SHAs are unchanged. The restart test and the tool switch were verified locally on top of `c8a4a28` before P3, then pushed after P3 as `bf703a6` and `ff230fa`.
+`76aa7ba..f32b9d3` is **on `selfhost`, pushed**, and CI-green (run 37919990444; image run 37919990428). The G3 and G4 SHAs are unchanged. The restart test and the tool switch were verified locally on top of `c8a4a28` before P3, then pushed after P3 as `bf703a6` and `ff230fa`.
 
 | Commit | Subject | Gate |
 |---|---|---|

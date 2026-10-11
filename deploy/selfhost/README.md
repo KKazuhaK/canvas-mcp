@@ -284,7 +284,9 @@ image's public contract and refusal paths, and deletes its temporary resources.
 It does not authenticate a real IdP user or simulate a real client's long-lived
 refresh. Windows source checks alone do not prove the Linux image starts.
 
-Before a v1 tag, perform the handoff's staging gates: owner/member and Entra B2B
+The staging beta is published for acceptance, not as a compatibility claim.
+Before a stable release, production use or a compatibility claim, perform the
+handoff's staging gates: owner/member and Entra B2B
 guest sign-in; two users with separate Canvas credentials; two schools; all
 configured providers and identity-link conflicts; Claude client consent and
 refresh; account/grant/token revocation; key rotation with old access/refresh

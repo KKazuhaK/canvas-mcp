@@ -2,7 +2,7 @@
 # canvas-mcp self-hosted (Entra, multi-user): interactively generate the .env file.
 #
 # Run it in the deployment directory (for example /opt/canvas-mcp):
-#   curl -fsSLO https://raw.githubusercontent.com/KKazuhaK/canvas-mcp/uci-student/deploy/selfhost/setup-env.sh
+#   curl -fsSLO https://raw.githubusercontent.com/KKazuhaK/canvas-mcp/selfhost/deploy/selfhost/setup-env.sh
 #   bash setup-env.sh
 # Download it to a file first and run it with bash; do not use curl ... | bash (standard
 # input is reserved for the client secret).

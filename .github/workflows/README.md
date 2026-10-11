@@ -80,8 +80,8 @@ gh workflow run create-release.yml -f tag_name=v1.0.7-test
 **Purpose**: Runs the test suite.
 
 **Triggers**:
-- Pull requests to `main` and `uci-student`
-- Push to `main`, `development`, `uci-student`, `feature/**`, `fix/**` and `ci/**`
+- Pull requests to `main` and `selfhost`
+- Push to `main`, `development`, `selfhost`, `feature/**`, `fix/**` and `ci/**`
 - Manual runs (`workflow_dispatch`)
 
 **What it does**:

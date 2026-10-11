@@ -62,8 +62,8 @@ def test_ordinary_text_is_left_alone(text):
 
 
 def test_emails_are_removed_only_when_asked():
-    assert scrub_secrets("user a.b@uci.edu failed") == "user a.b@uci.edu failed"
-    assert "uci.edu" not in scrub_secrets("user a.b@uci.edu failed", emails=True)
+    assert scrub_secrets("user a.b@example.edu failed") == "user a.b@example.edu failed"
+    assert "example.edu" not in scrub_secrets("user a.b@example.edu failed", emails=True)
 
 
 def test_strip_query_drops_query_and_fragment():
@@ -127,11 +127,11 @@ class TestAuditEvents:
     def test_error_text_is_scrubbed_and_cut_short(self, lines):
         audit.log_data_access(
             "GET", "/courses/1", "error",
-            f"HTTPStatusError for https://u:pw@canvas/api?access_token=zzzzzzzz {JWT} a.b@uci.edu " + "x" * 1000,
+            f"HTTPStatusError for https://u:pw@canvas/api?access_token=zzzzzzzz {JWT} a.b@example.edu " + "x" * 1000,
         )
         (line,) = lines
         event = json.loads(line)
-        assert JWT not in line and "zzzzzzzz" not in line and "pw@" not in line and "uci.edu" not in line
+        assert JWT not in line and "zzzzzzzz" not in line and "pw@" not in line and "example.edu" not in line
         assert len(event["error"]) <= 300
 
     def test_closed_set_codes_pass_through_unchanged(self, lines):

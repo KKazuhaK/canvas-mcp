@@ -7,7 +7,7 @@ This is a working checkpoint, not a deployment or release approval. Follow
 
 The native runtime, required React UI, database-owned configuration, custody,
 maintenance, pagination, reserved contracts, operator/Docker guides, historical
-proposals and optional pilot profile are merged into `uci-student` through
+proposals and optional pilot profile are merged into `selfhost` through
 [fork PR #5](https://github.com/KKazuhaK/canvas-mcp/pull/5), at
 `b739665ef0fc8e146e0c4d13aead964efb322d66` (2026-10-11).
 Upgrade, transfer, backup and compatibility code lives only in
@@ -25,8 +25,11 @@ below. GHCR index annotations and each architecture's image labels independently
 confirm the merge commit. The stable `latest` digest remains unchanged.
 
 The owner supplies staging and reverse-proxy deployment; real IdP/B2B/client,
-proxy and multiday refresh acceptance still gate the first v1 beta tag. Upstream
-PRs #490, #491 and #494 await maintainer review. No v1 release has been published,
+proxy and multiday refresh acceptance remain required. The owner approved
+`v1.14.0-beta.3` for staging before those live checks, superseding the initial
+first-tag timing gate. The development/publishing branch is `selfhost`, while
+`main` remains the upstream mirror. New version names carry no school suffix.
+Upstream PRs #490, #491 and #494 await maintainer review. The new beta is being prepared,
 and no real-client compatibility row is marked passed.
 
 ## Deployable staging image
@@ -41,7 +44,7 @@ CANVAS_MCP_IMAGE=ghcr.io/kkazuhak/canvas-mcp@sha256:2c777d4f957bda7bb0e4f4b5718e
 
 - Source: `b739665ef0fc8e146e0c4d13aead964efb322d66`.
 - Registry version: `edge-b739665`; platforms: `linux/amd64`, `linux/arm64`.
-- Stable image left in place: `1.13.0-uci.1`, digest
+- The pre-v1 stable image is left in place at digest
   `sha256:9eeeaea8365ecad39ea02704b867f2dfae03521c229938ce78e8937fcbf1cdfb`.
 - Final reviewed CI: locked SQLite 8,026 passed / 64 skipped; Windows
   8,024 passed / 66 skipped; each PostgreSQL dependency set 4,211 passed /
@@ -53,7 +56,9 @@ client versions, timestamps and secret-free evidence in the README's tested-clie
 table. Follow its complete staging checklist, including Entra B2B guests,
 separate users/schools, configured providers, custody, revocation and rotation,
 both persistence backends, proxy failure/log redaction and consecutive-day
-refresh. Keep the first v1 tag gated until these observations are complete.
+refresh. Keep production and client compatibility claims gated until these
+observations are complete; a stable release also requires them. Earlier branch labels below use the current name;
+commit IDs and historical release tags retain their original evidence.
 
 ## Historical checkpoints
 
@@ -64,7 +69,7 @@ later checkpoints; they are not the current status.
 ## Completed prerequisite
 
 P7 was independently reviewed, corrected and merged through fork PR #4. The
-fork main line is `uci-student` at `3926f04934dc56cfd1f025cb4f37fb4e1168fa0b`,
+fork main line is `selfhost` at `3926f04934dc56cfd1f025cb4f37fb4e1168fa0b`,
 including the upstream synchronization. Post-merge test workflow `38125252305`
 and self-host image workflow `38125252313` passed. See `B0-REVIEW.md` for review
 findings and validation. These images precede the v1 consolidation.

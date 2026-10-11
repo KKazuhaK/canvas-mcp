@@ -55,7 +55,8 @@ The reviewed multi-architecture staging image and its immutable digest are in
    its acknowledgement before storing a PAT. Each friend stores their own PAT
    and chooses their school; no server-wide Canvas token is configured.
 7. Complete [live acceptance](README.md#validate-before-publishing-a-v1-release)
-   before the first v1 tag. Record client versions, exact server commit/image
+   using the staging beta before a stable release, production use or compatibility claims.
+   Record client versions, exact server commit/image
    digest, date and results in the tested-client table. Exercise Entra B2B guest
    sign-in, two users/two schools, disable at the next MCP request, real consent
    and refresh across consecutive days, CIMD reachability, proxy limits and log
