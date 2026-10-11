@@ -123,7 +123,6 @@ class AuthzSettings:
     #: A replay of a just-used code or refresh token inside this window is a benign
     #: duplicate, not theft; 0 means strict.
     refresh_reuse_grace_s: int = DEFAULT_REFRESH_REUSE_GRACE_S
-    #: How long a grant's status (live, account active) is reused in this process.
     #: Resolve client ids that are URLs (Client ID Metadata Documents).
     cimd_enabled: bool = True
     cimd_fetch_timeout_s: int = DEFAULT_CIMD_FETCH_TIMEOUT_S

@@ -397,7 +397,7 @@ def _run_grants(args: argparse.Namespace, store: TokenStore) -> int:
         return EXIT_OK
     epoch = authz.bump_jwt_epoch()
     print(
-        f"rotated to epoch {epoch}: access tokens stop verifying within 30 s; "
+        f"rotated to epoch {epoch}: existing access tokens are refused on their next request; "
         "refresh tokens and grants are kept"
     )
     return EXIT_OK

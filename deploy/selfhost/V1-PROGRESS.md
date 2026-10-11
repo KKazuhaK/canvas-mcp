@@ -379,3 +379,37 @@ and the first v1 tag remain outstanding.
   remain gated on the owner's staging deployment.
 - Upgrade, compatibility, backup and database transfer code remains isolated
   in `db/migrations/`; its structural boundary checks pass on both backends.
+
+## Native authorization, React serving and provider navigation checkpoint
+
+- The entire authorization package passes on SQLite: 983 passed, 4 skips.
+  Locked PostgreSQL passes the authorization package plus migration boundary
+  checks: 989 passed, 2 external-network skips. This includes real MCP SDK
+  sessions, code/refresh replay, custody, request snapshots, native hash storage,
+  login-state consumption, operator commands and the PostgreSQL concurrency
+  gates. Its scratch server was stopped; the log contains no deadlock.
+- Native authorization and React static-serving/sign-in checks: SQLite 232
+  passed, 3 platform/backend skips; locked PostgreSQL 234 passed, 1 platform skip.
+  Failure responses expose closed redirect codes and never provider prose.
+- Startup configuration and metadata/code-epoch/CIMD checks: 208 passed,
+  2 external-network skips on each backend. Startup requires the sole built-in
+  authorization server; no removed mode, separate JWT secret, cached grant
+  standing or HTML fallback is restored. JWT rotation's CLI output now describes
+  refusal on the next request.
+- Provider callback order, bootstrap standing, external identity, configuration
+  and React chooser navigation checks: 199 passed on each backend. The locked
+  PostgreSQL scratch server was stopped after the run. HTML chooser,
+  language-toggle and identity-form assertions were retired with their removed
+  production surface; applicable protocol checks now use native React/API paths,
+  identity authorization stays covered by the native identity API suite, and
+  localized rendering/icons stay in the frontend suite.
+- Source/tests Ruff, formatting of changed Python files and Linux-target mypy
+  pass (83 source files). The latest completed read-only image verification at
+  `a856369` is [38149719136](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38149719136):
+  amd64 and arm64 builds and SQLite/PostgreSQL container smoke pass. No registry
+  image or release was published.
+- Whole self-host collection finds 3,841 tests with 8 remaining imports of
+  removed account interfaces. Other provider/account/operator regression ports
+  and the complete runtime matrix remain required. Focused and container green
+  results do not satisfy the full handoff; real IdP/guest/Claude/multiday gates
+  still follow the owner's deployment.

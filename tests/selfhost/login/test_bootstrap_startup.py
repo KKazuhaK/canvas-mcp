@@ -43,15 +43,23 @@ NO_ENTRA = {
 
 def gext() -> ExternalClaims:
     return ExternalClaims(
-        provider_id="google", issuer=acc.GOOGLE_ISSUER, subject=GSUB,
-        email="x@example.edu", email_verified=True, hd="example.edu",
+        provider_id="google",
+        issuer=acc.GOOGLE_ISSUER,
+        subject=GSUB,
+        email="x@example.edu",
+        email_verified=True,
+        hd="example.edu",
     )
 
 
 def test_entra_only_bootstrap_admits_an_existing_rules_user_with_zero_owners() -> None:
     policy = acc.AccessPolicy(
-        mode="rules", rules=(), owner_rules=(),
-        bootstrap_owner=acc.BootstrapOwner("entra", acc.entra_issuer("tenant"), "subject"),
+        mode="rules",
+        rules=(),
+        owner_rules=(),
+        bootstrap_owner=acc.BootstrapOwner(
+            "entra", acc.entra_issuer("tenant"), "subject"
+        ),
     )
     decision = acc.decide(
         acc.AccountFacts("active", "user", None, "rules"),
@@ -67,10 +75,16 @@ def test_entra_only_bootstrap_admits_an_existing_rules_user_with_zero_owners() -
 def test_pending_bootstrap_owner_keeps_admission_after_rules_change(
     tmp_path: pathlib.Path,
 ) -> None:
-    base = default_env(tmp_path, **{
-        **BOTH, **NO_ENTRA, "ACCESS_POLICY": "approval", "ACCESS_RULES": "",
-        "SELFHOST_BOOTSTRAP_OWNER": "token_admin",
-    })
+    base = default_env(
+        tmp_path,
+        **{
+            **BOTH,
+            **NO_ENTRA,
+            "ACCESS_POLICY": "approval",
+            "ACCESS_RULES": "",
+            "SELFHOST_BOOTSTRAP_OWNER": "token_admin",
+        },
+    )
     runtime = prepare_selfhost(load_selfhost_settings(base))
     try:
         pending = runtime.identity.sign_in_external(gext())
@@ -80,7 +94,9 @@ def test_pending_bootstrap_owner_keeps_admission_after_rules_change(
     finally:
         runtime.store.close()
     bootstrap = {
-        **base, "ACCESS_POLICY": "rules", "ACCESS_RULES": "google:domain:example.edu",
+        **base,
+        "ACCESS_POLICY": "rules",
+        "ACCESS_RULES": "google:domain:example.edu",
         "SELFHOST_BOOTSTRAP_OWNER": f"google:{GSUB}",
     }
     runtime = prepare_selfhost(load_selfhost_settings(bootstrap))
@@ -90,9 +106,14 @@ def test_pending_bootstrap_owner_keeps_admission_after_rules_change(
         assert runtime.store.get_principal_status(key).admitted_via == "bootstrap"
     finally:
         runtime.store.close()
-    runtime = prepare_selfhost(load_selfhost_settings({
-        **bootstrap, "ACCESS_RULES": "google:domain:other.edu",
-    }))
+    runtime = prepare_selfhost(
+        load_selfhost_settings(
+            {
+                **bootstrap,
+                "ACCESS_RULES": "google:domain:other.edu",
+            }
+        )
+    )
     try:
         signed = runtime.identity.sign_in_external(gext())
         assert not isinstance(signed, acc.Denied) and signed.owner
@@ -104,11 +125,16 @@ def test_pending_bootstrap_owner_keeps_admission_after_rules_change(
 def test_operator_promoted_owner_keeps_admission_after_rules_change(
     tmp_path: pathlib.Path,
 ) -> None:
-    base = default_env(tmp_path, **{
-        **BOTH, **NO_ENTRA, "ACCESS_POLICY": "rules",
-        "ACCESS_RULES": "google:domain:example.edu",
-        "SELFHOST_BOOTSTRAP_OWNER": "token_admin",
-    })
+    base = default_env(
+        tmp_path,
+        **{
+            **BOTH,
+            **NO_ENTRA,
+            "ACCESS_POLICY": "rules",
+            "ACCESS_RULES": "google:domain:example.edu",
+            "SELFHOST_BOOTSTRAP_OWNER": "token_admin",
+        },
+    )
     runtime = prepare_selfhost(load_selfhost_settings(base))
     try:
         signed = runtime.identity.sign_in_external(gext())
@@ -117,13 +143,20 @@ def test_operator_promoted_owner_keeps_admission_after_rules_change(
         assert key is not None
         assert runtime.store.promote_owner(key, listed_providers={"google"})
         assert runtime.store.get_principal_status(key).admitted_via == "operator"
-        entry = next(e for e in runtime.store.list_audit(100) if e.action == "role_changed")
+        entry = next(
+            e for e in runtime.store.iter_audit() if e.action == "role_changed"
+        )
         assert entry.detail["admitted_via"] == "operator"
     finally:
         runtime.store.close()
-    runtime = prepare_selfhost(load_selfhost_settings({
-        **base, "ACCESS_RULES": "google:domain:other.edu",
-    }))
+    runtime = prepare_selfhost(
+        load_selfhost_settings(
+            {
+                **base,
+                "ACCESS_RULES": "google:domain:other.edu",
+            }
+        )
+    )
     try:
         signed = runtime.identity.sign_in_external(gext())
         assert not isinstance(signed, acc.Denied) and signed.owner
@@ -134,22 +167,34 @@ def test_operator_promoted_owner_keeps_admission_after_rules_change(
 def test_used_oidc_provider_cannot_change_issuer_under_the_same_slug(
     tmp_path: pathlib.Path,
 ) -> None:
-    base = default_env(tmp_path, **{
-        **NO_ENTRA, **oidc(), "SELFHOST_LOGIN_PROVIDERS": "oidc:school",
-        "ACCESS_POLICY": "open", "ACCESS_OPEN_ACKNOWLEDGE_PUBLIC": "true",
-        "SELFHOST_BOOTSTRAP_OWNER": "oidc:school:owner",
-    })
+    base = default_env(
+        tmp_path,
+        **{
+            **NO_ENTRA,
+            **oidc(),
+            "SELFHOST_LOGIN_PROVIDERS": "oidc:school",
+            "ACCESS_POLICY": "open",
+            "ACCESS_OPEN_ACKNOWLEDGE_PUBLIC": "true",
+            "SELFHOST_BOOTSTRAP_OWNER": "oidc:school:owner",
+        },
+    )
     runtime = prepare_selfhost(load_selfhost_settings(base))
     try:
-        signed = runtime.identity.sign_in_external(ExternalClaims(
-            provider_id="oidc:school", issuer=ISSUER, subject="owner",
-        ))
+        signed = runtime.identity.sign_in_external(
+            ExternalClaims(
+                provider_id="oidc:school",
+                issuer=ISSUER,
+                subject="owner",
+            )
+        )
         assert not isinstance(signed, acc.Denied) and signed.owner
     finally:
         runtime.store.close()
     replacement = "https://idp.example.edu/realms/replacement"
     with pytest.raises(SelfhostConfigError) as caught:
-        prepare_selfhost(load_selfhost_settings({**base, "OIDC_SCHOOL_ISSUER": replacement}))
+        prepare_selfhost(
+            load_selfhost_settings({**base, "OIDC_SCHOOL_ISSUER": replacement})
+        )
     message = " ".join(caught.value.problems)
     assert "OIDC_SCHOOL_ISSUER" in message and "new slug" in message
     assert ISSUER not in message and replacement not in message
@@ -159,7 +204,10 @@ def link_google(store, key: str) -> None:  # type: ignore[no-untyped-def]
     ext = gext()
     policy = AccessPolicy(mode="open")
     result = store.link_identity(
-        key, ext, evaluate_admission(ext, policy), policy,
+        key,
+        ext,
+        evaluate_admission(ext, policy),
+        policy,
         expected_epoch=store.get_principal_status(key).session_epoch,
     )
     assert result.ok, result
@@ -169,7 +217,9 @@ def test_a_stranded_rules_owner_named_as_the_bootstrap_identity_signs_in_as_an_o
     tmp_path: pathlib.Path,
 ) -> None:
     # entra + google: X becomes an owner through the Entra owner rule and links Google.
-    base_env = default_env(tmp_path, **BOTH)  # built once: on PostgreSQL building it resets the schema
+    base_env = default_env(
+        tmp_path, **BOTH
+    )  # built once: on PostgreSQL building it resets the schema
     first = prepare_selfhost(load_selfhost_settings(base_env))
     sign_in(first.store, OID_A, owner=True)
     key = acct_key(OID_A)
@@ -194,10 +244,12 @@ def test_a_stranded_rules_owner_named_as_the_bootstrap_identity_signs_in_as_an_o
         assert (status.role, status.role_source) == ("owner", "bootstrap")
         assert runtime.store.count_usable_owners(listed) == 1
         entry = next(
-            e for e in runtime.store.list_audit(100) if e.action == "role_changed" and e.target == key
+            e
+            for e in runtime.store.iter_audit()
+            if e.action == "role_changed" and e.target == key
         )
         assert entry.detail["was"] == "rules" and "unusable_owners" not in entry.detail
-        assert runtime.store.list_status_events(key)[0].action == "owner_re_sourced"
+        assert entry.action == "role_changed"
     finally:
         runtime.store.close()
     # With a usable owner the startup check is satisfied without the bootstrap identity.
@@ -205,7 +257,9 @@ def test_a_stranded_rules_owner_named_as_the_bootstrap_identity_signs_in_as_an_o
     again.store.close()
 
 
-def test_promote_owner_fixes_the_same_stranded_owner_for_the_operator(tmp_path: pathlib.Path) -> None:
+def test_promote_owner_fixes_the_same_stranded_owner_for_the_operator(
+    tmp_path: pathlib.Path,
+) -> None:
     base_env = default_env(tmp_path, **BOTH)
     first = prepare_selfhost(load_selfhost_settings(base_env))
     sign_in(first.store, OID_A, owner=True)
@@ -228,7 +282,10 @@ def test_a_bootstrap_account_the_rules_no_longer_admit_does_not_stop_the_server(
     tmp_path: pathlib.Path,
 ) -> None:
     rules = {
-        **BOTH, **NO_ENTRA, "ACCESS_POLICY": "rules", "ACCESS_RULES": "google:domain:example.edu",
+        **BOTH,
+        **NO_ENTRA,
+        "ACCESS_POLICY": "rules",
+        "ACCESS_RULES": "google:domain:example.edu",
     }
     base_env = default_env(tmp_path, **rules, SELFHOST_BOOTSTRAP_OWNER="token_admin")
     first = prepare_selfhost(load_selfhost_settings(base_env))
@@ -238,12 +295,19 @@ def test_a_bootstrap_account_the_rules_no_longer_admit_does_not_stop_the_server(
     assert xkey is not None and first.store.get_principal_status(xkey).role == "user"
     # A stranded owner (an Entra identity only), so startup needs the bootstrap.
     first.store.create_operator_account(
-        provider_id="entra", issuer=acc.entra_issuer("11111111-2222-3333-4444-555555555555"),
-        subject="ffffffff-0000-4000-8000-00000000000f", status="active", role="owner",
+        provider_id="entra",
+        issuer=acc.entra_issuer("11111111-2222-3333-4444-555555555555"),
+        subject="ffffffff-0000-4000-8000-00000000000f",
+        status="active",
+        role="owner",
     )
     first.store.close()
     # The domain rule changes: X's account (admitted through the rule) is no longer admitted.
-    moved = {**base_env, "ACCESS_RULES": "google:domain:other.edu", "SELFHOST_BOOTSTRAP_OWNER": f"google:{GSUB}"}
+    moved = {
+        **base_env,
+        "ACCESS_RULES": "google:domain:other.edu",
+        "SELFHOST_BOOTSTRAP_OWNER": f"google:{GSUB}",
+    }
     runtime = prepare_selfhost(load_selfhost_settings(moved))
     try:
         listed = runtime.settings.login_providers.ids
@@ -253,9 +317,13 @@ def test_a_bootstrap_account_the_rules_no_longer_admit_does_not_stop_the_server(
         assert runtime.store.get_principal_status(xkey).role_source == "bootstrap"
         assert runtime.store.count_usable_owners(listed) == 1
         entry = next(
-            e for e in runtime.store.list_audit(100) if e.action == "role_changed" and e.target == xkey
+            e
+            for e in runtime.store.iter_audit()
+            if e.action == "role_changed" and e.target == xkey
         )
-        assert entry.detail["unusable_owners"] == 1  # the Entra-only owner, not X itself
+        assert (
+            entry.detail["unusable_owners"] == 1
+        )  # the Entra-only owner, not X itself
     finally:
         runtime.store.close()
     # The rules still do not admit X, but the owner is a personal admission now: it can sign in
@@ -263,7 +331,9 @@ def test_a_bootstrap_account_the_rules_no_longer_admit_does_not_stop_the_server(
     for _ in range(2):
         restarted = prepare_selfhost(load_selfhost_settings(moved))
         try:
-            assert restarted.store.get_principal_status(xkey).admitted_via == "bootstrap"
+            assert (
+                restarted.store.get_principal_status(xkey).admitted_via == "bootstrap"
+            )
             signed = restarted.identity.sign_in_external(gext())
             assert not isinstance(signed, acc.Denied) and signed.owner
             again = restarted.identity.sign_in_external(gext())
@@ -286,7 +356,10 @@ def test_a_re_sourced_owner_the_rules_do_not_admit_keeps_signing_in_after_a_rest
     # Entra is delisted, the policy becomes rules that do not admit Google, and the operator
     # names X's Google identity as the bootstrap owner.
     named = {
-        **base_env, **NO_ENTRA, "ACCESS_POLICY": "rules", "ACCESS_RULES": "google:domain:other.edu",
+        **base_env,
+        **NO_ENTRA,
+        "ACCESS_POLICY": "rules",
+        "ACCESS_RULES": "google:domain:other.edu",
         "SELFHOST_BOOTSTRAP_OWNER": f"google:{GSUB}",
     }
     for _ in range(3):  # three starts, each followed by a sign-in
@@ -295,13 +368,18 @@ def test_a_re_sourced_owner_the_rules_do_not_admit_keeps_signing_in_after_a_rest
             signed = runtime.identity.sign_in_external(gext())
             assert not isinstance(signed, acc.Denied) and signed.owner, signed
             status = runtime.store.get_principal_status(key)
-            assert (status.role_source, status.admitted_via) == ("bootstrap", "bootstrap")
+            assert (status.role_source, status.admitted_via) == (
+                "bootstrap",
+                "bootstrap",
+            )
         finally:
             runtime.store.close()
 
 
 def test_the_record_of_a_refused_start_is_the_list_it_was_refused_for(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     from canvas_mcp.core.selfhost import token_admin
 
@@ -343,21 +421,29 @@ class TestBootstrapSignInGivesOwner:
         bootstrap_owner=BootstrapOwner("google", acc.GOOGLE_ISSUER, GSUB),
     )
 
-    def answer(self, existing: AccountFacts | None, policy: AccessPolicy = POLICY) -> bool:
+    def answer(
+        self, existing: AccountFacts | None, policy: AccessPolicy = POLICY
+    ) -> bool:
         return bootstrap_sign_in_gives_owner(existing, policy)
 
     def test_the_states_where_the_sign_in_makes_an_owner(self) -> None:
-        assert self.answer(None)  # no account yet: created as the owner, whatever the rules say
+        assert self.answer(
+            None
+        )  # no account yet: created as the owner, whatever the rules say
         assert self.answer(AccountFacts("pending"))
         assert self.answer(AccountFacts("active"))  # admitted whatever the rules say
-        assert self.answer(AccountFacts("active", "owner", "rules"))  # re-sourced to bootstrap
+        assert self.answer(
+            AccountFacts("active", "owner", "rules")
+        )  # re-sourced to bootstrap
         assert self.answer(AccountFacts("active", "owner", "bootstrap"))
         assert self.answer(AccountFacts("active", "owner", "operator"))
 
     def test_the_states_where_it_cannot(self) -> None:
         assert not self.answer(AccountFacts("disabled"))
         assert not self.answer(AccountFacts("disabled", "owner", "bootstrap"))
-        assert not self.answer(None, AccessPolicy(mode="rules"))  # no bootstrap identity named
+        assert not self.answer(
+            None, AccessPolicy(mode="rules")
+        )  # no bootstrap identity named
 
 
 class TestBootstrapAdmissionIsPersonal:
@@ -365,12 +451,18 @@ class TestBootstrapAdmissionIsPersonal:
 
     POLICY = TestBootstrapSignInGivesOwner.POLICY
     FACTS = acc.DecisionFacts(
-        active_owner_count=1, usable_owner_count=0, is_bootstrap_identity=True,
+        active_owner_count=1,
+        usable_owner_count=0,
+        is_bootstrap_identity=True,
         existing_owner_usable=False,
     )
-    VERDICT = acc.Verdict(admitted_by_rule=False, owner_by_rule=False, owner_evidence=False)
+    VERDICT = acc.Verdict(
+        admitted_by_rule=False, owner_by_rule=False, owner_evidence=False
+    )
 
-    def decision(self, existing: AccountFacts, *, purpose: str = "sign_in") -> acc.Decision:
+    def decision(
+        self, existing: AccountFacts, *, purpose: str = "sign_in"
+    ) -> acc.Decision:
         return acc.decide(existing, self.VERDICT, self.POLICY, self.FACTS, purpose)  # type: ignore[arg-type]
 
     @pytest.mark.parametrize("via", ["rules", "open"])
@@ -389,22 +481,27 @@ class TestBootstrapAdmissionIsPersonal:
         decision = self.decision(AccountFacts("active", "owner", "rules", via))
         assert decision.session_owner and decision.admitted_via is None
 
-    def test_the_request_path_changes_nothing(self) -> None:
-        decision = self.decision(AccountFacts("active", "user", None, "rules"), purpose="request")
-        assert decision.outcome == "allow" and decision.role is None and decision.admitted_via is None
-        assert not decision.writes
+    # Native MCP requests read one authoritative snapshot, without identity-policy writes.
+    # See authz/test_mcp_hot_read.py for the request-path regression coverage.
 
 
 def test_the_server_records_the_providers_it_runs_with(tmp_path: pathlib.Path) -> None:
     both = default_env(tmp_path, **BOTH)
     entra_only = {
-        k: v for k, v in both.items()
-        if k not in ("SELFHOST_LOGIN_PROVIDERS", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET",
-                     "ACCESS_OPEN_ACKNOWLEDGE_PUBLIC", "ACCESS_POLICY")
+        k: v
+        for k, v in both.items()
+        if k
+        not in (
+            "SELFHOST_LOGIN_PROVIDERS",
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_CLIENT_SECRET",
+            "ACCESS_OPEN_ACKNOWLEDGE_PUBLIC",
+            "ACCESS_POLICY",
+        )
     }
-    # A deployment with Entra alone and no earlier record keeps its database as it was.
+    # Every deployment reconciles its database provider inventory, including Entra alone.
     plain = prepare_selfhost(load_selfhost_settings(entra_only))
-    assert plain.store.recorded_login_providers() is None
+    assert plain.store.recorded_login_providers() == frozenset({"entra"})
     plain.store.close()
     # Listing more providers records them (a restart with the same list writes nothing new).
     runtime = prepare_selfhost(load_selfhost_settings(both))

@@ -51,7 +51,9 @@ def env(tmp_path, keyring, clock) -> Env:
 
 def directory(env: Env, cimd: FakeCimd, allowlist=DEFAULT_ALLOWLIST) -> ClientDirectory:
     settings = AuthzSettings()
-    resolver = CimdResolver(env.authz, settings, allowlist, SCOPES, fetch=cimd, clock=env.clock)
+    resolver = CimdResolver(
+        env.authz, settings, allowlist, SCOPES, fetch=cimd, clock=env.clock
+    )
     return ClientDirectory(env.authz, resolver, allowlist, SCOPES, clock=env.clock)
 
 
@@ -59,27 +61,49 @@ class TestTheRecordedDocuments:
     def test_the_fixtures_say_what_the_design_assumes(self) -> None:
         ai, code = fixture("claude-ai.json"), fixture("claude-code.json")
         assert ai["client_id"] == CLAUDE_AI_URL and code["client_id"] == CLAUDE_CODE_URL
-        assert ai["token_endpoint_auth_method"] == code["token_endpoint_auth_method"] == "none"
+        assert (
+            ai["token_endpoint_auth_method"]
+            == code["token_endpoint_auth_method"]
+            == "none"
+        )
         assert "scope" not in ai and "scope" not in code
         assert ai["redirect_uris"] == ["https://claude.ai/api/mcp/auth_callback"]
         assert "urn:ietf:params:oauth:grant-type:jwt-bearer" in ai["grant_types"]
-        assert code["redirect_uris"] == ["http://localhost/callback", "http://127.0.0.1/callback"]
+        assert code["redirect_uris"] == [
+            "http://localhost/callback",
+            "http://127.0.0.1/callback",
+        ]
 
     async def test_the_models_parse_both_documents(self) -> None:
-        for name, url in (("claude-ai.json", CLAUDE_AI_URL), ("claude-code.json", CLAUDE_CODE_URL)):
+        for name, url in (
+            ("claude-ai.json", CLAUDE_AI_URL),
+            ("claude-code.json", CLAUDE_CODE_URL),
+        ):
             doc = compat.validate_client_document(fixture(name), url)
             assert doc.client_id == url and doc.scope is None
 
-    async def test_claude_ai_is_accepted_with_the_server_scope_and_without_the_jwt_bearer_grant(self, env: Env) -> None:
+    async def test_claude_ai_is_accepted_with_the_server_scope_and_without_the_jwt_bearer_grant(
+        self, env: Env
+    ) -> None:
         cimd = FakeCimd()
         cimd.serve(CLAUDE_AI_URL, fixture("claude-ai.json"))
         client = await directory(env, cimd).get(CLAUDE_AI_URL)
-        assert client is not None and client.kind == "cimd" and client.client_host == "claude.ai"
-        assert client.scope == "Canvas.Access"  # the document has none: ours is the default
+        assert (
+            client is not None
+            and client.kind == "cimd"
+            and client.client_host == "claude.ai"
+        )
+        assert (
+            client.scope == "Canvas.Access"
+        )  # the document has none: ours is the default
         assert client.grant_types == ["authorization_code", "refresh_token"]
-        assert client.token_endpoint_auth_method == "none" and client.client_secret is None
+        assert (
+            client.token_endpoint_auth_method == "none" and client.client_secret is None
+        )
         assert client.validate_scope("Canvas.Access") == ["Canvas.Access"]
-        assert client.display_name == "claude.ai"  # the verified host, not the self-asserted name
+        assert (
+            client.display_name == "claude.ai"
+        )  # the verified host, not the self-asserted name
 
     async def test_claude_ai_may_only_use_its_callback(self, env: Env) -> None:
         from mcp.shared.auth import InvalidRedirectUriError
@@ -89,9 +113,11 @@ class TestTheRecordedDocuments:
         cimd.serve(CLAUDE_AI_URL, fixture("claude-ai.json"))
         client = await directory(env, cimd).get(CLAUDE_AI_URL)
         assert client is not None
-        assert str(client.validate_redirect_uri(AnyUrl("https://claude.ai/api/mcp/auth_callback"))) == (
-            "https://claude.ai/api/mcp/auth_callback"
-        )
+        assert str(
+            client.validate_redirect_uri(
+                AnyUrl("https://claude.ai/api/mcp/auth_callback")
+            )
+        ) == ("https://claude.ai/api/mcp/auth_callback")
         for bad in (
             "https://claude.com/api/mcp/auth_callback",  # on the allowlist, but not in the document
             "https://claude.ai/api/mcp/other",
@@ -102,14 +128,23 @@ class TestTheRecordedDocuments:
             with pytest.raises(InvalidRedirectUriError):
                 client.validate_redirect_uri(AnyUrl(bad))
         # no redirect_uri parameter: the single registered https URI is used
-        assert str(client.validate_redirect_uri(None)) == "https://claude.ai/api/mcp/auth_callback"
+        assert (
+            str(client.validate_redirect_uri(None))
+            == "https://claude.ai/api/mcp/auth_callback"
+        )
 
     @pytest.mark.parametrize(
         "uri",
-        ["http://localhost:53682/callback", "http://127.0.0.1:39211/callback", "http://localhost/callback",
-         "http://127.0.0.1:1/callback"],
+        [
+            "http://localhost:53682/callback",
+            "http://127.0.0.1:39211/callback",
+            "http://localhost/callback",
+            "http://127.0.0.1:1/callback",
+        ],
     )
-    async def test_claude_code_matches_loopback_callbacks_on_any_port(self, env: Env, uri: str) -> None:
+    async def test_claude_code_matches_loopback_callbacks_on_any_port(
+        self, env: Env, uri: str
+    ) -> None:
         from pydantic import AnyUrl
 
         cimd = FakeCimd()
@@ -144,36 +179,65 @@ class TestTheRecordedDocuments:
         with pytest.raises(InvalidRedirectUriError):
             client.validate_redirect_uri(None)
 
-    async def test_a_document_with_no_allowlisted_redirect_is_refused(self, env: Env) -> None:
+    async def test_a_document_with_no_allowlisted_redirect_is_refused(
+        self, env: Env
+    ) -> None:
         cimd = FakeCimd()
         cimd.serve(CLAUDE_AI_URL, fixture("claude-ai.json"))
-        assert await directory(env, cimd, allowlist=("https://other.example/cb",)).get(CLAUDE_AI_URL) is None
+        assert (
+            await directory(env, cimd, allowlist=("https://other.example/cb",)).get(
+                CLAUDE_AI_URL
+            )
+            is None
+        )
         assert env.authz.cimd_snapshot(CLAUDE_AI_URL) is None  # and nothing was stored
         assert cimd.calls == [CLAUDE_AI_URL]
 
-    async def test_only_the_allowlisted_part_of_a_document_survives(self, env: Env) -> None:
+    async def test_only_the_allowlisted_part_of_a_document_survives(
+        self, env: Env
+    ) -> None:
         cimd = FakeCimd()
         doc = fixture("claude-ai.json")
-        doc["redirect_uris"] = ["https://claude.ai/api/mcp/auth_callback", "https://evil.example/cb"]
+        doc["redirect_uris"] = [
+            "https://claude.ai/api/mcp/auth_callback",
+            "https://evil.example/cb",
+        ]
         cimd.serve(CLAUDE_AI_URL, doc)
         client = await directory(env, cimd).get(CLAUDE_AI_URL)
-        assert client is not None and [str(u) for u in client.redirect_uris] == ["https://claude.ai/api/mcp/auth_callback"]
+        assert client is not None and [str(u) for u in client.redirect_uris] == [
+            "https://claude.ai/api/mcp/auth_callback"
+        ]
 
-    async def test_the_stored_copy_is_the_reduced_document_not_the_raw_one(self, env: Env) -> None:
+    async def test_the_stored_copy_is_the_reduced_document_not_the_raw_one(
+        self, env: Env
+    ) -> None:
         cimd = FakeCimd()
         cimd.serve(CLAUDE_AI_URL, fixture("claude-ai.json"))
         await directory(env, cimd).get(CLAUDE_AI_URL)
         snapshot = env.authz.cimd_snapshot(CLAUDE_AI_URL)
         assert snapshot is not None
-        stored = json.loads(snapshot.doc_json)
-        assert stored["grant_types"] == ["authorization_code", "refresh_token"] and stored["scope"] == "Canvas.Access"
-        assert "client_uri" not in stored and "jwt-bearer" not in snapshot.doc_json
+        stored = snapshot.doc
+        assert (
+            stored["grant_types"] == ["authorization_code", "refresh_token"]
+            and stored["scope"] == "Canvas.Access"
+        )
+        assert "client_uri" not in stored and "jwt-bearer" not in json.dumps(
+            snapshot.doc
+        )
 
 
-@pytest.mark.skipif(os.environ.get("CANVAS_MCP_LIVE_CIMD") != "1", reason="set CANVAS_MCP_LIVE_CIMD=1 (needs network access)")
+@pytest.mark.skipif(
+    os.environ.get("CANVAS_MCP_LIVE_CIMD") != "1",
+    reason="set CANVAS_MCP_LIVE_CIMD=1 (needs network access)",
+)
 class TestLiveDrift:
-    @pytest.mark.parametrize(("name", "url"), [("claude-ai.json", CLAUDE_AI_URL), ("claude-code.json", CLAUDE_CODE_URL)])
-    async def test_the_live_document_still_has_the_fields_the_tests_rely_on(self, name: str, url: str) -> None:
+    @pytest.mark.parametrize(
+        ("name", "url"),
+        [("claude-ai.json", CLAUDE_AI_URL), ("claude-code.json", CLAUDE_CODE_URL)],
+    )
+    async def test_the_live_document_still_has_the_fields_the_tests_rely_on(
+        self, name: str, url: str
+    ) -> None:
         fetched = await compat.fetch_client_metadata(url, 5.0)
         live = json.loads(fetched.content)
         recorded = fixture(name)
@@ -181,5 +245,8 @@ class TestLiveDrift:
         assert live["client_id"] == recorded["client_id"]
         assert set(live["redirect_uris"]) == set(recorded["redirect_uris"])
         assert set(live["grant_types"]) == set(recorded["grant_types"])
-        assert live.get("token_endpoint_auth_method", "none") == recorded["token_endpoint_auth_method"]
+        assert (
+            live.get("token_endpoint_auth_method", "none")
+            == recorded["token_endpoint_auth_method"]
+        )
         assert live.get("scope") == recorded.get("scope")

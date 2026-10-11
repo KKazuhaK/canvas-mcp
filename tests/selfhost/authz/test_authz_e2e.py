@@ -71,9 +71,14 @@ class MemoryStorage:
 
 
 def make_oauth(
-    served: Served, user: User = ALICE, *, client_metadata_url: str | None = None,
-    storage: MemoryStorage | None = None, results: list[dict[str, str]] | None = None,
-    decision: str = "approve", react: bool = True,
+    served: Served,
+    user: User = ALICE,
+    *,
+    client_metadata_url: str | None = None,
+    storage: MemoryStorage | None = None,
+    results: list[dict[str, str]] | None = None,
+    decision: str = "approve",
+    react: bool = True,
 ) -> tuple[OAuthClientProvider, MemoryStorage, list[dict[str, str]]]:
     storage = storage or MemoryStorage()
     results = results if results is not None else []
@@ -81,14 +86,18 @@ def make_oauth(
 
     async def redirect_handler(url: str) -> None:
         params = dict(parse_qsl(urlsplit(url).query))
-        landed = await anyio.to_thread.run_sync(lambda: browser.connect(params, user, decision=decision))
+        landed = await anyio.to_thread.run_sync(
+            lambda: browser.connect(params, user, decision=decision)
+        )
         results.append(landed.query)
 
     async def callback_handler() -> AuthorizationCodeResult:
         result = results[-1]
         if "code" not in result:
             raise RuntimeError(f"authorization failed: {result}")
-        return AuthorizationCodeResult(code=result["code"], state=result.get("state"), iss=result.get("iss"))
+        return AuthorizationCodeResult(
+            code=result["code"], state=result.get("state"), iss=result.get("iss")
+        )
 
     oauth = OAuthClientProvider(
         server_url=AUDIENCE,
@@ -108,7 +117,9 @@ def make_oauth(
 
 
 def sdk_client(served: Served, oauth: OAuthClientProvider) -> Client:
-    http = httpx2.AsyncClient(auth=oauth, timeout=30, transport=served.async_transport())
+    http = httpx2.AsyncClient(
+        auth=oauth, timeout=30, transport=served.async_transport()
+    )
     return Client(streamable_http_client(AUDIENCE, http_client=http))
 
 
@@ -125,40 +136,69 @@ def served(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
 
 
 def grants(served: Served) -> list[tuple]:
-    return raw_sql(served.stack.store, "SELECT id, client_kind, client_id, revoked_reason, expires_at FROM oauth_grants")
+    return raw_sql(
+        served.stack.store,
+        "SELECT id, client_kind, client_id, revoked_reason, expires_at FROM oauth_grants",
+    )
 
 
 class TestOfficialSdkClient:
-    async def test_dcr_flow_and_a_tool_call_as_the_account(self, served: Served) -> None:
+    async def test_dcr_flow_and_a_tool_call_as_the_account(
+        self, served: Served
+    ) -> None:
         stack = served.stack
         oauth, storage, results = make_oauth(served)
         async with sdk_client(served, oauth) as client:
             assert await whoami(client) == stack.account_of(ALICE)
         # registered as a public client; the secret in the echo is gone
-        assert storage.client_info is not None and storage.client_info.client_secret is None
+        assert (
+            storage.client_info is not None
+            and storage.client_info.client_secret is None
+        )
         assert storage.client_info.token_endpoint_auth_method == "none"
         # RFC 9207: the SDK validated iss; it is the one issuer string
         assert results[0]["iss"] == ISSUER
         assert storage.tokens is not None and storage.tokens.refresh_token
         claims = stack.authz.codec.decode(storage.tokens.access_token).claims
-        assert claims["aud"] == AUDIENCE and claims["iss"] == ISSUER and claims["acct"] == stack.account_of(ALICE)
-        assert claims["client_id"] == storage.client_info.client_id and claims["scope"] == SCOPE
+        assert (
+            claims["aud"] == AUDIENCE
+            and claims["iss"] == ISSUER
+            and claims["acct"] == stack.account_of(ALICE)
+        )
+        assert (
+            claims["client_id"] == storage.client_info.client_id
+            and claims["scope"] == SCOPE
+        )
         # the refresh token is opaque and only its hash is stored
         assert tk.REFRESH_RE.fullmatch(storage.tokens.refresh_token)
-        stored = [r[0] for r in raw_sql(stack.store, "SELECT token_hash FROM oauth_refresh_tokens")]
-        assert stored == [tk.hash_secret(storage.tokens.refresh_token)]
+        stored = [
+            r[0]
+            for r in raw_sql(stack.store, "SELECT token_hash FROM oauth_refresh_tokens")
+        ]
+        assert stored == [bytes.fromhex(tk.hash_secret(storage.tokens.refresh_token))]
         assert grants(served)[0][1] == "dcr"
 
-    async def test_cimd_flow_uses_the_url_as_the_client_id_and_creates_no_registration(self, served: Served) -> None:
+    async def test_cimd_flow_uses_the_url_as_the_client_id_and_creates_no_registration(
+        self, served: Served
+    ) -> None:
         stack = served.stack
-        stack.cimd.serve(CIMD_URL, cimd_document(CIMD_URL, redirect_uris=["http://127.0.0.1/callback"]))
+        stack.cimd.serve(
+            CIMD_URL,
+            cimd_document(CIMD_URL, redirect_uris=["http://127.0.0.1/callback"]),
+        )
         oauth, storage, results = make_oauth(served, client_metadata_url=CIMD_URL)
         async with sdk_client(served, oauth) as client:
             assert await whoami(client) == stack.account_of(ALICE)
-        assert storage.client_info is not None and storage.client_info.client_id == CIMD_URL
+        assert (
+            storage.client_info is not None
+            and storage.client_info.client_id == CIMD_URL
+        )
         assert raw_sql(stack.store, "SELECT COUNT(*) FROM oauth_clients")[0][0] == 0
         assert results[0]["iss"] == ISSUER
-        assert stack.authz.codec.decode(storage.tokens.access_token).claims["client_id"] == CIMD_URL  # type: ignore[union-attr]
+        assert (
+            stack.authz.codec.decode(storage.tokens.access_token).claims["client_id"]
+            == CIMD_URL
+        )  # type: ignore[union-attr]
         assert grants(served)[0][1] == "cimd"
         # a refresh works for a CIMD client too
         first = storage.tokens
@@ -167,44 +207,66 @@ class TestOfficialSdkClient:
             assert await whoami(client) == stack.account_of(ALICE)
         assert storage.tokens.refresh_token != first.refresh_token  # type: ignore[union-attr]
 
-    async def test_the_sdk_refreshes_proactively_and_the_family_keeps_its_cap(self, served: Served) -> None:
+    async def test_the_sdk_refreshes_proactively_and_the_family_keeps_its_cap(
+        self, served: Served
+    ) -> None:
         stack = served.stack
         oauth, storage, _ = make_oauth(served)
         async with sdk_client(served, oauth) as client:
             assert await whoami(client) == stack.account_of(ALICE)
             first = storage.tokens
-            oauth.context.token_expiry_time = time.time() - 10  # the SDK refreshes on the next request
+            oauth.context.token_expiry_time = (
+                time.time() - 10
+            )  # the SDK refreshes on the next request
             assert await whoami(client) == stack.account_of(ALICE)
         second = storage.tokens
         assert first is not None and second is not None
-        assert second.refresh_token != first.refresh_token and second.access_token != first.access_token
+        assert (
+            second.refresh_token != first.refresh_token
+            and second.access_token != first.access_token
+        )
         old = raw_sql(
             stack.store,
-            "SELECT used_at, replaced_by, expires_at FROM oauth_refresh_tokens WHERE token_hash = :h",
-            {"h": tk.hash_secret(first.refresh_token or "")},
+            "SELECT r.used_at, r.replaced_by, g.expires_at FROM oauth_refresh_tokens r "
+            "JOIN oauth_grants g ON g.id = r.grant_id WHERE r.token_hash = :h",
+            {"h": bytes.fromhex(tk.hash_secret(first.refresh_token or ""))},
         )[0]
         new = raw_sql(
-            stack.store, "SELECT used_at, expires_at FROM oauth_refresh_tokens WHERE token_hash = :h",
-            {"h": tk.hash_secret(second.refresh_token or "")},
+            stack.store,
+            "SELECT r.used_at, g.expires_at FROM oauth_refresh_tokens r "
+            "JOIN oauth_grants g ON g.id = r.grant_id WHERE r.token_hash = :h",
+            {"h": bytes.fromhex(tk.hash_secret(second.refresh_token or ""))},
         )[0]
-        assert old[0] is not None and old[1] == tk.hash_secret(second.refresh_token or "")
+        assert old[0] is not None and old[1] == bytes.fromhex(
+            tk.hash_secret(second.refresh_token or "")
+        )
         assert new[0] is None and new[1] == old[2] == grants(served)[0][4]
 
-    async def test_a_declined_request_reaches_the_sdk_as_access_denied(self, served: Served) -> None:
+    async def test_a_declined_request_reaches_the_sdk_as_access_denied(
+        self, served: Served
+    ) -> None:
         oauth, storage, results = make_oauth(served, decision="deny")
         with pytest.raises(Exception):  # noqa: B017 - the SDK raises its own error type
             async with sdk_client(served, oauth) as client:
                 await whoami(client)
-        assert results and results[0]["error"] == "access_denied" and results[0]["iss"] == ISSUER
+        assert (
+            results
+            and results[0]["error"] == "access_denied"
+            and results[0]["iss"] == ISSUER
+        )
         assert storage.tokens is None and grants(served) == []
 
-    async def test_the_sdk_survives_a_revoked_connection_by_connecting_again(self, served: Served) -> None:
+    async def test_the_sdk_survives_a_revoked_connection_by_connecting_again(
+        self, served: Served
+    ) -> None:
         stack = served.stack
         oauth, storage, results = make_oauth(served)
         async with sdk_client(served, oauth) as client:
             assert await whoami(client) == stack.account_of(ALICE)
-            assert await stack.authz.grants.revoke_by_client(grants(served)[0][0])
-            assert await whoami(client) == stack.account_of(ALICE)  # a 401, then a fresh authorization
+            assert await stack.authz.grants.revoke_by_client(str(grants(served)[0][0]))
+            assert await whoami(client) == stack.account_of(
+                ALICE
+            )  # a 401, then a fresh authorization
         assert len(results) == 2 and len(grants(served)) == 2
 
 
@@ -219,13 +281,18 @@ def served_react(tmp_path, monkeypatch, react_env):  # type: ignore[no-untyped-d
 class TestReactConsent:
     """The browser decides through the JSON API (read the request, post the decision, follow redirect_to)."""
 
-    async def test_dcr_flow_and_a_tool_call_as_the_account(self, served_react: Served) -> None:
+    async def test_dcr_flow_and_a_tool_call_as_the_account(
+        self, served_react: Served
+    ) -> None:
         stack = served_react.stack
         oauth, storage, results = make_oauth(served_react, react=True)
         async with sdk_client(served_react, oauth) as client:
             assert await whoami(client) == stack.account_of(ALICE)
         assert results[0]["iss"] == ISSUER and "code" in results[0]
-        assert storage.client_info is not None and storage.client_info.client_secret is None
+        assert (
+            storage.client_info is not None
+            and storage.client_info.client_secret is None
+        )
         assert grants(served_react)[0][1] == "dcr"
         # the SDK refreshes through the same family
         first = storage.tokens
@@ -234,17 +301,29 @@ class TestReactConsent:
             assert await whoami(client) == stack.account_of(ALICE)
         assert storage.tokens.refresh_token != first.refresh_token  # type: ignore[union-attr]
 
-    async def test_cimd_flow_creates_no_registration(self, served_react: Served) -> None:
+    async def test_cimd_flow_creates_no_registration(
+        self, served_react: Served
+    ) -> None:
         stack = served_react.stack
-        stack.cimd.serve(CIMD_URL, cimd_document(CIMD_URL, redirect_uris=["http://127.0.0.1/callback"]))
-        oauth, storage, _ = make_oauth(served_react, client_metadata_url=CIMD_URL, react=True)
+        stack.cimd.serve(
+            CIMD_URL,
+            cimd_document(CIMD_URL, redirect_uris=["http://127.0.0.1/callback"]),
+        )
+        oauth, storage, _ = make_oauth(
+            served_react, client_metadata_url=CIMD_URL, react=True
+        )
         async with sdk_client(served_react, oauth) as client:
             assert await whoami(client) == stack.account_of(ALICE)
-        assert storage.client_info is not None and storage.client_info.client_id == CIMD_URL
+        assert (
+            storage.client_info is not None
+            and storage.client_info.client_id == CIMD_URL
+        )
         assert raw_sql(stack.store, "SELECT COUNT(*) FROM oauth_clients")[0][0] == 0
         assert grants(served_react)[0][1] == "cimd"
 
-    async def test_a_declined_request_reaches_the_sdk_as_access_denied(self, served_react: Served) -> None:
+    async def test_a_declined_request_reaches_the_sdk_as_access_denied(
+        self, served_react: Served
+    ) -> None:
         oauth, storage, results = make_oauth(served_react, decision="deny", react=True)
         with pytest.raises(Exception):  # noqa: B017 - the SDK raises its own error type
             async with sdk_client(served_react, oauth) as client:
@@ -257,12 +336,22 @@ class TestReactConsent:
         stack.cimd.serve(CLAUDE_AI_URL, fixture("claude-ai.json"))
         verifier, challenge = pkce()
         landed = Browser(stack, react=True).connect(
-            stack.authorize_params(CLAUDE_AI_URL, challenge, redirect_uri=CLAUDE_REDIRECT), ALICE
+            stack.authorize_params(
+                CLAUDE_AI_URL, challenge, redirect_uri=CLAUDE_REDIRECT
+            ),
+            ALICE,
         )
-        assert landed.url.startswith(CLAUDE_REDIRECT + "?") and landed.query["iss"] == ISSUER
+        assert (
+            landed.url.startswith(CLAUDE_REDIRECT + "?")
+            and landed.query["iss"] == ISSUER
+        )
         response = stack.token(
-            grant_type="authorization_code", code=landed.query["code"], client_id=CLAUDE_AI_URL,
-            redirect_uri=CLAUDE_REDIRECT, code_verifier=verifier, resource=AUDIENCE,
+            grant_type="authorization_code",
+            code=landed.query["code"],
+            client_id=CLAUDE_AI_URL,
+            redirect_uri=CLAUDE_REDIRECT,
+            code_verifier=verifier,
+            resource=AUDIENCE,
         )
         assert response.status_code == 200, response.text
         key = stack.account_of(ALICE)
@@ -270,26 +359,42 @@ class TestReactConsent:
         # the consent screen showed the verified domain, not the self-asserted name
         browser = Browser(stack, react=True)
         _, challenge = pkce()
-        started = browser.start(stack.authorize_params(CLAUDE_AI_URL, challenge, redirect_uri=CLAUDE_REDIRECT))
+        started = browser.start(
+            stack.authorize_params(
+                CLAUDE_AI_URL, challenge, redirect_uri=CLAUDE_REDIRECT
+            )
+        )
         txn = started.headers["location"].split("txn=")[1]
         browser.entra_login(ALICE, browser.get(started.headers["location"]))
         response = browser.api("GET", f"/consent?txn={txn}")
         shown = response.json()
         assert "client" in shown, (response.status_code, shown)
-        assert shown["client"]["verified"] is True and shown["client"]["host"] == "claude.ai"
+        assert (
+            shown["client"]["verified"] is True
+            and shown["client"]["host"] == "claude.ai"
+        )
         assert shown["redirect"] == {"host": "claude.ai", "loopback": False}
 
 
 class TestRecordedClients:
-    def authorize_and_exchange(self, stack: Any, client_id: str, redirect_uri: str) -> tuple[dict[str, Any], str]:
+    def authorize_and_exchange(
+        self, stack: Any, client_id: str, redirect_uri: str
+    ) -> tuple[dict[str, Any], str]:
         verifier, challenge = pkce()
         landed = Browser(stack).connect(
-            stack.authorize_params(client_id, challenge, redirect_uri=redirect_uri), ALICE
+            stack.authorize_params(client_id, challenge, redirect_uri=redirect_uri),
+            ALICE,
         )
-        assert landed.url.startswith(redirect_uri + "?") and landed.query["iss"] == ISSUER, landed
+        assert (
+            landed.url.startswith(redirect_uri + "?") and landed.query["iss"] == ISSUER
+        ), landed
         response = stack.token(
-            grant_type="authorization_code", code=landed.query["code"], client_id=client_id,
-            redirect_uri=redirect_uri, code_verifier=verifier, resource=AUDIENCE,
+            grant_type="authorization_code",
+            code=landed.query["code"],
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            code_verifier=verifier,
+            resource=AUDIENCE,
         )
         assert response.status_code == 200, response.text
         return response.json(), landed.query["state"]
@@ -297,31 +402,49 @@ class TestRecordedClients:
     def test_claude_ai_by_its_published_identity(self, served: Served) -> None:
         stack = served.stack
         stack.cimd.serve(CLAUDE_AI_URL, fixture("claude-ai.json"))
-        tokens, state = self.authorize_and_exchange(stack, CLAUDE_AI_URL, CLAUDE_REDIRECT)
+        tokens, state = self.authorize_and_exchange(
+            stack, CLAUDE_AI_URL, CLAUDE_REDIRECT
+        )
         assert state == "state-1"
         key = stack.account_of(ALICE)
         assert stack.whoami(tokens["access_token"]) == key
         refreshed = stack.refresh(CLAUDE_AI_URL, tokens["refresh_token"])
-        assert refreshed.status_code == 200 and stack.whoami(refreshed.json()["access_token"]) == key
+        assert (
+            refreshed.status_code == 200
+            and stack.whoami(refreshed.json()["access_token"]) == key
+        )
         assert grants(served)[0][1] == "cimd"
 
     @pytest.mark.parametrize("host", ["localhost", "127.0.0.1"])
-    def test_claude_code_on_a_random_loopback_port(self, served: Served, host: str) -> None:
+    def test_claude_code_on_a_random_loopback_port(
+        self, served: Served, host: str
+    ) -> None:
         stack = served.stack
         stack.cimd.serve(CLAUDE_CODE_URL, fixture("claude-code.json"))
         port = 20000 + int(time.time() * 1000) % 30000
         redirect = f"http://{host}:{port}/callback"
         tokens, _ = self.authorize_and_exchange(stack, CLAUDE_CODE_URL, redirect)
         assert stack.whoami(tokens["access_token"]) == stack.account_of(ALICE)
-        assert stack.refresh(CLAUDE_CODE_URL, tokens["refresh_token"]).status_code == 200
+        assert (
+            stack.refresh(CLAUDE_CODE_URL, tokens["refresh_token"]).status_code == 200
+        )
 
-    def test_a_different_loopback_host_or_path_is_not_this_clients(self, served: Served) -> None:
+    def test_a_different_loopback_host_or_path_is_not_this_clients(
+        self, served: Served
+    ) -> None:
         stack = served.stack
         stack.cimd.serve(CLAUDE_CODE_URL, fixture("claude-code.json"))
         _, challenge = pkce()
-        for uri in ("http://[::1]:5000/callback", "http://localhost:5000/other", "https://localhost:5000/callback"):
+        for uri in (
+            "http://[::1]:5000/callback",
+            "http://localhost:5000/other",
+            "https://localhost:5000/callback",
+        ):
             response = stack.client.get(
-                "/authorize", params=stack.authorize_params(CLAUDE_CODE_URL, challenge, redirect_uri=uri)
+                "/authorize",
+                params=stack.authorize_params(
+                    CLAUDE_CODE_URL, challenge, redirect_uri=uri
+                ),
             )
             assert response.status_code == 400, uri
 
@@ -331,18 +454,24 @@ class TestRecordedClients:
         from canvas_mcp.core.selfhost.authz import fastmcp_compat as compat
 
         stack = served.stack
-        stack.cimd.serve(CLAUDE_AI_URL, fixture("claude-ai.json"), cache_control="max-age=60")
+        stack.cimd.serve(
+            CLAUDE_AI_URL, fixture("claude-ai.json"), cache_control="max-age=60"
+        )
         tokens, _ = self.authorize_and_exchange(stack, CLAUDE_AI_URL, CLAUDE_REDIRECT)
         stack.cimd.fail(CLAUDE_AI_URL, compat.MetadataFetchError(compat.FETCH_TIMEOUT))
         stack.clock.advance(120)  # the copy is stale now
         _, challenge = pkce()
-        denied = stack.client.get("/authorize", params=stack.authorize_params(CLAUDE_AI_URL, challenge))
+        denied = stack.client.get(
+            "/authorize", params=stack.authorize_params(CLAUDE_AI_URL, challenge)
+        )
         assert denied.status_code == 400 and "location" not in denied.headers
         assert stack.refresh(CLAUDE_AI_URL, tokens["refresh_token"]).status_code == 200
 
 
 class TestTwoBrowsers:
-    def test_a_link_opened_in_another_browser_is_refused_and_the_rightful_one_completes(self, served: Served) -> None:
+    def test_a_link_opened_in_another_browser_is_refused_and_the_rightful_one_completes(
+        self, served: Served
+    ) -> None:
         stack = served.stack
         client_id = stack.register(CLAUDE_REDIRECT)
         _, challenge = pkce()
@@ -352,11 +481,12 @@ class TestTwoBrowsers:
         stranger = Browser(stack)
         refused = stranger.get(started.headers["location"])
         assert refused.status_code == 303
-        assert refused.headers["location"] == "/account/sign-in?error=authorization_invalid"
+        assert (
+            refused.headers["location"]
+            == "/account/sign-in?error=authorization_invalid"
+        )
         landed = owner.connect(stack.authorize_params(client_id, challenge), ALICE)
         assert "code" in landed.query
-
-
 
 
 def app_src() -> str:

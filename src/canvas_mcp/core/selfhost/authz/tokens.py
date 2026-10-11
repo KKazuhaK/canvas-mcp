@@ -72,7 +72,7 @@ def new_auth_code() -> str:
 
 
 def hash_secret(value: str) -> str:
-    """SHA-256 hex digest of a secret (the only form in which a code or token is stored)."""
+    """SHA-256 hex digest for service calls; repositories persist its 32 bytes."""
     return sha256(value.encode("utf-8")).hexdigest()
 
 

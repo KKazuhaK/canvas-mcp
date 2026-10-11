@@ -842,7 +842,7 @@ class AuthzStore:
             return mcp_snapshot(conn, account_id, grant_id)
 
     def bump_jwt_epoch(self) -> int:
-        """Invalidate every access token (running servers notice within 30 seconds)."""
+        """Invalidate every access token on the next authoritative request read."""
         now = self._now()
         with self._db.write() as conn:
             epoch = self._repos.jwt_epoch.bump(conn, now=now)
