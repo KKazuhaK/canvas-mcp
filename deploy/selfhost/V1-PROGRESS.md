@@ -45,35 +45,53 @@ the actual Compose and minimal `.env`, operator CLI and container recreation.
 Fork PR #7 also refuses inaccessible or non-regular database storage before
 generating keys. Existing data without its original keys is never re-keyed.
 
+Database-owned login registration and protected first-install setup are merged
+through [PR #8](https://github.com/KKazuhaK/canvas-mcp/pull/8), at
+`8147922dfa31b65d8cce70be5073f99f176edf8e`. A fresh deployment now needs only the
+public origin in `.env`; Entra, Google, GitHub and OIDC credentials, enablement,
+role names and ordering are managed in the database. Private expiring setup
+authority, write-only sealed secrets, complete-policy validation, per-request
+login generations and governed configuration checks cover initialization,
+editing and in-flight callbacks. Owner mutations read current provider
+enablement inside their transaction. All legacy environment adoption, export
+and inventory checks remain in the removable migration package.
+
 ## Deployable staging image
 
 The current published staging release is
-[v1.14.0-beta.4](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.4).
+[v1.14.0-beta.5](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.5).
 Download only its
-[docker-compose.yml](https://github.com/KKazuhaK/canvas-mcp/releases/download/v1.14.0-beta.4/docker-compose.yml)
-and [.env template](https://github.com/KKazuhaK/canvas-mcp/releases/download/v1.14.0-beta.4/default.env),
-save the template as `.env`, fill the four values and run
+[docker-compose.yml](https://github.com/KKazuhaK/canvas-mcp/releases/download/v1.14.0-beta.5/docker-compose.yml)
+and [.env template](https://github.com/KKazuhaK/canvas-mcp/releases/download/v1.14.0-beta.5/default.env),
+save the template as `.env`, fill `PUBLIC_BASE_URL` and run
 `docker compose up -d --wait`. No host environment exports, setup script or
 manual internal-key generation are required. Keep the persistent data volume;
 existing explicit keys remain supported and must be preserved with their data.
+Open `/account/setup`, use the private code from the container logs and enter
+the Entra app registration there. Existing environment-owned v1 registrations
+require deliberate one-time adoption; follow the migration package's guidance.
 The Compose default is `:beta`. For repeatable acceptance, optionally pin the
 immutable index in the same `.env`:
 
 ```dotenv
-CANVAS_MCP_IMAGE=ghcr.io/kkazuhak/canvas-mcp@sha256:e62d09d0ad7c9614742f289237a2920141c526840dfa88ede9f4f13f90bb010c
+CANVAS_MCP_IMAGE=ghcr.io/kkazuhak/canvas-mcp@sha256:126685d919c88e7bff263825bb85215596797989ae9e371693f06c2b027b9e97
 ```
 
-- Source: `ab64798f7c6fcb7606dee7182de1e872f3ae292d`.
-- Registry version: `1.14.0-beta.4`; platforms: `linux/amd64`, `linux/arm64`.
-- The complete reviewed [CI matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38189360639)
-  and native multi-architecture [release image checks](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38190557563)
+- Source: `8147922dfa31b65d8cce70be5073f99f176edf8e`.
+- Registry version: `1.14.0-beta.5`; platforms: `linux/amd64`, `linux/arm64`.
+- The complete reviewed [CI matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38210066406),
+  independent [post-merge matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38212365685)
+  and native multi-architecture [release image checks](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38213937119)
   passed; both beta aliases identify the same source and digest.
 - The pre-v1 stable image is left in place at digest
   `sha256:9eeeaea8365ecad39ea02704b867f2dfae03521c229938ce78e8937fcbf1cdfb`.
-- Final reviewed CI: locked SQLite 8,047 passed / 65 skipped; Windows
-  8,041 passed / 71 skipped; each PostgreSQL dependency set 4,227 passed /
-  11 skipped. The complete matrix includes Python 3.11-3.14, frontend, lint,
-  code API, formal confirmation checks and amd64/arm64 Docker smoke tests.
+- The complete matrix includes Python 3.11-3.14, locked/latest PostgreSQL,
+  Windows, frontend, lint, code API, formal confirmation checks and amd64/arm64
+  Docker smoke tests. The reviewed Python 3.11 DNS timing check required one
+  failed-job retry; its code and threshold were unchanged. Post-merge CI passed
+  on its first attempt. Local self-host tests passed 4,180 with 54 platform/
+  database skips; frontend tests passed 477. Source and architecture labels
+  match independently. Downloaded release assets match their prepared SHA-256.
 
 Deployment and live acceptance are pending. Record the staging origin, exact
 client versions, timestamps and secret-free evidence in the README's tested-client
