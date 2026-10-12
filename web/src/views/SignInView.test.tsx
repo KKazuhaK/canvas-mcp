@@ -37,7 +37,7 @@ describe('SignInView', () => {
     const microsoft = await screen.findByRole('link', { name: /Sign in with Microsoft/ })
     expect(microsoft).toHaveAttribute('href', '/auth/login')
     expect(screen.getAllByRole('link', { name: /Sign in with/ })).toHaveLength(1)
-    expect(screen.getByRole('heading', { name: 'Canvas account' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Canvas MCP' })).toBeInTheDocument()
     expect(hardNavigate).not.toHaveBeenCalled()
   })
 

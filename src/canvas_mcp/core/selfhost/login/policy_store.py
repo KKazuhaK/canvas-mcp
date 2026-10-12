@@ -72,6 +72,7 @@ class AccountPolicyStore:
                 ).scalars()
             )
             owners_before = self.repos.accounts.count_usable_owners(conn, active)
+            local_owners_before = self.repos.accounts.local_owner_ids(conn, active)
             affected = (
                 list(
                     conn.execute(
@@ -151,6 +152,10 @@ class AccountPolicyStore:
                 action = (
                     "account_sso_unlocked" if unlock else "account_login_policy_changed"
                 )
+            if local_owners_before and not self.repos.accounts.local_owner_ids(
+                conn, active
+            ):
+                raise ProviderConfigurationError("last_local_owner")
             if owners_before and not self.repos.accounts.count_usable_owners(
                 conn, active
             ):

@@ -212,6 +212,35 @@ class SqlAccountRepo:
     ) -> int:
         return len(self.usable_owner_ids(conn, provider_ids))
 
+    def local_owner_ids(
+        self,
+        conn: Connection,
+        provider_ids: Sequence[str] | None = None,
+        *,
+        exclude: str | None = None,
+    ) -> list[str]:
+        """Independent owners with a usable local password and permitted local login."""
+        listed = (
+            list(
+                conn.execute(
+                    select(t.login_providers.c.id).where(t.login_providers.c.configured)
+                ).scalars()
+            )
+            if provider_ids is None
+            else provider_ids
+        )
+        if "local" not in listed:
+            return []
+        owners = self.usable_owner_ids(conn, ["local"], exclude=exclude)
+        return list(
+            conn.execute(
+                select(_a.c.id)
+                .join(t.local_credentials, t.local_credentials.c.account_id == _a.c.id)
+                .where(_a.c.id.in_(owners), _a.c.upn != "", ~_a.c.upn_required)
+                .order_by(_a.c.id)
+            ).scalars()
+        )
+
     def count_pending(self, conn: Connection) -> int:
         stmt = select(func.count()).select_from(_a).where(_a.c.status == STATUS_PENDING)
         return int(conn.execute(stmt).scalar_one())

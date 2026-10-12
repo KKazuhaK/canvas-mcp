@@ -1,12 +1,14 @@
 import SvgIcon, { type SvgIconProps } from '@mui/material/SvgIcon'
 
-// Inline SVG only: no remote icons, no icon fonts. The Google "G" follows Google's sign-in
+// Embedded PNG or inline SVG: no remote icons or icon fonts. The Google "G" follows Google's sign-in
 // branding guidelines; the GitHub mark is Primer Octicons "mark-github" (MIT); the key is
 // drawn here. A provider the app does not know yet gets the generic key icon.
 export default function ProviderIcon({
   icon,
+  data,
   ...props
-}: { icon: string } & SvgIconProps) {
+}: { icon: string; data?: string | null } & SvgIconProps) {
+  if (data?.startsWith('data:image/png;base64,')) return <img src={data} alt="" aria-hidden width={24} height={24} style={{ objectFit: 'contain' }} />
   switch (icon) {
     case 'microsoft':
       return (

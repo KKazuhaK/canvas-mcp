@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A protected local administrator entry point, explicit administrator creation
+  in the owner UI, and a warning for existing SSO-only installations. Another
+  SSO owner cannot authorize removal of the last local administrator.
+- Database-owned custom PNG sign-in icons with upload and default restoration.
+- SSO first-sign-in registration now always assigns a unique UPN automatically;
+  later UPN edits are administrator-only, audited and governed by revision CAS.
+  Personal UPN display is read-only. Account-home labels identify the Canvas MCP
+  account separately from its Canvas LMS connection.
+
 - Independent selfhost account UPNs, provider-neutral immutable identity ownership,
   per-provider opt-in email association, account method restrictions, first-SSO
   locking and audited administrator unlock. Local passwords can be attached to

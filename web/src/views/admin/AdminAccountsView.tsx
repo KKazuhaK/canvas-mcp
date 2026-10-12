@@ -8,6 +8,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { AdminAccount, AdminStatusFilter } from '@/api/types'
 import AccountApps from '@/components/admin/AccountApps'
+import AccountUpnEditor from '@/components/admin/AccountUpnEditor'
 import { AccountLoginPolicy } from '@/components/admin/LoginPolicySettings'
 import AccountIdentities from '@/components/admin/AccountIdentities'
 import AdminActions from '@/components/admin/AdminActions'
@@ -134,6 +135,7 @@ export default function AdminAccountsView() {
         <Box sx={{ display: 'grid', gap: 0.5, justifyItems: 'start' }}>
           <AdminActions account={a} />
           <AccountLoginPolicy id={a.id} />
+          <AccountUpnEditor account={a} />
           {a.status === 'active' ? <AccountApps account={a} /> : null}
         </Box>
       ),

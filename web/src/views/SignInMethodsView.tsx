@@ -98,7 +98,7 @@ export default function SignInMethodsView() {
       primary: true,
       render: (i) => (
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-          <ProviderIcon icon={iconOf(i.provider_id)} fontSize="small" />
+          <ProviderIcon icon={iconOf(i.provider_id)} data={names.get(i.provider_id)?.icon_data} fontSize="small" />
           <span>{nameOf(i.provider_id)}</span>
           {i.current ? (
             <Chip size="small" variant="outlined" label={t('account:methods.current')} />
@@ -212,7 +212,7 @@ export default function SignInMethodsView() {
                     key={id}
                     variant="outlined"
                     disabled={!fresh || startLink.isPending}
-                    startIcon={<ProviderIcon icon={iconOf(id)} />}
+                    startIcon={<ProviderIcon icon={iconOf(id)} data={names.get(id)?.icon_data} />}
                     onClick={() => void link(id)}
                   >
                     {t('account:methods.link', { name: nameOf(id) })}

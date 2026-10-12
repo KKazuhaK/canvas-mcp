@@ -1,5 +1,11 @@
 # Isolated database upgrade tooling
 
+`0004_onboarding_and_icons` adds nullable provider PNG presentation and assigns
+unique system names only to previously unnamed accounts. Account ids, existing
+UPNs, roles, passwords and sessions remain unchanged. Revisions 0001-0003 stay
+frozen, and the compatibility floor remains 2. No temporary account-name
+backfill lives in the runtime.
+
 Keep all schema upgrade, migration, backup and database transfer code in this
 package. Application repositories and the normal connection pool must not
 contain DDL upgrades, legacy data adapters or foreign-key-off connections.

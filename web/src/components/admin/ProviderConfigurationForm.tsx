@@ -5,9 +5,12 @@ import MenuItem from '@mui/material/MenuItem'
 import Stack from '@mui/material/Stack'
 import Switch from '@mui/material/Switch'
 import TextField from '@mui/material/TextField'
+import Typography from '@mui/material/Typography'
 import { useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import ErrorNotice from '@/components/ErrorNotice'
+import Alert from '@mui/material/Alert'
+import ProviderIcon from '@/components/ProviderIcon'
 
 export interface EditableProvider {
   id: string
@@ -17,6 +20,7 @@ export interface EditableProvider {
   config: Record<string, string | string[] | boolean>
   secret_present: boolean
   auto_link_email?: boolean
+  icon_data?: string | null
 }
 
 export interface ProviderSave {
@@ -25,6 +29,7 @@ export interface ProviderSave {
   rank: number
   client_secret?: string
   auto_link_email?: boolean
+  icon_data?: string | null
 }
 
 export default function ProviderConfigurationForm({ provider, callbackUri, onSave, installation = false, disabled = false }: {
@@ -40,6 +45,10 @@ export default function ProviderConfigurationForm({ provider, callbackUri, onSav
   const [enabled, setEnabled] = useState(provider.enabled)
   const [rank, setRank] = useState(provider.rank)
   const [autoLinkEmail, setAutoLinkEmail] = useState(provider.auto_link_email ?? false)
+  const [iconData, setIconData] = useState(provider.icon_data ?? null)
+  const [iconChanged, setIconChanged] = useState(false)
+  const [iconError, setIconError] = useState(false)
+  const [iconReading, setIconReading] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
   function text(key: string, fallback = '') {
@@ -51,11 +60,13 @@ export default function ProviderConfigurationForm({ provider, callbackUri, onSav
   }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (iconReading) return
     if (busy) return
     setBusy(true)
     setError(null)
     const values: ProviderSave = { config, enabled, rank }
     if (!installation && provider.protocol !== 'local') values.auto_link_email = autoLinkEmail
+    if (!installation && iconChanged) values.icon_data = iconData
     if (secret.length > 0) values.client_secret = secret
     try {
       await onSave(values)
@@ -93,11 +104,30 @@ export default function ProviderConfigurationForm({ provider, callbackUri, onSav
       </>}
       </>}
       {!installation && <>
+        <Stack direction="row" spacing={2} sx={{ alignItems: 'center' }}>
+          <ProviderIcon icon={provider.protocol === 'entra' ? 'microsoft' : provider.protocol} data={iconData} />
+          <Button component="label" disabled={busy || iconReading}>{t('admin:providerConfig.icon')}
+            <input type="file" accept="image/png" hidden disabled={busy || iconReading} aria-label={t('admin:providerConfig.icon')} onChange={(event) => {
+              const file = event.target.files?.[0]
+              event.target.value = ''
+              if (!file) return
+              if (file.type !== 'image/png' || file.size > 65536) { setIconError(true); return }
+              setIconReading(true)
+              const reader = new FileReader()
+              reader.onload = () => { if (typeof reader.result === 'string') { setIconData(reader.result); setIconChanged(true); setIconError(false) } }
+              reader.onerror = () => setIconError(true)
+              reader.onloadend = () => setIconReading(false)
+              reader.readAsDataURL(file)
+            }} />
+          </Button>
+          <Button disabled={busy || iconReading} onClick={() => { setIconData(null); setIconChanged(true); setIconError(false) }}>{t('admin:providerConfig.resetIcon')}</Button>
+        </Stack>
+        {iconError ? <Alert severity="error">{t('admin:providerConfig.iconHelp')}</Alert> : <Typography variant="caption">{t('admin:providerConfig.iconHelp')}</Typography>}
         {provider.protocol !== 'local' && <FormControlLabel control={<Switch checked={autoLinkEmail} disabled={busy} onChange={(_, value) => setAutoLinkEmail(value)} />} label={t('admin:providerConfig.autoLinkEmail')} />}
         <TextField type="number" label={t('admin:providerConfig.position')} value={rank + 1} disabled={busy} slotProps={{ htmlInput: { min: 1, max: 8, step: 1 } }} onChange={(event) => setRank(Number(event.target.value) - 1)} />
         <FormControlLabel control={<Switch checked={enabled} disabled={busy} onChange={(_, value) => setEnabled(value)} />} label={t('admin:providerConfig.enabled')} />
       </>}
-      <Button type="submit" variant="contained" disabled={busy || disabled}>{t(installation ? 'admin:providerConfig.initialize' : 'admin:providerConfig.save')}</Button>
+      <Button type="submit" variant="contained" disabled={busy || disabled || iconReading}>{t(installation ? 'admin:providerConfig.initialize' : 'admin:providerConfig.save')}</Button>
     </Stack>
   </Box>
 }

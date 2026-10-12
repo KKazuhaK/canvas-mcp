@@ -75,6 +75,7 @@ login_providers = Table(
     Column("sort_rank", Integer(), nullable=False, server_default=text("0")),
     Column("configured", Flag(), nullable=False, server_default=false()),
     Column("auto_link_email", Flag(), nullable=False, server_default=false()),
+    Column("icon_data", Text),
     Column("configured_at", Epoch),
     Column("config_source", Key, nullable=False, server_default=text("'env'")),
     Column("config", JsonDoc()),

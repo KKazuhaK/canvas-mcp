@@ -130,7 +130,7 @@ export default function SignInView() {
                     variant="outlined"
                     size="large"
                     fullWidth
-                    startIcon={<ProviderIcon icon={provider.icon} />}
+                    startIcon={<ProviderIcon icon={provider.icon} data={provider.icon_data} />}
                     sx={{ justifyContent: 'flex-start' }}
                   >
                     {t('auth:login.signInWith', { name: provider.name })}

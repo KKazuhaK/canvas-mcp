@@ -52,6 +52,7 @@ export type ApiOnlyErrorCode =
   | 'pilot_profile_restricted' // 409
   | 'confirmation_required' // 409, params: { affected: { host: count } }
   | 'last_owner' // 409
+  | 'last_local_owner' // 409
   | 'cannot_disable_self' // 409
   // linked sign-in methods
   | 'identity_in_use' // 409 (also the result of a link)
@@ -79,6 +80,7 @@ export interface LoginProviderConfiguration {
   protocol: 'entra' | 'google' | 'github' | 'oidc' | 'local'
   enabled: boolean
   auto_link_email?: boolean
+  icon_data?: string | null
   rank: number
   config: Record<string, string | string[] | boolean>
   secret_present: boolean
@@ -89,6 +91,7 @@ export interface LoginProviderSave {
   config: LoginProviderConfiguration['config']
   enabled: boolean
   auto_link_email?: boolean
+  icon_data?: string | null
   rank: number
   client_secret?: string
 }
@@ -146,6 +149,7 @@ export interface Provider {
   kind: 'oidc' | 'oauth2' | 'local'
   name: string
   icon: ProviderIcon
+  icon_data?: string | null
   /** The server-side redirect that starts the sign-in (a full-page navigation). */
   start_url: string
 }
@@ -534,6 +538,7 @@ export interface AdminSchool {
 }
 export interface AdminSettingsResponse {
   revision: number
+  local_admin: { ready: boolean }
   site: SiteAddress
   sign_in_methods: {
     id: string; protocol: string; icon: ProviderIcon; configured: boolean

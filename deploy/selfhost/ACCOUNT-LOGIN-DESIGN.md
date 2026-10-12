@@ -17,8 +17,11 @@ audit ownership or external identities.
 Existing local names become the account UPN during the isolated upgrade so
 previous local sign-in names continue working. A new SSO registration can use a
 verified, unclaimed email as its default UPN. Missing proof or a name collision
-requires selection of another UPN. A provisional account may complete this step
-in the account UI but must not authorize MCP until it has a selected name.
+gets a unique system-generated UPN, without another registration step. Only
+administrators can rename it; the personal UI is read-only. Rename uses recent
+sign-in, Origin/CSRF, revision CAS and an in-transaction owner check, and ends
+existing named-account sessions/codes/grants. Isolated revision 0004 completes
+older provisional names without merging accounts or changing existing names.
 
 External identity is canonical issuer plus immutable subject: Google and generic
 OIDC use issuer/sub; Entra's adapter defaults to its verified tenant issuer and
@@ -114,6 +117,20 @@ origin does not revoke connections. Corrupt database values refuse startup and
 do not fall back to the environment. DATABASE_URL remains infrastructure config.
 
 ## Upgrade and verification
+
+At least one independent active owner with a local identity, password, assigned
+UPN and permitted local login is retained once such an entry point exists. A
+remaining SSO owner does not replace it. Provider disablement, account method
+restrictions, identity unlink, disablement and deletion cannot remove the final
+local administrator, including operator force-disable. Another local owner
+allows intentional rotation. Entra rules owners are not silently converted to
+independent local administrators. Older SSO-only installations show a warning
+and let a fresh owner explicitly create an independent local administrator.
+
+Sign-in registrations store optional bounded embedded PNG icons in SQL. Upload,
+preservation and reset use the existing governed provider edit, without remote
+image fetching or additional deployment files. Home labels distinguish the
+Canvas MCP account from its Canvas LMS connection.
 
 Every schema revision, compatibility gate, legacy name adoption, automatic backup
 and data-transfer adjustment stays under `core/selfhost/db/migrations/`. The

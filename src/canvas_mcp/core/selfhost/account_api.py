@@ -145,6 +145,7 @@ ERROR_STATUS: Mapping[str, int] = {
     "write_tools_unavailable": 503,
     # admin
     "last_owner": 409,
+    "last_local_owner": 409,
     "settings_conflict": 409,
     "pilot_profile_restricted": 409,
     "confirmation_required": 409,
@@ -437,6 +438,7 @@ class ApiApp:
                         access="owner",
                         mutating=True,
                         body="json",
+                        max_body=131072,
                     )
                 },
             ),
@@ -453,8 +455,8 @@ class ApiApp:
                 },
             ),
             (
-                f"{API_PREFIX}/me/upn",
-                {"PUT": e(self.save_upn, access="session", mutating=True, body="json")},
+                f"{API_PREFIX}/admin/accounts/{{id}}/upn",
+                {"PUT": e(self.save_upn, access="owner", mutating=True, body="json")},
             ),
             (
                 f"{API_PREFIX}/me/local-password",
@@ -1017,12 +1019,15 @@ class ApiApp:
 
     async def providers(self, ctx: _Ctx) -> Response:
         logins = self.app.logins
+        snapshot = CURRENT_CONFIG.get()
+        icons = {p.id: p.icon_data for p in snapshot.providers} if snapshot else {}
         entries = [
             {
                 "id": entry.id,
                 "kind": entry.kind,
                 "name": _clean(entry.name, 40),
                 "icon": entry.icon,
+                **({"icon_data": icons[entry.id]} if icons.get(entry.id) else {}),
                 "start_url": entry.start_path,
             }
             for entry in logins.entries()
@@ -1575,7 +1580,13 @@ class ApiApp:
         return response
 
     async def create_local_account(self, ctx: _Ctx) -> Response:
-        body, revision = self._settings_body(ctx, {"revision", "username", "password"})
+        body = ctx.body or {}
+        fields = {"revision", "username", "password"}
+        if "owner" in body:
+            fields.add("owner")
+        body, revision = self._settings_body(ctx, fields)
+        if type(body.get("owner", False)) is not bool:
+            raise _Fail("invalid_local_credentials")
         assert ctx.session is not None
         actor = ctx.session.acct
         account, revision = await run_store(
@@ -1585,6 +1596,7 @@ class ApiApp:
                 actor=actor,
                 revision=revision,
                 now=int(self.app.clock()),
+                owner=body.get("owner", False),
             )
         )
         return self._ok({"account_id": account, "revision": revision})
@@ -1628,6 +1640,8 @@ class ApiApp:
         body = ctx.body or {}
         if "auto_link_email" in body:
             fields.add("auto_link_email")
+        if "icon_data" in body:
+            fields.add("icon_data")
         if "client_secret" in body:
             fields.add("client_secret")
         body, revision = self._settings_body(ctx, fields)
@@ -1641,6 +1655,7 @@ class ApiApp:
                 enabled=body["enabled"],
                 rank=body["rank"],
                 auto_link_email=body.get("auto_link_email"),
+                **({"icon_data": body["icon_data"]} if "icon_data" in body else {}),
                 revision=revision,
                 actor=actor,
                 now=int(self.app.clock()),
@@ -1668,19 +1683,27 @@ class ApiApp:
         if providers is None:
             raise _Fail("not_found")
         assert session is not None
-        _closed(ctx.body or {}, required=("upn",))
+        body, revision = self._settings_body(ctx, {"upn", "revision"})
+        from .login.account_policy import normalize_upn
+
+        try:
+            upn = normalize_upn(body["upn"])
+        except ValueError:
+            raise _invalid("upn") from None
+        target = self._target(ctx)
         reauthenticate = await run_store(
             lambda: AccountNames(providers.database).save(
-                (ctx.body or {})["upn"],
-                account_id=session.acct,
-                expected_epoch=session.ep,
+                upn,
+                account_id=target,
+                actor=session.acct,
+                revision=revision,
                 now=int(self.app.clock()),
             )
         )
         response = self._ok(
-            {"redirect_to": "/account/sign-in" if reauthenticate else "/account"}
+            {"revision": revision + 1, "account_id": target}
         )
-        if reauthenticate:
+        if reauthenticate and target == session.acct:
             self.app.clear_cookie(response, web.SESSION_COOKIE)
         return response
 
@@ -1749,6 +1772,9 @@ class ApiApp:
         )
         return {
             "revision": snapshot.revision,
+            "local_admin": {
+                "ready": await run_store(self.app.store.has_local_admin),
+            },
             "site": {
                 "public_base_url": snapshot.settings["site.public_base_url"]
                 or self.app.base,

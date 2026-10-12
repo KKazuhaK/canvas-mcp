@@ -1401,6 +1401,8 @@ class AccountCore:
         """The closed code for an access change the store refused."""
         if code == AccessActionRefused.LAST_OWNER:
             return "last_owner"
+        if code == AccessActionRefused.LAST_LOCAL_OWNER:
+            return "last_local_owner"
         if code == AccessActionRefused.SELF:
             return "cannot_disable_self"
         return "forbidden"

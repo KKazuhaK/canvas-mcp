@@ -23,7 +23,7 @@ beforeEach(() => {
 describe('routing and the session gate', () => {
   it('shows the signed-out landing page at / when /me answers 401', async () => {
     await renderApp('/', 'signed-out')
-    expect(await screen.findByRole('heading', { name: 'Canvas account' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Canvas MCP' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/sign-in')
     expect(await screen.findByRole('textbox', { name: 'MCP connector URL' })).toBeInTheDocument()
     expect(screen.queryByLabelText(/Canvas access token/)).toBeNull()

@@ -69,7 +69,7 @@ describe('Database-managed settings', () => {
     })
     await user.type(await screen.findByLabelText('Microsoft'), 'Stale editor name')
     await user.click(screen.getByRole('button', { name: 'Save names' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Settings changed elsewhere')
+    expect(await screen.findByText('Settings changed elsewhere. Reload before saving.')).toBeVisible()
     expect(screen.getByRole('button', { name: 'Save names' })).toBeDisabled()
     await user.click(screen.getByRole('button', { name: 'Reload settings' }))
     await waitFor(() => expect(screen.getByLabelText('Microsoft')).toHaveValue('Externally saved name'))

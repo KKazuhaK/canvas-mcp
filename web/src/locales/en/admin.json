@@ -202,6 +202,7 @@
     "detail": {
       "separator": ": ",
       "keys": {
+        "custom_icon": "Custom sign-in icon",
         "reason": "Reason",
         "canvas_host": "Canvas host",
         "admitted_via": "Admitted via",
@@ -276,6 +277,9 @@
     "lastUsed": "Last used"
   },
   "providerConfig": {
+    "icon": "Upload sign-in icon",
+    "resetIcon": "Restore default icon",
+    "iconHelp": "PNG, up to 64 KB and 512 × 512 pixels. Saved in the database.",
     "title": "Login provider configuration",
     "reload": "Reload login configuration",
     "edit": "Edit {{provider}}",
@@ -336,7 +340,10 @@
     "only": "Local account only",
     "owner": "Local administrator",
     "create": "Create local account",
-    "help": "Creates an active regular account. Local sign-in must be enabled. Public registration is closed.",
+    "help": "Creates an active account. Local sign-in must be enabled. Public registration is closed. Accounts are regular users unless you select administrator.",
+    "ownerHelp": "This account can administer the server with its UPN and password independently of SSO. Keep its password private.",
+    "ready": "A local administrator entry point is available. The last usable local administrator is protected.",
+    "missing": "No local administrator entry point is available. Enable local sign-in and create a local administrator below so SSO failure cannot lock you out.",
     "created": "Local account created."
   },
   "loginPolicy": {

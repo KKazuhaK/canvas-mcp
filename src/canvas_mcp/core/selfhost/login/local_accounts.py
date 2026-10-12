@@ -103,8 +103,10 @@ class LocalAccounts:
             account_id=account_id,
             status="active",
             role="owner" if owner else "user",
-            role_source="bootstrap" if owner else None,
-            admitted_via="bootstrap" if owner else "operator",
+            role_source=("bootstrap" if actor is None else "operator")
+            if owner
+            else None,
+            admitted_via="bootstrap" if owner and actor is None else "operator",
             display_name=name,
             upn=name,
             now=now,
@@ -182,15 +184,24 @@ class LocalAccounts:
         return revision
 
     def create(
-        self, *, name: object, password: object, actor: str, revision: int, now: int
+        self,
+        *,
+        name: object,
+        password: object,
+        actor: str,
+        revision: int,
+        now: int,
+        owner: bool = False,
     ) -> tuple[str, int]:
+        if type(owner) is not bool:
+            raise ProviderConfigurationError("invalid_local_credentials")
         name, hashed = username(name), password_hash(password)
         with self.database.write() as conn:
             revision = ConfigStore._authorize(conn, actor, revision, now)
             if not self._enabled(conn):
                 raise ProviderConfigurationError("local_login_failed")
             return self._insert(
-                conn, name, hashed, owner=False, actor=actor, now=now
+                conn, name, hashed, owner=owner, actor=actor, now=now
             ), revision
 
     @staticmethod

@@ -36,18 +36,28 @@ class AccountNames:
             }
 
     def save(
-        self, value: object, *, account_id: str, expected_epoch: int, now: int
+        self,
+        value: object,
+        *,
+        account_id: str,
+        expected_epoch: int | None = None,
+        now: int,
+        actor: str | None = None,
+        revision: int | None = None,
     ) -> bool:
         upn = normalize_upn(value)
         try:
             with self.database.write() as conn:
+                # None is an operator call; browser writes must carry an owner and CAS revision.
+                if revision is not None:
+                    ConfigStore._authorize(conn, actor, revision, now)
+                elif actor is not None:
+                    raise ValueError("revision required")
                 self.repos.codes.delete_unconsumed_for_account(conn, account_id)
                 row = self.repos.accounts.get(conn, account_id, for_update=True)
-                if (
-                    row is None
-                    or row.status == "disabled"
-                    or row.session_epoch != expected_epoch
-                ):
+                if row is None:
+                    raise ProviderConfigurationError("not_found")
+                if expected_epoch is not None and row.session_epoch != expected_epoch:
                     raise ProviderConfigurationError("local_login_failed")
                 if conn.execute(
                     select(s.accounts.c.id).where(
@@ -65,11 +75,15 @@ class AccountNames:
                 if not row.upn_required:
                     self.repos.accounts.end_sessions(conn, account_id, now)
                 self.repos.grants.revoke_for_account(
-                    conn, account_id, reason="admission_lost", by=account_id, now=now
+                    conn,
+                    account_id,
+                    reason="admission_lost",
+                    by=actor or "operator",
+                    now=now,
                 )
                 ConfigStore._audit(
                     conn,
-                    account_id,
+                    actor,
                     now,
                     "account_upn_changed",
                     "account",

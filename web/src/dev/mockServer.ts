@@ -468,6 +468,7 @@ function buildState(scenario: MockScenario): MockState {
     hasCatalog: scenario !== 'no-write-tools',
     schools,
     settings: {
+      local_admin: { ready: false },
       site: { public_base_url: 'https://canvas.example.test', active_base_url: 'https://canvas.example.test', restart_required: false },
       revision: 1,
       sign_in_methods: (multi ? MULTI_PROVIDERS : [MULTI_PROVIDERS[0]]).map((p) => ({ id: p.id, protocol: p.id.startsWith('oidc:') ? 'oidc' : p.id, icon: p.icon, configured: true, default_name: p.name, display_name: null, effective_name: p.name })),
@@ -619,6 +620,7 @@ const STATUS: Partial<Record<ApiErrorCode, number>> = {
   pilot_profile_restricted: 409,
   confirmation_required: 409,
   last_owner: 409,
+  last_local_owner: 409,
   cannot_disable_self: 409,
   identity_in_use: 409,
   provider_already_linked: 409,
@@ -720,6 +722,7 @@ route('PUT /me/password', 'active', (_c, s) => { s.signedIn = false; return ok({
 route('POST /admin/local-accounts', 'owner', (c, s) => {
   if (c.body.revision !== s.settings.revision) return fail('settings_conflict')
   s.settings.revision += 1
+  if (c.body.owner === true) s.settings.local_admin.ready = true
   return ok({ account_id: acct(9), revision: s.settings.revision })
 })
 route('GET /setup', 'public', (_c, s) => ok({ initialized: s.setupInitialized, revision: s.settings.revision, callback_uri: 'https://canvas.example.test/auth/callback/entra' }))
@@ -747,9 +750,11 @@ route('PUT /admin/login-providers/{id}', 'owner', (c, s) => {
     id, protocol: id.startsWith('oidc:') ? 'oidc' : id as LoginProviderConfiguration['protocol'],
     enabled: c.body.enabled, rank: c.body.rank, config: c.body.config as LoginProviderConfiguration['config'],
     auto_link_email: typeof c.body.auto_link_email === 'boolean' ? c.body.auto_link_email : old?.auto_link_email ?? false,
+    icon_data: c.body.icon_data === null ? null : typeof c.body.icon_data === 'string' ? c.body.icon_data : old?.icon_data ?? null,
     secret_present: id !== 'local', callback_uri: id === 'local' ? '' : `https://canvas.example.test/auth/callback/${id.replace(':', '/')}`,
   }
   s.providerConfigurations = [...s.providerConfigurations.filter((provider) => provider.id !== id), value]
+  s.providers = s.providers.map((provider) => provider.id === id ? { ...provider, icon_data: value.icon_data } : provider)
   s.settings.revision += 1
   return ok({ revision: s.settings.revision, public_base_url: 'https://canvas.example.test', providers: s.providerConfigurations })
 })
@@ -850,9 +855,14 @@ route('PUT /admin/settings/schools', 'owner', (c, s) => {
 })
 
 route('GET /me', 'session', (_c, s) => ok(meView(s)))
-route('PUT /me/upn', 'session', (c) => {
+route('PUT /admin/accounts/{id}/upn', 'owner', (c, s) => {
+  if (c.body.revision !== s.settings.revision) return fail('settings_conflict')
   if (typeof c.body.upn !== 'string' || !/^[a-z0-9][a-z0-9.@_+-]{2,253}$/i.test(c.body.upn)) return fail('validation_failed', { field: 'upn' })
-  return ok({ redirect_to: '/account/sign-in' })
+  s.settings.revision += 1
+  const id = decodeURIComponent(c.match[1])
+  const account = s.accounts.find((item) => item.id === id)
+  if (account) account.upn = String(c.body.upn).trim().toLowerCase()
+  return ok({ revision: s.settings.revision, account_id: id })
 })
 route('POST /me/local-password', 'active', (c) => {
   if (typeof c.body.password !== 'string' || c.body.password.length < 15) return fail('invalid_local_credentials')

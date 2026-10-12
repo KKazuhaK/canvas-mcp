@@ -3,6 +3,15 @@ import { describe, expect, it } from 'vitest'
 import ProviderIcon from './ProviderIcon'
 
 describe('ProviderIcon', () => {
+  it('uses an embedded custom PNG and keeps external URLs on the default icon', () => {
+    const data = 'data:image/png;base64,aWNvbg=='
+    const custom = render(<ProviderIcon icon="key" data={data} />).container
+    expect(custom.querySelector('img')).toHaveAttribute('src', data)
+    expect(custom.querySelector('img')).toHaveAttribute('alt', '')
+    const remote = render(<ProviderIcon icon="key" data="https://icons.test/icon.svg" />).container
+    expect(remote.querySelector('img')).toBeNull()
+    expect(remote.querySelector('svg')).not.toBeNull()
+  })
   it.each(['microsoft', 'google', 'github', 'key', 'something-new'])(
     'draws %s as inline SVG with nothing remote in it',
     (icon) => {

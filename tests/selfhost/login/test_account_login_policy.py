@@ -281,7 +281,7 @@ def test_local_password_and_upn_rename_keep_external_account_and_identity(store)
     assert AccountNames(store._db).read(key)["upn"] == "renamed@example.test"
 
 
-def test_name_selection_gate_closes_before_oauth_authorization(store):
+def test_sso_without_email_gets_system_upn_before_oauth_authorization(store):
     from canvas_mcp.core.selfhost.authz.store import _standing_ok
     from canvas_mcp.core.selfhost.login.account_names import AccountNames
 
@@ -292,7 +292,8 @@ def test_name_selection_gate_closes_before_oauth_authorization(store):
     key = created.status.principal_key
     with store._db.read() as conn:
         row = store._repos.accounts.get(conn, key)
-        assert row.upn_required and not _standing_ok(row, row.session_epoch)
+        assert not row.upn_required and row.upn.startswith("account_")
+        assert _standing_ok(row, row.session_epoch)
     AccountNames(store._db).save(
         "chosen@example.test",
         account_id=key,

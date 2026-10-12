@@ -60,7 +60,7 @@ describe('Database login installation', () => {
     await waitFor(() => expect(seen.some((request) => request.url === '/setup' && request.method === 'POST')).toBe(true))
     const sent = seen.find((request) => request.url === '/setup' && request.method === 'POST')!
     expect(JSON.parse(sent.data as string)).toMatchObject({ code: 'A'.repeat(43), revision: 1, local_account: { username: 'admin', password: 'a long private local password' }, provider_id: 'entra', client_secret: 'new-client-secret-0123456789' })
-    expect(await screen.findByRole('heading', { name: 'Canvas account' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Canvas MCP' })).toBeInTheDocument()
   })
 
   it('renders installation in Chinese', async () => {
@@ -71,7 +71,7 @@ describe('Database login installation', () => {
   })
   it('redirects an initialized installation to sign-in', async () => {
     await renderApp('/setup', 'signed-out')
-    expect(await screen.findByRole('heading', { name: 'Canvas account' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Canvas MCP' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Configure sign-in' })).not.toBeInTheDocument()
   })
 })
