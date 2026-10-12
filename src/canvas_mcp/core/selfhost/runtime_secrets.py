@@ -28,7 +28,10 @@ def _path(env: Mapping[str, str]) -> Path:
 
 def _read(path: Path) -> dict[str, str] | None:
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
     except FileNotFoundError:
         return None
     except OSError:

@@ -40,7 +40,6 @@ ENV=(
   -e ENTRA_TENANT_ID="${SMOKE_ENTRA_TENANT_ID:-11111111-2222-3333-4444-555555555555}"
   -e ENTRA_CLIENT_ID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
   -e ENTRA_CLIENT_SECRET=smoke-not-a-real-secret-0123456789
-  -e ACCOUNT_SESSION_SECRET="$SESSION_SECRET" -e CANVAS_TOKEN_KEYS="$TOKEN_KEYS"
   -e CANVAS_ROLE=student
 )
 NETWORK=()
@@ -50,6 +49,7 @@ fi
 if [ -n "${SMOKE_NETWORK:-}" ]; then
   NETWORK=(--network "$SMOKE_NETWORK")
 fi
+REFUSAL_ENV=("${ENV[@]}" -e ACCOUNT_SESSION_SECRET="$SESSION_SECRET" -e CANVAS_TOKEN_KEYS="$TOKEN_KEYS")
 wait_for() {
   local name="$1" i
   for ((i=0; i<60; i++)); do
@@ -166,7 +166,7 @@ expect_refusal() {
   local label="$1" result marker; shift
   set +e
   timeout 30 docker run --rm --name "$REFUSAL" --read-only --tmpfs /tmp \
-    "${NETWORK[@]}" "${ENV[@]}" "$@" "$IMAGE" >"$WORKDIR/refusal" 2>&1
+    "${NETWORK[@]}" "${REFUSAL_ENV[@]}" "$@" "$IMAGE" >"$WORKDIR/refusal" 2>&1
   result=$?
   set -e
   docker rm -f "$REFUSAL" >/dev/null 2>&1 || true

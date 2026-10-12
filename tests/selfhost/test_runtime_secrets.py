@@ -149,6 +149,13 @@ def test_unreachable_database_never_writes_keys_or_prints_its_password(tmp_path)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX ownership and mode enforcement")
+def test_fifo_secret_file_is_refused_without_blocking(tmp_path):
+    os.mkfifo(tmp_path / SECRETS_FILE, 0o600)
+    with pytest.raises(RuntimeSecretsError):
+        with_saved_secrets(minimal(tmp_path))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX ownership and mode enforcement")
 def test_symlink_and_world_readable_secret_files_are_refused(tmp_path):
     env = initialize_secrets(minimal(tmp_path))
     path = tmp_path / SECRETS_FILE
