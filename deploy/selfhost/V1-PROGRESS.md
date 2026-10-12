@@ -135,7 +135,14 @@ mypy and Ruff passed. Focused regression checks passed 111 tests with nine
 platform skips; 18 real-graph migration checks passed, including populated
 beta.6 and conflicting canonical ownership rollback. Full selfhost regression,
 native PostgreSQL CI and both Docker architectures remain required before
-publication. This candidate is not a published deployment image yet.
+publication. Complete local selfhost regression passed 4,233 checks with 54
+platform skips. Additional focused checks passed 32 account-policy/site-origin
+checks, including case-insensitive UPN collision and a rename during password
+verification. The account-unlock UI sends only its governed unlock request,
+without deleting or linking identities. The initial Docker run exposed a smoke
+assertion that omitted the canonical OAuth issuer's trailing slash; the corrected
+assertion requires a new exact-head native image run. This candidate is not a
+published deployment image yet.
 
 ## Historical checkpoints
 

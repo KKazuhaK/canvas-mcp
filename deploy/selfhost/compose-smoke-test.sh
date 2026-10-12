@@ -96,5 +96,5 @@ finally:
     runtime.store.close()
 PY
 compose exec -T canvas-mcp python -m canvas_mcp.core.selfhost.token_admin check
-curl -fsS http://127.0.0.1:8819/.well-known/oauth-authorization-server | python -c 'import json,sys; assert json.load(sys.stdin)["issuer"] == "https://mcp.example.com"'
+curl -fsS http://127.0.0.1:8819/.well-known/oauth-authorization-server | python -c 'import json,sys; assert json.load(sys.stdin)["issuer"] == "https://mcp.example.com/"'
 echo "TWO-FILE COMPOSE TEST PASSED: origin-only boot, HTTP setup and encrypted configuration survive recreation"

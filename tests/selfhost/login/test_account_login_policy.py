@@ -348,3 +348,29 @@ def test_block_conflicting_registration_checks_bare_upn_without_associating(stor
     assert result.outcome == "deny" and not result.created
     assert result.reason == "use_existing_sign_in"
     assert store.list_identities(KEY_A) == before
+
+
+def test_upn_collision_is_account_wide_and_case_insensitive(store):
+    from canvas_mcp.core.selfhost.login.account_names import AccountNames
+    from canvas_mcp.core.selfhost.login.provider_config import (
+        ProviderConfigurationError,
+    )
+
+    first = signin(store, google())
+    second = signin(store, replace(google("second"), email="second@example.test"))
+    names = AccountNames(store._db)
+    names.save(
+        "  Shared.UPN  ",
+        account_id=first.status.principal_key,
+        expected_epoch=first.status.session_epoch,
+        now=2,
+    )
+    with pytest.raises(ProviderConfigurationError, match="local_username_taken"):
+        names.save(
+            "shared.upn",
+            account_id=second.status.principal_key,
+            expected_epoch=second.status.session_epoch,
+            now=3,
+        )
+    assert names.read(first.status.principal_key)["upn"] == "shared.upn"
+    assert names.read(second.status.principal_key)["upn"] == "second@example.test"
