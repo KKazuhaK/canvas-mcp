@@ -14,15 +14,19 @@ Upgrade, transfer, backup and compatibility code lives only in
 `core/selfhost/db/migrations/`, with four structural boundary tests and three
 lazy startup/CLI bridges. Its README explains how to remove the package later.
 
-Both complete CI matrices at the final reviewed head `0dc62bb` passed:
-[push](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38171071968) and
-[PR](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38171075305).
-The squash merge has the identical file tree. The separate post-merge matrix is
-tracked in [run 38172509352](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38172509352).
-The [image publication](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38172509368)
-passed both native-architecture container smoke tests and published the index
-below. GHCR index annotations and each architecture's image labels independently
-confirm the merge commit. The stable `latest` digest remains unchanged.
+The two-file deployment and database-storage guard are merged through fork
+[PR #6](https://github.com/KKazuhaK/canvas-mcp/pull/6) and
+[PR #7](https://github.com/KKazuhaK/canvas-mcp/pull/7). The complete reviewed
+[CI matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38189360639)
+passed at `105706fa9beba38a0f185ea20fdc1527b5b422ae`; the final squash merge
+`ab64798f7c6fcb7606dee7182de1e872f3ae292d` has the identical file tree.
+Post-merge focused checks passed 114 tests with five platform/database skips.
+The separate post-merge full matrix also passed in
+[run 38190515625](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38190515625).
+The [release image publication](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38190557563)
+passed native amd64/arm64 container and actual Compose checks. GHCR index
+annotations and each architecture's labels independently confirm the final
+merge commit. The stable `latest` digest remains unchanged.
 
 The owner supplies staging and reverse-proxy deployment; real IdP/B2B/client,
 proxy and multiday refresh acceptance remain required. The owner approved
@@ -33,35 +37,42 @@ Upstream PRs #490, #491 and #494 await maintainer review. The hosting stack is
 maintained independently on the fork; upstream changes are not merged into
 `selfhost` automatically. No real-client compatibility row is marked passed.
 
-`v1.14.0-beta.3` is published. The two-file deployment follow-up in fork PR #6
+`v1.14.0-beta.4` is published. The two-file deployment follow-up in fork PR #6
 reduces initial configuration to the public origin and three Entra credentials,
 defaults Compose to the beta image, and automatically persists separate random
 encryption/session keys on the data volume. Native image smoke checks exercise
 the actual Compose and minimal `.env`, operator CLI and container recreation.
-This follow-up must pass its complete CI matrix before the next beta publication.
+Fork PR #7 also refuses inaccessible or non-regular database storage before
+generating keys. Existing data without its original keys is never re-keyed.
 
 ## Deployable staging image
 
-Use a fresh v1 database. The current published staging release is
-[v1.14.0-beta.3](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.3).
-It still requires explicit internal keys in `.env`; the automatic two-file
-startup described above is awaiting its next beta release. For repeatable
-acceptance, pin this immutable index rather than the moving `edge` channel:
+The current published staging release is
+[v1.14.0-beta.4](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.4).
+Download only its
+[docker-compose.yml](https://github.com/KKazuhaK/canvas-mcp/releases/download/v1.14.0-beta.4/docker-compose.yml)
+and [.env template](https://github.com/KKazuhaK/canvas-mcp/releases/download/v1.14.0-beta.4/default.env),
+save the template as `.env`, fill the four values and run
+`docker compose up -d --wait`. No host environment exports, setup script or
+manual internal-key generation are required. Keep the persistent data volume;
+existing explicit keys remain supported and must be preserved with their data.
+The Compose default is `:beta`. For repeatable acceptance, optionally pin the
+immutable index in the same `.env`:
 
 ```dotenv
-CANVAS_MCP_IMAGE=ghcr.io/kkazuhak/canvas-mcp@sha256:3959d1641edeef9c6e5b10754502a079ff78a86dfa2b5b5146892058af10d5d8
+CANVAS_MCP_IMAGE=ghcr.io/kkazuhak/canvas-mcp@sha256:e62d09d0ad7c9614742f289237a2920141c526840dfa88ede9f4f13f90bb010c
 ```
 
-- Source: `42a501a550edf93631708cbe9a8bb6afe683b232`.
-- Registry version: `1.14.0-beta.3`; platforms: `linux/amd64`, `linux/arm64`.
-- The complete source [CI matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38184914895)
-  and native multi-architecture [release image checks](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38186065476)
+- Source: `ab64798f7c6fcb7606dee7182de1e872f3ae292d`.
+- Registry version: `1.14.0-beta.4`; platforms: `linux/amd64`, `linux/arm64`.
+- The complete reviewed [CI matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38189360639)
+  and native multi-architecture [release image checks](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38190557563)
   passed; both beta aliases identify the same source and digest.
 - The pre-v1 stable image is left in place at digest
   `sha256:9eeeaea8365ecad39ea02704b867f2dfae03521c229938ce78e8937fcbf1cdfb`.
-- Final reviewed CI: locked SQLite 8,026 passed / 64 skipped; Windows
-  8,024 passed / 66 skipped; each PostgreSQL dependency set 4,211 passed /
-  11 skipped. Both complete matrices include Python 3.11-3.14, frontend, lint,
+- Final reviewed CI: locked SQLite 8,047 passed / 65 skipped; Windows
+  8,041 passed / 71 skipped; each PostgreSQL dependency set 4,227 passed /
+  11 skipped. The complete matrix includes Python 3.11-3.14, frontend, lint,
   code API, formal confirmation checks and amd64/arm64 Docker smoke tests.
 
 Deployment and live acceptance are pending. Record the staging origin, exact
