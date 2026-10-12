@@ -46,7 +46,7 @@ fi
 if [ -n "${SMOKE_NETWORK:-}" ]; then
   NETWORK=(--network "$SMOKE_NETWORK")
 fi
-REFUSAL_ENV=("${ENV[@]}" -e ACCOUNT_SESSION_SECRET="$SESSION_SECRET" -e CANVAS_TOKEN_KEYS="$TOKEN_KEYS")
+REFUSAL_ENV=("${ENV[@]}")
 wait_for() {
   local name="$1" i
   for ((i=0; i<60; i++)); do
@@ -183,7 +183,7 @@ expect_refusal() {
   local label="$1" result marker; shift
   set +e
   timeout 30 docker run --rm --name "$REFUSAL" --read-only --tmpfs /tmp \
-    "${NETWORK[@]}" "${REFUSAL_ENV[@]}" "$@" "$IMAGE" >"$WORKDIR/refusal" 2>&1
+    "${NETWORK[@]}" -v "$VOLUME:/data" "${REFUSAL_ENV[@]}" "$@" "$IMAGE" >"$WORKDIR/refusal" 2>&1
   result=$?
   set -e
   docker rm -f "$REFUSAL" >/dev/null 2>&1 || true

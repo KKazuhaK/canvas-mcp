@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import { recordRequests } from '@/test/fixtures'
 import { renderApp } from '@/test/renderWithProviders'
+import zhAdmin from '@/locales/zh/admin.json'
 
 describe('Database login installation', () => {
   it('opens first-install setup from the home page and saves credentials through the API', async () => {
@@ -26,8 +27,8 @@ describe('Database login installation', () => {
   it('renders installation in Chinese', async () => {
     await renderApp('/setup', 'setup')
     await act(async () => { await i18next.changeLanguage('zh') })
-    expect(await screen.findByRole('heading', { name: '配置登录' })).toBeInTheDocument()
-    expect(screen.getByLabelText(/^初始化码/)).toHaveAttribute('type', 'password')
+    expect(await screen.findByRole('heading', { name: zhAdmin.installation.title })).toBeInTheDocument()
+    expect(screen.getByLabelText(new RegExp(`^${zhAdmin.installation.code}`))).toHaveAttribute('type', 'password')
   })
   it('redirects an initialized installation to sign-in', async () => {
     await renderApp('/setup', 'signed-out')

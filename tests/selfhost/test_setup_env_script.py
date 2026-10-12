@@ -1,4 +1,4 @@
-"""deploy/selfhost/setup-env.sh writes a .env the server accepts, and nothing else.
+"""The isolated legacy helper writes input for explicit environment adoption.
 
 The script runs on the operator's Linux host, so these tests drive the real
 script with bash and openssl. On Windows they use Git for Windows' bash (never
@@ -24,7 +24,10 @@ from canvas_mcp.core.selfhost.db.migrations.provider_environment import (
 
 from .conftest import CLIENT, TENANT
 
-SCRIPT = Path(__file__).resolve().parents[2] / "deploy" / "selfhost" / "setup-env.sh"
+SCRIPT = (
+    Path(__file__).resolve().parents[2]
+    / "src/canvas_mcp/core/selfhost/db/migrations/legacy_setup_env.sh"
+)
 SECRET = "Fake~Entra.Secret_value-0123456789"
 BASE = "https://canvas.example.test"
 IMAGE = "canvas-mcp:selfhost-v1-local"

@@ -246,7 +246,10 @@ def test_operator_guide_covers_security_and_staging_limits():
 
 
 def test_setup_and_smoke_scripts_disable_tracing_and_preserve_secrets():
-    setup, smoke = text("setup-env.sh"), text("smoke-test.sh")
+    setup = (
+        ROOT / "src/canvas_mcp/core/selfhost/db/migrations/legacy_setup_env.sh"
+    ).read_text(encoding="utf-8")
+    smoke = text("smoke-test.sh")
     assert "set +x" in setup and "set +x" in smoke
     assert "umask 077" in setup and "set -o noclobber" in setup
     assert "read -r -s -p" in setup

@@ -47,6 +47,7 @@ class DatabaseLoginRuntime:
         """Refresh without publishing a partially rebuilt or stale generation."""
         from ..accounts import EntraClaimsPolicy
         from ..identity import IdentityService
+        from ..settings import SelfhostConfigError
         from .flows import ExternalSignIn
         from .provider_config import ProviderConfigurationError
         from .provider_settings import settings_from_database
@@ -60,7 +61,12 @@ class DatabaseLoginRuntime:
                 snapshot = self.app.snapshots.get(saved.revision)
                 if snapshot.revision != saved.revision:
                     continue
-                settings = settings_from_database(self.settings, saved)
+                try:
+                    settings = settings_from_database(self.settings, saved)
+                except SelfhostConfigError:
+                    raise ProviderConfigurationError(
+                        "provider_configuration_unavailable"
+                    ) from None
                 previous = self.current.logins
                 logins = build_login_runtime(
                     settings,

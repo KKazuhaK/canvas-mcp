@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# canvas-mcp self-hosted (Entra, multi-user): interactively generate the .env file.
+# Legacy configuration export for explicit provider adoption only.
+# New installations use Compose plus an origin-only .env and the web setup page.
 #
 # Run it in the deployment directory (for example /opt/canvas-mcp):
-#   curl -fsSLO https://raw.githubusercontent.com/KKazuhaK/canvas-mcp/selfhost/deploy/selfhost/setup-env.sh
-#   bash setup-env.sh
+# Copy this legacy helper as setup-env.sh only when deliberately preparing an
+# old-style environment for token_admin login-providers --import-env.
 # Download it to a file first and run it with bash; do not use curl ... | bash (standard
 # input is reserved for the client secret).
 #

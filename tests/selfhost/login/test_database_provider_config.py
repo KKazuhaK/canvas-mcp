@@ -216,6 +216,47 @@ def test_operator_can_repair_an_already_stranded_provider_inventory(providers, d
     assert {provider.id for provider in providers.load_enabled()} == {"entra", "google"}
 
 
+def test_policy_validation_rolls_back_configuration_revision_secret_and_audit(db):
+    infrastructure = load_selfhost_settings(
+        _env(
+            ACCESS_POLICY="rules",
+            ACCESS_RULES="entra:role:Canvas.User",
+            OWNER_RULES="entra:role:Canvas.Owner",
+        )
+    )
+    providers = ProviderConfigStore(
+        db,
+        Keyring([("k1", b"1" * 32)]),
+        validate=lambda snapshot: settings_from_database(infrastructure, snapshot),
+    )
+    save(providers, db)
+    providers.save(
+        "google",
+        config={"client_id": "123456.apps.googleusercontent.com"},
+        client_secret=SECRET,
+        enabled=True,
+        rank=1,
+        revision=revision(db),
+        actor=None,
+        now=101,
+    )
+    before = providers.load_snapshot()
+    with db.read() as conn:
+        audit_before = conn.execute(select(s.audit_log.c.id)).all()
+    with pytest.raises(
+        ProviderConfigurationError, match="invalid_provider_configuration"
+    ):
+        save(
+            providers,
+            db,
+            enabled=False,
+            client_secret="replacement-not-committed-secret",
+        )
+    assert providers.load_snapshot() == before
+    with db.read() as conn:
+        assert conn.execute(select(s.audit_log.c.id)).all() == audit_before
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

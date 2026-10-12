@@ -2,6 +2,7 @@ import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderWithQuery, setupI18n } from '@/test/renderWithProviders'
+import zhAdmin from '@/locales/zh/admin.json'
 import ProviderConfigurationForm, { type EditableProvider } from './ProviderConfigurationForm'
 
 const provider: EditableProvider = {
@@ -53,8 +54,8 @@ describe('Write-only sign-in provider credentials', () => {
   it('renders credential handling in Chinese too', async () => {
     await setupI18n('zh')
     renderWithQuery(<ProviderConfigurationForm provider={provider} callbackUri={callback} onSave={async () => {}} />)
-    expect(screen.getByLabelText('客户端密钥')).toHaveValue('')
-    expect(screen.getByText('密钥已保存。留空保留原值，填写新值则替换。')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '保存登录配置' })).toBeInTheDocument()
+    expect(screen.getByLabelText(zhAdmin.providerConfig.secret)).toHaveValue('')
+    expect(screen.getByText(zhAdmin.providerConfig.keepSecret)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: zhAdmin.providerConfig.save })).toBeInTheDocument()
   })
 })

@@ -6,6 +6,7 @@ import os
 import time
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -342,7 +343,11 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         from .login.provider_settings import settings_from_database
         from .login.provider_store import ProviderConfigStore
 
-        provider_store = ProviderConfigStore(store.database, keyring)
+        provider_store = ProviderConfigStore(
+            store.database,
+            keyring,
+            validate=partial(settings_from_database, settings),
+        )
         if settings.login_providers.order:
             import_provider_settings(settings, provider_store)
         else:

@@ -855,7 +855,9 @@ def _run_login_providers(args: argparse.Namespace) -> int:
         store = _open_store()
         try:
             providers = ProviderConfigStore(
-                store.database, Keyring.parse(settings.canvas_token_keys_raw)
+                store.database,
+                Keyring.parse(settings.canvas_token_keys_raw),
+                validate=lambda snapshot: settings_from_database(settings, snapshot),
             )
             if args.import_env:
                 from .db.migrations.provider_environment import (

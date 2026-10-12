@@ -89,9 +89,8 @@ database has lost its original keys, startup refuses to generate replacements.
 Existing explicitly configured keys remain supported; keep those keys in `.env`.
 
 [env.reference.example](env.reference.example) is the optional full settings
-reference. `setup-env.sh` remains an optional manual-key configuration helper,
-not a deployment requirement. Upgrade, backup and transfer procedures stay in
-the isolated migration package.
+reference. Legacy environment export, upgrade, backup and transfer tooling
+remain together in the removable `core/selfhost/db/migrations/` package.
 
 For a source build, select `CANVAS_MCP_IMAGE=canvas-mcp:selfhost-v1-local` in
 `.env` and use the repository's build override:

@@ -110,6 +110,7 @@ def import_provider_settings(
                 now=now,
                 _connection=conn,
             )
+        providers.validate_in(conn)
         return True
 
 

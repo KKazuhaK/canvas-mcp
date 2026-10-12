@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
@@ -30,10 +31,17 @@ class ProviderSnapshot:
 
 
 class ProviderConfigStore:
-    def __init__(self, database: Database, keys: SealKeys) -> None:
+    def __init__(
+        self,
+        database: Database,
+        keys: SealKeys,
+        *,
+        validate: Callable[[ProviderSnapshot], object] | None = None,
+    ) -> None:
         self.database = database
         self.keys = keys
         self.repos = Repositories(database.kind)
+        self.validate = validate
 
     @staticmethod
     def _public(row: Any) -> dict[str, Any]:
@@ -104,26 +112,39 @@ class ProviderConfigStore:
     def load_snapshot(self) -> ProviderSnapshot:
         """Read credentials and their revision in one SQL statement snapshot."""
         with self.database.read() as conn:
-            rows = (
-                conn.execute(
-                    select(s.server_state.c.settings_revision, s.login_providers)
-                    .select_from(
-                        s.server_state.outerjoin(
-                            s.login_providers, s.login_providers.c.configured
-                        )
+            return self._snapshot_in(conn)
+
+    def _snapshot_in(self, conn: Connection) -> ProviderSnapshot:
+        rows = (
+            conn.execute(
+                select(s.server_state.c.settings_revision, s.login_providers)
+                .select_from(
+                    s.server_state.outerjoin(
+                        s.login_providers, s.login_providers.c.configured
                     )
-                    .where(s.server_state.c.id == 1)
-                    .order_by(s.login_providers.c.sort_rank, s.login_providers.c.id)
                 )
-                .mappings()
-                .all()
+                .where(s.server_state.c.id == 1)
+                .order_by(s.login_providers.c.sort_rank, s.login_providers.c.id)
             )
-            if not rows:
-                raise ProviderConfigurationError("provider_configuration_unavailable")
-            return ProviderSnapshot(
-                int(rows[0]["settings_revision"]),
-                tuple(self._decode(row) for row in rows if row["id"] is not None),
-            )
+            .mappings()
+            .all()
+        )
+        if not rows:
+            raise ProviderConfigurationError("provider_configuration_unavailable")
+        return ProviderSnapshot(
+            int(rows[0]["settings_revision"]),
+            tuple(self._decode(row) for row in rows if row["id"] is not None),
+        )
+
+    def validate_in(self, conn: Connection) -> None:
+        """Validate the whole proposed registration set before its transaction commits."""
+        if self.validate is not None:
+            from ..settings import SelfhostConfigError
+
+            try:
+                self.validate(self._snapshot_in(conn))
+            except SelfhostConfigError:
+                raise ProviderConfigurationError() from None
 
     @staticmethod
     def setup_available_in(conn: Connection) -> bool:
@@ -277,4 +298,6 @@ class ProviderConfigStore:
                     "secret_replaced": value.client_secret is not None,
                 },
             )
+            if _connection is None:
+                self.validate_in(conn)
         return new_revision

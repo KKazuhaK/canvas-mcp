@@ -22,6 +22,8 @@ database is refused rather than silently generating a different identity.
   adapter lazily only when the operator requests adoption. It also contains
   guarded removal of an old beta's entirely empty startup metadata.
   Adoption is atomic and never replaces database-owned values.
+- `legacy_setup_env.sh`: legacy environment export for deliberate adoption.
+  New installations never use this helper or generate keys manually.
 - `policy.py`: forward revision flags, SQLite rebuild invariants and PostgreSQL
   concurrent-index recovery. This is upgrade tooling, not a runtime repository.
 
