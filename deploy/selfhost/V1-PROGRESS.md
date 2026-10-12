@@ -33,9 +33,17 @@ proxy and multiday refresh acceptance remain required. The owner approved
 `v1.14.0-beta.3` for staging before those live checks, superseding the initial
 first-tag timing gate. The development/publishing branch is `selfhost`, while
 `main` remains the upstream mirror. New version names carry no school suffix.
-Upstream PRs #490, #491 and #494 await maintainer review. The hosting stack is
-maintained independently on the fork; upstream changes are not merged into
-`selfhost` automatically. No real-client compatibility row is marked passed.
+Upstream PR #490 still awaits maintainer review. The maintainer approved #491
+and #494 and requested fresh branches. Both were updated from upstream main
+`7c4229c` on October 12, with their reviewed source/tests unchanged; complete
+application CI and required checks passed for
+[#491 at ca2563f](https://github.com/vishalsachdev/canvas-mcp/actions/runs/38322496722)
+and [#494 at cf2c287](https://github.com/vishalsachdev/canvas-mcp/actions/runs/38322500393).
+The separate review-secret workflow remains unavailable on fork PRs. Their
+updated bodies record local full-suite results and CI evidence; merge is left
+to the upstream maintainer. The hosting stack is maintained independently on
+the fork; these upstream-PR updates were not merged into `selfhost`. No
+real-client compatibility row is marked passed.
 
 `v1.14.0-beta.4` is published. The two-file deployment follow-up in fork PR #6
 reduces initial configuration to the public origin and three Entra credentials,
