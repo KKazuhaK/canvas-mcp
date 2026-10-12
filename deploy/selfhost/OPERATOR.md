@@ -47,6 +47,14 @@ The reviewed multi-architecture staging image and its immutable digest are in
    nginx's `location ^~ /auth/` must keep its trailing slash. Preserve Host,
    streaming responses, request limits and callback log redaction. Check the
    external health response and provider callback through that proxy.
+   Both `/.well-known/oauth-authorization-server` and
+   `/.well-known/oauth-protected-resource/mcp` must return application JSON.
+   In aaPanel/BaoTa, open Website > the site's Settings > Configuration and
+   add the `location ^~ /.well-known/oauth-` block from
+   [nginx.conf.example](nginx.conf.example) inside the HTTPS `server` block,
+   alongside its other locations, if a panel-generated `.well-known` rule
+   returns a static 404. Save, validate and reload nginx in the panel. The
+   prefix preserves the original request path and leaves ACME validation alone.
 6. Open first-install `/account/setup` using the private code from the container
    logs and create a local administrator. External login configuration is optional
    during setup and can be added later in Settings. Configuration belongs in the

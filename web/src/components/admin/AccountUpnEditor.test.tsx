@@ -10,6 +10,8 @@ describe('Administrator UPN editing', () => {
     await renderApp('/admin', 'owner')
     const row = (await screen.findByText('Cleo Example')).closest('tr, li')!
     await user.click(within(row as HTMLElement).getByRole('button', { name: 'Edit account UPN' }))
+    expect(screen.getByLabelText('Account UPN')).toHaveValue('cleo@example.edu')
+    await user.clear(screen.getByLabelText('Account UPN'))
     await user.type(screen.getByLabelText('Account UPN'), 'renamed.user')
     const seen = recordRequests()
     await user.click(screen.getByRole('button', { name: 'Save account UPN' }))

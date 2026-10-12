@@ -82,6 +82,17 @@ server {
     # claude.ai MCP request bodies and the /account forms are tiny; 10m is more than enough.
     client_max_body_size 10m;
 
+    # OAuth discovery is served by the application. Keep panel-generated
+    # /.well-known/ static or regex rules from intercepting these paths.
+    # This prefix leaves /.well-known/acme-challenge/ certificate checks alone.
+    location ^~ /.well-known/oauth- {
+        proxy_pass http://127.0.0.1:8819;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
     # The two OAuth entry points that need no sign-in: 10 requests per minute per IP (burst of 5).
     # In normal use they are rarely called: they run only once when a connector is connected.
     location = /register {

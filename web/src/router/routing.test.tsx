@@ -33,6 +33,8 @@ describe('routing and the session gate', () => {
     await renderApp('/', 'enrolled')
     expect(await screen.findByText('Canvas token enrolled')).toBeInTheDocument()
     expect(screen.getByText(/Signed in as ada@example.edu/)).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Account UPN' })).toHaveValue('ada@example.edu')
+    expect(screen.getByRole('textbox', { name: 'Account UPN' })).toHaveAttribute('readonly')
     expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBeInTheDocument()
   })
 

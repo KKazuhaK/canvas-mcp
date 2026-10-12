@@ -59,6 +59,71 @@ and inventory checks remain in the removable migration package.
 ## Deployable staging image
 
 The current published staging release is
+[v1.14.0-beta.8](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.8),
+from `85ffeca785885efdfce83121c5004ef22df6c858` and
+[fork PR #11](https://github.com/KKazuhaK/canvas-mcp/pull/11).
+UPN edits are administrator-only, with fresh authentication, Origin/CSRF,
+revision CAS, uniqueness, actor audit and target session/code/grant revocation.
+Personal pages show a read-only UPN. SSO registration automatically chooses an
+available trusted email or a unique system name under the admission policy.
+Account UUIDs and immutable external identity ownership remain unchanged.
+
+At least one independent active local administrator with a password and permitted
+local login is retained once one exists. A remaining SSO owner cannot replace
+that path. Disabling providers/accounts, changing method restrictions, unlinking
+or deleting accounts cannot remove the final local administrator. A second local
+administrator allows rotation. Owners can explicitly create a local administrator;
+ordinary local accounts remain the default. Older SSO-only deployments show an
+actionable warning without silently changing roles or assigning passwords.
+
+Each provider registration can store/reset a bounded embedded PNG sign-in icon
+in SQL. Home now says My account and login identifies Canvas MCP. Provider-neutral
+issuer/subject binding, multiple OIDC instances, per-instance matching-email
+association, account restrictions and audited SSO unlock continue to apply.
+Product settings, provider credentials and the canonical public origin live in SQL.
+
+Additive isolated revision 0004 adds icons and assigns unique names to previously
+unnamed accounts. Existing ids, UPNs, hashes, roles and epochs are retained.
+Frozen revisions 0001-0003 are unchanged; compatibility floor stays 2. Keep
+.env and canvas-mcp-data with its keys, and retain a PostgreSQL backup before
+upgrading. Returning to an older image requires the matching database backup.
+All upgrade/backfill/backup/transfer code remains in db/migrations.
+
+Deployment uses only
+[docker-compose.yml](https://github.com/KKazuhaK/canvas-mcp/releases/download/v1.14.0-beta.8/docker-compose.yml)
+and the complete [.env template](https://github.com/KKazuhaK/canvas-mcp/releases/download/v1.14.0-beta.8/default.env).
+Existing deployments keep their files and run docker compose pull followed by
+docker compose up -d --wait. No host/system environment variables are set.
+Both beta and 1.14.0-beta.8 resolve to `sha256:6dbebfcada679750a0047461a088a21472bfe7475114b360b52611297cc0557e`;
+linux/amd64 and linux/arm64 index/config labels confirm the source and version.
+
+- Reviewed complete [CI](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38316757675)
+  passed at bfc1012; the squash merge has the identical file tree. Local selfhost
+  regression passed 4,257 tests with 54 platform/network skips. Frontend passed
+  all 487 tests, with production typecheck/build/dist and Ruff/Linux mypy green.
+- Independent post-merge [complete CI](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38319630025)
+  passed every job, including Windows, Python 3.11-3.14, locked dependencies,
+  both native PostgreSQL dependency sets and both native Docker architectures.
+  Post-merge focused API/database, migration and documentation checks passed 81.
+- Native [release image checks](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38321688858)
+  passed SQLite/PostgreSQL smoke and actual Compose startup/recreation.
+- Downloaded release asset SHA-256: Compose
+  `91e193483bb76bd13879c02bdbd21c7d7e1aefede4db0bc5cd9d40fcbf192b9f`;
+  env template `4f0e1ff437d4d6b26943e0a6e8c2e2ef044f1fb9a5a2b2a5a6ed2af634f25075`.
+- Stable latest remains
+  `sha256:9eeeaea8365ecad39ea02704b867f2dfae03521c229938ce78e8937fcbf1cdfb`.
+
+The owner reports successful Entra tenant-member login on staging. B2B guests,
+exact client/version/image evidence, real Claude connectivity and consecutive-day
+refresh still require live acceptance. October 12 public probes returned 200 for
+/healthz and /api/v1/providers, with Entra and local login offered, but nginx HTML
+404 for both OAuth discovery paths under /.well-known/. Those paths must reach
+the application before client acceptance. No real-client compatibility row is
+marked passed. Later documentation checkpoints do not change the release source.
+
+## Historical beta.7 staging image
+
+The preceding published staging release was
 [v1.14.0-beta.7](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.7).
 The account/login redesign is merged through
 [fork PR #10](https://github.com/KKazuhaK/canvas-mcp/pull/10), with release source
@@ -100,8 +165,8 @@ native linux/amd64 and linux/arm64 labels identify the release source above.
 - Stable latest remains
   `sha256:9eeeaea8365ecad39ea02704b867f2dfae03521c229938ce78e8937fcbf1cdfb`.
 
-The owner reported successful real Entra ID sign-in on October 12. The account
-type, exact client/version and secret-free trace were not supplied, so this is
+The owner reported successful real Entra tenant-member sign-in on October 12.
+Exact client/version, image and secret-free trace were not supplied, so this is
 recorded as an owner observation, not B2B or MCP-client certification.
 B2B/client/proxy and consecutive-day refresh acceptance remain pending.
 The October 12 public probe returned 200 from /healthz but nginx HTML 404 from

@@ -16,8 +16,9 @@ audit ownership or external identities.
 
 Existing local names become the account UPN during the isolated upgrade so
 previous local sign-in names continue working. A new SSO registration can use a
-verified, unclaimed email as its default UPN. Missing proof or a name collision
-gets a unique system-generated UPN, without another registration step. Only
+verified or explicitly trusted, unclaimed email as its default UPN. Missing
+proof or a name collision gets a unique system-generated UPN, without another
+registration step. Only
 administrators can rename it; the personal UI is read-only. Rename uses recent
 sign-in, Origin/CSRF, revision CAS and an in-transaction owner check, and ends
 existing named-account sessions/codes/grants. Isolated revision 0004 completes
@@ -98,7 +99,7 @@ With conflicting-registration blocking enabled, a matching existing UPN or
 email refuses creation of a separate account and asks the person to sign in
 through the existing method. It never enters that account on the strength of
 the conflict. Without blocking, uniqueness still prevents reusing the UPN and
-the person must choose another. Explicit linking requires a fresh original
+a unique system name is assigned. Explicit linking requires a fresh original
 session and a session-bound verification ceremony for the new identity.
 
 ## Public origin assessment
