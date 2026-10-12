@@ -144,6 +144,9 @@
       "detail": "Detail"
     },
     "actions": {
+      "local_account_created": "Created local account",
+      "local_password_changed": "Changed local password",
+      "sign_in_provider_configured": "Configured sign-in provider",
       "account_created": "Account created",
       "account_created_by_operator": "Account created by the operator",
       "account_activated": "Account activated",
