@@ -11,7 +11,7 @@ import ErrorNotice from '@/components/ErrorNotice'
 
 export interface EditableProvider {
   id: string
-  protocol: 'entra' | 'google' | 'github' | 'oidc'
+  protocol: 'entra' | 'google' | 'github' | 'oidc' | 'local'
   enabled: boolean
   rank: number
   config: Record<string, string | string[] | boolean>
@@ -25,11 +25,12 @@ export interface ProviderSave {
   client_secret?: string
 }
 
-export default function ProviderConfigurationForm({ provider, callbackUri, onSave, installation = false }: {
+export default function ProviderConfigurationForm({ provider, callbackUri, onSave, installation = false, disabled = false }: {
   provider: EditableProvider
   callbackUri: string
   onSave: (values: ProviderSave) => Promise<void>
   installation?: boolean
+  disabled?: boolean
 }) {
   const { t } = useTranslation()
   const [config, setConfig] = useState(provider.config)
@@ -64,6 +65,7 @@ export default function ProviderConfigurationForm({ provider, callbackUri, onSav
   return <Box component="form" onSubmit={(event) => { void submit(event) }}>
     <Stack spacing={2}>
       {error !== null && <ErrorNotice error={error} />}
+      {provider.protocol !== 'local' && <>
       <TextField label={t('admin:providerConfig.callback')} value={callbackUri} slotProps={{ input: { readOnly: true } }} helperText={t('admin:providerConfig.callbackHelp')} />
       {provider.protocol === 'entra' && <TextField required label={t('admin:providerConfig.tenant')} value={text('tenant_id')} disabled={busy} onChange={(event) => change('tenant_id', event.target.value)} />}
       {provider.protocol === 'oidc' && <TextField required type="url" label={t('admin:providerConfig.issuer')} value={text('issuer')} disabled={busy} onChange={(event) => change('issuer', event.target.value)} />}
@@ -85,11 +87,12 @@ export default function ProviderConfigurationForm({ provider, callbackUri, onSav
         </TextField>
         <FormControlLabel control={<Switch checked={config.userinfo === true} disabled={busy} onChange={(_, value) => change('userinfo', value)} />} label={t('admin:providerConfig.userinfo')} />
       </>}
+      </>}
       {!installation && <>
         <TextField type="number" label={t('admin:providerConfig.position')} value={rank + 1} disabled={busy} slotProps={{ htmlInput: { min: 1, max: 8, step: 1 } }} onChange={(event) => setRank(Number(event.target.value) - 1)} />
         <FormControlLabel control={<Switch checked={enabled} disabled={busy} onChange={(_, value) => setEnabled(value)} />} label={t('admin:providerConfig.enabled')} />
       </>}
-      <Button type="submit" variant="contained" disabled={busy}>{t(installation ? 'admin:providerConfig.initialize' : 'admin:providerConfig.save')}</Button>
+      <Button type="submit" variant="contained" disabled={busy || disabled}>{t(installation ? 'admin:providerConfig.initialize' : 'admin:providerConfig.save')}</Button>
     </Stack>
   </Box>
 }

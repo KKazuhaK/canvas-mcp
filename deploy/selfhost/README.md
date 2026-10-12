@@ -15,6 +15,9 @@ instructions are kept separately in [the migration package](../../src/canvas_mcp
 
 ## Prepare an external sign-in provider
 
+This step is optional. First installation creates a local administrator;
+additional local accounts can be created in Settings without an external provider.
+
 For the owner's deployment sequence, follow [OPERATOR.md](OPERATOR.md).
 
 Use a public HTTPS origin such as `https://mcp.example.com`. Replace this
@@ -34,7 +37,7 @@ invitation, then assign the appropriate app role. Use
 [Microsoft's B2B invitation guide](https://learn.microsoft.com/en-us/entra/external-id/b2b-quickstart-add-guest-users-portal).
 The real guest sign-in and client refresh flow still need staging validation.
 
-Google, GitHub and generic OIDC can be configured alongside Entra in
+Google, GitHub and generic OIDC can be configured independently of Entra in
 Admin > Settings. Register these callbacks in their respective apps:
 
 | Provider | Web callback |
@@ -76,7 +79,12 @@ setup script or other downloaded files are required. The defaults are student,
 read-only and anonymized. Schools are managed after sign-in.
 
 Open `PUBLIC_BASE_URL/account/setup`. Use the installation code from
-`docker compose logs canvas-mcp` and enter your Entra app registration there.
+`docker compose logs canvas-mcp` and create your local administrator there.
+You can optionally configure Entra, Google, GitHub or OIDC during setup, or add
+them later in Admin > Settings. Local passwords are stored as salted scrypt
+hashes in SQL. Owners create regular local accounts in Settings; public local
+registration is closed. Password changes on the account home page invalidate
+existing sessions and connected app grants.
 The code expires after 30 minutes; obtain another with
 `docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin setup-code`.
 Login credentials and enablement are encrypted/database-managed through

@@ -49,7 +49,7 @@ class ProviderDisplay:
 
     @property
     def start_path(self) -> str:
-        return auth_login(self.id)
+        return "/account/sign-in" if self.id == "local" else auth_login(self.id)
 
 
 @dataclass(frozen=True)
@@ -84,6 +84,8 @@ def school_display_name(value: object) -> str:
 
 
 def provider_defaults(identifier: str) -> tuple[str, str, str]:
+    if identifier == "local":
+        return "Local account", "local", "key"
     if identifier in {"entra", "google", "github"}:
         return (
             {"entra": "Microsoft", "google": "Google", "github": "GitHub"}[identifier],

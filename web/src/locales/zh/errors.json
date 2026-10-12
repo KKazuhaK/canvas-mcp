@@ -68,5 +68,8 @@
   "not_enrolled": "尚未登记 Canvas 令牌。",
   "settings_conflict": "设置已被其他人修改，请重新加载后再保存。",
   "confirmation_required": "删除会影响已有 Canvas 绑定，请确认受影响的学校后继续。",
-  "pilot_profile_restricted": "试点配置要求仅提供一所学校，并关闭学校搜索。"
+  "pilot_profile_restricted": "试点配置要求仅提供一所学校，并关闭学校搜索。",
+  "invalid_local_credentials": "请填写有效的用户名及 15–128 个字符的密码。",
+  "local_username_taken": "该用户名已被使用。",
+  "local_login_failed": "用户名或密码不正确，或本地登录不可用。"
 }

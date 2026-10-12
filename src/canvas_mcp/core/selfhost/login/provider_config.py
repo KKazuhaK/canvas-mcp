@@ -30,6 +30,8 @@ class ProviderConfiguration:
 
     @property
     def issuer(self) -> str:
+        if self.id == "local":
+            return "urn:canvas-mcp:local"
         if self.id == "entra":
             return f"https://login.microsoftonline.com/{self.config['tenant_id']}/v2.0"
         if self.id == "google":
@@ -43,6 +45,10 @@ def validate_provider(
     identifier: str, config: object, client_secret: object
 ) -> ProviderConfiguration:
     """Validate closed public fields separately from a write-only secret."""
+    if identifier == "local":
+        if config != {} or client_secret is not None:
+            raise ProviderConfigurationError()
+        return ProviderConfiguration("local", "local", MappingProxyType({}), None)
     if not isinstance(identifier, str) or (
         identifier not in {"entra", "google", "github"}
         and not (

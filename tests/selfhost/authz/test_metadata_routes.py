@@ -167,6 +167,7 @@ class TestRouteTables:
             "/register": ("OPTIONS", "POST"),
             "/revoke": ("OPTIONS", "POST"),
             "/token": ("OPTIONS", "POST"),
+            "/": ("GET", "HEAD"),
             "/account": (),
             "/account/{path:path}": (),
             "/account/assets": (),

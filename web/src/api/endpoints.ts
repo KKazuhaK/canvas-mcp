@@ -46,6 +46,9 @@ async function call<K extends RouteKey>(key: K, options: CallOptions<K> = {}): P
 
 // ---- public ---------------------------------------------------------------------
 
+export const loginLocal = (body: BodyOf<'POST /login/local'>) => call('POST /login/local', { body })
+export const changeLocalPassword = (body: BodyOf<'PUT /me/password'>) => call('PUT /me/password', { body })
+export const createLocalAccount = (body: BodyOf<'POST /admin/local-accounts'>) => call('POST /admin/local-accounts', { body })
 export const getProviders = () => call('GET /providers')
 export const getSetupStatus = () => call('GET /setup')
 export const initializeLogin = (body: SetupRequest) => call('POST /setup', { body })

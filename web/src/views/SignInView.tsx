@@ -11,6 +11,7 @@ import { useTranslation } from 'react-i18next'
 import { isUnauthenticated } from '@/api/errors'
 import { signInUrl } from '@/api/endpoints'
 import ErrorNotice from '@/components/ErrorNotice'
+import LocalLoginForm from '@/components/LocalLoginForm'
 import McpUrlCard from '@/components/McpUrlCard'
 import ProviderIcon from '@/components/ProviderIcon'
 import { useMe, useProviders } from '@/query/hooks'
@@ -121,7 +122,7 @@ export default function SignInView() {
 
           {offered.length > 0 ? (
             <Box component="ul" sx={{ listStyle: 'none', m: 0, p: 0, display: 'grid', gap: 1.5 }}>
-              {offered.map((provider) => (
+              {offered.map((provider) => provider.id === 'local' ? <li key="local"><LocalLoginForm txn={txn} returnTo={returnTo} /></li> : (
                 <li key={provider.id}>
                   <Button
                     component="a"

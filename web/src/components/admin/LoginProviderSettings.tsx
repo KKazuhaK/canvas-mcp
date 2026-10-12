@@ -12,6 +12,7 @@ import { getLoginProviderSettings, saveLoginProvider } from '@/api/endpoints'
 import type { LoginProviderConfiguration } from '@/api/types'
 import ErrorNotice from '@/components/ErrorNotice'
 import { keys } from '@/query/keys'
+import LocalAccountCreate from './LocalAccountCreate'
 import ProviderConfigurationForm, { type EditableProvider } from './ProviderConfigurationForm'
 
 export default function LoginProviderSettings() {
@@ -34,7 +35,7 @@ export default function LoginProviderSettings() {
     </Stack>)}
     <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
       <TextField select label={t('admin:providerConfig.type')} value={kind} onChange={(event) => setKind(event.target.value as LoginProviderConfiguration['protocol'])}>
-        {(['entra', 'google', 'github', 'oidc'] as const).map((value) => <MenuItem key={value} value={value}>{value === 'entra' ? 'Microsoft Entra' : value === 'oidc' ? 'OIDC' : value === 'github' ? 'GitHub' : 'Google'}</MenuItem>)}
+        {(['local', 'entra', 'google', 'github', 'oidc'] as const).map((value) => <MenuItem key={value} value={value}>{value === 'local' ? t('admin:localAccount.name') : value === 'entra' ? 'Microsoft Entra' : value === 'oidc' ? 'OIDC' : value === 'github' ? 'GitHub' : 'Google'}</MenuItem>)}
       </TextField>
       {kind === 'oidc' && <TextField label={t('admin:providerConfig.slug')} value={slug} onChange={(event) => setSlug(event.target.value)} />}
       <Button disabled={!validId || exists || query.data.providers.length >= 8} onClick={() => setSelected({ id: identifier, protocol: kind, enabled: true, rank: query.data.providers.length, config: {}, secret_present: false })}>{t('admin:providerConfig.add')}</Button>
@@ -48,6 +49,7 @@ export default function LoginProviderSettings() {
         for (const key of [keys.adminSettings, keys.providers, keys.me, keys.adminAudit]) await cache.invalidateQueries({ queryKey: key })
       }} />}
     {selected !== null && <Button onClick={() => setSelected(null)}>{t('admin:settings.cancel')}</Button>}
+    {query.data.providers.some((provider) => provider.id === 'local' && provider.enabled) && <LocalAccountCreate />}
     <Button onClick={() => { setSelected(null); void query.refetch() }}>{t('admin:providerConfig.reload')}</Button>
   </Stack></CardContent></Card>
 }

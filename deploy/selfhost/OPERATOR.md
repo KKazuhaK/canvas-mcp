@@ -13,7 +13,8 @@ The reviewed multi-architecture staging image and its immutable digest are in
    [host prerequisites](README.md#prepare-docker): Docker Engine, Compose v2,
    persistent storage and outbound HTTPS. Start with a fresh v1 database;
    pre-v1 databases are refused. An existing `latest` or `edge` image may be old.
-2. Follow [Entra setup](README.md#prepare-an-external-sign-in-provider) in the
+2. External sign-in is optional; local accounts need no external app registration.
+   If using Entra, follow [Entra setup](README.md#prepare-an-external-sign-in-provider) in the
    owner's tenant. Register a single-tenant Web application with only
    `https://mcp.example.com/auth/callback/entra` as the callback. Set assignment
    required, define `Canvas.User` and `Canvas.Owner`, and grant the required
@@ -47,7 +48,8 @@ The reviewed multi-architecture staging image and its immutable digest are in
    streaming responses, request limits and callback log redaction. Check the
    external health response and provider callback through that proxy.
 6. Open first-install `/account/setup` using the private code from the container
-   logs and the Entra application credentials. Configuration belongs in the
+   logs and create a local administrator. External login configuration is optional
+   during setup and can be added later in Settings. Configuration belongs in the
    database, not `.env`. After initialization, sign in and follow
    [enrollment and client setup](README.md#enroll-and-connect-a-client). A fresh
    database has no preset schools. Manage sign-in names, featured-school order

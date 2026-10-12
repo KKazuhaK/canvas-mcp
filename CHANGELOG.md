@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Selfhost local username/password accounts, administrator bootstrap, optional Entra/Google/GitHub/OIDC setup, owner-created local users and password changes with session and grant revocation. Password hashes live in SQL; the forward schema revision remains isolated under the removable migration package.
+
 - English/Chinese account administration: enroll, replace, recheck or delete a
   Canvas token; link sign-in methods; approve or disable accounts; manage public
   sign-in names and schools; inspect sign-in/audit history; and revoke connected

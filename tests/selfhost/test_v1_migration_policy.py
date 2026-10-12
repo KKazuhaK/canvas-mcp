@@ -28,6 +28,10 @@ def revision_graph(tmp_path, monkeypatch):
         source / "versions/0001_v1_baseline.py",
         directory / "versions/0001_v1_baseline.py",
     )
+    shutil.copyfile(
+        source / "versions/0002_local_credentials.py",
+        directory / "versions/0002_local_credentials.py",
+    )
     monkeypatch.setattr(migrate, "_MIGRATIONS_DIR", directory)
     migrate._script.cache_clear()
 
@@ -37,7 +41,7 @@ def revision_graph(tmp_path, monkeypatch):
         contract=False,
         non_transactional=False,
         revision="0002_policy",
-        down="0001_v1_baseline",
+        down="0002_local_credentials",
     ):
         script = f"""from alembic import op
 import sqlalchemy as sa
@@ -102,7 +106,7 @@ def test_contract_automatically_backs_up_and_preserves_strict_rowid_indexes_and_
         )
         assert backup.execute(
             "SELECT version_num FROM canvas_mcp_alembic_version"
-        ).fetchone() == ("0001_v1_baseline",)
+        ).fetchone() == ("0002_local_credentials",)
         assert "obsolete" in {
             row[1] for row in backup.execute("PRAGMA table_info(audit_log)")
         }
@@ -197,7 +201,7 @@ def test_floor_policy_failure_rolls_back_ddl_and_revision(
             conn.exec_driver_sql(
                 "SELECT version_num FROM canvas_mcp_alembic_version"
             ).scalar_one()
-            == "0001_v1_baseline"
+            == "0002_local_credentials"
         )
 
 
@@ -312,7 +316,7 @@ def test_nontransactional_plan_refuses_atomic_modes_before_any_revision(
             conn.exec_driver_sql(
                 "SELECT version_num FROM canvas_mcp_alembic_version"
             ).scalar_one()
-            == "0001_v1_baseline"
+            == "0002_local_credentials"
         )
 
 

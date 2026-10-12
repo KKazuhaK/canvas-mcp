@@ -62,7 +62,7 @@ class TestSchema:
         with token_store.database.read() as conn:
             assert migrate.compare_schema(conn) == []
             status = migrate.read_status(conn)
-        assert status.alembic_revision == "0001_v1_baseline"
+        assert status.alembic_revision == "0002_local_credentials"
         assert status.state == migrate.STATE_CURRENT
         assert status.compat_floor == 1 and status.database_id is not None
         assert set(AUTHZ_TABLES) <= set(schema.metadata.tables)

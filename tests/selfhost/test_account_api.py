@@ -2908,6 +2908,9 @@ class TestEveryAnswer:
 
     def test_the_error_codes_equal_the_documented_set(self) -> None:
         assert account_api.API_ERROR_CODES == {
+            "invalid_local_credentials",
+            "local_username_taken",
+            "local_login_failed",
             "invalid_provider_configuration",
             "provider_secret_required",
             "provider_identity_binding_changed",

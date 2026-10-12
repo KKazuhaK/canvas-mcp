@@ -82,13 +82,14 @@ def credential(conn, account_id, **overrides):
     return fields["id"]
 
 
-def test_nineteen_tables_with_a_lifecycle_and_registered_ciphertexts():
+def test_current_tables_with_a_lifecycle_and_registered_ciphertexts():
     expected = {
         "server_state",
         "settings",
         "login_providers",
         "canvas_schools",
         "accounts",
+        "local_credentials",
         "external_identities",
         "account_write_tools",
         "canvas_credentials",
@@ -257,7 +258,7 @@ def test_sqlite_strict_and_autoincrement_options(connection):
             "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != 'canvas_mcp_alembic_version'"
         )
     ).all()
-    assert len(tables) == 19
+    assert len(tables) == 20
     for name, ddl in tables:
         assert "STRICT" in ddl, name
         if name in {"auth_events", "audit_log"}:
