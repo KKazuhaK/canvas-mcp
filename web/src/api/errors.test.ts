@@ -64,6 +64,7 @@ describe('closed error code set', () => {
         'pilot_profile_restricted',
         'confirmation_required',
         'last_owner',
+        'last_local_owner',
         'cannot_disable_self',
         // linked sign-in methods
         'identity_in_use',

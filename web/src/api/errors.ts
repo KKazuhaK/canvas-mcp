@@ -10,6 +10,7 @@ const CODE_SET: Record<ApiErrorCode, true> = {
   invalid_local_credentials: true,
   local_username_taken: true,
   local_login_failed: true,
+  last_local_owner: true,
   provider_secret_required: true,
   provider_identity_binding_changed: true,
   too_many_providers: true,

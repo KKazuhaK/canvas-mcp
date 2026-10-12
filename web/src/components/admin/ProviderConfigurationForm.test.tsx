@@ -14,6 +14,19 @@ const callback = 'https://mcp.example.com/auth/callback/entra'
 beforeEach(async () => { await setupI18n('en') })
 
 describe('Write-only sign-in provider credentials', () => {
+  it('uploads an embedded PNG and explicitly restores the default icon', async () => {
+    const user = userEvent.setup()
+    const save = vi.fn(async () => {})
+    renderWithQuery(<ProviderConfigurationForm provider={provider} callbackUri={callback} onSave={save} />)
+    const file = new File([new Uint8Array([137, 80, 78, 71])], 'icon.png', { type: 'image/png' })
+    await user.upload(screen.getByLabelText('Upload sign-in icon'), file)
+    await waitFor(() => expect(document.querySelector('img')?.getAttribute('src')).toBe('data:image/png;base64,iVBORw=='))
+    await user.click(screen.getByRole('button', { name: 'Save sign-in configuration' }))
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ icon_data: 'data:image/png;base64,iVBORw==' })))
+    await user.click(screen.getByRole('button', { name: 'Restore default icon' }))
+    await user.click(screen.getByRole('button', { name: 'Save sign-in configuration' }))
+    await waitFor(() => expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ icon_data: null })))
+  })
   it('enables automatic email association on the edited instance without a second verification step', async () => {
     const user = userEvent.setup()
     const save = vi.fn(async () => {})

@@ -1,6 +1,6 @@
 {
   "home": {
-    "title": "Canvas 账户",
+    "title": "我的账户",
     "signedInAs": "当前登录：{{name}}"
   },
   "school": {
@@ -259,7 +259,7 @@
   },
   "methods": {
     "title": "登录方式",
-    "intro": "可用来登录这个 Canvas 账户的账号。只有证明你掌控它之后才会添加；账户绝不会按邮箱地址自动合并。",
+    "intro": "关联到本站 Canvas MCP 账户的登录方式。管理员可以为各个可信服务商独立开启自动关联，账户登录限制仍然优先。",
     "columns": {
       "provider": "提供方",
       "account": "账号",

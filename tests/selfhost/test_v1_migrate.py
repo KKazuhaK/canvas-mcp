@@ -36,8 +36,9 @@ def test_graph_preserves_frozen_baseline_and_metadata_matches_real_upgrade(db):
         "0001_v1_baseline",
         "0002_local_credentials",
         "0003_account_login_policy",
+        "0004_onboarding_and_icons",
     }
-    assert migrate.head_revision() == "0003_account_login_policy"
+    assert migrate.head_revision() == "0004_onboarding_and_icons"
     assert migrate.current(db).state == migrate.STATE_UNINITIALIZED
     migrate.ensure_ready(db)
     first = migrate.current(db)
@@ -126,6 +127,36 @@ def test_beta5_upgrade_preserves_accounts_provider_ciphertext_and_database_ident
         assert conn.execute(account_query).all() == accounts
         assert conn.execute(provider_query).all() == providers
         assert conn.execute(select(schema.local_credentials)).all() == []
+        assert migrate.compare_schema(conn) == []
+
+
+def test_beta7_provisional_names_are_assigned_without_changing_existing_names(db):
+    pending_id, existing_id = new_id(), new_id()
+    occupied = "account_" + pending_id.replace("-", "")
+    connection = db.row_write if IS_POSTGRES else lambda: migrate.sqlite_migration(db)
+    with connection() as conn:
+        migrate._apply(conn, "0003_account_login_policy")
+        for identifier, name, required in (
+            (pending_id, "", True),
+            (existing_id, occupied, False),
+        ):
+            conn.execute(
+                text(
+                    "INSERT INTO accounts(id,status,role,admitted_via,display_name,created_at,updated_at,upn,upn_required) "
+                    "VALUES (:id,'active','user','operator','Preserved',1,1,:name,:required)"
+                ),
+                {"id": identifier, "name": name, "required": required},
+            )
+    migrate.ensure_ready(db)
+    with db.read() as conn:
+        rows = dict(
+            conn.execute(select(schema.accounts.c.id, schema.accounts.c.upn)).all()
+        )
+        assert rows == {existing_id: occupied, pending_id: occupied + "_2"}
+        assert not any(conn.execute(select(schema.accounts.c.upn_required)).scalars())
+        assert conn.execute(
+            select(schema.accounts.c.session_epoch)
+        ).scalars().all() == [0, 0]
         assert migrate.compare_schema(conn) == []
 
 

@@ -183,6 +183,7 @@ UNLINK_OK = "unlinked"
 UNLINK_NOT_FOUND = "not_found"
 UNLINK_LAST = "last_identity"
 UNLINK_LAST_OWNER = "last_owner"
+UNLINK_LAST_LOCAL_OWNER = "last_local_owner"
 UNLINK_SESSION_ENDED = "link_session_ended"
 
 _KEY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
@@ -249,6 +250,7 @@ class AccessActionRefused(TokenStoreError):
 
     NOT_OWNER = "not_owner"
     LAST_OWNER = "last_owner"
+    LAST_LOCAL_OWNER = "last_local_owner"
     SELF = "self"
 
     def __init__(self, code: str) -> None:
@@ -1524,9 +1526,16 @@ class TokenStore:
     def record_login_providers(self, provider_ids: Iterable[str]) -> None:
         """Reconcile env providers under governance, preserving edited public names."""
         with self._db.write() as conn:
+            local_before = self._repos.accounts.local_owner_ids(conn)
             self._repos.providers.reconcile(
                 conn, list(dict.fromkeys(provider_ids)), now=self._now()
             )
+            if local_before and not self._repos.accounts.local_owner_ids(conn):
+                raise AccessActionRefused(AccessActionRefused.LAST_LOCAL_OWNER)
+
+    def has_local_admin(self) -> bool:
+        with self._db.read() as conn:
+            return bool(self._repos.accounts.local_owner_ids(conn))
 
     def recorded_login_providers(self) -> frozenset[str]:
         with self._db.read() as conn:
@@ -2059,6 +2068,10 @@ class TokenStore:
             )
             if ident is None:
                 return UnlinkResult(UNLINK_NOT_FOUND)
+            if ident.provider_id == "local":
+                local_owners = repos.accounts.local_owner_ids(conn)
+                if account_id in local_owners and len(local_owners) == 1:
+                    return UnlinkResult(UNLINK_LAST_LOCAL_OWNER, ident.provider_id)
             count = repos.identities.count_for_account(conn, account_id)
             self._pause("after_identity_count")
             if count <= 1:
@@ -2144,6 +2157,14 @@ class TokenStore:
             ).first()
         ):
             upn = None
+        if upn is None:
+            base = "account_" + account_id.replace("-", "")
+            upn, suffix = base, 1
+            while conn.execute(
+                select(schema.accounts.c.id).where(schema.accounts.c.upn == upn)
+            ).first():
+                suffix += 1
+                upn = f"{base}_{suffix}"
         repos.accounts.insert(
             conn,
             account_id=account_id,
@@ -2152,8 +2173,8 @@ class TokenStore:
             role_source=decision.role_source if is_owner else None,
             admitted_via=decision.admitted_via or acc.ADMITTED_RULES,
             display_name=ext.display_name[:_MAX_DISPLAY_NAME],
-            upn=upn or "",
-            upn_required=upn is None,
+            upn=upn,
+            upn_required=False,
             now=now,
         )
         repos.identities.insert(
@@ -2431,6 +2452,9 @@ class TokenStore:
             row = self._repos.accounts.get(conn, account_id, for_update=True)
             if row is None:
                 return False
+            local_owners = self._repos.accounts.local_owner_ids(conn)
+            if account_id in local_owners and len(local_owners) == 1:
+                raise AccessActionRefused(AccessActionRefused.LAST_LOCAL_OWNER)
             if row.status == STATUS_ACTIVE and row.role == ROLE_OWNER:
                 listed = self._provider_lists_in(conn, listed_providers)[0]
                 others = self._repos.accounts.usable_owner_ids(
@@ -2528,6 +2552,9 @@ class TokenStore:
             row = repos.accounts.get(conn, account_id, for_update=True)
             if row is None or row.status == STATUS_DISABLED:
                 return False
+            local_owners = repos.accounts.local_owner_ids(conn)
+            if account_id in local_owners and len(local_owners) == 1:
+                raise AccessActionRefused(AccessActionRefused.LAST_LOCAL_OWNER)
             if (
                 row.status == STATUS_ACTIVE
                 and row.role == ROLE_OWNER

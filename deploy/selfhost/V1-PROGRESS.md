@@ -100,7 +100,10 @@ native linux/amd64 and linux/arm64 labels identify the release source above.
 - Stable latest remains
   `sha256:9eeeaea8365ecad39ea02704b867f2dfae03521c229938ce78e8937fcbf1cdfb`.
 
-Real IdP/B2B/client/proxy and consecutive-day refresh acceptance remain pending.
+The owner reported successful real Entra ID sign-in on October 12. The account
+type, exact client/version and secret-free trace were not supplied, so this is
+recorded as an owner observation, not B2B or MCP-client certification.
+B2B/client/proxy and consecutive-day refresh acceptance remain pending.
 The October 12 public probe returned 200 from /healthz but nginx HTML 404 from
 both OAuth discovery paths under /.well-known/. Those paths must reach the
 application before client acceptance. No production/client compatibility row

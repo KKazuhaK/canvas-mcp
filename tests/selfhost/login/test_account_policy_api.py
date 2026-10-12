@@ -73,7 +73,7 @@ def test_last_local_administrator_cannot_disallow_its_only_method(tmp_path):
         )
         assert (
             refused.status_code == 409
-            and refused.json()["error"]["code"] == "last_owner"
+            and refused.json()["error"]["code"] == "last_local_owner"
         )
         assert client.get(route).json() == before
         assert client.get("/api/v1/me").status_code == 200

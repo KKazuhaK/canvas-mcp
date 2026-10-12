@@ -22,6 +22,7 @@ from .provider_config import (
 )
 
 _SEALED = next(entry for entry in SEALED if entry.table is s.login_providers)
+_UNCHANGED = object()
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ class ProviderConfigStore:
             "config_source": row["config_source"],
             "enabled": bool(row["configured"]),
             "auto_link_email": bool(row["auto_link_email"]),
+            "icon_data": row["icon_data"],
             "rank": row["sort_rank"],
             "config": dict(config),
             "secret_present": row["secret_ciphertext"] is not None,
@@ -203,10 +205,14 @@ class ProviderConfigStore:
         actor: str | None,
         now: int,
         auto_link_email: bool | None = None,
+        icon_data: object = _UNCHANGED,
         _initial: bool = False,
         _connection: Connection | None = None,
     ) -> int:
         value = validate_provider(identifier, config, client_secret)
+        from .provider_icon import validate_icon
+
+        parsed_icon = validate_icon(icon_data) if icon_data is not _UNCHANGED else None
         if (
             type(enabled) is not bool
             or auto_link_email is not None
@@ -258,12 +264,19 @@ class ProviderConfigStore:
                 ).scalars()
             )
             current = set(active)
+            local_owners_before = self.repos.accounts.local_owner_ids(
+                conn, sorted(current)
+            )
             if enabled:
                 active.add(identifier)
             else:
                 active.discard(identifier)
             if len(active) > MAX_PROVIDERS:
                 raise ProviderConfigurationError("too_many_providers")
+            if local_owners_before and not self.repos.accounts.local_owner_ids(
+                conn, sorted(active)
+            ):
+                raise ProviderConfigurationError("last_local_owner")
             if (
                 active != current
                 and self.repos.accounts.count_usable_owners(conn, sorted(current)) > 0
@@ -303,6 +316,8 @@ class ProviderConfigStore:
                 )
             if auto_link_email is not None:
                 updates["auto_link_email"] = auto_link_email
+            if icon_data is not _UNCHANGED:
+                updates["icon_data"] = parsed_icon
             conn.execute(
                 update(s.login_providers)
                 .where(s.login_providers.c.id == identifier)
@@ -321,6 +336,11 @@ class ProviderConfigStore:
                     if auto_link_email is not None
                     else bool(old and old["auto_link_email"]),
                     "secret_replaced": value.client_secret is not None,
+                    "custom_icon": bool(
+                        parsed_icon
+                        if icon_data is not _UNCHANGED
+                        else old and old["icon_data"]
+                    ),
                 },
             )
             if _connection is None:

@@ -48,9 +48,9 @@ import type {
 export interface Contract {
   'POST /login/local': { body: { username: string; password: string; txn?: string; return_to?: string }; response: { redirect_to: string } }
   'PUT /me/password': { body: { current_password: string; new_password: string }; response: { redirect_to: string } }
-  'PUT /me/upn': { body: { upn: string }; response: { redirect_to: string } }
+  'PUT /admin/accounts/{id}/upn': { body: { upn: string; revision: number }; response: { revision: number; account_id: string } }
   'POST /me/local-password': { body: { password: string }; response: { redirect_to: string } }
-  'POST /admin/local-accounts': { body: { revision: number; username: string; password: string }; response: { account_id: string; revision: number } }
+  'POST /admin/local-accounts': { body: { revision: number; username: string; password: string; owner?: boolean }; response: { account_id: string; revision: number } }
   'GET /setup': { response: SetupStatus }
   'POST /setup': { body: SetupRequest; response: { redirect_to: string } }
   'GET /admin/login-providers': { response: LoginProviderSettings }

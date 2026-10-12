@@ -558,6 +558,12 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
                 additional_provider_lists=_protected_provider_lists(store),
             )
         except AccessActionRefused as exc:
+            if exc.code == AccessActionRefused.LAST_LOCAL_OWNER:
+                print(
+                    "refused: keep at least one usable local administrator; create another local administrator first",
+                    file=sys.stderr,
+                )
+                return EXIT_REFUSED
             if exc.code == AccessActionRefused.LAST_OWNER:
                 print(
                     "refused: that user is the last usable owner (an active owner who can still "
@@ -607,6 +613,12 @@ def _run(args: argparse.Namespace, store: TokenStore) -> int:
             print(
                 "refused: an account keeps at least one sign-in method (use 'disable' to cut "
                 "someone off)",
+                file=sys.stderr,
+            )
+            return EXIT_REFUSED
+        if result.code == "last_local_owner":
+            print(
+                "refused: keep at least one usable local administrator; create another local administrator first",
                 file=sys.stderr,
             )
             return EXIT_REFUSED

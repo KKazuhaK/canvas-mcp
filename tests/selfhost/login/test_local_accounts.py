@@ -100,7 +100,7 @@ def test_invalid_optional_provider_rolls_back_entire_installation(tmp_path):
 def test_last_local_owner_cannot_disable_local_signin(tmp_path):
     with installation(tmp_path) as (client, runtime, code):
         assert initialize(client, code).status_code == 200
-        with pytest.raises(ProviderConfigurationError, match="last_owner"):
+        with pytest.raises(ProviderConfigurationError, match="last_local_owner"):
             runtime.provider_store.save(
                 "local",
                 config={},

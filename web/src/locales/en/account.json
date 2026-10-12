@@ -1,6 +1,6 @@
 {
   "home": {
-    "title": "Canvas account",
+    "title": "My account",
     "signedInAs": "Signed in as {{name}}"
   },
   "school": {
@@ -259,7 +259,7 @@
   },
   "methods": {
     "title": "Sign-in methods",
-    "intro": "The accounts you can use to sign in to this Canvas account. A method is only added when you prove you control it; accounts are never merged by e-mail address.",
+    "intro": "The sign-in methods linked to your Canvas MCP account. Administrators can enable automatic association independently for trusted providers; account restrictions still apply.",
     "columns": {
       "provider": "Provider",
       "account": "Account",

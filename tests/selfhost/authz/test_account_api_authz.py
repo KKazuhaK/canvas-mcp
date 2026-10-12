@@ -74,13 +74,13 @@ def open_request(
         browser.entra_login(user, login)
         me = browser.api("GET", "/me")
         if me.status_code == 200 and me.json()["account"].get("upn_required"):
-            selected = browser.api(
-                "PUT",
-                "/me/upn",
-                body={"upn": user.oid + "@example.test"},
-                csrf=me.json()["csrf_token"],
+            from canvas_mcp.core.selfhost.login.account_names import AccountNames
+
+            AccountNames(stack.store.database).save(
+                user.oid + "@example.test",
+                account_id=me.json()["account"]["id"],
+                now=int(stack.clock()),
             )
-            assert selected.status_code == 200, selected.text
     return browser, txn
 
 

@@ -119,5 +119,5 @@ export default function AdminSettingsView() {
   const query = useQuery({ queryKey: keys.adminSettings, queryFn: getAdminSettings })
   if (query.isPending) return <PageSkeleton />
   if (query.isError) return <ErrorNotice error={query.error} onRetry={() => void query.refetch()} />
-  return <Stack spacing={3}><Typography component="h1" variant="h4">{t('admin:settings.title')}</Typography><LoginProviderSettings /><Editor key={query.data.revision} data={query.data} reload={() => void query.refetch()} /></Stack>
+  return <Stack spacing={3}><Typography component="h1" variant="h4">{t('admin:settings.title')}</Typography><Alert role="status" severity={query.data.local_admin.ready ? 'success' : 'warning'}>{t(query.data.local_admin.ready ? 'admin:localAccount.ready' : 'admin:localAccount.missing')}</Alert><LoginProviderSettings /><Editor key={query.data.revision} data={query.data} reload={() => void query.refetch()} /></Stack>
 }

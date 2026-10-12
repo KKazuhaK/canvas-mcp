@@ -19,6 +19,7 @@ from .db.engine import Database
 from .db.errors import StoreUnavailable
 from .db.settings_repo import TypedSettings
 from .login.config import LoginProvidersConfig
+from .login.provider_icon import validate_icon
 from .routes import auth_login
 from .schools import (
     MAX_FEATURED,
@@ -46,6 +47,7 @@ class ProviderDisplay:
     display_name: str | None
     effective_name: str
     rank: int
+    icon_data: str | None = None
 
     @property
     def start_path(self) -> str:
@@ -219,6 +221,7 @@ class ConfigSnapshots:
                         s.login_providers.c.display_name,
                         s.login_providers.c.configured,
                         s.login_providers.c.sort_rank,
+                        s.login_providers.c.icon_data,
                     )
                     .select_from(state.outerjoin(s.login_providers, true()))
                     .where(state.c.id == 1)
@@ -297,6 +300,7 @@ class ConfigSnapshots:
                     name,
                     effective,
                     row["sort_rank"],
+                    validate_icon(row["icon_data"]),
                 )
             )
         if (

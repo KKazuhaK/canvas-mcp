@@ -6,6 +6,8 @@ import CardContent from '@mui/material/CardContent'
 import Stack from '@mui/material/Stack'
 import TextField from '@mui/material/TextField'
 import Typography from '@mui/material/Typography'
+import Checkbox from '@mui/material/Checkbox'
+import FormControlLabel from '@mui/material/FormControlLabel'
 import { useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQueryClient } from '@tanstack/react-query'
@@ -17,6 +19,7 @@ export default function LocalAccountCreate() {
   const cache = useQueryClient()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [owner, setOwner] = useState(false)
   const [busy, setBusy] = useState(false)
   const [done, setDone] = useState(false)
   const [error, setError] = useState<unknown>(null)
@@ -26,8 +29,8 @@ export default function LocalAccountCreate() {
     setBusy(true); setError(null); setDone(false)
     try {
       const settings = await getLoginProviderSettings()
-      await createLocalAccount({ revision: settings.revision, username, password })
-      setUsername(''); setPassword(''); setDone(true)
+      await createLocalAccount({ revision: settings.revision, username, password, owner })
+      setUsername(''); setPassword(''); setOwner(false); setDone(true)
       await cache.invalidateQueries({ queryKey: ['admin'] })
     } catch (reason) { setError(reason) }
     finally { setBusy(false) }
@@ -39,6 +42,8 @@ export default function LocalAccountCreate() {
     {done && <Alert severity="success">{t('admin:localAccount.created')}</Alert>}
     <TextField required label={t('auth:local.username')} autoComplete="off" value={username} disabled={busy} onChange={(event) => setUsername(event.target.value)} helperText={t('auth:local.usernameHelp')} />
     <TextField required label={t('auth:local.password')} type="password" autoComplete="new-password" value={password} disabled={busy} onChange={(event) => setPassword(event.target.value)} helperText={t('auth:local.passwordHelp')} slotProps={{ htmlInput: { minLength: 15, maxLength: 128 } }} />
+    <FormControlLabel label={t('admin:localAccount.owner')} control={<Checkbox checked={owner} disabled={busy} onChange={(_, checked) => setOwner(checked)} />} />
+    {owner && <Alert severity="info">{t('admin:localAccount.ownerHelp')}</Alert>}
     <Button type="submit" variant="contained" disabled={busy}>{t('admin:localAccount.create')}</Button>
   </Stack></Box></CardContent></Card>
 }

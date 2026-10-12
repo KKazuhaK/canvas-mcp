@@ -37,6 +37,10 @@ def revision_graph(tmp_path, monkeypatch):
         directory / "versions/0003_account_login_policy.py",
     )
     monkeypatch.setattr(migrate, "_MIGRATIONS_DIR", directory)
+    shutil.copyfile(
+        source / "versions/0004_onboarding_and_icons.py",
+        directory / "versions/0004_onboarding_and_icons.py",
+    )
     migrate._script.cache_clear()
 
     def add(
@@ -45,7 +49,7 @@ def revision_graph(tmp_path, monkeypatch):
         contract=False,
         non_transactional=False,
         revision="0002_policy",
-        down="0003_account_login_policy",
+        down="0004_onboarding_and_icons",
     ):
         script = f"""from alembic import op
 import sqlalchemy as sa
@@ -110,7 +114,7 @@ def test_contract_automatically_backs_up_and_preserves_strict_rowid_indexes_and_
         )
         assert backup.execute(
             "SELECT version_num FROM canvas_mcp_alembic_version"
-        ).fetchone() == ("0003_account_login_policy",)
+        ).fetchone() == ("0004_onboarding_and_icons",)
         assert "obsolete" in {
             row[1] for row in backup.execute("PRAGMA table_info(audit_log)")
         }
@@ -205,7 +209,7 @@ def test_floor_policy_failure_rolls_back_ddl_and_revision(
             conn.exec_driver_sql(
                 "SELECT version_num FROM canvas_mcp_alembic_version"
             ).scalar_one()
-            == "0003_account_login_policy"
+            == "0004_onboarding_and_icons"
         )
 
 
@@ -320,7 +324,7 @@ def test_nontransactional_plan_refuses_atomic_modes_before_any_revision(
             conn.exec_driver_sql(
                 "SELECT version_num FROM canvas_mcp_alembic_version"
             ).scalar_one()
-            == "0003_account_login_policy"
+            == "0004_onboarding_and_icons"
         )
 
 

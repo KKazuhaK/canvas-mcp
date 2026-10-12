@@ -53,7 +53,7 @@ async function call<K extends RouteKey>(key: K, options: CallOptions<K> = {}): P
 // ---- public ---------------------------------------------------------------------
 
 export const loginLocal = (body: BodyOf<'POST /login/local'>) => call('POST /login/local', { body })
-export const saveAccountUpn = (upn: string) => call('PUT /me/upn', { body: { upn } })
+export const saveAccountUpn = (id: string, upn: string, revision: number) => call('PUT /admin/accounts/{id}/upn', { id, body: { upn, revision } })
 export const addLocalPassword = (password: string) => call('POST /me/local-password', { body: { password } })
 export const changeLocalPassword = (body: BodyOf<'PUT /me/password'>) => call('PUT /me/password', { body })
 export const createLocalAccount = (body: BodyOf<'POST /admin/local-accounts'>) => call('POST /admin/local-accounts', { body })
