@@ -17,6 +17,15 @@ database is refused rather than silently generating a different identity.
 - `baseline_v1.py`, `baselines/`, `versions/`, `env.py`, `script.py.mako`:
   frozen Alembic revision graph and shipped DDL.
 - `transfer.py`: SQLite-to-PostgreSQL import and the silent-switch guard.
+- `provider_environment.py`: explicit adoption of old provider configuration,
+  exposed by `token_admin login-providers --import-env`; the CLI imports this
+  adapter lazily only when the operator requests adoption. It also contains
+  guarded removal of an old beta's entirely empty startup metadata and the
+  legacy environment owner-inventory checks. Native DB-owned registrations
+  exclude those old environment checks entirely.
+  Adoption is atomic and never replaces database-owned values.
+- `legacy_setup_env.sh`: legacy environment export for deliberate adoption.
+  New installations never use this helper or generate keys manually.
 - `policy.py`: forward revision flags, SQLite rebuild invariants and PostgreSQL
   concurrent-index recovery. This is upgrade tooling, not a runtime repository.
 
@@ -30,8 +39,8 @@ delegations with a schema-state check, then remove this package and its dedicate
 migration tests together. Keep `db/schema.py`, ordinary engines, portable types
 and application repositories: they define current runtime persistence.
 
-The only bridges outside this package are `app.py` (dependency and silent-switch
-checks), `token_store.py` (startup readiness), and `token_admin.py` (CLI
+The only bridges outside this package are `app.py` (dependency, silent-switch
+checks and explicit provider-input adoption), `token_store.py` (startup readiness), and `token_admin.py` (CLI
 registration/execution and the operator silent-switch check). Boundary tests
 reject new callers, metadata DDL and direct Alembic use elsewhere.
 They also reject database backup calls and foreign-key-off SQL outside this

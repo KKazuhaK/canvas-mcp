@@ -62,6 +62,47 @@ export type ApiOnlyErrorCode =
   // an app's authorization request (the server's own authorization server)
   | 'authorization_invalid' // 400 (also a sign-in error)
   | 'client_unavailable' // 409
+  | 'invalid_provider_configuration'
+  | 'provider_secret_required'
+  | 'provider_identity_binding_changed'
+  | 'too_many_providers'
+  | 'installation_already_initialized'
+  | 'installation_code_invalid'
+  | 'provider_configuration_unavailable'
+  | 'installation_authority_unavailable'
+
+export interface LoginProviderConfiguration {
+  id: string
+  protocol: 'entra' | 'google' | 'github' | 'oidc'
+  enabled: boolean
+  rank: number
+  config: Record<string, string | string[] | boolean>
+  secret_present: boolean
+  callback_uri: string
+}
+export interface LoginProviderSave {
+  revision: number
+  config: LoginProviderConfiguration['config']
+  enabled: boolean
+  rank: number
+  client_secret?: string
+}
+export interface LoginProviderSettings {
+  revision: number
+  public_base_url: string
+  providers: LoginProviderConfiguration[]
+}
+export interface SetupStatus {
+  initialized: boolean
+  revision: number
+  callback_uri: string
+}
+export interface SetupRequest {
+  revision: number
+  code: string
+  config: LoginProviderConfiguration['config']
+  client_secret: string
+}
 
 /** Codes that only ever arrive as ?error= on /account/sign-in, never as JSON. */
 export type SignInErrorCode =
@@ -103,6 +144,7 @@ export interface Provider {
 export interface ProvidersResponse {
   providers: Provider[]
   mcp_url: string
+  setup_required?: boolean
 }
 
 // ---- Canvas token --------------------------------------------------------------

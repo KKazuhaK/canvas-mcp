@@ -20,6 +20,7 @@ import { checkSchool, getAdminSettings, saveDirectorySearch, saveFeaturedSchools
 import { ApiError } from '@/api/errors'
 import type { AdminSettingsResponse } from '@/api/types'
 import ErrorNotice from '@/components/ErrorNotice'
+import LoginProviderSettings from '@/components/admin/LoginProviderSettings'
 import { keys } from '@/query/keys'
 import { PageSkeleton } from '../StateViews'
 
@@ -114,5 +115,5 @@ export default function AdminSettingsView() {
   const query = useQuery({ queryKey: keys.adminSettings, queryFn: getAdminSettings })
   if (query.isPending) return <PageSkeleton />
   if (query.isError) return <ErrorNotice error={query.error} onRetry={() => void query.refetch()} />
-  return <Stack spacing={3}><Typography component="h1" variant="h4">{t('admin:settings.title')}</Typography><Editor key={query.data.revision} data={query.data} reload={() => void query.refetch()} /></Stack>
+  return <Stack spacing={3}><Typography component="h1" variant="h4">{t('admin:settings.title')}</Typography><LoginProviderSettings /><Editor key={query.data.revision} data={query.data} reload={() => void query.refetch()} /></Stack>
 }

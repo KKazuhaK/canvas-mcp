@@ -120,7 +120,8 @@ class ConfigStore:
             defaults = {
                 r["id"]: provider_defaults(r["id"])[0]
                 for r in rows
-                if r["id"] in self.snapshots.providers.ids
+                if self.snapshots.providers is None
+                or r["id"] in self.snapshots.providers.ids
             }
             current = {r["id"]: r["display_name"] for r in rows}
             names = validate_provider_names(defaults, current, changes)

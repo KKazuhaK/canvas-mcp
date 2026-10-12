@@ -603,6 +603,8 @@ def _providers_summary(settings: SelfhostSettings) -> list[str]:
     providers. Client secrets are never printed.
     """
     login = settings.login_providers
+    if not login.order:
+        return ["Sign-in providers: database-managed (Admin > Settings)"]
     if login.order == ("entra",):
         return []
     parts: list[str] = []
@@ -717,6 +719,7 @@ def _main_selfhost(args: argparse.Namespace, config: "Config") -> None:
 
     try:
         runtime = prepare_selfhost(settings)
+        settings = runtime.settings
     except SelfhostConfigError as exc:
         for problem in exc.problems:
             log_error(problem)

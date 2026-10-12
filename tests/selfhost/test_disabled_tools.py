@@ -136,10 +136,10 @@ class TestSetting:
     def test_it_is_reported_together_with_other_problems(self):
         with pytest.raises(SelfhostConfigError) as info:
             load_selfhost_settings(
-                _env(ENTRA_CLIENT_SECRET="short", SELFHOST_DISABLED_TOOLS="nope")
+                _env(PUBLIC_BASE_URL="invalid", SELFHOST_DISABLED_TOOLS="nope")
             )
         text = "; ".join(info.value.problems)
-        assert "ENTRA_CLIENT_SECRET" in text and "SELFHOST_DISABLED_TOOLS" in text
+        assert "PUBLIC_BASE_URL" in text and "SELFHOST_DISABLED_TOOLS" in text
 
     def test_the_summary_for_config_lists_the_tools(self):
         settings = load_selfhost_settings(

@@ -1,4 +1,8 @@
 import type {
+  LoginProviderSave,
+  LoginProviderSettings,
+  SetupStatus,
+  SetupRequest,
   PageQuery,
   AdminAccountsResponse,
   AdminSettingsResponse,
@@ -41,6 +45,10 @@ import type {
  * route cannot be added on one side only. `void` means "204, no body".
  */
 export interface Contract {
+  'GET /setup': { response: SetupStatus }
+  'POST /setup': { body: SetupRequest; response: { redirect_to: string } }
+  'GET /admin/login-providers': { response: LoginProviderSettings }
+  'PUT /admin/login-providers/{id}': { body: LoginProviderSave; response: LoginProviderSettings }
   'GET /admin/settings': { response: AdminSettingsResponse }
   'PUT /admin/settings/sign-in-methods': { body: { revision: number; names: Record<string, string | null> }; response: AdminSettingsResponse }
   'PUT /admin/settings/schools': { body: FeaturedSchoolsRequest; response: AdminSettingsResponse }

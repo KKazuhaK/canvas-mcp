@@ -1,4 +1,12 @@
 {
+  "invalid_provider_configuration": "Check the login provider fields and try again.",
+  "provider_secret_required": "Enter the login provider's client secret.",
+  "provider_identity_binding_changed": "This provider already has linked identities. Its issuer and client ID cannot be changed.",
+  "too_many_providers": "At most eight login providers can be enabled.",
+  "installation_already_initialized": "Installation is already configured. Sign in to manage its settings.",
+  "installation_code_invalid": "The installation code is invalid or expired. Retrieve a current code on the server.",
+  "provider_configuration_unavailable": "Stored login configuration cannot be loaded. Ask the server operator to check it.",
+  "installation_authority_unavailable": "Installation authorization is unavailable. Ask the server operator to check it.",
   "not_authenticated": "Your session has ended. Please sign in again.",
   "csrf_invalid": "Your session check failed. Reload the page and try again.",
   "origin_not_allowed": "This request came from an origin that is not allowed.",

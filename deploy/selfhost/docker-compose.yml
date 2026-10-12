@@ -1,5 +1,5 @@
 # Download this file and env.example; save the latter as .env.
-# Fill the four required .env values, then run: docker compose up -d
+# Fill PUBLIC_BASE_URL in .env, then run: docker compose up -d
 # The container creates and retains its internal keys on the data volume.
 
 services:
@@ -10,7 +10,7 @@ services:
     # Every `docker compose up -d` pulls the image the chosen tag points to again.
     pull_policy: always
 
-    # All settings and secrets live in .env (chmod 600); do not put them in this file.
+    # Infrastructure settings come from .env; login credentials are database-managed.
     env_file:
       - .env
 

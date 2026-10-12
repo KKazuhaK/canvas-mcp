@@ -23,7 +23,7 @@ The reviewed multi-architecture staging image and its immutable digest are in
    home account is in another tenant in the later acceptance checks. Optional
    Google, GitHub or OIDC providers remain off unless explicitly configured.
 3. Download only `docker-compose.yml` and `env.example` from the reviewed revision.
-   Save the latter as `.env`, fill its four required values, and run
+   Save the latter as `.env`, fill `PUBLIC_BASE_URL`, and run
    `docker compose up -d`. No setup script or manual key generation is required.
    The beta image is the Compose default; override `CANVAS_MCP_IMAGE` only to pin
    another reviewed version/digest. The image generates and persists its own
@@ -46,7 +46,9 @@ The reviewed multi-architecture staging image and its immutable digest are in
    nginx's `location ^~ /auth/` must keep its trailing slash. Preserve Host,
    streaming responses, request limits and callback log redaction. Check the
    external health response and provider callback through that proxy.
-6. Sign in as the admitted owner and follow
+6. Open first-install `/account/setup` using the private code from the container
+   logs and the Entra application credentials. Configuration belongs in the
+   database, not `.env`. After initialization, sign in and follow
    [enrollment and client setup](README.md#enroll-and-connect-a-client). A fresh
    database has no preset schools. Manage sign-in names, featured-school order
    and directory search in Admin > Settings, or use the governed

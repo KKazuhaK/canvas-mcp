@@ -1,6 +1,6 @@
 # Database-managed configuration
 
-The v1 account panel has **Admin > Settings** for public sign-in names,
+The v1 account panel has **Admin > Settings** for login registrations, public sign-in names,
 featured schools and school directory search. An active owner must have signed
 in within the last ten minutes. Saves require the session CSRF header, a
 same-origin JSON request and the configuration revision shown when editing.
@@ -20,8 +20,14 @@ runtime and Docker acceptance gates are tracked in [V1-PROGRESS.md](V1-PROGRESS.
   disabled is selected automatically.
 - Public names default to Microsoft, Google, GitHub, or the OIDC provider slug.
   Resetting a name uses that default; it does not remove the provider.
-- Provider credentials and the enabled provider list remain environment-owned.
-  Restart reconciliation preserves edited names and applies the configured order.
+- Provider credentials, enablement, button order and provider app-role names are
+  database-owned. Client secrets are encrypted and write-only: a blank field
+  keeps the saved value. Configuration takes effect on the next request.
+- Fresh installations use `/account/setup` with the private expiring operator
+  code. Disabling providers does not reopen setup. Old environment adoption is
+  explicit and isolated in the migration package; saved DB values always win.
+- Owner mutations read current provider enablement inside the governed write,
+  so a stale request or shell environment cannot bypass last-owner protection.
 - `CANVAS_API_URL`, `CANVAS_FEATURED_SCHOOLS`, `CANVAS_SCHOOL_SEARCH` and
   `OIDC_<SLUG>_DISPLAY_NAME` are refused in self-host mode. They do not seed the
   database. Upstream authentication modes retain their own configuration.
@@ -46,6 +52,8 @@ Run these in the server's environment, with its database and keyring settings:
 python -m canvas_mcp.core.selfhost.token_admin providers list
 python -m canvas_mcp.core.selfhost.token_admin providers rename entra "Campus sign-in"
 python -m canvas_mcp.core.selfhost.token_admin providers reset-name entra
+python -m canvas_mcp.core.selfhost.token_admin login-providers
+python -m canvas_mcp.core.selfhost.token_admin login-providers --check
 
 python -m canvas_mcp.core.selfhost.token_admin schools list
 python -m canvas_mcp.core.selfhost.token_admin schools add SCHOOL_HOST --name "Your school"
@@ -60,6 +68,14 @@ python -m canvas_mcp.core.selfhost.token_admin settings set schools.directory_se
 python -m canvas_mcp.core.selfhost.token_admin settings set retention.auth_events_days 180
 python -m canvas_mcp.core.selfhost.token_admin settings reset retention.auth_events_days
 ```
+
+The first-install code can be renewed with `token_admin setup-code` only while
+unconfigured. Operator recovery uses `token_admin login-providers --configure
+PROVIDER`, reading a closed JSON object from stdin with `revision`, `config`,
+`enabled`, `rank` and optional `client_secret`; no secret belongs in an argument.
+Read the revision without loading provider configuration using
+`token_admin login-providers --revision`. Explicit legacy adoption uses
+`token_admin login-providers --import-env`, which never replaces DB-owned values.
 
 Settings values are JSON booleans or integers with exact types. Authentication
 event retention accepts 7–3650 days; audit retention accepts 0–3650 days, where

@@ -3,7 +3,7 @@ import Button from '@mui/material/Button'
 import Card from '@mui/material/Card'
 import CardContent from '@mui/material/CardContent'
 import Typography from '@mui/material/Typography'
-import { Link as RouterLink } from 'react-router'
+import { Link as RouterLink, Navigate } from 'react-router'
 import { useTranslation } from 'react-i18next'
 import { isUnauthenticated } from '@/api/errors'
 import type { MeResponse } from '@/api/types'
@@ -13,7 +13,7 @@ import PageHeader from '@/components/PageHeader'
 import TokenSection from '@/components/token/TokenSection'
 import AccountShell from '@/layouts/AccountShell'
 import PublicLayout from '@/layouts/PublicLayout'
-import { useMe } from '@/query/hooks'
+import { useMe, useProviders } from '@/query/hooks'
 import { FullPageLoading } from './StateViews'
 
 function SignedOutHome() {
@@ -62,6 +62,8 @@ function AccountHome({ me }: { me: MeResponse }) {
  */
 export default function HomeView() {
   const me = useMe()
+  const providers = useProviders()
+  if (providers.data?.setup_required) return <Navigate to="/setup" replace />
   if (me.isPending) return <FullPageLoading />
   if (isUnauthenticated(me.error)) return <SignedOutHome />
   if (me.isError) {

@@ -1,4 +1,4 @@
-"""deploy/selfhost/setup-env.sh writes a .env the server accepts, and nothing else.
+"""The isolated legacy helper writes input for explicit environment adoption.
 
 The script runs on the operator's Linux host, so these tests drive the real
 script with bash and openssl. On Windows they use Git for Windows' bash (never
@@ -18,11 +18,16 @@ import pytest
 from dotenv import dotenv_values
 
 from canvas_mcp.core.config import STUDENT_WRITE_TOOL_NAMES
-from canvas_mcp.core.selfhost.settings import load_selfhost_settings
+from canvas_mcp.core.selfhost.db.migrations.provider_environment import (
+    load_provider_environment,
+)
 
 from .conftest import CLIENT, TENANT
 
-SCRIPT = Path(__file__).resolve().parents[2] / "deploy" / "selfhost" / "setup-env.sh"
+SCRIPT = (
+    Path(__file__).resolve().parents[2]
+    / "src/canvas_mcp/core/selfhost/db/migrations/legacy_setup_env.sh"
+)
 SECRET = "Fake~Entra.Secret_value-0123456789"
 BASE = "https://canvas.example.test"
 IMAGE = "canvas-mcp:selfhost-v1-local"
@@ -31,8 +36,14 @@ IMAGE = "canvas-mcp:selfhost-v1-local"
 def _find_bash() -> str | None:
     if sys.platform == "win32":
         for candidate in (
-            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe",
-            Path(os.environ.get("ProgramW6432", r"C:\Program Files")) / "Git" / "bin" / "bash.exe",
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            / "Git"
+            / "bin"
+            / "bash.exe",
+            Path(os.environ.get("ProgramW6432", r"C:\Program Files"))
+            / "Git"
+            / "bin"
+            / "bash.exe",
         ):
             if candidate.is_file():
                 return str(candidate)
@@ -42,7 +53,9 @@ def _find_bash() -> str | None:
 
 BASH = _find_bash()
 
-pytestmark = pytest.mark.skipif(BASH is None, reason="needs bash (Git for Windows bash on Windows)")
+pytestmark = pytest.mark.skipif(
+    BASH is None, reason="needs bash (Git for Windows bash on Windows)"
+)
 
 
 def run_script(
@@ -54,7 +67,13 @@ def run_script(
     base_env = {
         key: value
         for key, value in os.environ.items()
-        if key not in {"PUBLIC_BASE_URL", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "CANVAS_MCP_IMAGE"}
+        if key
+        not in {
+            "PUBLIC_BASE_URL",
+            "ENTRA_TENANT_ID",
+            "ENTRA_CLIENT_ID",
+            "CANVAS_MCP_IMAGE",
+        }
     }
     base_env.update(env or {})
     assert BASH is not None
@@ -96,7 +115,7 @@ def load(values: dict[str, str], tmp_path: Path) -> object:
     env = dict(values)
     # The container paths are not writable here; everything else is used as written.
     env["SELFHOST_DATA_DIR"] = str(tmp_path / "data")
-    return load_selfhost_settings(env)
+    return load_provider_environment(env)
 
 
 def test_generated_env_is_accepted_by_the_settings_loader(tmp_path):
@@ -132,7 +151,9 @@ def test_defaults_are_read_only_and_anonymized(tmp_path):
         assert name not in values, f"{name} must stay unset without an explicit flag"
 
 
-def test_course_state_is_left_at_its_request_local_default_and_the_opt_in_is_shown_commented(tmp_path):
+def test_course_state_is_left_at_its_request_local_default_and_the_opt_in_is_shown_commented(
+    tmp_path,
+):
     assert run_script(tmp_path, env=preset()).returncode == 0
     path = tmp_path / ".env"
     assert "SELFHOST_COURSE_STATE" not in read_env(path)
@@ -155,13 +176,17 @@ def test_read_only_file_turns_writes_on_by_uncommenting_not_regenerating(tmp_pat
     assert "# ALLOWED_WRITE_TOOLS=all" in text
     assert "# COURSE_AGENT_POLICY_DEFAULT=allow" in text
     assert "Do not rerun setup-env.sh" in text
-    uncommented = text.replace("# ALLOWED_WRITE_TOOLS", "ALLOWED_WRITE_TOOLS").replace(
-        "# STUDENT_WRITE_TOOLS", "STUDENT_WRITE_TOOLS"
-    ).replace("# COURSE_AGENT_POLICY_DEFAULT", "COURSE_AGENT_POLICY_DEFAULT")
+    uncommented = (
+        text.replace("# ALLOWED_WRITE_TOOLS", "ALLOWED_WRITE_TOOLS")
+        .replace("# STUDENT_WRITE_TOOLS", "STUDENT_WRITE_TOOLS")
+        .replace("# COURSE_AGENT_POLICY_DEFAULT", "COURSE_AGENT_POLICY_DEFAULT")
+    )
     (tmp_path / "edited.env").write_text(uncommented, encoding="utf-8")
     values = read_env(tmp_path / "edited.env")
     assert values["ALLOWED_WRITE_TOOLS"] == "all"
-    assert set(values["STUDENT_WRITE_TOOLS"].split(",")) == set(STUDENT_WRITE_TOOL_NAMES)
+    assert set(values["STUDENT_WRITE_TOOLS"].split(",")) == set(
+        STUDENT_WRITE_TOOL_NAMES
+    )
     assert values["COURSE_AGENT_POLICY_DEFAULT"] == "allow"
 
 
@@ -178,7 +203,9 @@ def test_opt_in_flags_enable_every_student_write_tool_and_real_names(tmp_path):
     assert result.returncode == 0, result.stderr
     values = read_env(tmp_path / ".env")
     assert values["ALLOWED_WRITE_TOOLS"] == "all"
-    assert set(values["STUDENT_WRITE_TOOLS"].split(",")) == set(STUDENT_WRITE_TOOL_NAMES)
+    assert set(values["STUDENT_WRITE_TOOLS"].split(",")) == set(
+        STUDENT_WRITE_TOOL_NAMES
+    )
     assert values["COURSE_AGENT_POLICY_DEFAULT"] == "allow"
     assert values["ENABLE_DATA_ANONYMIZATION"] == "false"
     load(values, tmp_path)
@@ -190,7 +217,10 @@ def test_the_enabled_writes_comment_and_help_say_each_user_still_opts_in(tmp_pat
     text = (tmp_path / ".env").read_text(encoding="utf-8")
     assert "only the ceiling" in text
     flat_env = " ".join(text.replace("# ", " ").split())
-    assert 'tool stays off for each user until that user turns it on in the "Write tools" section of /account' in flat_env
+    assert (
+        'tool stays off for each user until that user turns it on in the "Write tools" section of /account'
+        in flat_env
+    )
     help_result = run_script(tmp_path, "--help")
     flat = " ".join(help_result.stdout.split())
     assert "only the server ceiling" in flat
@@ -293,15 +323,15 @@ def test_invalid_input_is_refused_and_writes_nothing(tmp_path, overrides, secret
         assert secret not in result.stdout + result.stderr
 
 
-
-
 def test_highest_port_is_accepted(tmp_path):
     result = run_script(tmp_path, env=preset(PUBLIC_BASE_URL=BASE + ":65535"))
     assert result.returncode == 0, result.stderr
 
 
 def test_an_unusable_output_path_fails_before_asking_for_the_secret(tmp_path):
-    result = run_script(tmp_path, "--output", "missing-dir/.env", env=preset(), stdin="")
+    result = run_script(
+        tmp_path, "--output", "missing-dir/.env", env=preset(), stdin=""
+    )
     assert result.returncode != 0
     assert "missing-dir" in result.stderr
     assert not (tmp_path / "missing-dir").exists()
@@ -312,7 +342,11 @@ def test_no_temporary_files_are_left_behind(tmp_path):
     bad = tmp_path / "bad"
     bad.mkdir()
     assert run_script(bad, env=preset(), stdin="short\n").returncode != 0
-    leftovers = [p.name for p in (*tmp_path.iterdir(), *bad.iterdir()) if p.name.startswith(".setup-env.")]
+    leftovers = [
+        p.name
+        for p in (*tmp_path.iterdir(), *bad.iterdir())
+        if p.name.startswith(".setup-env.")
+    ]
     assert leftovers == []
     assert sorted(p.name for p in tmp_path.iterdir() if p.is_file()) == [".env"]
 
@@ -384,7 +418,11 @@ def test_help_describes_the_options_and_writes_nothing(tmp_path):
 def test_schools_are_managed_in_the_database_not_generated_as_env(tmp_path):
     assert run_script(tmp_path, env=preset()).returncode == 0
     values = read_env(tmp_path / ".env")
-    for removed in ("CANVAS_API_URL", "CANVAS_FEATURED_SCHOOLS", "CANVAS_SCHOOL_SEARCH"):
+    for removed in (
+        "CANVAS_API_URL",
+        "CANVAS_FEATURED_SCHOOLS",
+        "CANVAS_SCHOOL_SEARCH",
+    ):
         assert removed not in values
     assert "Admin > Settings" in (tmp_path / ".env").read_text(encoding="utf-8")
 

@@ -7,6 +7,9 @@ from typing import Any
 
 import pytest
 
+from canvas_mcp.core.selfhost.db.migrations.provider_environment import (
+    load_provider_environment,
+)
 from canvas_mcp.core.selfhost.login.config import (
     LoginProvidersConfig,
     OidcConfig,
@@ -17,7 +20,6 @@ from canvas_mcp.core.selfhost.login.config import (
 from canvas_mcp.core.selfhost.settings import (
     SelfhostConfigError,
     SelfhostSettings,
-    load_selfhost_settings,
 )
 
 TENANT = "11111111-2222-3333-4444-555555555555"
@@ -85,7 +87,7 @@ def oidc(slug: str = "school", **extra: str | None) -> dict[str, str | None]:
 
 def problems(**overrides: str | None) -> list[str]:
     with pytest.raises(SelfhostConfigError) as info:
-        load_selfhost_settings(env(**overrides))
+        load_provider_environment(env(**overrides))
     return info.value.problems
 
 
@@ -96,8 +98,8 @@ def parse(**overrides: str | None) -> tuple[LoginProvidersConfig, list[str]]:
 
 
 def test_entra_only_environment_gives_todays_settings() -> None:
-    plain = load_selfhost_settings(env(SELFHOST_AUTH_MODE=None))
-    explicit = load_selfhost_settings(
+    plain = load_provider_environment(env(SELFHOST_AUTH_MODE=None))
+    explicit = load_provider_environment(
         env(SELFHOST_AUTH_MODE=None, SELFHOST_LOGIN_PROVIDERS="entra")
     )
     assert plain.login_providers == LoginProvidersConfig()
@@ -235,7 +237,7 @@ def test_entra_not_listed_refuses_each_entra_variable() -> None:
 
 
 def test_entra_not_listed_loads_with_empty_entra_fields() -> None:
-    settings = load_selfhost_settings(
+    settings = load_provider_environment(
         env(
             SELFHOST_LOGIN_PROVIDERS="google,github",
             ACCESS_RULES="google:domain:example.edu,github:user:42",
@@ -404,7 +406,7 @@ def test_an_entra_only_deployment_without_the_list_ignores_stray_provider_variab
     # shared environment file holds; the ignored variables are named in the log, never their values.
     stray = {**google(), **github(), **oidc("other")}
     with caplog.at_level("WARNING", logger="canvas_mcp.selfhost.account"):
-        settings = load_selfhost_settings(env(**stray))
+        settings = load_provider_environment(env(**stray))
     assert settings.login_providers.order == ("entra",)
     text = caplog.text
     for name in ("GOOGLE_CLIENT_ID", "GITHUB_CLIENT_SECRET", "OIDC_OTHER_ISSUER"):
@@ -445,7 +447,7 @@ def test_secrets_never_appear_in_problems_or_reprs() -> None:
     )
     assert found
     blob = " ".join(found) + repr(cfg)
-    settings = load_selfhost_settings(
+    settings = load_provider_environment(
         env(
             SELFHOST_LOGIN_PROVIDERS="entra,google,github,oidc:school",
             **google(),
@@ -471,13 +473,14 @@ def test_open_policy_with_a_public_provider_needs_the_acknowledgement() -> None:
         and "ACCESS_OPEN_ACKNOWLEDGE_PUBLIC" in p
         for p in found
     )
-    settings = load_selfhost_settings(
+    settings = load_provider_environment(
         env(**base, ACCESS_OPEN_ACKNOWLEDGE_PUBLIC="true")
     )
     assert settings.access_policy.mode == "open" and settings.access_policy.ack_public
     # Entra alone stays unenforced, as before.
     assert (
-        load_selfhost_settings(env(ACCESS_POLICY="open")).access_policy.mode == "open"
+        load_provider_environment(env(ACCESS_POLICY="open")).access_policy.mode
+        == "open"
     )
 
 
@@ -551,7 +554,7 @@ def test_bootstrap_owner_grammar(value: str, providers: str, ok: bool) -> None:
     if "oidc" in providers:
         extra.update(oidc())
     if ok:
-        settings = load_selfhost_settings(env(**extra))
+        settings = load_provider_environment(env(**extra))
         policy = settings.access_policy
         assert (policy.bootstrap_owner is not None) != policy.bootstrap_via_token_admin
     else:
@@ -561,7 +564,7 @@ def test_bootstrap_owner_grammar(value: str, providers: str, ok: bool) -> None:
 
 
 def test_bootstrap_issuers() -> None:
-    settings = load_selfhost_settings(
+    settings = load_provider_environment(
         env(
             SELFHOST_LOGIN_PROVIDERS="entra,oidc:school",
             SELFHOST_BOOTSTRAP_OWNER="oidc:school:abc",
@@ -574,7 +577,7 @@ def test_bootstrap_issuers() -> None:
         ISSUER,
         "abc",
     )
-    settings = load_selfhost_settings(
+    settings = load_provider_environment(
         env(
             SELFHOST_LOGIN_PROVIDERS="entra,google",
             SELFHOST_BOOTSTRAP_OWNER="google:sub_1-x",
@@ -587,7 +590,7 @@ def test_bootstrap_issuers() -> None:
         and boot.issuer == "https://accounts.google.com"
         and boot.subject == "sub_1-x"
     )
-    settings = load_selfhost_settings(
+    settings = load_provider_environment(
         env(
             SELFHOST_LOGIN_PROVIDERS="entra,github",
             SELFHOST_BOOTSTRAP_OWNER="github:583231",
@@ -608,7 +611,7 @@ def test_link_by_verified_email_is_reserved() -> None:
         )
     # Saying "no" (or nothing) is what the server does anyway.
     for value in ("", "false", "False", "0", "no", "off"):
-        load_selfhost_settings(env(ACCOUNT_LINK_BY_VERIFIED_EMAIL=value))
+        load_provider_environment(env(ACCOUNT_LINK_BY_VERIFIED_EMAIL=value))
 
 
 def test_more_than_ten_github_membership_rules_are_refused() -> None:

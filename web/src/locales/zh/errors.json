@@ -1,4 +1,12 @@
 {
+  "invalid_provider_configuration": "请检查登录提供方的配置后重试。",
+  "provider_secret_required": "请输入登录提供方的客户端密钥。",
+  "provider_identity_binding_changed": "此提供方已绑定用户身份，不能更改颁发者或客户端 ID。",
+  "too_many_providers": "最多可启用八个登录提供方。",
+  "installation_already_initialized": "安装已完成配置，请登录后管理设置。",
+  "installation_code_invalid": "初始化码无效或已过期，请在服务器获取当前初始化码。",
+  "provider_configuration_unavailable": "无法读取数据库中的登录配置，请联系服务器管理员检查。",
+  "installation_authority_unavailable": "初始化授权不可用，请联系服务器管理员检查。",
   "not_authenticated": "登录已失效，请重新登录。",
   "csrf_invalid": "会话校验失败。请刷新页面后重试。",
   "origin_not_allowed": "该请求来自不被允许的来源。",

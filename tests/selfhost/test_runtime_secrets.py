@@ -68,9 +68,9 @@ def test_concurrent_first_boots_choose_one_complete_key_pair(tmp_path):
     assert not list(tmp_path.glob(".runtime-secrets-*"))
 
 
-def test_bad_login_configuration_writes_no_secret_file(tmp_path):
+def test_bad_infrastructure_configuration_writes_no_secret_file(tmp_path):
     env = minimal(tmp_path)
-    env["ENTRA_CLIENT_ID"] = ""
+    env["PUBLIC_BASE_URL"] = "invalid"
     with pytest.raises(SelfhostConfigError):
         initialize_secrets(env)
     assert not (tmp_path / SECRETS_FILE).exists()

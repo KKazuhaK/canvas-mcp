@@ -26,6 +26,7 @@ import { splitRoute } from '@/api/contract'
 import type {
   AdminAccount,
   AdminSettingsResponse,
+  LoginProviderConfiguration,
   AdminAction,
   AdminActionResponse,
   AdminIdentity,
@@ -51,6 +52,7 @@ import type {
 } from '@/api/types'
 
 export const MOCK_SCENARIOS = [
+  'setup',
   'enrolled',
   'featured',
   'fresh',
@@ -200,6 +202,8 @@ interface MockState {
   tools: MockTool[]
   hasCatalog: boolean
   settings: AdminSettingsResponse
+  setupInitialized: boolean
+  providerConfigurations: LoginProviderConfiguration[]
   schools: SchoolsResponse
   history: LoginEvent[]
   accounts: AdminAccount[]
@@ -454,7 +458,9 @@ function buildState(scenario: MockScenario): MockState {
 
   return {
     scenario,
-    signedIn: scenario !== 'signed-out',
+    signedIn: scenario !== 'signed-out' && scenario !== 'setup',
+    setupInitialized: scenario !== 'setup',
+    providerConfigurations: [{ id: 'entra', protocol: 'entra', enabled: true, rank: 0, config: { tenant_id: '11111111-2222-3333-4444-555555555555', client_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }, secret_present: true, callback_uri: 'https://canvas.example.test/auth/callback/entra' }],
     fresh,
     me,
     canvas,
@@ -562,6 +568,14 @@ type Reply<T> = Ok<T> | Fail
 const ok = <T>(data: T, status = 200): Ok<T> => ({ status, data })
 const noContent = (): Ok<void> => ({ status: 204, data: '' as unknown as void })
 const STATUS: Partial<Record<ApiErrorCode, number>> = {
+  invalid_provider_configuration: 422,
+  provider_secret_required: 422,
+  provider_identity_binding_changed: 409,
+  too_many_providers: 422,
+  installation_already_initialized: 409,
+  installation_code_invalid: 403,
+  provider_configuration_unavailable: 503,
+  installation_authority_unavailable: 503,
   not_authenticated: 401,
   csrf_invalid: 403,
   origin_not_allowed: 403,
@@ -686,10 +700,38 @@ function syncSelf(state: MockState): void {
 
 route('GET /providers', 'public', (_c, s) =>
   ok({
+    setup_required: !s.setupInitialized,
     providers: s.providers.map((p) => ({ ...p, start_url: s.multi ? p.start_url : '/auth/login', name: s.settings.sign_in_methods.find((m) => m.id === p.id)?.effective_name ?? p.name })),
     mcp_url: s.me.server.mcp_url,
   }),
 )
+
+route('GET /setup', 'public', (_c, s) => ok({ initialized: s.setupInitialized, revision: s.settings.revision, callback_uri: 'https://canvas.example.test/auth/callback/entra' }))
+route('POST /setup', 'public', (c, s) => {
+  if (s.setupInitialized) return fail('installation_already_initialized')
+  if (c.body.code !== 'A'.repeat(43)) return fail('installation_code_invalid')
+  if (c.body.revision !== s.settings.revision) return fail('settings_conflict')
+  if (typeof c.body.client_secret !== 'string' || c.body.client_secret.length < 16) return fail('provider_secret_required')
+  s.setupInitialized = true
+  s.settings.revision += 1
+  return ok({ redirect_to: '/auth/login/entra' })
+})
+route('GET /admin/login-providers', 'owner', (_c, s) => ok({ revision: s.settings.revision, public_base_url: 'https://canvas.example.test', providers: s.providerConfigurations }))
+route('PUT /admin/login-providers/{id}', 'owner', (c, s) => {
+  if (c.body.revision !== s.settings.revision) return fail('settings_conflict')
+  const id = decodeURIComponent(c.match[1])
+  const old = s.providerConfigurations.find((provider) => provider.id === id)
+  if (!old && (typeof c.body.client_secret !== 'string' || c.body.client_secret.length < 16)) return fail('provider_secret_required')
+  if (typeof c.body.enabled !== 'boolean' || typeof c.body.rank !== 'number' || !c.body.config || typeof c.body.config !== 'object' || Array.isArray(c.body.config)) return fail('invalid_provider_configuration')
+  const value: LoginProviderConfiguration = {
+    id, protocol: id.startsWith('oidc:') ? 'oidc' : id as LoginProviderConfiguration['protocol'],
+    enabled: c.body.enabled, rank: c.body.rank, config: c.body.config as LoginProviderConfiguration['config'],
+    secret_present: true, callback_uri: `https://canvas.example.test/auth/callback/${id.replace(':', '/')}`,
+  }
+  s.providerConfigurations = [...s.providerConfigurations.filter((provider) => provider.id !== id), value]
+  s.settings.revision += 1
+  return ok({ revision: s.settings.revision, public_base_url: 'https://canvas.example.test', providers: s.providerConfigurations })
+})
 
 function settingsConflict(c: Ctx, s: MockState): Fail | null {
   return c.body.revision !== s.settings.revision ? fail('settings_conflict') : null

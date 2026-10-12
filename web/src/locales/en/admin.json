@@ -1,4 +1,9 @@
 {
+  "installation": {
+    "title": "Configure sign-in",
+    "help": "Enter the installation code from the container logs and your Microsoft Entra app registration. Configuration is saved in the database.",
+    "code": "Installation code"
+  },
   "title": "Admin",
   "ownerOnly": "Only owners can see the admin pages.",
   "actions": {
@@ -248,6 +253,32 @@
     "returnsTo": "Returns to",
     "connected": "Connected",
     "lastUsed": "Last used"
+  },
+  "providerConfig": {
+    "title": "Login provider configuration",
+    "reload": "Reload login configuration",
+    "edit": "Edit {{provider}}",
+    "type": "Provider type",
+    "slug": "OIDC identifier",
+    "add": "Add login provider",
+    "callback": "Callback URL",
+    "callbackHelp": "Register this exact Web callback with your sign-in provider.",
+    "tenant": "Directory (tenant) ID",
+    "issuer": "OpenID Connect issuer",
+    "clientId": "Client ID",
+    "secret": "Client secret",
+    "keepSecret": "A secret is saved. Leave blank to keep it, or enter a replacement.",
+    "newSecret": "Enter the secret value, not its identifier. It will be stored encrypted.",
+    "userRole": "Member app role",
+    "ownerRole": "Owner app role",
+    "scopes": "OpenID Connect scopes",
+    "tokenAuth": "Token endpoint authentication",
+    "discovery": "Use provider discovery",
+    "userinfo": "Verify identity through userinfo",
+    "position": "Sign-in button position",
+    "enabled": "Offer this sign-in method",
+    "save": "Save sign-in configuration",
+    "initialize": "Initialize sign-in"
   },
   "settings": {
     "title": "Settings",

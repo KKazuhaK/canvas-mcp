@@ -28,12 +28,12 @@ operation refused, 4 ``db current`` found a schema behind this build.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import os
 import pathlib
 import re
 import sys
-from collections.abc import Iterable, Iterator
+import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -121,6 +121,25 @@ def _build_parser() -> argparse.ArgumentParser:
         "--check",
         action="store_true",
         help="also fetch each OpenID Connect provider's discovery document and keys (network)",
+    )
+    action = providers.add_mutually_exclusive_group()
+    action.add_argument(
+        "--revision",
+        action="store_true",
+        help="print the current configuration revision for operator recovery",
+    )
+    action.add_argument(
+        "--import-env",
+        action="store_true",
+        help="explicitly adopt legacy environment credentials once",
+    )
+    action.add_argument(
+        "--configure",
+        metavar="PROVIDER",
+        help="operator recovery: read provider configuration JSON from stdin",
+    )
+    sub.add_parser(
+        "setup-code", help="print a private first-install code, renewing it if expired"
     )
     sub.add_parser(
         "list",
@@ -706,125 +725,37 @@ def _endpoint_hosts(meta: Any) -> str:
 
 
 def _protected_provider_lists(store: TokenStore) -> tuple[frozenset[str], ...]:
-    """Preserve an owner under each real list, not only their intersection.
+    if store.database_managed_login_providers():
+        return (store.recorded_login_providers(),)
+    from .db.migrations.provider_environment import _protected_provider_lists as legacy
 
-    The recorded and operator lists can have different owners and no owner under their
-    intersection. Each guard runs inside the mutation's writer transaction.
-    """
-    recorded = store.recorded_login_providers()
-    if not (os.environ.get("SELFHOST_LOGIN_PROVIDERS") or "").strip():
-        return (recorded,)
-    from_env = _environment_providers()
-    if from_env is None or from_env == recorded:
-        return (recorded,)
-    return (recorded, from_env)
+    return legacy(store)
 
 
 def _listed_providers(store: TokenStore) -> frozenset[str] | None:
-    """Use the database's configured provider inventory for owner governance.
+    if store.database_managed_login_providers():
+        return store.recorded_login_providers()
+    from .db.migrations.provider_environment import _listed_providers as legacy
 
-    An unreadable or absent operator environment cannot invent providers. When
-    an explicit environment differs, promotion recovery uses its intersection
-    with the inventory, or the inventory if they are disjoint. Disable and
-    unlink separately preserve an owner under each real list in their writer
-    transaction. Startup reconciles the inventory before checking owner access.
-    """
-    from canvas_mcp.core.selfhost.login.config import LOGIN_PROVIDERS_ENV
-
-    recorded = store.recorded_login_providers()
-    named = bool((os.environ.get(LOGIN_PROVIDERS_ENV) or "").strip())
-    if not named:
-        return recorded
-    from_env = _environment_providers()
-    if from_env is None or from_env == recorded:
-        return recorded
-    both = recorded & from_env
-    print(
-        f"note: {LOGIN_PROVIDERS_ENV} differs from the configured providers in the database; "
-        "disable and unlink preserve an owner under each list",
-        file=sys.stderr,
-    )
-    return both or recorded
-
-
-def _environment_providers() -> frozenset[str] | None:
-    """The provider ids this environment's settings name; None when they cannot be read."""
-    from canvas_mcp.core.selfhost.login.config import (
-        LOGIN_PROVIDERS_ENV,
-        parse_login_providers,
-    )
-    from canvas_mcp.core.selfhost.settings import (
-        SelfhostConfigError,
-        load_selfhost_settings,
-    )
-
-    try:
-        with _quiet_login_config():
-            return load_selfhost_settings().login_providers.ids
-    except SelfhostConfigError:
-        pass
-    ignored: list[str] = []
-    try:
-        # authz_mode "local": the mode of the other settings is not known here, and this reads
-        # the list alone.
-        with _quiet_login_config():
-            ids = parse_login_providers(os.environ, ignored).ids
-    except Exception:  # noqa: BLE001 - an unreadable list is reported by the caller
-        return None
-    if ids and not any(p.startswith(LOGIN_PROVIDERS_ENV) for p in ignored):
-        return ids
-    return None
+    return legacy(store)
 
 
 def _note_assumed_entra_only(store: TokenStore) -> None:
-    """Tell the operator when Entra alone is assumed for a database that holds other providers."""
-    others = sorted(
-        {
-            identity.provider_id
-            for account in store.iter_accounts()
-            for identity in account.identities
-            if identity.provider_id != acc.PROVIDER_ENTRA
-        }
-    )
-    if others:
-        print(
-            "note: the server has not recorded its SELFHOST_LOGIN_PROVIDERS and this environment "
-            f"does not set it, so only entra is assumed to be listed, but the database holds "
-            f"sign-in methods at {', '.join(others[:5])}; run this command with the server's "
-            "environment (or start the server once) so the usable-owner check matches it",
-            file=sys.stderr,
+    if not store.database_managed_login_providers():
+        from .db.migrations.provider_environment import (
+            _note_assumed_entra_only as legacy,
         )
 
-
-@contextlib.contextmanager
-def _quiet_login_config() -> Iterator[None]:
-    """Keep the stray-provider-variable warnings of the settings parser out of this command.
-
-    ``GOOGLE_CLIENT_ID`` and the like, set while ``SELFHOST_LOGIN_PROVIDERS`` is not, are ignored
-    and logged as a warning where the server starts; here they would only add noise to a command
-    whose output people and scripts read. Nothing else the logger says is touched.
-    """
-    import logging
-
-    from canvas_mcp.core.selfhost.login import config as login_config
-
-    class _Stray(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
-            return not (
-                record.levelno == logging.WARNING
-                and "is unset: it is ignored" in record.getMessage()
-            )
-
-    stray = _Stray()
-    login_config.logger.addFilter(stray)
-    try:
-        yield
-    finally:
-        login_config.logger.removeFilter(stray)
+        legacy(store)
 
 
 def _run_login_providers(args: argparse.Namespace) -> int:
     """``login-providers``: what is configured, and with ``--check`` whether the providers answer."""
+    from canvas_mcp.core.selfhost.login.provider_config import (
+        ProviderConfigurationError,
+    )
+    from canvas_mcp.core.selfhost.login.provider_settings import settings_from_database
+    from canvas_mcp.core.selfhost.login.provider_store import ProviderConfigStore
     from canvas_mcp.core.selfhost.settings import (
         SelfhostConfigError,
         load_selfhost_settings,
@@ -832,9 +763,77 @@ def _run_login_providers(args: argparse.Namespace) -> int:
 
     try:
         settings = load_selfhost_settings()
+        store = _open_store()
+        try:
+            if args.revision:
+                from sqlalchemy import select
+
+                from .db import schema
+
+                with store.database.read() as conn:
+                    print(
+                        conn.execute(
+                            select(schema.server_state.c.settings_revision)
+                        ).scalar_one()
+                    )
+                return EXIT_OK
+            providers = ProviderConfigStore(
+                store.database,
+                Keyring.parse(settings.canvas_token_keys_raw),
+                validate=lambda snapshot: settings_from_database(settings, snapshot),
+            )
+            if args.import_env:
+                from .db.migrations.provider_environment import (
+                    import_provider_settings,
+                    load_provider_environment,
+                )
+
+                import_provider_settings(load_provider_environment(), providers)
+            if args.configure:
+                import json
+
+                try:
+                    raw = sys.stdin.read(8193)
+                    body = json.loads(raw) if len(raw.encode("utf-8")) <= 8192 else None
+                except (ValueError, UnicodeError):
+                    body = None
+                required = {"config", "enabled", "rank", "revision"}
+                if (
+                    not isinstance(body, dict)
+                    or set(body) - required - {"client_secret"}
+                    or not required <= set(body)
+                    or type(body["revision"]) is not int
+                    or body["revision"] < 0
+                ):
+                    print(
+                        "error: Invalid provider configuration input", file=sys.stderr
+                    )
+                    return EXIT_CONFIG
+                from .db.settings_repo import SettingsConflict
+
+                try:
+                    providers.save(
+                        args.configure,
+                        config=body["config"],
+                        enabled=body["enabled"],
+                        rank=body["rank"],
+                        revision=body["revision"],
+                        client_secret=body.get("client_secret"),
+                        actor=None,
+                        now=int(time.time()),
+                    )
+                except SettingsConflict:
+                    print("error: Configuration revision changed", file=sys.stderr)
+                    return EXIT_CONFIG
+            settings = settings_from_database(settings, providers.load_snapshot())
+        finally:
+            store.close()
     except SelfhostConfigError as exc:
         for problem in exc.problems:
             print(f"error: {problem}", file=sys.stderr)
+        return EXIT_CONFIG
+    except ProviderConfigurationError:
+        print("error: Stored login configuration is unavailable", file=sys.stderr)
         return EXIT_CONFIG
     login = settings.login_providers
     base = settings.public_base_url
@@ -924,6 +923,32 @@ def main(argv: list[str] | None = None) -> int:
             return _run_login_providers(args)
         store = _open_store()
         try:
+            if args.command == "setup-code":
+                from .login.installation import InstallationAuthority
+                from .login.provider_config import ProviderConfigurationError
+                from .login.provider_store import ProviderConfigStore
+                from .settings import load_selfhost_settings
+
+                settings = load_selfhost_settings()
+                authority = InstallationAuthority(
+                    ProviderConfigStore(
+                        store.database, Keyring.parse(settings.canvas_token_keys_raw)
+                    ),
+                    settings.data_dir,
+                )
+                try:
+                    code = authority.issue()
+                except ProviderConfigurationError:
+                    print(
+                        "error: Installation authorization is unavailable",
+                        file=sys.stderr,
+                    )
+                    return EXIT_CONFIG
+                if code is None:
+                    print("error: Installation is already configured", file=sys.stderr)
+                    return EXIT_NOT_FOUND
+                print(code)
+                return EXIT_OK
             if args.command in {"schools", "providers", "settings"}:
                 from .config_cli import refusal, run
                 from .config_store import SchoolRemovalConfirmation

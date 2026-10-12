@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import base64
+import io
+import json
 import pathlib
+import sys
 
 import pytest
 from dbbackend import make_store, stack_env
@@ -11,8 +14,13 @@ from dbbackend import make_store, stack_env
 from canvas_mcp.core.selfhost import accounts as acc
 from canvas_mcp.core.selfhost import token_admin
 from canvas_mcp.core.selfhost.accounts import ExternalClaims
+from canvas_mcp.core.selfhost.db.migrations.provider_environment import (
+    import_provider_settings,
+    load_provider_environment,
+)
 from canvas_mcp.core.selfhost.login import registry as login_registry
 from canvas_mcp.core.selfhost.login.http import SafeHttp
+from canvas_mcp.core.selfhost.login.provider_store import ProviderConfigStore
 from canvas_mcp.core.selfhost.token_store import Keyring, TokenStore, token_db_path
 
 from ..conftest import OID_A, OID_B, acct_key, make_account, sign_in
@@ -552,6 +560,17 @@ class TestLoginProviders:
         values = env(**options)
         for name, value in values.items():
             monkeypatch.setenv(name, value)
+        configured = token_admin._open_store()
+        try:
+            settings = load_provider_environment()
+            import_provider_settings(
+                settings,
+                ProviderConfigStore(
+                    configured.database, Keyring.parse(settings.canvas_token_keys_raw)
+                ),
+            )
+        finally:
+            configured.close()
 
     def test_it_prints_the_redirect_uris_to_register_and_no_secret(
         self, cli_env, monkeypatch, capsys
@@ -640,10 +659,126 @@ class TestLoginProviders:
         assert rows["google"][2] == "OK" and rows["oidc:school"][2] == "FAILED"
         assert "idp.example.edu" not in rows["oidc:school"][3]
 
-    def test_a_bad_environment_is_a_configuration_error(
+    def test_legacy_environment_does_not_configure_an_empty_database(
         self, cli_env, monkeypatch, capsys
     ) -> None:
         for name, value in env(SELFHOST_LOGIN_PROVIDERS="google").items():
             monkeypatch.setenv(name, value)
-        assert token_admin.main(["login-providers"]) == 2
-        assert "GOOGLE_CLIENT_ID is required" in capsys.readouterr().err
+        assert token_admin.main(["login-providers"]) == 0
+        captured = capsys.readouterr()
+        assert captured.out == "" and captured.err == ""
+
+
+class TestDatabaseLoginCommands:
+    def test_operator_can_read_revision_without_loading_damaged_provider_configuration(
+        self, cli_env, monkeypatch, capsys
+    ):
+        from sqlalchemy import select, update
+
+        from canvas_mcp.core.selfhost.db import schema
+
+        for name, value in env().items():
+            monkeypatch.setenv(name, value)
+        assert token_admin.main(["login-providers", "--import-env"]) == 0
+        capsys.readouterr()
+        store = token_admin._open_store()
+        try:
+            with store.database.write() as conn:
+                revision = conn.execute(
+                    select(schema.server_state.c.settings_revision)
+                ).scalar_one()
+                conn.execute(
+                    update(schema.login_providers).values(
+                        config={"invalid_field": "damaged-private-configuration"}
+                    )
+                )
+            assert token_admin.main(["login-providers", "--revision"]) == 0
+            assert capsys.readouterr().out.strip() == str(revision)
+            assert token_admin.main(["login-providers"]) == 2
+            assert "damaged-private-configuration" not in capsys.readouterr().err
+        finally:
+            store.close()
+
+    def test_database_inventory_excludes_legacy_environment_governance(
+        self, cli_env, monkeypatch, capsys
+    ):
+        from canvas_mcp.core.selfhost.db.migrations import provider_environment
+
+        for name, value in env().items():
+            monkeypatch.setenv(name, value)
+        assert token_admin.main(["login-providers", "--import-env"]) == 0
+        capsys.readouterr()
+        monkeypatch.setenv("SELFHOST_LOGIN_PROVIDERS", "github")
+        monkeypatch.setattr(
+            provider_environment,
+            "_environment_providers",
+            lambda: pytest.fail(
+                "DB-owned inventory must not read legacy environment providers"
+            ),
+        )
+        store = token_admin._open_store()
+        try:
+            assert token_admin._listed_providers(store) == {"entra"}
+            assert token_admin._protected_provider_lists(store) == (
+                frozenset({"entra"}),
+            )
+            token_admin._note_assumed_entra_only(store)
+            assert capsys.readouterr().err == ""
+        finally:
+            store.close()
+
+    def test_explicit_import_is_once_and_closes_setup(
+        self, cli_env, monkeypatch, capsys
+    ):
+        for name, value in env().items():
+            monkeypatch.setenv(name, value)
+        assert token_admin.main(["setup-code"]) == 0
+        code = capsys.readouterr().out.strip()
+        assert len(code) == 43
+        assert token_admin.main(["login-providers", "--import-env"]) == 0
+        capsys.readouterr()
+        store = token_admin._open_store()
+        try:
+            providers = ProviderConfigStore(
+                store.database, Keyring.parse(env()["CANVAS_TOKEN_KEYS"])
+            )
+            saved = providers.load_snapshot()
+            monkeypatch.setenv(
+                "ENTRA_CLIENT_SECRET", "changed-secret-that-must-not-replace"
+            )
+            assert token_admin.main(["login-providers", "--import-env"]) == 0
+            assert providers.load_snapshot() == saved
+            assert not providers.setup_available()
+        finally:
+            store.close()
+        assert token_admin.main(["setup-code"]) == 1
+        assert code not in capsys.readouterr().err
+
+    def test_operator_configuration_reads_secret_from_stdin_and_enforces_revision(
+        self, cli_env, monkeypatch, capsys
+    ):
+        for name, value in env().items():
+            monkeypatch.setenv(name, value)
+        assert token_admin.main(["login-providers", "--import-env"]) == 0
+        capsys.readouterr()
+        store = token_admin._open_store()
+        try:
+            providers = ProviderConfigStore(
+                store.database, Keyring.parse(env()["CANVAS_TOKEN_KEYS"])
+            )
+            values = {
+                "revision": providers.load_snapshot().revision,
+                "config": {"client_id": GOOGLE_ID},
+                "client_secret": GOOGLE_SECRET,
+                "enabled": True,
+                "rank": 1,
+            }
+            monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(values)))
+            assert token_admin.main(["login-providers", "--configure", "google"]) == 0
+            assert providers.load_snapshot().providers[1].client_secret == GOOGLE_SECRET
+            assert GOOGLE_SECRET not in capsys.readouterr().out
+            monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(values)))
+            assert token_admin.main(["login-providers", "--configure", "google"]) == 2
+            assert "revision changed" in capsys.readouterr().err
+        finally:
+            store.close()

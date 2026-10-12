@@ -10,8 +10,10 @@ import pytest
 
 from canvas_mcp import server as server_module
 from canvas_mcp.core import config as config_module
-from canvas_mcp.core.selfhost.app import validate_selfhost_startup
-from canvas_mcp.core.selfhost.settings import load_selfhost_settings
+from canvas_mcp.core.selfhost.app import prepare_selfhost, validate_selfhost_startup
+from canvas_mcp.core.selfhost.db.migrations.provider_environment import (
+    load_provider_environment,
+)
 
 from .conftest import CLIENT, TENANT, store_put
 from .spa_fixture import make_dist
@@ -73,11 +75,27 @@ def entra_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]
 def _run_main(monkeypatch: pytest.MonkeyPatch, *argv: str) -> SystemExit:
     monkeypatch.setattr("sys.argv", ["canvas-mcp-server", *argv])
     config_module.reset_config()
+    reached_http = False
+
+    def unexpected_http(*args, **kwargs):
+        nonlocal reached_http
+        reached_http = True
+        raise RuntimeError("A refusal test unexpectedly reached HTTP serving")
+
     try:
-        with pytest.raises(SystemExit) as info:
-            server_module.main()
+        with monkeypatch.context() as guard:
+            if (
+                server_module._run_selfhost_http_server.__module__
+                == "canvas_mcp.server"
+            ):
+                guard.setattr(
+                    server_module, "_run_selfhost_http_server", unexpected_http
+                )
+            with pytest.raises(SystemExit) as info:
+                server_module.main()
     finally:
         config_module.reset_config()
+    assert not reached_http, "A startup-refusal test reached the live HTTP server"
     return info.value
 
 
@@ -105,9 +123,6 @@ class TestRefusals:
         "name",
         [
             "PUBLIC_BASE_URL",
-            "ENTRA_TENANT_ID",
-            "ENTRA_CLIENT_ID",
-            "ENTRA_CLIENT_SECRET",
             "ACCOUNT_SESSION_SECRET",
             "CANVAS_TOKEN_KEYS",
             "ACCOUNT_WEB_DIST",
@@ -124,7 +139,7 @@ class TestRefusals:
         mp.setenv("PUBLIC_BASE_URL", "http://canvas.example.test")
         mp.delenv("CANVAS_TOKEN_KEYS")
         assert _run_main(mp, *HTTP).code == 1
-        for name in ("ENTRA_CLIENT_SECRET", "PUBLIC_BASE_URL", "CANVAS_TOKEN_KEYS"):
+        for name in ("PUBLIC_BASE_URL", "CANVAS_TOKEN_KEYS"):
             assert name in caplog.text
         assert "short" not in caplog.text.replace("shortly", "")
         assert SECRETS["OAUTH_JWT_SIGNING_KEY"] not in caplog.text
@@ -189,7 +204,7 @@ class TestRefusals:
 
     def test_the_keyring_must_cover_every_key_id_in_use(self, entra_env, caplog):
         token_store = pytest.importorskip("canvas_mcp.core.selfhost.token_store")
-        settings = load_selfhost_settings()
+        settings = load_provider_environment()
         store = token_store.TokenStore(
             settings.token_db_path,
             token_store.Keyring.parse(SECRETS["CANVAS_TOKEN_KEYS"]),
@@ -217,7 +232,7 @@ class TestRefusals:
         self, entra_env, caplog
     ):
         pytest.importorskip("canvas_mcp.core.selfhost.token_store")
-        db = load_selfhost_settings().token_db_path
+        db = load_provider_environment().token_db_path
         db.parent.mkdir(parents=True, exist_ok=True)
         db.write_bytes(b"this is not a database" * 100)
         # Any escape from main() other than SystemExit(1) fails this call.
@@ -232,7 +247,7 @@ class TestRefusals:
         from canvas_mcp.core.selfhost.app import prepare_selfhost
         from canvas_mcp.core.selfhost.settings import SelfhostConfigError
 
-        settings = load_selfhost_settings()
+        settings = load_provider_environment()
         settings.token_db_path.parent.mkdir(parents=True, exist_ok=True)
         settings.token_db_path.write_bytes(b"this is not a database" * 100)
         with pytest.raises(SelfhostConfigError) as info:
@@ -256,7 +271,7 @@ class TestRefusals:
 
         monkeypatch.setattr(TokenStore, "initialize", refuse)
         with pytest.raises(SelfhostConfigError) as info:
-            prepare_selfhost(load_selfhost_settings())
+            prepare_selfhost(load_provider_environment())
         (problem,) = info.value.problems
         assert "schema upgrade did not run and nothing was changed" in problem
         assert "backup failed" in problem and "not a valid database" not in problem
@@ -273,7 +288,8 @@ class TestConfigCommand:
         out = capsys.readouterr().err
         assert "selfhost" in out
         assert "https://canvas.example.test/mcp" in out
-        assert TENANT in out
+        assert TENANT not in out
+        assert "database-managed" in out
         for secret in SECRETS.values():
             assert secret not in out
 
@@ -285,7 +301,7 @@ class TestConfigCommand:
 class TestValidateStartup:
     def test_a_valid_environment_has_no_problems(self, entra_env):
         config = config_module.get_config()
-        assert validate_selfhost_startup(config, load_selfhost_settings()) == []
+        assert validate_selfhost_startup(config, load_provider_environment()) == []
         assert entra_env["data"].is_dir()
 
     def test_legacy_flags_each_produce_a_problem(self, entra_env):
@@ -295,7 +311,7 @@ class TestValidateStartup:
         mp.setenv("ENTRA_AUTH_ENABLED", "true")
         config_module.reset_config()
         problems = validate_selfhost_startup(
-            config_module.get_config(), load_selfhost_settings()
+            config_module.get_config(), load_provider_environment()
         )
         text = " ".join(problems)
         for name in ("CANVAS_API_TOKEN", "MCP_ACCESS_KEYS", "ENTRA_AUTH_ENABLED"):
@@ -309,7 +325,7 @@ class TestSsrfTrustProxy:
         entra_env["monkeypatch"].setenv("FASTMCP_SSRF_TRUST_PROXY", value)
         assert (
             validate_selfhost_startup(
-                config_module.get_config(), load_selfhost_settings()
+                config_module.get_config(), load_provider_environment()
             )
             == []
         )
@@ -318,7 +334,7 @@ class TestSsrfTrustProxy:
         entra_env["monkeypatch"].delenv("FASTMCP_SSRF_TRUST_PROXY", raising=False)
         assert (
             validate_selfhost_startup(
-                config_module.get_config(), load_selfhost_settings()
+                config_module.get_config(), load_provider_environment()
             )
             == []
         )
@@ -326,7 +342,7 @@ class TestSsrfTrustProxy:
     def test_the_message_names_the_variable_and_never_echoes_the_value(self, entra_env):
         entra_env["monkeypatch"].setenv("FASTMCP_SSRF_TRUST_PROXY", "definitely-on")
         problems = validate_selfhost_startup(
-            config_module.get_config(), load_selfhost_settings()
+            config_module.get_config(), load_provider_environment()
         )
         assert len(problems) == 1
         assert "FASTMCP_SSRF_TRUST_PROXY" in problems[0]
@@ -340,7 +356,7 @@ class TestSsrfTrustProxy:
         mp.delenv("FASTMCP_SSRF_TRUST_PROXY", raising=False)
         mp.setattr(fastmcp.settings, "ssrf_trust_proxy", True)
         problems = validate_selfhost_startup(
-            config_module.get_config(), load_selfhost_settings()
+            config_module.get_config(), load_provider_environment()
         )
         assert any("FASTMCP_SSRF_TRUST_PROXY" in problem for problem in problems)
 
@@ -351,6 +367,8 @@ class TestHappyPath:
     ):
         pytest.importorskip("canvas_mcp.core.selfhost.token_store")
         pytest.importorskip("canvas_mcp.core.selfhost.account_core")
+        configured = prepare_selfhost(load_provider_environment())
+        configured.store.close()
         mp = entra_env["monkeypatch"]
         caplog.set_level(logging.INFO)
         captured: dict[str, Any] = {}
@@ -499,4 +517,4 @@ def test_pilot_startup_refuses_unconfigured_school_database(entra_env, caplog):
     monkeypatch = entra_env["monkeypatch"]
     monkeypatch.setenv("SELFHOST_PROFILE", "pilot")
     with pytest.raises(SelfhostConfigError, match="exactly one featured school"):
-        prepare_selfhost(load_selfhost_settings())
+        prepare_selfhost(load_provider_environment())

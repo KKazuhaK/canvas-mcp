@@ -272,6 +272,7 @@ class TestProviders:
                 }
             ],
             "mcp_url": f"{BASE}/mcp",
+            "setup_required": False,
         }
 
     def test_it_does_not_look_at_the_fetch_site_or_say_anything_about_admission(
@@ -294,7 +295,10 @@ class TestTransport:
                     method, url, headers={"Origin": BASE, "X-CSRF-Token": "x"}
                 )
                 if endpoint.access == "public":
-                    assert response.status_code == 200
+                    if endpoint.body == "json":
+                        error_of(response, 415, "unsupported_media_type")
+                    else:
+                        assert response.status_code == 200
                 elif endpoint.linking:
                     # This fixture has one provider, so linking is absent.
                     error_of(response, 404, "not_found")
@@ -2904,6 +2908,14 @@ class TestEveryAnswer:
 
     def test_the_error_codes_equal_the_documented_set(self) -> None:
         assert account_api.API_ERROR_CODES == {
+            "invalid_provider_configuration",
+            "provider_secret_required",
+            "provider_identity_binding_changed",
+            "too_many_providers",
+            "installation_already_initialized",
+            "installation_code_invalid",
+            "provider_configuration_unavailable",
+            "installation_authority_unavailable",
             "not_authenticated",
             "csrf_invalid",
             "origin_not_allowed",

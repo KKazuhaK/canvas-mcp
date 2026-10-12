@@ -13,6 +13,7 @@ from ..account_core import _SESSION_SCOPE_KEY, any_method_route
 from ..config_snapshot import CURRENT_CONFIG
 from ..routes import AUTH_LOGIN, route_provider
 from .ceremony import FLOW_COOKIE
+from .runtime_config import CURRENT_LOGIN
 
 if TYPE_CHECKING:
     from ..config_snapshot import CURRENT_CONFIG
@@ -28,16 +29,17 @@ def build_login_routes(app: AccountCore) -> list[Route]:
                 "Method not allowed", status_code=405, headers={"Allow": "GET"}
             )
             return app.finish(response)
-        provider = None
-        if request.url.path != AUTH_LOGIN:
-            key = request.path_params.get("provider", "")
-            if "slug" in request.path_params:
-                key = "oidc/" + request.path_params["slug"]
-            provider_id = route_provider(key)
-            provider = app.logins.providers.get(provider_id or "")
-            if provider is None:
-                return app.finish(PlainTextResponse("Not found", status_code=404))
         try:
+            await app.refresh_login_config()
+            provider = None
+            if request.url.path != AUTH_LOGIN:
+                key = request.path_params.get("provider", "")
+                if "slug" in request.path_params:
+                    key = "oidc/" + request.path_params["slug"]
+                provider_id = route_provider(key)
+                provider = app.logins.providers.get(provider_id or "")
+                if provider is None:
+                    return app.finish(PlainTextResponse("Not found", status_code=404))
             # A link callback needs the current session epoch. This check is never cached.
             request.scope[_SESSION_SCOPE_KEY] = await app._resolve_session(request)
             if CURRENT_CONFIG.get() is None:
@@ -53,10 +55,12 @@ def build_login_routes(app: AccountCore) -> list[Route]:
 
     async def dispatch(request: Request) -> Response:
         marker = CURRENT_CONFIG.set(None)
+        login_marker = CURRENT_LOGIN.set(None)
         try:
             response = await dispatch_checked(request)
         finally:
             CURRENT_CONFIG.reset(marker)
+            CURRENT_LOGIN.reset(login_marker)
         if request.url.path.startswith("/auth/callback/"):
             app.clear_cookie(response, FLOW_COOKIE)
         return response

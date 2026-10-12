@@ -51,7 +51,12 @@ from canvas_mcp.core.selfhost.authz.runtime import (
     build_authz_runtime,
 )
 from canvas_mcp.core.selfhost.custody import CustodyAcknowledgement
-from canvas_mcp.core.selfhost.settings import SelfhostSettings, load_selfhost_settings
+from canvas_mcp.core.selfhost.db.migrations.provider_environment import (
+    load_provider_environment,
+)
+from canvas_mcp.core.selfhost.settings import (
+    SelfhostSettings,
+)
 from canvas_mcp.core.selfhost.token_store import Keyring
 
 from ..conftest import CLIENT as ENTRA_CLIENT_ID
@@ -574,7 +579,7 @@ def _build(
 
     reset_config()
     clock = clock or Clock()
-    settings = load_selfhost_settings(default_env(tmp_path, **dict(env or {})))
+    settings = load_provider_environment(default_env(tmp_path, **dict(env or {})))
     cimd = FakeCimd()
     idp = FakeIdp(clock)
     runtime = prepare_selfhost(settings)

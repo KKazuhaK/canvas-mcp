@@ -88,6 +88,8 @@ from .config_snapshot import CURRENT_CONFIG
 from .config_store import ConfigStore, SchoolRemovalConfirmation
 from .db.settings_repo import SettingsAccessDenied, SettingsConflict
 from .db.workers import run_store
+from .login.provider_config import ProviderConfigurationError
+from .login.runtime_config import CURRENT_LOGIN
 from .pagination import DEFAULT_LIMIT, decode_cursor, page_limit
 from .profile import PilotProfileViolation
 from .routes import API_PREFIX
@@ -155,6 +157,14 @@ ERROR_STATUS: Mapping[str, int] = {
     # an app's authorization request (SELFHOST_AUTH_MODE=local)
     "authorization_invalid": 400,
     "client_unavailable": 409,
+    "invalid_provider_configuration": 422,
+    "provider_secret_required": 422,
+    "provider_identity_binding_changed": 409,
+    "too_many_providers": 422,
+    "installation_already_initialized": 409,
+    "installation_code_invalid": 403,
+    "provider_configuration_unavailable": 503,
+    "installation_authority_unavailable": 503,
 }
 API_ERROR_CODES = frozenset(ERROR_STATUS)
 
@@ -376,6 +386,33 @@ class ApiApp:
         """Every (path, {method: endpoint}) of the API."""
         e = _Endpoint
         return [
+            (
+                f"{API_PREFIX}/setup",
+                {
+                    "GET": e(self.setup_status, access="public"),
+                    "POST": e(
+                        self.initialize_login,
+                        access="public",
+                        mutating=True,
+                        body="json",
+                    ),
+                },
+            ),
+            (
+                f"{API_PREFIX}/admin/login-providers",
+                {"GET": e(self.login_provider_settings, access="owner")},
+            ),
+            (
+                f"{API_PREFIX}/admin/login-providers/{{id}}",
+                {
+                    "PUT": e(
+                        self.save_login_provider,
+                        access="owner",
+                        mutating=True,
+                        body="json",
+                    )
+                },
+            ),
             (
                 f"{API_PREFIX}/admin/settings",
                 {"GET": e(self.admin_settings, access="owner")},
@@ -618,12 +655,21 @@ class ApiApp:
     ) -> Callable[[Request], Awaitable[Response]]:
         async def endpoint(request: Request) -> Response:
             marker = CURRENT_CONFIG.set(None)
+            login_marker = CURRENT_LOGIN.set(None)
             try:
+                await self.app.refresh_login_config()
                 return await self._handle(request, endpoints)
             except _Fail as fail:
                 return self._error(fail)
             except web._StoreUnavailable:
                 return self._error(_Fail("token_store_unavailable"))
+            except ProviderConfigurationError as exc:
+                code = (
+                    exc.code
+                    if exc.code in ERROR_STATUS
+                    else "provider_configuration_unavailable"
+                )
+                return self._error(_Fail(code))
             except TokenStoreError as exc:
                 logger.error("account api store failure: %s", type(exc).__name__)
                 return self._error(_Fail("token_store_unavailable"))
@@ -632,6 +678,7 @@ class ApiApp:
                 return self._error(_Fail("internal_error"))
             finally:
                 CURRENT_CONFIG.reset(marker)
+                CURRENT_LOGIN.reset(login_marker)
 
         return endpoint
 
@@ -661,6 +708,8 @@ class ApiApp:
                 if not self.app._csrf_ok(session, supplied):
                     raise _Fail("csrf_invalid")
         if endpoint.access == "public":
+            if endpoint.mutating:
+                self._check_origin(request, mutating=True)
             await self.app.refresh_public_config()
         body: dict[str, Any] | None = None
         if endpoint.body == "json":
@@ -892,7 +941,12 @@ class ApiApp:
             }
             for entry in logins.entries()
         ]
-        return self._ok({"providers": entries, "mcp_url": self.app.base + "/mcp"})
+        data: dict[str, Any] = {"providers": entries, "mcp_url": self.app.base + "/mcp"}
+        if self.app.provider_store is not None:
+            data["setup_required"] = await run_store(
+                self.app.provider_store.setup_available
+            )
+        return self._ok(data)
 
     # -- self --------------------------------------------------------------------------------------
 
@@ -1258,6 +1312,98 @@ class ApiApp:
         return response
 
     # -- database-owned server configuration ---------------------------------------
+
+    async def setup_status(self, ctx: _Ctx) -> Response:
+        providers = self.app.provider_store
+        if providers is None or self.app.installation is None:
+            raise _Fail("not_found")
+        available = await run_store(providers.setup_available)
+        return self._ok(
+            {
+                "initialized": not available,
+                "revision": await run_store(self.app.snapshots.revision),
+                "callback_uri": self.app.base + "/auth/callback/entra",
+            }
+        )
+
+    async def initialize_login(self, ctx: _Ctx) -> Response:
+        providers, authority = self.app.provider_store, self.app.installation
+        if providers is None or authority is None:
+            raise _Fail("not_found")
+        if not self.app.installation_limiter.allow(("installation",)):
+            raise _Fail("rate_limited", {"retry_after_s": 600})
+        body, revision = self._settings_body(
+            ctx, {"revision", "code", "config", "client_secret"}
+        )
+        if not await run_store(providers.setup_available):
+            raise _Fail("installation_already_initialized")
+        if not await run_store(authority.verify, body["code"]):
+            raise _Fail("installation_code_invalid")
+        await self._save_provider_config(
+            lambda: providers.initialize(
+                config=body["config"],
+                client_secret=body["client_secret"],
+                revision=revision,
+                now=int(self.app.clock()),
+            )
+        )
+        return self._ok({"redirect_to": "/auth/login/entra"})
+
+    async def login_provider_settings(self, ctx: _Ctx) -> Response:
+        providers = self.app.provider_store
+        if providers is None:
+            raise _Fail("not_found")
+        revision, entries = await run_store(providers.public_snapshot)
+        return self._ok(
+            {
+                "revision": revision,
+                "public_base_url": self.app.base,
+                "providers": [
+                    {
+                        **entry,
+                        "callback_uri": self.app.base
+                        + "/auth/callback/"
+                        + entry["id"].replace(":", "/"),
+                    }
+                    for entry in entries
+                ],
+            }
+        )
+
+    async def _save_provider_config(self, operation: Callable[[], int]) -> None:
+        try:
+            revision = await run_store(operation)
+        except SettingsConflict:
+            raise _Fail("settings_conflict") from None
+        except SettingsAccessDenied:
+            raise _Fail("forbidden") from None
+        CURRENT_CONFIG.set(await run_store(self.app.snapshots.get, revision))
+        # The current request keeps its original generation; the next request refreshes.
+
+    async def save_login_provider(self, ctx: _Ctx) -> Response:
+        providers = self.app.provider_store
+        if providers is None:
+            raise _Fail("not_found")
+        fields = {"revision", "config", "enabled", "rank"}
+        body = ctx.body or {}
+        if "client_secret" in body:
+            fields.add("client_secret")
+        body, revision = self._settings_body(ctx, fields)
+        assert ctx.session is not None
+        actor = ctx.session.acct
+        await self._save_provider_config(
+            lambda: providers.save(
+                ctx.params["id"],
+                config=body["config"],
+                client_secret=body.get("client_secret"),
+                enabled=body["enabled"],
+                rank=body["rank"],
+                revision=revision,
+                actor=actor,
+                now=int(self.app.clock()),
+            )
+        )
+        return await self.login_provider_settings(ctx)
 
     @staticmethod
     def _settings_body(ctx: _Ctx, fields: set[str]) -> tuple[dict[str, Any], int]:

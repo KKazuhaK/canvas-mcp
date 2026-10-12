@@ -143,10 +143,11 @@ def build_login_runtime(
     rate_limiters: RateLimiters | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     snapshots: ConfigSnapshots | None = None,
+    http: SafeHttp | None = None,
 ) -> LoginRuntime:
     """Build every configured provider, including Entra-only deployments."""
     config = settings.login_providers
-    http = SafeHttp(transport=transport)
+    http = http or SafeHttp(transport=transport)
     policy = settings.access_policy
     base = settings.public_base_url
     limiters = rate_limiters or build_rate_limiters("memory")

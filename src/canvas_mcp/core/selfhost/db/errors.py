@@ -7,6 +7,13 @@ class TokenStoreError(Exception):
     """Base class for token store failures. Messages carry no secrets."""
 
 
+class LoginConfigurationChanged(TokenStoreError):
+    """The login generation changed before a governed identity write."""
+
+    def __init__(self) -> None:
+        super().__init__("login configuration changed")
+
+
 class StoreUnavailable(TokenStoreError):
     """The database could not be reached, locked in time, or refused a statement.
 

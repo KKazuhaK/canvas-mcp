@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from canvas_mcp.core.selfhost.db.migrations.provider_environment import (
+    load_provider_environment,
+)
 from canvas_mcp.core.selfhost.settings import (
     AUTH_MODE_ENV,
     AUTH_MODE_SELFHOST,
@@ -15,7 +18,6 @@ from canvas_mcp.core.selfhost.settings import (
     SelfhostConfigError,
     SelfhostSettings,
     auth_mode,
-    load_selfhost_settings,
 )
 
 TENANT = "11111111-2222-3333-4444-555555555555"
@@ -46,13 +48,13 @@ def _env(**overrides: str | None) -> dict[str, str]:
 
 def _problems(**overrides: str | None) -> list[str]:
     with pytest.raises(SelfhostConfigError) as info:
-        load_selfhost_settings(_env(**overrides))
+        load_provider_environment(_env(**overrides))
     return info.value.problems
 
 
 class TestValidEnvironment:
     def test_minimal_environment_loads_with_defaults(self):
-        settings = load_selfhost_settings(_env())
+        settings = load_provider_environment(_env())
         assert settings.public_base_url == "https://canvas.example.test"
         assert settings.public_host == "canvas.example.test"
         assert settings.tenant_id == TENANT
@@ -71,14 +73,14 @@ class TestValidEnvironment:
         assert SelfhostSettings.mcp_path == "/mcp"
 
     def test_guids_are_lower_cased(self):
-        settings = load_selfhost_settings(
+        settings = load_provider_environment(
             _env(ENTRA_TENANT_ID=TENANT.upper(), ENTRA_CLIENT_ID=CLIENT.upper())
         )
         assert settings.tenant_id == TENANT
         assert settings.client_id == CLIENT
 
     def test_overrides_are_honoured(self):
-        settings = load_selfhost_settings(
+        settings = load_provider_environment(
             _env(
                 MCP_SCOPE="Mcp.Use",
                 ENTRA_REQUIRED_ROLE="Reader",
@@ -102,7 +104,7 @@ class TestValidEnvironment:
         raw = bytes(range(200, 232))
         encoded = base64.urlsafe_b64encode(raw).decode().rstrip("=")
         assert (
-            load_selfhost_settings(
+            load_provider_environment(
                 _env(ACCOUNT_SESSION_SECRET=encoded)
             ).account_session_secret
             == raw
@@ -112,14 +114,14 @@ class TestValidEnvironment:
 class TestPublicBaseUrl:
     def test_trailing_slash_is_removed(self):
         assert (
-            load_selfhost_settings(
+            load_provider_environment(
                 _env(PUBLIC_BASE_URL="https://canvas.example.test/")
             ).public_base_url
             == "https://canvas.example.test"
         )
 
     def test_host_is_lower_cased(self):
-        settings = load_selfhost_settings(
+        settings = load_provider_environment(
             _env(PUBLIC_BASE_URL="https://Canvas.Example.TEST")
         )
         assert settings.public_host == "canvas.example.test"
@@ -201,7 +203,7 @@ class TestEntraIdentifiers:
 
 class TestSecrets:
     def test_jwt_keys_are_derived_without_a_separate_secret(self):
-        assert not hasattr(load_selfhost_settings(_env()), "oauth_jwt_signing_key")
+        assert not hasattr(load_provider_environment(_env()), "oauth_jwt_signing_key")
         assert any(
             "OAUTH_JWT_SIGNING_KEY" in p
             for p in _problems(OAUTH_JWT_SIGNING_KEY=SIGNING_KEY)
@@ -231,13 +233,13 @@ class TestSecrets:
 
     def test_ttl_edges_accepted(self):
         assert (
-            load_selfhost_settings(
+            load_provider_environment(
                 _env(ACCOUNT_SESSION_TTL_SECONDS="60")
             ).account_session_ttl_seconds
             == 60
         )
         assert (
-            load_selfhost_settings(
+            load_provider_environment(
                 _env(ACCOUNT_SESSION_TTL_SECONDS="3600")
             ).account_session_ttl_seconds
             == 3600
@@ -248,7 +250,7 @@ class TestSecrets:
         assert any("CANVAS_TOKEN_KEYS" in p for p in _problems(CANVAS_TOKEN_KEYS="  "))
 
     def test_secrets_are_not_in_repr(self):
-        text = repr(load_selfhost_settings(_env()))
+        text = repr(load_provider_environment(_env()))
         for secret in (CLIENT_SECRET, SIGNING_KEY, SESSION_SECRET, TOKEN_KEYS):
             assert secret not in text
         hidden = {f.name for f in fields(SelfhostSettings) if not f.repr}
@@ -256,6 +258,7 @@ class TestSecrets:
             "client_secret",
             "account_session_secret",
             "canvas_token_keys_raw",
+            "access_source",
         }
 
     def test_messages_never_contain_secret_values(self):
@@ -281,7 +284,7 @@ class TestSecrets:
 
 class TestRedirectUris:
     def test_custom_list(self):
-        settings = load_selfhost_settings(
+        settings = load_provider_environment(
             _env(
                 OAUTH_ALLOWED_REDIRECT_URIS=" https://claude.ai/api/mcp/auth_callback , http://localhost/cb ,https://claude.ai/api/mcp/auth_callback"
             )
@@ -325,14 +328,14 @@ class TestPaths:
     def test_fastmcp_home_is_not_required_or_used(self):
         for value in (None, "fastmcp"):
             assert not hasattr(
-                load_selfhost_settings(_env(FASTMCP_HOME=value)), "fastmcp_home"
+                load_provider_environment(_env(FASTMCP_HOME=value)), "fastmcp_home"
             )
 
 
 class TestAllProblemsAtOnce:
     def test_empty_environment_reports_every_required_variable(self):
         with pytest.raises(SelfhostConfigError) as info:
-            load_selfhost_settings({})
+            load_provider_environment({})
         text = " ".join(info.value.problems)
         for name in (
             "PUBLIC_BASE_URL",
@@ -385,7 +388,7 @@ class TestAuthMode:
 
 class TestDatabaseOwnedSchools:
     def test_startup_settings_do_not_seed_school_policy(self):
-        settings = load_selfhost_settings(_env())
+        settings = load_provider_environment(_env())
         assert not hasattr(settings, "featured_schools")
         assert not hasattr(settings, "school_search")
 
@@ -393,7 +396,7 @@ class TestDatabaseOwnedSchools:
 class TestCourseState:
     def test_the_default_is_request_local(self):
         assert DEFAULT_COURSE_STATE == "request_local"
-        assert load_selfhost_settings(_env()).course_state == "request_local"
+        assert load_provider_environment(_env()).course_state == "request_local"
 
     def test_the_variable_name(self):
         assert COURSE_STATE_ENV == "SELFHOST_COURSE_STATE"
@@ -403,7 +406,7 @@ class TestCourseState:
     )
     def test_request_local_spellings(self, value):
         assert (
-            load_selfhost_settings(_env(SELFHOST_COURSE_STATE=value)).course_state
+            load_provider_environment(_env(SELFHOST_COURSE_STATE=value)).course_state
             == "request_local"
         )
 
@@ -412,7 +415,7 @@ class TestCourseState:
     )
     def test_per_principal_is_an_explicit_opt_in(self, value):
         assert (
-            load_selfhost_settings(_env(SELFHOST_COURSE_STATE=value)).course_state
+            load_provider_environment(_env(SELFHOST_COURSE_STATE=value)).course_state
             == "per_principal"
         )
 
@@ -431,12 +434,12 @@ class TestCourseState:
 
 class TestAccountUi:
     def test_react_has_one_mandatory_image_path(self):
-        settings = load_selfhost_settings(_env())
+        settings = load_provider_environment(_env())
         assert not hasattr(settings, "account_ui")
         assert settings.account_web_dist.as_posix() == "/app/web-dist"
 
     def test_the_directory_is_taken_as_given_and_must_be_absolute(self):
-        settings = load_selfhost_settings(_env(ACCOUNT_WEB_DIST="/srv/web/dist"))
+        settings = load_provider_environment(_env(ACCOUNT_WEB_DIST="/srv/web/dist"))
         assert settings.account_web_dist.as_posix() == "/srv/web/dist"
         for value in ("web/dist", "./dist", "dist", "~/dist"):
             assert _problems(ACCOUNT_WEB_DIST=value) == [
@@ -446,7 +449,7 @@ class TestAccountUi:
 
 @pytest.mark.parametrize("raw", ["pilot", " PILOT "])
 def test_pilot_profile_disables_all_file_download_tools(raw):
-    settings = load_selfhost_settings(
+    settings = load_provider_environment(
         _env(SELFHOST_PROFILE=raw, SELFHOST_DISABLED_TOOLS="list_courses")
     )
     assert settings.profile == "pilot"

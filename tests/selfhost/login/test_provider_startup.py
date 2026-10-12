@@ -9,9 +9,11 @@ import pytest
 from canvas_mcp.core.selfhost import accounts as acc
 from canvas_mcp.core.selfhost.accounts import ExternalClaims
 from canvas_mcp.core.selfhost.app import prepare_selfhost
+from canvas_mcp.core.selfhost.db.migrations.provider_environment import (
+    load_provider_environment,
+)
 from canvas_mcp.core.selfhost.settings import (
     SelfhostConfigError,
-    load_selfhost_settings,
 )
 from canvas_mcp.core.selfhost.token_store import OPERATOR
 
@@ -36,7 +38,7 @@ def env_for(tmp_path: pathlib.Path, **env: str) -> dict[str, str]:
 
 
 def settings_for(tmp_path: pathlib.Path, **env: str):  # type: ignore[no-untyped-def]
-    return load_selfhost_settings(env_for(tmp_path, **env))
+    return load_provider_environment(env_for(tmp_path, **env))
 
 
 def test_without_entra_and_without_an_owner_path_the_server_refuses_to_start(
@@ -89,12 +91,12 @@ def test_an_owner_already_in_the_database_is_an_owner_path(
     tmp_path: pathlib.Path,
 ) -> None:
     env = env_for(tmp_path, SELFHOST_BOOTSTRAP_OWNER="token_admin")
-    first = prepare_selfhost(load_selfhost_settings(env))
+    first = prepare_selfhost(load_provider_environment(env))
     google_owner(first)
     first.store.close()
     # Same database, no bootstrap setting any more: the existing owner is the path.
     again = prepare_selfhost(
-        load_selfhost_settings({**env, "SELFHOST_BOOTSTRAP_OWNER": ""})
+        load_provider_environment({**env, "SELFHOST_BOOTSTRAP_OWNER": ""})
     )
     assert again.store.count_active_owners() == 1
     again.store.close()
@@ -105,23 +107,23 @@ def test_owners_who_can_no_longer_sign_in_are_not_an_owner_path(
 ) -> None:
     # A deployment that ran with Entra and drops it: its owner has only an Entra identity.
     env = env_for(tmp_path, SELFHOST_BOOTSTRAP_OWNER="token_admin")
-    first = prepare_selfhost(load_selfhost_settings(env))
+    first = prepare_selfhost(load_provider_environment(env))
     key = make_account(first.store, OID_A, role="owner")
     assert first.store.count_active_owners() == 1
     first.store.close()
     with pytest.raises(SelfhostConfigError) as info:
         prepare_selfhost(
-            load_selfhost_settings({**env, "SELFHOST_BOOTSTRAP_OWNER": ""})
+            load_provider_environment({**env, "SELFHOST_BOOTSTRAP_OWNER": ""})
         )
     (message,) = info.value.problems
     assert "no owner can sign in" in message and "promote-owner" in message
     assert "SELFHOST_BOOTSTRAP_OWNER" in message  # it names the other way out
     # The operator command is the way out, and token_admin as the bootstrap setting keeps the start.
-    again = prepare_selfhost(load_selfhost_settings(env))
+    again = prepare_selfhost(load_provider_environment(env))
     google_owner(again, "99")
     again.store.close()
     ok = prepare_selfhost(
-        load_selfhost_settings({**env, "SELFHOST_BOOTSTRAP_OWNER": ""})
+        load_provider_environment({**env, "SELFHOST_BOOTSTRAP_OWNER": ""})
     )
     assert ok.store.count_active_owners() == 2 and key
     ok.store.close()
@@ -132,7 +134,7 @@ def test_a_rules_owner_with_a_google_identity_is_not_an_owner_path(
 ) -> None:
     # Its role came from the Entra owner rule: no Google sign-in can give it an owner session.
     env = env_for(tmp_path, SELFHOST_BOOTSTRAP_OWNER="token_admin")
-    first = prepare_selfhost(load_selfhost_settings(env))
+    first = prepare_selfhost(load_provider_environment(env))
     policy = acc.AccessPolicy(
         mode="rules",
         rules=(
@@ -164,7 +166,7 @@ def test_a_rules_owner_with_a_google_identity_is_not_an_owner_path(
     first.store.close()
     with pytest.raises(SelfhostConfigError) as info:
         prepare_selfhost(
-            load_selfhost_settings({**env, "SELFHOST_BOOTSTRAP_OWNER": ""})
+            load_provider_environment({**env, "SELFHOST_BOOTSTRAP_OWNER": ""})
         )
     assert "no owner can sign in" in info.value.problems[0]
 
@@ -173,7 +175,7 @@ def test_an_owner_that_was_disabled_is_not_an_owner_path(
     tmp_path: pathlib.Path,
 ) -> None:
     env = env_for(tmp_path, SELFHOST_BOOTSTRAP_OWNER="token_admin")
-    first = prepare_selfhost(load_selfhost_settings(env))
+    first = prepare_selfhost(load_provider_environment(env))
     key = make_account(first.store, OID_A, role="owner")
     assert first.store.disable_principal(
         key, actor=OPERATOR, reason="operator_disabled", allow_last_owner=True
@@ -181,18 +183,18 @@ def test_an_owner_that_was_disabled_is_not_an_owner_path(
     first.store.close()
     with pytest.raises(SelfhostConfigError):
         prepare_selfhost(
-            load_selfhost_settings({**env, "SELFHOST_BOOTSTRAP_OWNER": ""})
+            load_provider_environment({**env, "SELFHOST_BOOTSTRAP_OWNER": ""})
         )
 
 
 def test_an_entra_deployment_needs_no_owner_path(tmp_path: pathlib.Path) -> None:
-    runtime = prepare_selfhost(load_selfhost_settings(default_env(tmp_path)))
+    runtime = prepare_selfhost(load_provider_environment(default_env(tmp_path)))
     runtime.store.close()
 
 
 def test_other_providers_are_refused_under_entra_proxy(tmp_path: pathlib.Path) -> None:
     with pytest.raises(SelfhostConfigError) as info:
-        load_selfhost_settings(
+        load_provider_environment(
             default_env(
                 tmp_path,
                 SELFHOST_AUTH_MODE="entra_proxy",
@@ -212,11 +214,13 @@ def test_a_named_bootstrap_owner_is_an_owner_path_beside_owners_nobody_can_use(
     # The bootstrap owner applies while there is no *usable* owner, so the start is allowed and
     # the first sign-in of that identity makes an owner (audited with the number it overrides).
     env = env_for(tmp_path, SELFHOST_BOOTSTRAP_OWNER="token_admin")
-    first = prepare_selfhost(load_selfhost_settings(env))
+    first = prepare_selfhost(load_provider_environment(env))
     stranded = make_account(first.store, OID_A, role="owner")
     first.store.close()
     runtime = prepare_selfhost(
-        load_selfhost_settings({**env, "SELFHOST_BOOTSTRAP_OWNER": "google:1234567890"})
+        load_provider_environment(
+            {**env, "SELFHOST_BOOTSTRAP_OWNER": "google:1234567890"}
+        )
     )
     try:
         assert runtime.store.count_active_owners() == 1
@@ -247,7 +251,7 @@ def test_a_disabled_bootstrap_account_beside_unusable_owners_is_not_an_owner_pat
 ) -> None:
     # The bootstrap owner would make an owner at its next sign-in, but a disabled account is refused first.
     env = env_for(tmp_path, SELFHOST_BOOTSTRAP_OWNER="token_admin")
-    first = prepare_selfhost(load_selfhost_settings(env))
+    first = prepare_selfhost(load_provider_environment(env))
     make_account(first.store, OID_A, role="owner")  # stranded: an Entra identity only
     boot = first.store.create_operator_account(
         provider_id="google",
@@ -259,7 +263,7 @@ def test_a_disabled_bootstrap_account_beside_unusable_owners_is_not_an_owner_pat
     first.store.close()
     named = {**env, "SELFHOST_BOOTSTRAP_OWNER": "google:1234567890"}
     with pytest.raises(SelfhostConfigError) as info:
-        prepare_selfhost(load_selfhost_settings(named))
+        prepare_selfhost(load_provider_environment(named))
     (message,) = info.value.problems
     assert (
         "no owner can sign in" in message
@@ -267,8 +271,8 @@ def test_a_disabled_bootstrap_account_beside_unusable_owners_is_not_an_owner_pat
     )
     assert "1234567890" not in message
     # Enabling the account restores the path.
-    again = prepare_selfhost(load_selfhost_settings(env))
+    again = prepare_selfhost(load_provider_environment(env))
     assert again.store.enable_principal(boot, actor=OPERATOR)
     again.store.close()
-    ok = prepare_selfhost(load_selfhost_settings(named))
+    ok = prepare_selfhost(load_provider_environment(named))
     ok.store.close()

@@ -63,6 +63,7 @@ export default function SignInView() {
   }
 
   const data = providers.data
+  if (data?.setup_required) return <Navigate to="/setup" replace />
   const offered = data?.providers.filter((provider) => isPlainPath(provider.start_url)) ?? []
   return (
     <>

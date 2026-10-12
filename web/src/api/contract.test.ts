@@ -14,11 +14,16 @@ const KEYS = [...contract.matchAll(/^\s*'((?:GET|POST|PUT|PATCH|DELETE) \/[^']*)
 
 describe('api/contract.ts', () => {
   it('lists the routes of the server (and nothing for the sign-in itself)', () => {
-    expect(KEYS).toHaveLength(39)
+    expect(KEYS).toHaveLength(43)
     expect(new Set(KEYS).size).toBe(KEYS.length)
     for (const key of KEYS) {
       expect(key, key).not.toMatch(/login\//)
     }
+  })
+  it('includes installation and database login administration', () => {
+    expect(KEYS).toEqual(expect.arrayContaining([
+      'GET /setup', 'POST /setup', 'GET /admin/login-providers', 'PUT /admin/login-providers/{id}',
+    ]))
   })
 
   it('lists the sign-in methods routes the server serves only with two or more providers', () => {
