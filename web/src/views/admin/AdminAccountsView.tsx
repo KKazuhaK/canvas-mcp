@@ -8,6 +8,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { AdminAccount, AdminStatusFilter } from '@/api/types'
 import AccountApps from '@/components/admin/AccountApps'
+import { AccountLoginPolicy } from '@/components/admin/LoginPolicySettings'
 import AccountIdentities from '@/components/admin/AccountIdentities'
 import AdminActions from '@/components/admin/AdminActions'
 import ErrorNotice from '@/components/ErrorNotice'
@@ -74,6 +75,7 @@ export default function AdminAccountsView() {
     (a) =>
       needle === '' ||
       a.display_name.toLowerCase().includes(needle) ||
+      (a.upn ?? '').toLowerCase().includes(needle) ||
       a.username.toLowerCase().includes(needle),
   )
   const counts = accounts.data?.counts
@@ -85,14 +87,14 @@ export default function AdminAccountsView() {
       primary: true,
       render: (a) => (
         <Box>
-          <Typography sx={{ fontWeight: 600, overflowWrap: 'anywhere' }}>
+          <Typography component="div" sx={{ fontWeight: 600, overflowWrap: 'anywhere' }}>
             {a.display_name}
             {a.is_self ? (
               <Chip size="small" variant="outlined" label={t('admin:accounts.you')} sx={{ ml: 1 }} />
             ) : null}
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>
-            {a.username || t('admin:accounts.noUsername')}
+            {a.upn || a.username || t('admin:accounts.noUsername')}
           </Typography>
           <Details account={a} />
         </Box>
@@ -131,6 +133,7 @@ export default function AdminAccountsView() {
       render: (a) => (
         <Box sx={{ display: 'grid', gap: 0.5, justifyItems: 'start' }}>
           <AdminActions account={a} />
+          <AccountLoginPolicy id={a.id} />
           {a.status === 'active' ? <AccountApps account={a} /> : null}
         </Box>
       ),

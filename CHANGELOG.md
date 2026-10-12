@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Independent selfhost account UPNs, provider-neutral immutable identity ownership,
+  per-provider opt-in email association, account method restrictions, first-SSO
+  locking and audited administrator unlock. Local passwords can be attached to
+  an existing external account. Restrictions take precedence over association;
+  providers can coexist, including multiple custom OIDC registrations.
+
 - Selfhost local username/password accounts, administrator bootstrap, optional Entra/Google/GitHub/OIDC setup, owner-created local users and password changes with session and grant revocation. Password hashes live in SQL; the forward schema revision remains isolated under the removable migration package.
 
 - English/Chinese account administration: enroll, replace, recheck or delete a
@@ -53,6 +59,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The `mcp` dependency floor is now 2.1.1 (it was 2) for every install, not only the self-hosted server.** The built-in self-hosted authorization server is built on that release's provider protocol, handlers and models, and the lock already pinned it. The stdio, `X-Canvas-*` header and hosted modes use nothing new from it; a pip install into an environment that has `mcp` 2.0.x upgrades it. The nginx example's new `/token` and `/revoke` limits (120 and 30 requests a minute per IP, claude.ai's egress range exempt) also apply to an `entra_proxy` deployment that uses the file.
 - **Self-hosted mode needs the `selfhost` extra when installed with pip.** SQLAlchemy and Alembic are optional dependencies (`pip install 'canvas-mcp[selfhost]'`, or `[postgres]` for the PostgreSQL driver); the container image includes both. The stdio, `X-Canvas-Token`, access-key and Easy Auth modes do not import them, and `entra-oauth` fails at start-up with an install hint if they are missing.
 ### Changed (breaking)
+
+- **Account-name schema upgrade.** The isolated `0003_account_login_policy`
+  contract preserves account ids, local login names, hashes and identities while
+  removing duplicate credential usernames and raising the schema compatibility
+  floor to 2. SQLite creates a pre-upgrade backup. PostgreSQL operators retain a
+  matching database backup for rollback; previous images cannot use the new
+  schema. Ambiguous historical identity ownership refuses the whole upgrade.
+- **Database-owned public origin.** `PUBLIC_BASE_URL` seeds a fresh installation
+  once. Later edits belong in Admin > Settings. A confirmed domain change ends
+  sessions and OAuth grants, pauses configuration-dependent requests until
+  restart, and requires updated reverse-proxy and external-provider callbacks.
 
 - **Selfhost v1 consolidation.** Use `MCP_AUTH_MODE=selfhost`: the built-in OAuth
   authorization server is the only MCP authentication path. Entra is a sign-in

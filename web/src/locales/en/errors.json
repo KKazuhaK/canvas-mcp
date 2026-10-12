@@ -71,5 +71,6 @@
   "pilot_profile_restricted": "The pilot profile requires exactly one school with directory search turned off.",
   "invalid_local_credentials": "Use a valid username and a password of 15–128 characters.",
   "local_username_taken": "That username is already in use.",
-  "local_login_failed": "The username or password is incorrect, or local sign-in is unavailable."
+  "local_login_failed": "The username or password is incorrect, or local sign-in is unavailable.",
+  "use_existing_sign_in": "Sign in with your existing method, then link this identity from your account. Contact an administrator if your account is locked to one SSO method."
 }

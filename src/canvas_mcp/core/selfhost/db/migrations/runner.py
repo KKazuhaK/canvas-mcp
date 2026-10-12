@@ -39,7 +39,7 @@ from .connections import (
 )
 from .policy import CompatibilityFloorGuard, RevisionPolicy, pending
 
-SCHEMA_EPOCH = 1
+SCHEMA_EPOCH = 2
 MIGRATION_LOCK_WAIT_SECONDS = 30.0
 PG_MIGRATION_LOCK_TIMEOUT = "30s"
 PG_MIGRATION_STATEMENT_TIMEOUT = "120s"
@@ -382,8 +382,8 @@ def compare_schema(conn: Connection) -> list[Any]:
     return list(compare_metadata(ctx, schema.metadata))
 
 
-def render_sql(dialect: str) -> str:
-    """The DDL ``upgrade head`` would run on ``dialect``, as offline SQL."""
+def render_sql(dialect: str, *, revision: str = "head") -> str:
+    """Offline DDL for a specified revision; data backfills require online upgrade."""
     import io
     from contextlib import redirect_stdout
 
@@ -391,5 +391,5 @@ def render_sql(dialect: str) -> str:
     cfg = _config(dialect=dialect)
     cfg.output_buffer = buffer
     with redirect_stdout(buffer):
-        command.upgrade(cfg, "head", sql=True)
+        command.upgrade(cfg, revision, sql=True)
     return buffer.getvalue()

@@ -1,4 +1,14 @@
 {
+  "site": {
+    "title": "Site address",
+    "address": "Public HTTPS address",
+    "help": "Saved in the database. The environment value is used only on first installation. Changing the domain signs everyone out and disconnects MCP apps. Update the reverse proxy and external login callbacks, then restart the container.",
+    "save": "Change site address",
+    "confirmTitle": "Change the site's domain?",
+    "confirmBody": "Save {{url}} and invalidate all existing sessions and connected apps? Sign-in and MCP access will pause until you restart the container. Update external login callback URLs and reconnect clients afterwards.",
+    "confirm": "Save and end existing connections",
+    "restart": "Saved {{url}}. Restart the container to activate it, then sign in at the new address. Existing clients need to reconnect."
+  },
   "installation": {
     "title": "Configure sign-in",
     "help": "Create the local administrator with the installation code from the container logs. You can also configure an external sign-in provider now, or add providers later in Settings. All account and provider configuration is saved in the database.",
@@ -144,6 +154,7 @@
       "detail": "Detail"
     },
     "actions": {
+      "site_address_changed": "Changed site address",
       "local_account_created": "Created local account",
       "local_password_changed": "Changed local password",
       "sign_in_provider_configured": "Configured sign-in provider",
@@ -176,7 +187,13 @@
       "sign_in_method_renamed": "Changed sign-in name",
       "featured_schools_changed": "Changed featured schools",
       "setting_changed": "Changed setting",
-      "school_access_changed": "Changed school address policy"
+      "school_access_changed": "Changed school address policy",
+      "local_password_added": "Added local password",
+      "account_upn_changed": "Changed account UPN",
+      "account_sso_locked": "Locked first SSO method",
+      "account_sso_unlocked": "Unlocked SSO method",
+      "account_login_policy_changed": "Changed account sign-in policy",
+      "login_policy_changed": "Changed installation sign-in policy"
     },
     "operator": "Server operator",
     "system": "System",
@@ -282,7 +299,8 @@
     "position": "Sign-in button position",
     "enabled": "Offer this sign-in method",
     "save": "Save sign-in configuration",
-    "initialize": "Initialize sign-in"
+    "initialize": "Initialize sign-in",
+    "autoLinkEmail": "Automatically link matching email to an existing account"
   },
   "settings": {
     "title": "Settings",
@@ -320,5 +338,22 @@
     "create": "Create local account",
     "help": "Creates an active regular account. Local sign-in must be enabled. Public registration is closed.",
     "created": "Local account created."
+  },
+  "loginPolicy": {
+    "title": "Account sign-in policy",
+    "saved": "Saved. Affected sessions ended; sign in again.",
+    "allow_multiple": "Allow multiple sign-in methods",
+    "lock_first_sso": "Lock the first successful SSO method",
+    "block_conflicting_registration": "Prevent separate accounts with conflicting email or UPN",
+    "help": "Automatic email association is configured independently on each sign-in provider. Account restrictions take priority.",
+    "save": "Save sign-in policy",
+    "locked": "SSO lock: {{provider}}",
+    "none": "None",
+    "unlock": "Unlock SSO",
+    "unlockHelp": "Keep the original identity and allow additional methods. Unlocking does not link another identity.",
+    "inherit": "Inherit installation policy",
+    "allow": "Allow",
+    "forbid": "Forbid",
+    "restrict": "Restrict this account to selected sign-in methods"
   }
 }

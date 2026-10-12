@@ -14,6 +14,17 @@ const callback = 'https://mcp.example.com/auth/callback/entra'
 beforeEach(async () => { await setupI18n('en') })
 
 describe('Write-only sign-in provider credentials', () => {
+  it('enables automatic email association on the edited instance without a second verification step', async () => {
+    const user = userEvent.setup()
+    const save = vi.fn(async () => {})
+    renderWithQuery(<ProviderConfigurationForm provider={provider} callbackUri={callback} onSave={save} />)
+    const automatic = screen.getByRole('switch', { name: 'Automatically link matching email to an existing account' })
+    expect(automatic).not.toBeChecked()
+    await user.click(automatic)
+    await user.click(screen.getByRole('button', { name: 'Save sign-in configuration' }))
+    await waitFor(() => expect(save).toHaveBeenCalledWith({ config: provider.config, enabled: true, rank: 0, auto_link_email: true }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
   it('omits the saved secret from an ordinary edit', async () => {
     const user = userEvent.setup()
     const save = vi.fn(async () => {})
@@ -21,7 +32,7 @@ describe('Write-only sign-in provider credentials', () => {
     expect(screen.getByLabelText('Client secret')).toHaveValue('')
     expect(screen.getByText(/Leave blank to keep it/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Save sign-in configuration' }))
-    await waitFor(() => expect(save).toHaveBeenCalledWith({ config: provider.config, enabled: true, rank: 0 }))
+    await waitFor(() => expect(save).toHaveBeenCalledWith({ config: provider.config, enabled: true, rank: 0, auto_link_email: false }))
   })
 
   it('sends a replacement once and clears it after a successful save', async () => {
@@ -32,7 +43,7 @@ describe('Write-only sign-in provider credentials', () => {
     expect(input).toHaveAttribute('type', 'password')
     await user.type(input, 'new-client-secret-value')
     await user.click(screen.getByRole('button', { name: 'Save sign-in configuration' }))
-    await waitFor(() => expect(save).toHaveBeenCalledWith({ config: provider.config, enabled: true, rank: 0, client_secret: 'new-client-secret-value' }))
+    await waitFor(() => expect(save).toHaveBeenCalledWith({ config: provider.config, enabled: true, rank: 0, auto_link_email: false, client_secret: 'new-client-secret-value' }))
     await waitFor(() => expect(input).toHaveValue(''))
   })
 

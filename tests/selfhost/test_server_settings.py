@@ -8,8 +8,7 @@ from dbbackend import IS_POSTGRES, pg_database
 from sqlalchemy import bindparam, text
 
 from canvas_mcp.core.selfhost.db.engine import Database
-from canvas_mcp.core.selfhost.db.migrations import baseline_v1
-from canvas_mcp.core.selfhost.db.migrations.connections import sqlite_migration
+from canvas_mcp.core.selfhost.db.migrations import runner as migrate
 from canvas_mcp.core.selfhost.db.settings_repo import (
     SettingsAccessDenied,
     SettingsConflict,
@@ -33,9 +32,7 @@ def db(tmp_path):
         else Database.sqlite(tmp_path / "settings.sqlite3")
     )
     db.prepare_storage()
-    transaction = db.write if IS_POSTGRES else lambda: sqlite_migration(db)
-    with transaction() as conn:
-        baseline_v1.create(conn, now=100)
+    migrate.ensure_ready(db)
     try:
         yield db
     finally:

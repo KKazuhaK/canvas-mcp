@@ -20,6 +20,15 @@ PASSWORD = "pw0rd-must-never-show"
 GOOD_PG = "postgresql+psycopg://canvas:s3cr3tpw@db.internal:5432/canvas_mcp"
 
 
+@pytest.fixture(autouse=True)
+def isolate_url_parser_from_database_site_lookup(monkeypatch):
+    # These tests validate/redact hypothetical connection URLs, not live databases.
+    # Real persisted-origin boot and failure behavior is covered in test_site_url.
+    monkeypatch.setattr(
+        "canvas_mcp.core.selfhost.site_url.saved_site_url", lambda target: None
+    )
+
+
 def _env(**overrides: str | None) -> dict[str, str]:
     env = {
         "PUBLIC_BASE_URL": "https://canvas.example.test",
@@ -68,7 +77,9 @@ class TestPostgresUrls:
         for text in (repr(settings), repr(target), target.description):
             assert "s3cr3tpw" not in text and "canvas:" not in text
 
-    def test_the_port_defaults_and_ipv6_hosts_are_bracketed_in_the_description(self) -> None:
+    def test_the_port_defaults_and_ipv6_hosts_are_bracketed_in_the_description(
+        self,
+    ) -> None:
         target = parse_database_url("postgresql+psycopg://u:p@db.internal/app", DATA)
         assert target.description == "postgresql+psycopg://db.internal:5432/app"
         v6 = parse_database_url("postgresql+psycopg://u:p@[::1]:5433/app", DATA)
@@ -126,7 +137,9 @@ class TestPostgresUrls:
             "db.internal",
         ],
     )
-    def test_malformed_or_wrong_scheme_urls_are_refused_without_echoing_them(self, url: str) -> None:
+    def test_malformed_or_wrong_scheme_urls_are_refused_without_echoing_them(
+        self, url: str
+    ) -> None:
         problems = _problems(DATABASE_URL=url)
         text = " ".join(problems)
         assert "DATABASE_URL" in text
@@ -146,7 +159,9 @@ class TestPostgresUrls:
 class TestSqliteUrls:
     def test_a_file_inside_the_data_directory_is_accepted(self) -> None:
         target = parse_database_url("sqlite:////data/canvas-mcp/other.sqlite3", DATA)
-        assert target.kind == "sqlite" and target.sqlite_path == Path("/data/canvas-mcp/other.sqlite3")
+        assert target.kind == "sqlite" and target.sqlite_path == Path(
+            "/data/canvas-mcp/other.sqlite3"
+        )
         also = parse_database_url("sqlite+pysqlite:////data/x.db", DATA)
         assert also.sqlite_path == Path("/data/x.db")
 
@@ -167,11 +182,15 @@ class TestSqliteUrls:
 
     def test_a_file_outside_the_data_directory_needs_an_explicit_opt_in(self) -> None:
         url = "sqlite:////srv/elsewhere/tokens.sqlite3"
-        assert any("outside SELFHOST_DATA_DIR" in p for p in _problems(DATABASE_URL=url))
+        assert any(
+            "outside SELFHOST_DATA_DIR" in p for p in _problems(DATABASE_URL=url)
+        )
         settings = load_selfhost_settings(
             _env(DATABASE_URL=url, DATABASE_ALLOW_SQLITE_OUTSIDE_DATA_DIR="true")
         )
-        assert settings.database_target.sqlite_path == Path("/srv/elsewhere/tokens.sqlite3")
+        assert settings.database_target.sqlite_path == Path(
+            "/srv/elsewhere/tokens.sqlite3"
+        )
 
     def test_the_opt_in_must_be_a_boolean(self) -> None:
         assert any(
@@ -183,23 +202,45 @@ class TestSqliteUrls:
 class TestMigrationAndStateSettings:
     @pytest.mark.parametrize(
         ("value", "expected"),
-        [("true", True), ("1", True), ("yes", True), ("", True), ("false", False), ("0", False), ("no", False)],
+        [
+            ("true", True),
+            ("1", True),
+            ("yes", True),
+            ("", True),
+            ("false", False),
+            ("0", False),
+            ("no", False),
+        ],
     )
     def test_auto_migrate_parsing(self, value: str, expected: bool) -> None:
-        assert load_selfhost_settings(_env(DATABASE_AUTO_MIGRATE=value)).auto_migrate is expected
+        assert (
+            load_selfhost_settings(_env(DATABASE_AUTO_MIGRATE=value)).auto_migrate
+            is expected
+        )
 
     def test_auto_migrate_garbage_is_a_problem(self) -> None:
-        assert any("DATABASE_AUTO_MIGRATE" in p for p in _problems(DATABASE_AUTO_MIGRATE="sometimes"))
+        assert any(
+            "DATABASE_AUTO_MIGRATE" in p
+            for p in _problems(DATABASE_AUTO_MIGRATE="sometimes")
+        )
 
     def test_the_memory_backend_is_accepted_and_redis_fails_closed(self) -> None:
-        assert load_selfhost_settings(_env(SELFHOST_STATE_BACKEND="memory")).state_backend == "memory"
+        assert (
+            load_selfhost_settings(_env(SELFHOST_STATE_BACKEND="memory")).state_backend
+            == "memory"
+        )
         text = " ".join(_problems(SELFHOST_STATE_BACKEND="redis"))
         assert "reserved and not implemented" in text
-        assert any("SELFHOST_STATE_BACKEND" in p for p in _problems(SELFHOST_STATE_BACKEND="etcd"))
+        assert any(
+            "SELFHOST_STATE_BACKEND" in p
+            for p in _problems(SELFHOST_STATE_BACKEND="etcd")
+        )
 
     def test_every_problem_is_reported_together(self) -> None:
         problems = _problems(
-            DATABASE_URL="mysql://x", DATABASE_AUTO_MIGRATE="??", SELFHOST_STATE_BACKEND="redis"
+            DATABASE_URL="mysql://x",
+            DATABASE_AUTO_MIGRATE="??",
+            SELFHOST_STATE_BACKEND="redis",
         )
         assert len(problems) == 3
 
@@ -225,7 +266,9 @@ class TestStartup:
         from canvas_mcp.core.selfhost.app import prepare_selfhost
 
         url = f"postgresql+psycopg://canvas:{PASSWORD}@127.0.0.1:1/db?connect_timeout=1"
-        settings = load_selfhost_settings(_env(SELFHOST_DATA_DIR=str(tmp_path), DATABASE_URL=url))
+        settings = load_selfhost_settings(
+            _env(SELFHOST_DATA_DIR=str(tmp_path), DATABASE_URL=url)
+        )
         caplog.set_level(logging.DEBUG)
         with pytest.raises(SelfhostConfigError) as refused:
             prepare_selfhost(settings)

@@ -43,6 +43,8 @@ class AccountRow:
     session_epoch: int
     credential_generation: int
     write_tools_version: int
+    upn: str = ""
+    upn_required: bool = False
 
 
 @dataclass(frozen=True)

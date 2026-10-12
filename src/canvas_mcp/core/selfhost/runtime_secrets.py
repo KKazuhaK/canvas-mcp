@@ -171,10 +171,11 @@ def initialize_secrets(env: Mapping[str, str]) -> dict[str, str]:
     for name in missing:
         value = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
         result[name] = ("k1:" if name == "CANVAS_TOKEN_KEYS" else "") + value
+    if missing:
+        _refuse_existing_database(result)
     load_selfhost_settings(result)
     Keyring.parse(result["CANVAS_TOKEN_KEYS"])
     if missing:
-        _refuse_existing_database(result)
         saved = _publish(_path(result), result)
         for name in missing:
             result[name] = saved[name]

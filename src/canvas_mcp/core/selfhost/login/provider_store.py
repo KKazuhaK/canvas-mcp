@@ -52,6 +52,7 @@ class ProviderConfigStore:
             "protocol": row["protocol"],
             "config_source": row["config_source"],
             "enabled": bool(row["configured"]),
+            "auto_link_email": bool(row["auto_link_email"]),
             "rank": row["sort_rank"],
             "config": dict(config),
             "secret_present": row["secret_ciphertext"] is not None,
@@ -201,12 +202,17 @@ class ProviderConfigStore:
         revision: int,
         actor: str | None,
         now: int,
+        auto_link_email: bool | None = None,
         _initial: bool = False,
         _connection: Connection | None = None,
     ) -> int:
         value = validate_provider(identifier, config, client_secret)
         if (
             type(enabled) is not bool
+            or auto_link_email is not None
+            and type(auto_link_email) is not bool
+            or identifier == "local"
+            and auto_link_email is True
             or type(rank) is not int
             or not 0 <= rank < MAX_PROVIDERS
         ):
@@ -295,6 +301,8 @@ class ProviderConfigStore:
                 updates.update(
                     secret_key_id=kid, secret_nonce=nonce, secret_ciphertext=ciphertext
                 )
+            if auto_link_email is not None:
+                updates["auto_link_email"] = auto_link_email
             conn.execute(
                 update(s.login_providers)
                 .where(s.login_providers.c.id == identifier)
@@ -309,6 +317,9 @@ class ProviderConfigStore:
                 identifier,
                 {
                     "enabled": enabled,
+                    "auto_link_email": auto_link_email
+                    if auto_link_email is not None
+                    else bool(old and old["auto_link_email"]),
                     "secret_replaced": value.client_secret is not None,
                 },
             )

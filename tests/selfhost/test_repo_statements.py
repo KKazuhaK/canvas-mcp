@@ -42,6 +42,13 @@ class _Result:
     def scalar_one_or_none(self) -> Any:
         return None
 
+    def first(self) -> Any:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            issuer="https://issuer", subject="s", provider_id="entra"
+        )
+
     def __iter__(self) -> Any:
         return iter(())
 
@@ -216,7 +223,7 @@ class TestCompiledStatements:
     ) -> None:
         statements = [s for s, _ in _run_everything(dialect, name)]
         scoped = [s for s in statements if "external_identities.id =" in s]
-        assert len(scoped) == 2
+        assert len(scoped) == 3
         assert all("external_identities.account_id =" in s for s in scoped)
         counts = [
             s

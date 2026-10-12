@@ -1,4 +1,14 @@
 {
+  "site": {
+    "title": "站点地址",
+    "address": "公网 HTTPS 地址",
+    "help": "配置保存在数据库，环境变量仅用于首次安装。更换域名会退出所有账户并断开 MCP 应用。请更新反代和外部登录回调地址，然后重启容器。",
+    "save": "更改站点地址",
+    "confirmTitle": "更改站点域名？",
+    "confirmBody": "保存 {{url}} 并作废全部现有会话和已连接应用？重启容器前将暂停登录和 MCP 访问。之后需要更新外部登录回调地址并重新连接客户端。",
+    "confirm": "保存并结束现有连接",
+    "restart": "已保存 {{url}}。重启容器后从新地址登录，现有客户端需要重新连接。"
+  },
   "installation": {
     "title": "配置登录",
     "help": "使用容器日志中的初始化码创建本地管理员。可同时配置外部登录方式，也可稍后在设置中添加。账户及登录配置均保存到数据库。",
@@ -144,6 +154,7 @@
       "detail": "详情"
     },
     "actions": {
+      "site_address_changed": "更改站点地址",
       "local_account_created": "创建本地账户",
       "local_password_changed": "更改本地密码",
       "sign_in_provider_configured": "配置登录方式",
@@ -176,7 +187,13 @@
       "sign_in_method_renamed": "更改登录名称",
       "featured_schools_changed": "更改推荐学校",
       "setting_changed": "更改设置",
-      "school_access_changed": "更改学校地址策略"
+      "school_access_changed": "更改学校地址策略",
+      "local_password_added": "添加本地密码",
+      "account_upn_changed": "修改账户 UPN",
+      "account_sso_locked": "锁定首次 SSO 登录方式",
+      "account_sso_unlocked": "解除 SSO 锁定",
+      "account_login_policy_changed": "修改账户登录策略",
+      "login_policy_changed": "修改站点登录策略"
     },
     "operator": "服务器运维",
     "system": "系统",
@@ -282,7 +299,8 @@
     "position": "登录按钮位置",
     "enabled": "启用此登录方式",
     "save": "保存登录配置",
-    "initialize": "初始化登录"
+    "initialize": "初始化登录",
+    "autoLinkEmail": "相同邮箱自动关联并进入原账户"
   },
   "settings": {
     "title": "设置",
@@ -320,5 +338,22 @@
     "create": "创建本地账户",
     "help": "创建已启用的普通账户，需先启用本地登录。不开放公众注册。",
     "created": "本地账户已创建。"
+  },
+  "loginPolicy": {
+    "title": "账户登录策略",
+    "saved": "已保存。受影响的会话已结束，请重新登录。",
+    "allow_multiple": "允许多个登录方式",
+    "lock_first_sso": "首次 SSO 登录后锁定该方式",
+    "block_conflicting_registration": "禁止邮箱或 UPN 冲突者另建账户",
+    "help": "邮箱自动关联在每个登录服务商中独立设置。账户的登录方式限制优先。",
+    "save": "保存登录策略",
+    "locked": "SSO 锁定：{{provider}}",
+    "none": "无",
+    "unlock": "解除 SSO 锁定",
+    "unlockHelp": "保留原身份，允许关联其他方式。解除锁定不会自动关联新身份。",
+    "inherit": "继承站点策略",
+    "allow": "允许",
+    "forbid": "禁止",
+    "restrict": "仅允许此账户使用选定的登录方式"
   }
 }

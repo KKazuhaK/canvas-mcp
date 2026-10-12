@@ -83,6 +83,7 @@ describe('closed error code set', () => {
         'bad_roles',
         'access_denied',
         'signups_paused',
+        'use_existing_sign_in',
         'authorization_invalid',
       ].sort(),
     )

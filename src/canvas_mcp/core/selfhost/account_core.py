@@ -163,6 +163,7 @@ _RETURN_TO_MAX_CHARS = 512
 _RETURN_TO_FORBIDDEN_PREFIXES = ("/api", "/auth")
 SIGN_IN_ERROR_CODES = frozenset(
     {
+        "use_existing_sign_in",
         "state_invalid",
         "provider_error",
         "sign_in_incomplete",

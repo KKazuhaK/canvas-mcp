@@ -1,4 +1,5 @@
 import Alert from '@mui/material/Alert'
+import LoginPolicySettings from '@/components/admin/LoginPolicySettings'
 import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
 import Card from '@mui/material/Card'
@@ -21,6 +22,7 @@ import { ApiError } from '@/api/errors'
 import type { AdminSettingsResponse } from '@/api/types'
 import ErrorNotice from '@/components/ErrorNotice'
 import LoginProviderSettings from '@/components/admin/LoginProviderSettings'
+import SiteAddressSettings from '@/components/admin/SiteAddressSettings'
 import { keys } from '@/query/keys'
 import { PageSkeleton } from '../StateViews'
 
@@ -58,6 +60,8 @@ function Editor({ data, reload }: { data: AdminSettingsResponse; reload: () => v
     setSchools(next)
   }
   return <Stack spacing={3}>
+    <SiteAddressSettings data={data} />
+    <LoginPolicySettings />
     {data.schools.warnings.includes('no_schools_offered') && <Alert severity="warning">{t('admin:settings.noSchools')}</Alert>}
     {save.isError && <ErrorNotice error={save.error} />}
     {conflicted && <Button onClick={reload}>{t('admin:settings.reload')}</Button>}

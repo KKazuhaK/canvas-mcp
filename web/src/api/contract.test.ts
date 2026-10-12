@@ -14,7 +14,7 @@ const KEYS = [...contract.matchAll(/^\s*'((?:GET|POST|PUT|PATCH|DELETE) \/[^']*)
 
 describe('api/contract.ts', () => {
   it('lists the JSON routes and leaves external sign-in redirects to the server', () => {
-    expect(KEYS).toHaveLength(46)
+    expect(KEYS).toHaveLength(54)
     expect(new Set(KEYS).size).toBe(KEYS.length)
     for (const key of KEYS) {
       if (key.includes('/login/')) expect(key).toBe('POST /login/local')

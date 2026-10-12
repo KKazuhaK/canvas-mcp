@@ -117,6 +117,7 @@ DENY_WRONG_TENANT = "wrong_tenant"
 DENY_BAD_SUBJECT = "bad_subject"
 DENY_BAD_ROLES = "bad_roles"
 DENY_ACCESS_DENIED = "access_denied"
+DENY_USE_EXISTING = "use_existing_sign_in"
 DENY_ACCESS_DISABLED = "access_disabled"
 DENY_PENDING_APPROVAL = "pending_approval"
 DENY_SIGNUPS_PAUSED = "signups_paused"
@@ -166,6 +167,7 @@ AUTH_REASONS = frozenset(
         DENY_BAD_SUBJECT,
         DENY_BAD_ROLES,
         DENY_ACCESS_DENIED,
+        DENY_USE_EXISTING,
         DENY_ACCESS_DISABLED,
         DENY_PENDING_APPROVAL,
         DENY_SIGNUPS_PAUSED,
@@ -196,6 +198,7 @@ EVENT_OWNER_LOSS_REFUSED = "owner_loss_refused_last_owner"
 EVENT_OWNER_RESOURCED = "owner_re_sourced"
 
 DENIAL_MESSAGES: dict[str, str] = {
+    DENY_USE_EXISTING: "Sign in with your existing method, then link this identity from your account. Contact an administrator if your account is locked to one SSO method.",
     DENY_WRONG_TENANT: (
         "Your Microsoft account belongs to a different directory than this server accepts."
     ),
@@ -358,6 +361,7 @@ def entra_external_claims(
         groups=groups,
         groups_overage=overage,
         tenant_id=tid,
+        email=claims.get("email") if isinstance(claims.get("email"), str) else None,
     )
 
 

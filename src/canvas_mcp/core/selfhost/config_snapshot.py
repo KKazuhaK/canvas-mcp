@@ -129,10 +129,12 @@ class ConfigSnapshots:
         providers: LoginProvidersConfig | None,
         *,
         resolve_host: HostResolver = system_resolve,
+        active_base_url: str | None = None,
     ) -> None:
         self.database = database
         self.providers = providers
         self.resolve_host = resolve_host
+        self.active_base_url = active_base_url
         self.pilot = False
         self._lock = threading.Lock()
         self._current = self._build()
@@ -173,6 +175,12 @@ class ConfigSnapshots:
             for _ in range(3):
                 snapshot = self._read()
                 if snapshot is not None:
+                    if (
+                        self.active_base_url is not None
+                        and snapshot.settings["site.public_base_url"]
+                        != self.active_base_url
+                    ):
+                        raise StoreUnavailable(kind="SiteAddressRestartRequired")
                     if self.pilot:
                         from .profile import validate_pilot_schools
 

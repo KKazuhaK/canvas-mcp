@@ -160,6 +160,7 @@ def add_account(db, *, role="owner", status="active", provider="entra"):
                 disabled_at=100 if status == "disabled" else None,
             )
         )
+        conn.execute(insert(s.external_identity_owners).values(issuer="https://login.microsoftonline.com/" + CONFIG["tenant_id"] + "/v2.0", subject=account, account_id=account))
         conn.execute(
             insert(s.external_identities).values(
                 id=new_id(),

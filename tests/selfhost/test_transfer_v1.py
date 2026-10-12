@@ -66,10 +66,24 @@ def source(tmp_path):
         conn.execute(
             insert(s.local_credentials).values(
                 account_id=account,
-                username="student.local",
                 password_hash=password_hash("transfer-local-password-0123456789"),
                 created_at=NOW,
                 updated_at=NOW,
+            )
+        )
+        conn.execute(
+            s.accounts.update()
+            .where(s.accounts.c.id == account)
+            .values(upn="student.local")
+        )
+        conn.execute(
+            insert(s.account_login_policy).values(
+                account_id=account, allow_multiple=True
+            )
+        )
+        conn.execute(
+            insert(s.account_allowed_login_providers).values(
+                account_id=account, provider_id="local"
             )
         )
         conn.execute(

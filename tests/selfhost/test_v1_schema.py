@@ -104,6 +104,9 @@ def test_current_tables_with_a_lifecycle_and_registered_ciphertexts():
         "canvas_oauth_apps",
         "web_sessions",
         "account_quotas",
+        "external_identity_owners",
+        "account_login_policy",
+        "account_allowed_login_providers",
     }
     assert set(s.metadata.tables) == expected
     for table in s.metadata.tables.values():
@@ -128,11 +131,11 @@ def test_every_ownership_foreign_key_has_an_index_prefix():
             for constraint in table.constraints
             if constraint.__class__.__name__ == "UniqueConstraint"
         )
-        for foreign_key in table.foreign_keys:
+        for foreign_key in table.foreign_key_constraints:
+            parents = list(foreign_key.columns)
             assert any(
-                columns and columns[0] is foreign_key.parent
-                for columns in candidate_keys
-            ), (table.name, foreign_key.parent.name)
+                columns[: len(parents)] == parents for columns in candidate_keys
+            ), (table.name, [column.name for column in parents])
 
 
 @pytest.mark.parametrize(
@@ -169,6 +172,13 @@ def test_identity_has_one_provider_per_account_and_one_account_per_subject(conne
         "subject": "a",
         "linked_at": 100,
     }
+    connection.execute(
+        s.external_identity_owners.insert(),
+        [
+            {"issuer": original["issuer"], "subject": subject, "account_id": a}
+            for subject in ("a", "b")
+        ],
+    )
     connection.execute(s.external_identities.insert().values(**original))
     for overrides in ({"subject": "b"}, {"account_id": b}):
         with pytest.raises(IntegrityError), connection.begin_nested():
@@ -184,6 +194,11 @@ def test_provider_and_school_references_restrict_deletion(connection):
     provider(connection)
     school(connection)
     credential(connection, owner)
+    connection.execute(
+        s.external_identity_owners.insert().values(
+            issuer="https://issuer.example.com", subject="a", account_id=owner
+        )
+    )
     connection.execute(
         s.external_identities.insert().values(
             id=new_id(),
@@ -204,6 +219,11 @@ def test_account_cascade_keeps_history_and_reserved_tables_empty(connection):
     provider(connection)
     school(connection)
     credential(connection, owner)
+    connection.execute(
+        s.external_identity_owners.insert().values(
+            issuer="https://issuer.example.com", subject="a", account_id=owner
+        )
+    )
     connection.execute(
         s.external_identities.insert().values(
             id=new_id(),
@@ -258,7 +278,7 @@ def test_sqlite_strict_and_autoincrement_options(connection):
             "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != 'canvas_mcp_alembic_version'"
         )
     ).all()
-    assert len(tables) == 20
+    assert len(tables) == 23
     for name, ddl in tables:
         assert "STRICT" in ddl, name
         if name in {"auth_events", "audit_log"}:
@@ -271,5 +291,8 @@ def test_sqlite_strict_and_autoincrement_options(connection):
             "oauth_refresh_tokens",
             "web_sessions",
             "account_quotas",
+            "external_identity_owners",
+            "account_login_policy",
+            "account_allowed_login_providers",
         }:
             assert "WITHOUT ROWID" in ddl, name

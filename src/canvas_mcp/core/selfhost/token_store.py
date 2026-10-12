@@ -361,6 +361,8 @@ class PrincipalStatus:
     credential_generation: int = 0
     # Set only on a value returned after a sign-in that changed the role.
     owner_change: str | None = None
+    upn: str = ""
+    upn_required: bool = False
 
     @property
     def disabled(self) -> bool:
@@ -546,6 +548,8 @@ def _status(row: AccountRow) -> PrincipalStatus:
         updated_at=row.updated_at,
         stored=True,
         credential_generation=row.credential_generation,
+        upn=row.upn,
+        upn_required=row.upn_required,
     )
 
 
@@ -1618,14 +1622,72 @@ class TokenStore:
         now = self._now()
         repos = self._repos
         surface = acc.SURFACE_ACCOUNT
+        from .login.account_policy import (
+            apply_sso_lock,
+            association_name,
+            email_name,
+            identity_owner,
+            matching_accounts,
+            method_allowed,
+            needs_sso_lock,
+            normalize_upn,
+            policy_in,
+        )
+
         with self._db.write() as conn:
             self._require_login_revision(conn, expected_revision)
             account_id = repos.identities.lookup(conn, *ext.identity)
-            row = (
-                repos.accounts.get(conn, account_id, for_update=True)
-                if account_id
-                else None
-            )
+            associate = False
+            refused = False
+            conflicting_registration = False
+            if account_id is None:
+                canonical_owner = identity_owner(conn, ext)
+                if canonical_owner is not None:
+                    account_id = canonical_owner
+                    associate = True
+                    refused = (
+                        not method_allowed(
+                            conn, account_id, ext.provider_id, linking=True
+                        )
+                        or repos.identities.count_for_provider(
+                            conn, account_id, ext.provider_id
+                        )
+                        > 0
+                    )
+                name = association_name(conn, ext)
+                if name is not None and not refused and account_id is None:
+                    matches = matching_accounts(conn, name)
+                    if len(matches) == 1:
+                        account_id = matches[0]
+                        associate = True
+                        refused = (
+                            not method_allowed(
+                                conn, account_id, ext.provider_id, linking=True
+                            )
+                            or repos.identities.count_for_provider(
+                                conn, account_id, ext.provider_id
+                            )
+                            > 0
+                        )
+                    elif len(matches) > 1:
+                        refused = True
+                        conflicting_registration = True
+                if (
+                    account_id is None
+                    and policy_in(conn).block_conflicting_registration
+                ):
+                    match_names = {email_name(ext.email)}
+                    try:
+                        match_names.add(normalize_upn(ext.username))
+                    except ValueError:
+                        pass
+                    conflicting_registration = any(
+                        name and matching_accounts(conn, name) for name in match_names
+                    )
+                    refused = refused or conflicting_registration
+            elif not method_allowed(conn, account_id, ext.provider_id):
+                refused = True
+            row = repos.accounts.get(conn, account_id) if account_id else None
             existing = None if row is None else _status(row).facts
             active_owners = repos.accounts.count_active_owners(conn)
             listed = self._provider_lists_in(conn, listed_providers)[0]
@@ -1656,6 +1718,56 @@ class TokenStore:
                 existing_owner_usable=owner_usable,
             )
             decision = acc.decide(existing, verdict, policy, facts, purpose)
+            if associate and row is not None:
+                # Association grants a method, never a new administrator role.
+                decision = replace(
+                    decision,
+                    role=None,
+                    role_source=None,
+                    role_event=None,
+                    session_owner=row.role == ROLE_OWNER
+                    and (
+                        row.role_source != acc.ROLE_SOURCE_RULES
+                        or verdict.owner_by_rule
+                    ),
+                )
+            lock_sso = purpose == "sign_in" and needs_sso_lock(
+                conn, account_id, ext.provider_id
+            )
+            if (
+                lock_sso
+                and row is not None
+                and row.role == ROLE_OWNER
+                and row.role_source == acc.ROLE_SOURCE_RULES
+                and ext.provider_id != "entra"
+                and not repos.accounts.usable_owner_ids(
+                    conn, listed, exclude=account_id
+                )
+            ):
+                refused = True
+            if (
+                refused
+                or associate
+                and (
+                    row is None
+                    or not acc.link_admissible(_status(row).facts, verdict, policy)
+                )
+            ):
+                decision = Decision(
+                    outcome="deny",
+                    reason=acc.DENY_USE_EXISTING
+                    if conflicting_registration
+                    else acc.DENY_ACCESS_DENIED,
+                    denied=acc.denied(
+                        acc.DENY_USE_EXISTING
+                        if conflicting_registration
+                        else acc.DENY_ACCESS_DENIED
+                    ),
+                )
+            if account_id is not None and decision.outcome != "deny":
+                if lock_sso:
+                    repos.codes.delete_unconsumed_for_account(conn, account_id)
+                row = repos.accounts.get(conn, account_id, for_update=True)
             self._pause("after_decision")
             created = activated = False
             owner_change: str | None = None
@@ -1704,6 +1816,26 @@ class TokenStore:
                     unusable_owners=unusable_owners,
                 )
             if account_id is not None and decision.outcome != "deny":
+                if associate:
+                    repos.identities.insert(
+                        conn,
+                        account_id=account_id,
+                        provider_id=ext.provider_id,
+                        issuer=ext.issuer,
+                        subject=ext.subject,
+                        username=ext.username[:_MAX_USERNAME],
+                        email=(ext.email or None) and ext.email[:_MAX_EMAIL],
+                        email_verified=bool(ext.email) and ext.email_verified,
+                        now=now,
+                    )
+                    self._audit(
+                        conn,
+                        SYSTEM_ACTOR,
+                        AUDIT_IDENTITY_LINKED,
+                        target=acc.account_key_of(account_id),
+                        detail={"provider": ext.provider_id, "automatic": True},
+                        now=now,
+                    )
                 repos.accounts.touch_login(
                     conn,
                     account_id,
@@ -1718,6 +1850,23 @@ class TokenStore:
                     email=(ext.email or None) and ext.email[:_MAX_EMAIL],
                     email_verified=ext.email_verified,
                 )
+                if lock_sso:
+                    apply_sso_lock(conn, account_id, ext.provider_id)
+                    repos.accounts.end_sessions(conn, account_id, now)
+                    repos.grants.revoke_for_account(
+                        conn, account_id, reason="admission_lost", by="system", now=now
+                    )
+                    from .config_store import ConfigStore
+
+                    ConfigStore._audit(
+                        conn,
+                        None,
+                        now,
+                        "account_sso_locked",
+                        "account",
+                        account_id,
+                        {"provider": ext.provider_id},
+                    )
             if created:
                 owner_change = (
                     decision.role_event if decision.role == ROLE_OWNER else None
@@ -1797,8 +1946,17 @@ class TokenStore:
             if owner == account_id:
                 return LinkResult(LINK_ALREADY, provider)
             refusal: str | None = None
-            if owner is not None:
+            from .login.account_policy import identity_owner, method_allowed
+
+            canonical_owner = identity_owner(conn, ext)
+            if (
+                owner is not None
+                or canonical_owner is not None
+                and canonical_owner != account_id
+            ):
                 refusal = LINK_IN_USE
+            elif not method_allowed(conn, account_id, provider, linking=True):
+                refusal = LINK_DENIED
             elif repos.identities.count_for_provider(conn, account_id, provider) > 0:
                 refusal = LINK_PROVIDER_TAKEN
             elif not acc.link_admissible(_status(row).facts, verdict, policy):
@@ -1907,6 +2065,13 @@ class TokenStore:
                 return UnlinkResult(UNLINK_LAST, ident.provider_id)
             if row.status == STATUS_ACTIVE and row.role == ROLE_OWNER:
                 rows = repos.identities.for_account(conn, account_id)
+                from .login.account_policy import method_allowed
+
+                rows = [
+                    identity
+                    for identity in rows
+                    if method_allowed(conn, account_id, identity.provider_id)
+                ]
                 for listed in self._provider_lists_in(
                     conn, listed_providers, additional_provider_lists
                 ):
@@ -1964,6 +2129,21 @@ class TokenStore:
         repos = self._repos
         key = acc.account_key_of(account_id)
         is_owner = decision.role == ROLE_OWNER
+        from sqlalchemy import select
+
+        from .db import schema
+        from .login.account_policy import association_name, email_name
+
+        upn = (
+            email_name(ext.email) if ext.email_verified else association_name(conn, ext)
+        )
+        if (
+            upn
+            and conn.execute(
+                select(schema.accounts.c.id).where(schema.accounts.c.upn == upn)
+            ).first()
+        ):
+            upn = None
         repos.accounts.insert(
             conn,
             account_id=account_id,
@@ -1972,6 +2152,8 @@ class TokenStore:
             role_source=decision.role_source if is_owner else None,
             admitted_via=decision.admitted_via or acc.ADMITTED_RULES,
             display_name=ext.display_name[:_MAX_DISPLAY_NAME],
+            upn=upn or "",
+            upn_required=upn is None,
             now=now,
         )
         repos.identities.insert(

@@ -71,5 +71,6 @@
   "pilot_profile_restricted": "试点配置要求仅提供一所学校，并关闭学校搜索。",
   "invalid_local_credentials": "请填写有效的用户名及 15–128 个字符的密码。",
   "local_username_taken": "该用户名已被使用。",
-  "local_login_failed": "用户名或密码不正确，或本地登录不可用。"
+  "local_login_failed": "用户名或密码不正确，或本地登录不可用。",
+  "use_existing_sign_in": "请使用原登录方式进入账户，再关联这个新身份。如果账户锁定了唯一 SSO，请联系管理员解除锁定。"
 }

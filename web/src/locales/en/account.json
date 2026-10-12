@@ -208,7 +208,8 @@
       "access_disabled": "Access turned off",
       "signups_paused": "Sign-ups paused",
       "pending_approval": "Waiting for approval",
-      "identity_linked": "Sign-in method added"
+      "identity_linked": "Sign-in method added",
+      "use_existing_sign_in": "Use your existing sign-in method"
     },
     "empty": "No sign-ins recorded yet.",
     "sessionsTitle": "Session",

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.engine import Connection
 
 from .config_snapshot import (
@@ -96,6 +96,7 @@ class ConfigStore:
                 action=action,
                 target_kind=kind,
                 target_id=target,
+                subject_account_id=target if kind == "account" else None,
                 detail=detail,
             )
         )
@@ -155,6 +156,10 @@ class ConfigStore:
         now: int,
         reset: bool = False,
     ) -> int:
+        if key == "site.public_base_url":
+            if reset:
+                raise ValueError("site address cannot be reset to an environment value")
+            return self.site_url(value, revision=revision, actor=actor, now=now)
         with self.database.write() as conn:
             new_revision = save_setting(
                 conn,
@@ -174,6 +179,62 @@ class ConfigStore:
                     "Directory search is disabled by SELFHOST_PROFILE=pilot"
                 )
         self.snapshots.get(new_revision)
+        return new_revision
+
+    def site_url(
+        self, value: object, *, revision: int, actor: str | None, now: int
+    ) -> int:
+        from .site_url import SITE_URL_KEY, validate_site_url
+
+        new = validate_site_url(value)
+        with self.database.write() as conn:
+            new_revision = self._authorize(conn, actor, revision, now)
+            old = conn.execute(
+                select(s.settings.c.value).where(s.settings.c.key == SITE_URL_KEY)
+            ).scalar_one_or_none()
+            if old is None:
+                raise ValueError("site address has not been initialized")
+            if new != old:
+                # Respect the established codes -> accounts -> grants lock order.
+                conn.execute(delete(s.oauth_codes))
+                conn.execute(
+                    select(s.accounts.c.id).order_by(s.accounts.c.id).with_for_update()
+                ).all()
+                conn.execute(
+                    update(s.accounts).values(
+                        session_epoch=s.accounts.c.session_epoch + 1, updated_at=now
+                    )
+                )
+                conn.execute(
+                    update(s.oauth_grants)
+                    .where(s.oauth_grants.c.revoked_at.is_(None))
+                    .values(
+                        revoked_at=now,
+                        revoked_reason="admission_lost",
+                        revoked_by=actor,
+                    )
+                )
+                conn.execute(delete(s.login_states))
+                conn.execute(
+                    update(s.server_state).values(
+                        jwt_epoch=s.server_state.c.jwt_epoch + 1
+                    )
+                )
+                conn.execute(
+                    update(s.settings)
+                    .where(s.settings.c.key == SITE_URL_KEY)
+                    .values(value=new, updated_at=now, updated_by=actor)
+                )
+                self._audit(
+                    conn,
+                    actor,
+                    now,
+                    "site_address_changed",
+                    "setting",
+                    SITE_URL_KEY,
+                    {"old": old, "new": new},
+                )
+        # The old process must never refresh OAuth/host guards piecemeal.
         return new_revision
 
     async def validate_school(self, host: object, name: object = "") -> School:

@@ -210,7 +210,7 @@ class MaintenanceRunner:
                 * DAY,
             )
             for index, (name, table, due, order, size) in enumerate(definitions)
-            if name != "audit" or settings["retention.audit_days"] > 0
+            if name != "audit" or int(settings["retention.audit_days"]) > 0
         )
 
     def chunk(self, job: Job, *, now: int, cursor: int = 0) -> Chunk:

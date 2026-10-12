@@ -4,6 +4,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     ForeignKey,
+    ForeignKeyConstraint,
     Identity,
     Index,
     Integer,
@@ -19,7 +20,7 @@ from sqlalchemy import (
 from .types import Bytes, Epoch, Flag, JsonDoc, Key, Uuid
 
 VERSION_TABLE = "canvas_mcp_alembic_version"
-SCHEMA_EPOCH = 1
+SCHEMA_EPOCH = 2
 metadata = MetaData(
     naming_convention={
         "pk": "pk_%(table_name)s",
@@ -73,6 +74,7 @@ login_providers = Table(
     Column("display_name", Text),
     Column("sort_rank", Integer(), nullable=False, server_default=text("0")),
     Column("configured", Flag(), nullable=False, server_default=false()),
+    Column("auto_link_email", Flag(), nullable=False, server_default=false()),
     Column("configured_at", Epoch),
     Column("config_source", Key, nullable=False, server_default=text("'env'")),
     Column("config", JsonDoc()),
@@ -91,6 +93,9 @@ login_providers = Table(
         name="display_name",
     ),
     CheckConstraint("configured IN (0,1)", name="configured_boolean").ddl_if(
+        dialect="sqlite"
+    ),
+    CheckConstraint("auto_link_email IN (0,1)", name="auto_link_email_boolean").ddl_if(
         dialect="sqlite"
     ),
     CheckConstraint("config_source IN ('env','db')", name="config_source"),
@@ -156,6 +161,8 @@ accounts = Table(
     Column("role_seen_at", Epoch),
     Column("admitted_via", Key, nullable=False),
     Column("display_name", Text, nullable=False, server_default=text("''")),
+    Column("upn", Key, nullable=False, server_default=text("''")),
+    Column("upn_required", Flag(), nullable=False, server_default=false()),
     Column("created_at", Epoch, nullable=False),
     Column("updated_at", Epoch, nullable=False),
     Column("approved_at", Epoch),
@@ -174,6 +181,12 @@ accounts = Table(
     CheckConstraint("status IN ('pending','active','disabled')", name="status"),
     CheckConstraint("role IN ('user','owner')", name="role"),
     CheckConstraint("length(display_name) <= 200", name="display_name"),
+    CheckConstraint("upn_required IN (0,1)", name="upn_required_boolean").ddl_if(
+        dialect="sqlite"
+    ),
+    CheckConstraint(
+        "upn = '' OR (length(upn) BETWEEN 3 AND 254 AND upn = lower(upn))", name="upn"
+    ),
     CheckConstraint("length(approved_by) = 36", name="approved_by_uuid").ddl_if(
         dialect="sqlite"
     ),
@@ -194,14 +207,9 @@ local_credentials = Table(
         ForeignKey("accounts.id", ondelete="CASCADE"),
         primary_key=True,
     ),
-    Column("username", Key, nullable=False, unique=True),
     Column("password_hash", Text, nullable=False),
     Column("created_at", Epoch, nullable=False),
     Column("updated_at", Epoch, nullable=False),
-    CheckConstraint(
-        "length(username) BETWEEN 3 AND 64 AND username = lower(username)",
-        name="username",
-    ),
     CheckConstraint("length(password_hash) BETWEEN 80 AND 256", name="password_hash"),
     info={"lifecycle": "durable"},
     sqlite_strict=True,
@@ -237,6 +245,16 @@ external_identities = Table(
     UniqueConstraint(
         "account_id", "provider_id", name="uq_external_identities_account_provider"
     ),
+    ForeignKeyConstraint(
+        ["issuer", "subject", "account_id"],
+        [
+            "external_identity_owners.issuer",
+            "external_identity_owners.subject",
+            "external_identity_owners.account_id",
+        ],
+        name="fk_external_identities_owner",
+        ondelete="CASCADE",
+    ),
     CheckConstraint("length(id) = 36", name="id_uuid").ddl_if(dialect="sqlite"),
     CheckConstraint("length(account_id) = 36", name="account_id_uuid").ddl_if(
         dialect="sqlite"
@@ -250,6 +268,77 @@ external_identities = Table(
     ),
     info={"lifecycle": "durable"},
     sqlite_strict=True,
+)
+
+external_identity_owners = Table(
+    "external_identity_owners",
+    metadata,
+    Column("issuer", Key, primary_key=True),
+    Column("subject", Key, primary_key=True),
+    Column(
+        "account_id",
+        Uuid(),
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    UniqueConstraint(
+        "issuer", "subject", "account_id", name="uq_external_identity_owners_binding"
+    ),
+    CheckConstraint("length(issuer) BETWEEN 1 AND 512", name="issuer"),
+    CheckConstraint("length(subject) BETWEEN 1 AND 255", name="subject"),
+    info={"lifecycle": "durable"},
+    sqlite_strict=True,
+    sqlite_with_rowid=False,
+)
+
+account_login_policy = Table(
+    "account_login_policy",
+    metadata,
+    Column(
+        "account_id",
+        Uuid(),
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("allow_multiple", Flag()),
+    Column("restrict_providers", Flag(), nullable=False, server_default=false()),
+    Column(
+        "sso_lock_provider", Key, ForeignKey("login_providers.id", ondelete="RESTRICT")
+    ),
+    Column("sso_lock_exempt", Flag(), nullable=False, server_default=false()),
+    CheckConstraint(
+        "allow_multiple IS NULL OR allow_multiple IN (0,1)",
+        name="allow_multiple_boolean",
+    ).ddl_if(dialect="sqlite"),
+    CheckConstraint(
+        "restrict_providers IN (0,1)", name="restrict_providers_boolean"
+    ).ddl_if(dialect="sqlite"),
+    CheckConstraint("sso_lock_exempt IN (0,1)", name="sso_lock_exempt_boolean").ddl_if(
+        dialect="sqlite"
+    ),
+    info={"lifecycle": "durable"},
+    sqlite_strict=True,
+    sqlite_with_rowid=False,
+)
+
+account_allowed_login_providers = Table(
+    "account_allowed_login_providers",
+    metadata,
+    Column(
+        "account_id",
+        Uuid(),
+        ForeignKey("account_login_policy.account_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "provider_id",
+        Key,
+        ForeignKey("login_providers.id", ondelete="RESTRICT"),
+        primary_key=True,
+    ),
+    info={"lifecycle": "durable"},
+    sqlite_strict=True,
+    sqlite_with_rowid=False,
 )
 
 account_write_tools = Table(
@@ -665,6 +754,13 @@ account_quotas = Table(
 
 Index("ix_accounts_status_role", accounts.c.status, accounts.c.role)
 Index(
+    "uq_accounts_upn",
+    accounts.c.upn,
+    unique=True,
+    sqlite_where=text("upn <> ''"),
+    postgresql_where=text("upn <> ''"),
+)
+Index(
     "uq_canvas_credentials_primary",
     canvas_credentials.c.account_id,
     unique=True,
@@ -720,3 +816,18 @@ Index(
 )
 Index("ix_web_sessions_account_id", web_sessions.c.account_id)
 Index("ix_web_sessions_expires_at", web_sessions.c.expires_at)
+Index(
+    "ix_external_identities_owner",
+    external_identities.c.issuer,
+    external_identities.c.subject,
+    external_identities.c.account_id,
+)
+Index("ix_external_identity_owners_account_id", external_identity_owners.c.account_id)
+Index(
+    "ix_account_login_policy_sso_lock_provider",
+    account_login_policy.c.sso_lock_provider,
+)
+Index(
+    "ix_account_allowed_login_providers_provider_id",
+    account_allowed_login_providers.c.provider_id,
+)

@@ -64,6 +64,8 @@ payload = {'sealed': [sealed[0], *(base64.b64encode(v).decode() for v in sealed[
            'session': hashlib.sha256(env['ACCOUNT_SESSION_SECRET'].encode()).hexdigest()}
 Path('/data/smoke-seal.json').write_text(json.dumps(payload), encoding='utf-8')
 PY
+# The saved database origin must boot without its original environment seed.
+sed -i '/^PUBLIC_BASE_URL=/d' "$WORK/.env"
 compose up -d --pull never --force-recreate --wait --wait-timeout 120
 compose exec -T canvas-mcp python - <<'PY'
 import base64, hashlib, json, os, stat
@@ -81,8 +83,10 @@ info = Path('/data/runtime-secrets.json').stat()
 assert stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == 10001
 assert 'CANVAS_TOKEN_KEYS' not in os.environ and 'ACCOUNT_SESSION_SECRET' not in os.environ
 assert not any(name.startswith('ENTRA_') for name in os.environ)
+assert 'PUBLIC_BASE_URL' not in os.environ
 runtime = prepare_selfhost(load_selfhost_settings(env))
 try:
+    assert runtime.settings.public_base_url == 'https://mcp.example.com'
     providers = runtime.provider_store
     assert next(p for p in providers.load_snapshot().providers if p.id == 'entra').client_secret == 'smoke-not-a-real-secret-0123456789'
     from canvas_mcp.core.selfhost.login.local_accounts import LocalAccounts
@@ -92,5 +96,5 @@ finally:
     runtime.store.close()
 PY
 compose exec -T canvas-mcp python -m canvas_mcp.core.selfhost.token_admin check
-curl -fsS http://127.0.0.1:8819/.well-known/oauth-authorization-server >/dev/null
+curl -fsS http://127.0.0.1:8819/.well-known/oauth-authorization-server | python -c 'import json,sys; assert json.load(sys.stdin)["issuer"] == "https://mcp.example.com"'
 echo "TWO-FILE COMPOSE TEST PASSED: origin-only boot, HTTP setup and encrypted configuration survive recreation"
