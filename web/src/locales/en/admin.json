@@ -249,6 +249,26 @@
     "connected": "Connected",
     "lastUsed": "Last used"
   },
+  "providerConfig": {
+    "callback": "Callback URL",
+    "callbackHelp": "Register this exact Web callback with your sign-in provider.",
+    "tenant": "Directory (tenant) ID",
+    "issuer": "OpenID Connect issuer",
+    "clientId": "Client ID",
+    "secret": "Client secret",
+    "keepSecret": "A secret is saved. Leave blank to keep it, or enter a replacement.",
+    "newSecret": "Enter the secret value, not its identifier. It will be stored encrypted.",
+    "userRole": "Member app role",
+    "ownerRole": "Owner app role",
+    "scopes": "OpenID Connect scopes",
+    "tokenAuth": "Token endpoint authentication",
+    "discovery": "Use provider discovery",
+    "userinfo": "Verify identity through userinfo",
+    "position": "Sign-in button position",
+    "enabled": "Offer this sign-in method",
+    "save": "Save sign-in configuration",
+    "initialize": "Initialize sign-in"
+  },
   "settings": {
     "title": "Settings",
     "providers": "Sign-in names",

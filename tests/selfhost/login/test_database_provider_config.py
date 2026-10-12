@@ -1,20 +1,26 @@
 """Database-owned provider credentials, independent of environment values."""
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 import pytest
 from sqlalchemy import insert, select, update
 
 from canvas_mcp.core.selfhost.db import schema as s
-from canvas_mcp.core.selfhost.db.sealed import verify
+from canvas_mcp.core.selfhost.db.sealed import rotate, verify
 from canvas_mcp.core.selfhost.db.settings_repo import (
     SettingsAccessDenied,
     SettingsConflict,
 )
 from canvas_mcp.core.selfhost.db.types import new_id
 from canvas_mcp.core.selfhost.login.provider_config import ProviderConfigurationError
+from canvas_mcp.core.selfhost.login.provider_settings import settings_from_database
 from canvas_mcp.core.selfhost.login.provider_store import ProviderConfigStore
+from canvas_mcp.core.selfhost.settings import load_selfhost_settings
 from canvas_mcp.core.selfhost.token_store import Keyring
 
 from .. import test_server_settings
+from ..test_settings import _env
 
 db = test_server_settings.db
 
@@ -248,3 +254,112 @@ def test_disabled_provider_does_not_load_and_db_row_survives_env_reconcile(
         providers.repos.providers.reconcile(conn, ["entra"], now=110)
     assert providers.load_enabled() == ()
     assert providers.list_public()[0]["enabled"] is False
+
+
+def test_concurrent_configuration_saves_have_one_cas_winner(providers, db):
+    save(providers, db)
+    old = revision(db)
+    barrier = Barrier(2)
+
+    def attempt(rank):
+        barrier.wait(timeout=5)
+        try:
+            save(providers, db, revision=old, rank=rank, client_secret=None)
+            return "saved"
+        except SettingsConflict:
+            return "conflict"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt, [1, 2]))
+    assert sorted(results) == ["conflict", "saved"]
+    assert revision(db) == old + 1
+    assert providers.load_enabled()[0].client_secret == SECRET
+    with db.read() as conn:
+        assert len(conn.execute(select(s.audit_log)).all()) == 2
+
+
+def test_registered_key_rotation_preserves_database_provider(providers, db):
+    save(providers, db)
+    rotating = Keyring([("k2", b"2" * 32), ("k1", b"1" * 32)])
+    assert rotate(db, rotating, chunk_size=1) == 1
+    only_new = ProviderConfigStore(db, Keyring([("k2", b"2" * 32)]))
+    assert only_new.load_enabled()[0].client_secret == SECRET
+    with db.read() as conn:
+        assert verify(conn, only_new.keys, all_values=True) == 1
+
+
+def test_ciphertext_cannot_be_copied_to_another_provider(providers, db):
+    for identifier in ("oidc:school", "oidc:other"):
+        providers.save(
+            identifier,
+            config={"issuer": "https://idp.example.edu", "client_id": "web"},
+            client_secret=SECRET,
+            enabled=True,
+            rank=0,
+            revision=revision(db),
+            actor=None,
+            now=100,
+        )
+    with db.write() as conn:
+        source = (
+            conn.execute(
+                select(s.login_providers).where(s.login_providers.c.id == "oidc:school")
+            )
+            .mappings()
+            .one()
+        )
+        conn.execute(
+            update(s.login_providers)
+            .where(s.login_providers.c.id == "oidc:other")
+            .values(
+                secret_key_id=source["secret_key_id"],
+                secret_nonce=source["secret_nonce"],
+                secret_ciphertext=source["secret_ciphertext"],
+            )
+        )
+    with pytest.raises(ProviderConfigurationError):
+        providers.load_enabled()
+
+
+def test_empty_snapshot_retains_revision_without_an_environment_fallback(providers, db):
+    snapshot = providers.load_snapshot()
+    assert snapshot.revision == revision(db) and snapshot.providers == ()
+    infrastructure = load_selfhost_settings(_env())
+    settings = settings_from_database(infrastructure, snapshot)
+    assert settings.login_providers.order == ()
+    assert settings.tenant_id == settings.client_id == settings.client_secret == ""
+
+
+def test_database_snapshot_replaces_infrastructure_provider_credentials(providers, db):
+    save(
+        providers,
+        db,
+        config={**CONFIG, "required_role": "School.User", "owner_role": "School.Owner"},
+    )
+    snapshot = providers.load_snapshot()
+    infrastructure = load_selfhost_settings(
+        _env(ENTRA_CLIENT_SECRET="stale-environment-client-secret")
+    )
+    settings = settings_from_database(infrastructure, snapshot)
+    assert snapshot.revision == revision(db)
+    assert settings.client_secret == SECRET
+    assert (
+        settings.required_role == "School.User"
+        and settings.owner_role == "School.Owner"
+    )
+    assert settings.access_policy.owner_rules[0].value == "School.Owner"
+
+
+def test_changing_owner_role_requires_another_usable_owner_path(providers, db):
+    save(providers, db)
+    owner = add_account(db)
+    old = revision(db)
+    with pytest.raises(ProviderConfigurationError, match="last_owner"):
+        save(
+            providers,
+            db,
+            config={**CONFIG, "owner_role": "New.Owner"},
+            actor=owner,
+            client_secret=None,
+        )
+    assert revision(db) == old

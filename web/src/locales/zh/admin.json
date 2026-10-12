@@ -249,6 +249,26 @@
     "connected": "连接于",
     "lastUsed": "最近使用"
   },
+  "providerConfig": {
+    "callback": "回调地址",
+    "callbackHelp": "在登录服务商处注册这个准确的 Web 回调地址。",
+    "tenant": "目录（租户）ID",
+    "issuer": "OpenID Connect 颁发者地址",
+    "clientId": "客户端 ID",
+    "secret": "客户端密钥",
+    "keepSecret": "密钥已保存。留空保留原值，填写新值则替换。",
+    "newSecret": "填写密钥值，而不是密钥标识。密钥将加密保存。",
+    "userRole": "成员应用角色",
+    "ownerRole": "管理员应用角色",
+    "scopes": "OpenID Connect 权限范围",
+    "tokenAuth": "Token 端点认证方式",
+    "discovery": "使用服务商发现配置",
+    "userinfo": "通过 userinfo 验证身份",
+    "position": "登录按钮位置",
+    "enabled": "启用此登录方式",
+    "save": "保存登录配置",
+    "initialize": "初始化登录"
+  },
   "settings": {
     "title": "设置",
     "providers": "登录名称",

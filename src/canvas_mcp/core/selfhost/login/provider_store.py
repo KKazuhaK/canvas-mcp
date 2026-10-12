@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import Connection, exists, select, update
 
 from ..config_store import ConfigStore
 from ..db import schema as s
@@ -19,6 +20,12 @@ from .provider_config import (
 )
 
 _SEALED = next(entry for entry in SEALED if entry.table is s.login_providers)
+
+
+@dataclass(frozen=True)
+class ProviderSnapshot:
+    revision: int
+    providers: tuple[ProviderConfiguration, ...]
 
 
 class ProviderConfigStore:
@@ -68,13 +75,61 @@ class ProviderConfigStore:
             ) from None
 
     def load_enabled(self) -> tuple[ProviderConfiguration, ...]:
+        return self.load_snapshot().providers
+
+    def load_snapshot(self) -> ProviderSnapshot:
+        """Read credentials and their revision in one SQL statement snapshot."""
         with self.database.read() as conn:
-            rows = conn.execute(
-                select(s.login_providers)
-                .where(s.login_providers.c.configured)
-                .order_by(s.login_providers.c.sort_rank, s.login_providers.c.id)
-            ).mappings()
-            return tuple(self._decode(row) for row in rows)
+            rows = (
+                conn.execute(
+                    select(s.server_state.c.settings_revision, s.login_providers)
+                    .select_from(
+                        s.server_state.outerjoin(
+                            s.login_providers, s.login_providers.c.configured
+                        )
+                    )
+                    .where(s.server_state.c.id == 1)
+                    .order_by(s.login_providers.c.sort_rank, s.login_providers.c.id)
+                )
+                .mappings()
+                .all()
+            )
+            if not rows:
+                raise ProviderConfigurationError("provider_configuration_unavailable")
+            return ProviderSnapshot(
+                int(rows[0]["settings_revision"]),
+                tuple(self._decode(row) for row in rows if row["id"] is not None),
+            )
+
+    @staticmethod
+    def setup_available_in(conn: Connection) -> bool:
+        """A DB-owned row is a durable marker, even after provider disablement."""
+        initialized = exists(
+            select(s.login_providers.c.id).where(
+                (s.login_providers.c.config_source == "db")
+                | s.login_providers.c.configured
+            )
+        ) | exists(select(s.accounts.c.id))
+        return not bool(conn.execute(select(initialized)).scalar_one())
+
+    def setup_available(self) -> bool:
+        with self.database.read() as conn:
+            return self.setup_available_in(conn)
+
+    def initialize(
+        self, *, config: object, client_secret: object, revision: int, now: int
+    ) -> int:
+        return self.save(
+            "entra",
+            config=config,
+            client_secret=client_secret,
+            enabled=True,
+            rank=0,
+            revision=revision,
+            actor=None,
+            now=now,
+            _initial=True,
+        )
 
     def save(
         self,
@@ -87,6 +142,7 @@ class ProviderConfigStore:
         revision: int,
         actor: str | None,
         now: int,
+        _initial: bool = False,
     ) -> int:
         value = validate_provider(identifier, config, client_secret)
         if (
@@ -96,6 +152,8 @@ class ProviderConfigStore:
         ):
             raise ProviderConfigurationError()
         with self.database.write() as conn:
+            if _initial and not self.setup_available_in(conn):
+                raise ProviderConfigurationError("installation_already_initialized")
             new_revision = ConfigStore._authorize(conn, actor, revision, now)
             old = (
                 conn.execute(
@@ -142,6 +200,18 @@ class ProviderConfigStore:
                 active != current
                 and self.repos.accounts.count_active_owners(conn) > 0
                 and not self.repos.accounts.count_usable_owners(conn, sorted(active))
+            ):
+                raise ProviderConfigurationError("last_owner")
+            if (
+                identifier == "entra"
+                and old is not None
+                and old["config"]
+                and old["config"].get("owner_role", "Canvas.Owner")
+                != value.config["owner_role"]
+                and self.repos.accounts.count_active_owners(conn) > 0
+                and not self.repos.accounts.count_usable_owners(
+                    conn, sorted(active - {"entra"})
+                )
             ):
                 raise ProviderConfigurationError("last_owner")
             self.repos.providers.ensure(conn, identifier, now=now)
