@@ -81,18 +81,31 @@ def _refuse_existing_database(env: Mapping[str, str]) -> None:
     from .db.url import parse_database_url
 
     try:
+        data_dir = _path(env).parent
+        try:
+            data_info = data_dir.stat()
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISDIR(data_info.st_mode):
+                raise OSError
         target = parse_database_url(
             env.get("DATABASE_URL", ""),
-            _path(env).parent,
+            data_dir,
             allow_external_sqlite=env.get(
                 "DATABASE_ALLOW_SQLITE_OUTSIDE_DATA_DIR", ""
             ).lower()
             in {"true", "1", "yes"},
         )
         if target.sqlite_path is not None:
-            exists = (
-                target.sqlite_path.exists() and target.sqlite_path.stat().st_size > 0
-            )
+            try:
+                info = target.sqlite_path.stat()
+            except FileNotFoundError:
+                exists = False
+            else:
+                if not stat.S_ISREG(info.st_mode):
+                    raise OSError
+                exists = info.st_size > 0
         else:
             from sqlalchemy import inspect
 

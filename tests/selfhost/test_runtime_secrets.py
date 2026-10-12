@@ -81,7 +81,7 @@ def test_file_in_place_of_data_directory_is_not_a_saved_secret_file(tmp_path):
     blocker.write_text("retained", encoding="utf-8")
     env = minimal(blocker)
     assert with_saved_secrets(env) == env
-    with pytest.raises(RuntimeSecretsError, match="Cannot save runtime secrets"):
+    with pytest.raises(RuntimeSecretsError, match="Cannot verify"):
         initialize_secrets(env)
     assert blocker.read_text(encoding="utf-8") == "retained"
 
@@ -119,6 +119,60 @@ def test_missing_keys_on_existing_sqlite_do_not_generate_a_new_identity(tmp_path
     with pytest.raises(RuntimeSecretsError, match="existing database"):
         initialize_secrets(minimal(tmp_path))
     assert database.read_bytes() == b"existing database"
+    assert not (tmp_path / SECRETS_FILE).exists()
+
+
+def test_inaccessible_sqlite_metadata_never_generates_keys(tmp_path, monkeypatch):
+    database = tmp_path / "canvas-mcp" / "tokens.sqlite3"
+    database.parent.mkdir()
+    database.write_bytes(b"existing database")
+    original_stat = os.stat
+    original_exists = Path.exists
+
+    def denied_stat(path, *args, **kwargs):
+        if not isinstance(path, int) and Path(path) == database:
+            raise PermissionError("private path must not be reported")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", denied_stat)
+    # exists() treats an inaccessible path as absent; stat() must preserve the error.
+    # Windows has a native exists implementation, so pin this portable contract.
+    monkeypatch.setattr(
+        Path,
+        "exists",
+        lambda path: False if path == database else original_exists(path),
+    )
+    with pytest.raises(RuntimeSecretsError, match="Cannot verify") as error:
+        initialize_secrets(minimal(tmp_path))
+    assert "private path" not in str(error.value)
+    assert not (tmp_path / SECRETS_FILE).exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory permissions")
+def test_real_inaccessible_sqlite_directory_preserves_the_original_database(tmp_path):
+    if os.getuid() == 0:
+        pytest.skip("root bypasses directory permission checks")
+    directory = tmp_path / "canvas-mcp"
+    directory.mkdir()
+    database = directory / "tokens.sqlite3"
+    database.write_bytes(b"existing database")
+    directory.chmod(0o000)
+    try:
+        with pytest.raises(RuntimeSecretsError, match="Cannot verify"):
+            initialize_secrets(minimal(tmp_path))
+        assert not (tmp_path / SECRETS_FILE).exists()
+    finally:
+        directory.chmod(0o700)
+    assert database.read_bytes() == b"existing database"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX FIFO database path")
+def test_nonregular_database_path_never_generates_keys(tmp_path):
+    database = tmp_path / "canvas-mcp" / "tokens.sqlite3"
+    database.parent.mkdir()
+    os.mkfifo(database, 0o600)
+    with pytest.raises(RuntimeSecretsError, match="Cannot verify"):
+        initialize_secrets(minimal(tmp_path))
     assert not (tmp_path / SECRETS_FILE).exists()
 
 
