@@ -265,7 +265,7 @@ def test_all_lifecycle_tables_copy_native_types_and_sequences_and_skip_ephemeral
             state["compat_floor"],
             state["jwt_epoch"],
             state["settings_revision"],
-        ) == (1, 17, 13)
+        ) == (2, 17, 13)
         assert verify(dst, ring, all_values=True) == 3
         assert (
             dst.execute(

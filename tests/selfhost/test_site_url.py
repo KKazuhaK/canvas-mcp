@@ -15,7 +15,7 @@ from canvas_mcp.core.selfhost.settings import (
 )
 from canvas_mcp.core.selfhost.site_url import SITE_URL_KEY, validate_site_url
 
-from .authz.stack import BASE, default_env
+from .authz.stack import BASE, SESSION_SECRET, TOKEN_KEYS
 from .authz.test_authz_schema import _grant_fields
 from .login.test_database_login_api import installation
 from .login.test_local_accounts import PASSWORD, initialize, login
@@ -23,12 +23,24 @@ from .login.test_local_accounts import PASSWORD, initialize, login
 NEW_BASE = "https://new.canvas.example.test"
 
 
+def restart_environment(runtime):
+    # The stack factory resets PostgreSQL public; a restart must retain its data.
+    return {
+        "PUBLIC_BASE_URL": BASE,
+        "DATABASE_URL": runtime.settings.database_target.url,
+        "SELFHOST_DATA_DIR": str(runtime.settings.data_dir),
+        "ACCOUNT_WEB_DIST": str(runtime.settings.account_web_dist),
+        "ACCOUNT_SESSION_SECRET": SESSION_SECRET,
+        "CANVAS_TOKEN_KEYS": TOKEN_KEYS,
+    }
+
+
 def test_first_start_adopts_origin_once_and_restart_can_omit_environment_value(
     tmp_path,
 ):
     with installation(tmp_path) as (client, runtime, code):
         assert initialize(client, code).status_code == 200
-        environment = default_env(tmp_path)
+        environment = restart_environment(runtime)
         environment.pop("PUBLIC_BASE_URL")
         assert load_selfhost_settings(environment).public_base_url == BASE
         environment["PUBLIC_BASE_URL"] = "http://ignored-invalid-environment"
@@ -135,7 +147,7 @@ def test_owner_save_invalidates_credentials_and_restart_uses_database_origin(tmp
         assert login(client).status_code == 503
         with pytest.raises(StoreUnavailable):
             runtime.snapshots.get(response.json()["revision"])
-        environment = default_env(tmp_path)
+        environment = restart_environment(runtime)
         environment.pop("PUBLIC_BASE_URL")
         restarted = prepare_selfhost(load_selfhost_settings(environment))
         try:
@@ -176,7 +188,7 @@ def test_invalid_stored_value_cannot_fall_back_to_environment(tmp_path):
                 .values(value="http://invalid")
             )
         with pytest.raises(SelfhostConfigError, match="site address"):
-            load_selfhost_settings(default_env(tmp_path))
+            load_selfhost_settings(restart_environment(runtime))
 
 
 def test_generic_save_and_reset_cannot_bypass_site_address_revocation(tmp_path):

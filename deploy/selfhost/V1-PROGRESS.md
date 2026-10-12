@@ -159,6 +159,16 @@ account through its saved mail-style provider login name after account UPN renam
 81 account-policy/link-store checks passed. A new exact-head full matrix is
 required for that last runtime correction before publication.
 
+The full PostgreSQL latest run passed 4,329 checks and exposed four fixture
+failures: restarting via the whole-stack environment factory reset PostgreSQL
+public, and transfer still expected compatibility floor 1. Restart checks now
+reuse the running database target without resetting it, and transfer asserts
+floor 2. Focused SQLite checks passed 20 tests with seven PostgreSQL-only skips.
+CI runs the account/transfer/origin checks first on both PostgreSQL dependency
+sets, followed by the unchanged full suite. The job allowance is 30 minutes;
+an earlier slower runner reached the former 20-minute limit, while the complete
+latest result took 15 minutes. Final exact-head CI remains the publication gate.
+
 ## Historical checkpoints
 
 The sections below retain dated development checkpoints. Their earlier

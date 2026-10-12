@@ -250,7 +250,7 @@ jobs:
   # a throwaway that only exists inside this job's private service container.
   test-postgres:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -305,6 +305,18 @@ jobs:
         python -m pip install --upgrade pip
         python -m pip install -e ".[documents,selfhost,postgres]"
         python -m pip install pytest pytest-asyncio pyyaml respx
+
+    - name: Verify the account contract and persisted origin before the full suite
+      env:
+        TEST_DEPENDENCIES: ${{ matrix.dependencies }}
+      run: |
+        set -euo pipefail
+        checks=(tests/selfhost/test_v1_migrate.py tests/selfhost/test_transfer_v1.py tests/selfhost/test_site_url.py tests/selfhost/login/test_account_login_policy.py tests/selfhost/login/test_account_policy_api.py)
+        if [[ "$TEST_DEPENDENCIES" == locked ]]; then
+          uv run --locked pytest "${checks[@]}" -q -p no:cacheprovider
+        else
+          python -m pytest "${checks[@]}" -q -p no:cacheprovider
+        fi
 
     - name: Run the lock-pinned self-hosted tests on PostgreSQL
       if: matrix.dependencies == 'locked'
