@@ -82,7 +82,9 @@ Automatic email association requires all of:
 
 Enabling this switch declares operator trust in that provider's matching claims.
 Entra can match its supplied email or UPN; Google and custom OIDC can match their
-configured email claim. No additional mailbox challenge or user confirmation is
+configured email claim. Matching also recognizes saved provider mail-style login
+names, so a Google sign-in can find an existing Entra account after its account
+UPN was renamed. No additional mailbox challenge or user confirmation is
 required for automatic association. This trust policy does not rewrite the
 protocol's `email_verified` claim. Without the instance opt-in, email or UPN alone
 never enters another account. Google-first, Entra-second sign-in with matching

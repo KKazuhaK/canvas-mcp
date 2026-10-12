@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from sqlalchemy import Connection, func, or_, select
+from sqlalchemy import Connection, false, func, or_, select
 
 from ..accounts import ExternalClaims
 from ..db import schema as s
@@ -134,14 +134,19 @@ def association_name(conn: Connection, ext: ExternalClaims) -> str | None:
 
 
 def matching_accounts(conn: Connection, name: str) -> list[str]:
-    """Match one account name or reported email; never choose among duplicates."""
-    email_match = select(s.external_identities.c.account_id).where(
-        func.lower(s.external_identities.c.email) == name
+    """Match UPN or provider mail-style claims; never choose among duplicates."""
+    claim_match = select(s.external_identities.c.account_id).where(
+        or_(
+            func.lower(s.external_identities.c.email) == name,
+            (func.lower(s.external_identities.c.username) == name)
+            if email_name(name) is not None
+            else false(),
+        )
     )
     return list(
         conn.execute(
             select(s.accounts.c.id)
-            .where(or_(s.accounts.c.upn == name, s.accounts.c.id.in_(email_match)))
+            .where(or_(s.accounts.c.upn == name, s.accounts.c.id.in_(claim_match)))
             .order_by(s.accounts.c.id)
         ).scalars()
     )

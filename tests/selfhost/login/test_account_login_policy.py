@@ -73,6 +73,33 @@ def test_custom_oidc_instances_have_independent_switches(store):
     )
 
 
+def test_google_can_associate_to_existing_entra_upn_after_account_upn_rename(store):
+    from canvas_mcp.core.selfhost.login.account_names import AccountNames
+
+    ext = acc.ExternalClaims(
+        provider_id="entra",
+        issuer=acc.entra_issuer("11111111-2222-3333-4444-555555555555"),
+        subject="existing-object",
+        username="G@Example.Test",
+    )
+    first = signin(store, ext)
+    key = first.status.principal_key
+    AccountNames(store._db).save(
+        "chosen.account.upn",
+        account_id=key,
+        expected_epoch=first.status.session_epoch,
+        now=2,
+    )
+    enable(store, "google", True)
+    second = signin(store, google())
+    assert second.status.principal_key == key and not second.created
+    assert {identity.provider_id for identity in store.list_identities(key)} == {
+        "entra",
+        "google",
+    }
+    assert AccountNames(store._db).read(key)["upn"] == "chosen.account.upn"
+
+
 @pytest.mark.parametrize("restriction", ["lock", "allowlist", "multiple"])
 def test_account_restrictions_precede_automatic_association(store, restriction):
     first = signin(store, google())

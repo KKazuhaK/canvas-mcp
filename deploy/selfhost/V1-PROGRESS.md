@@ -153,6 +153,12 @@ backend-only skips, and the real-graph migration suite passed all 19 checks.
 Native PostgreSQL and final Docker CI remain required; superseded failed runs
 were cancelled after recording their failures.
 
+Both native architectures then passed actual SQLite and PostgreSQL Docker smoke.
+The final association regression also covers Google entering an existing Entra
+account through its saved mail-style provider login name after account UPN rename;
+81 account-policy/link-store checks passed. A new exact-head full matrix is
+required for that last runtime correction before publication.
+
 ## Historical checkpoints
 
 The sections below retain dated development checkpoints. Their earlier
