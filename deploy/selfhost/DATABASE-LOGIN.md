@@ -18,18 +18,35 @@ secret is present; leaving its field unchanged preserves the saved value.
 
 ## Initial installation
 
-An unconfigured installation starts healthy and serves a protected setup
-screen at `/account/setup`. It offers the default Entra registration fields
-and the exact callback URL. A private random setup code, available to the
-server operator, authorizes the first save. Origin, content type, body size
-and rate-limit checks apply. Knowing the public URL alone cannot initialize
-the service. A durable installation marker prevents restart or disabling
-providers from reopening setup.
+An unconfigured installation starts healthy and serves `/account/setup`.
+A private random installation code from the container logs authorizes creation
+of a local administrator. Username and password are required; Entra, Google,
+GitHub or generic OIDC can optionally be configured on the same screen. The
+owner can add, enable and disable providers later in Settings. Knowing the
+public URL alone cannot initialize the service. Origin, content type, body size,
+rate limits and a database revision CAS protect initialization; account,
+credential, provider registration and audit changes commit together. A durable
+installation marker prevents setup reopening on restart or provider disablement.
 
-The setup save stores Entra configuration and a sealed secret atomically.
-Normal Entra app-role admission follows: `Canvas.Owner` for the owner and
-`Canvas.User` for guests. Setup possession does not grant an arbitrary
-visitor owner status. Owner recovery remains an explicit operator action.
+Local passwords are salted scrypt hashes (N=131072, r=8, p=1), never plaintext
+or recoverable encryption. Local identities use opaque account UUID subjects,
+with separate unique case-insensitive usernames. The `local_credentials` table
+is the twentieth business table, added by the isolated `0002_local_credentials`
+expand revision; the original nineteen-table baseline stays frozen. Existing
+accounts and ciphertext remain unchanged on SQLite and PostgreSQL.
+
+There is no public local registration. A freshly signed-in owner can create
+active regular accounts. Local login uses the same sealed cookie, account
+standing, session epoch, consent and MCP authorization paths as external login.
+Password changes require the current password and CSRF/Origin checks, and
+atomically end existing sessions, unconsumed codes and connected app grants.
+Provider disablement and the last usable owner rule also apply to local login.
+External identities never merge by username or email. Local credentials cannot
+be linked through the external OAuth ceremony.
+
+Without explicit admission policy overrides, installations with local login and
+no Entra use approval for new external users. Entra retains app-role admission
+when enabled. Explicit operator policies continue to apply unchanged.
 
 ## Administration and runtime
 

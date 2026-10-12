@@ -185,6 +185,29 @@ accounts = Table(
     postgresql_with={"fillfactor": 90},
 )
 
+local_credentials = Table(
+    "local_credentials",
+    metadata,
+    Column(
+        "account_id",
+        Uuid(),
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("username", Key, nullable=False, unique=True),
+    Column("password_hash", Text, nullable=False),
+    Column("created_at", Epoch, nullable=False),
+    Column("updated_at", Epoch, nullable=False),
+    CheckConstraint(
+        "length(username) BETWEEN 3 AND 64 AND username = lower(username)",
+        name="username",
+    ),
+    CheckConstraint("length(password_hash) BETWEEN 80 AND 256", name="password_hash"),
+    info={"lifecycle": "durable"},
+    sqlite_strict=True,
+    sqlite_with_rowid=False,
+)
+
 external_identities = Table(
     "external_identities",
     metadata,

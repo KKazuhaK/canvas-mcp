@@ -47,7 +47,8 @@ status = api('GET')
 assert status['initialized'] is False
 code = json.loads(Path('/data/installation-code.json').read_text())['code']
 api('POST', {'revision': status['revision'], 'code': code,
-    'config': {'tenant_id': '11111111-2222-3333-4444-555555555555', 'client_id': 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'},
+    'local_account': {'username': 'admin', 'password': 'smoke-local-password-0123456789'},
+    'provider_id': 'entra', 'config': {'tenant_id': '11111111-2222-3333-4444-555555555555', 'client_id': 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'},
     'client_secret': 'smoke-not-a-real-secret-0123456789'})
 assert api('GET')['initialized'] is True
 PY
@@ -83,7 +84,9 @@ assert not any(name.startswith('ENTRA_') for name in os.environ)
 runtime = prepare_selfhost(load_selfhost_settings(env))
 try:
     providers = runtime.provider_store
-    assert providers.load_snapshot().providers[0].client_secret == 'smoke-not-a-real-secret-0123456789'
+    assert next(p for p in providers.load_snapshot().providers if p.id == 'entra').client_secret == 'smoke-not-a-real-secret-0123456789'
+    from canvas_mcp.core.selfhost.login.local_accounts import LocalAccounts
+    assert LocalAccounts(providers).authenticate('admin', 'smoke-local-password-0123456789', now=1800000000).role == 'owner'
     assert not providers.setup_available()
 finally:
     runtime.store.close()

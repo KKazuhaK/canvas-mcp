@@ -88,6 +88,7 @@ from .config_snapshot import CURRENT_CONFIG
 from .config_store import ConfigStore, SchoolRemovalConfirmation
 from .db.settings_repo import SettingsAccessDenied, SettingsConflict
 from .db.workers import run_store
+from .login.local_accounts import LocalAccounts
 from .login.provider_config import ProviderConfigurationError
 from .login.runtime_config import CURRENT_LOGIN
 from .pagination import DEFAULT_LIMIT, decode_cursor, page_limit
@@ -165,6 +166,9 @@ ERROR_STATUS: Mapping[str, int] = {
     "installation_code_invalid": 403,
     "provider_configuration_unavailable": 503,
     "installation_authority_unavailable": 503,
+    "invalid_local_credentials": 422,
+    "local_username_taken": 409,
+    "local_login_failed": 401,
 }
 API_ERROR_CODES = frozenset(ERROR_STATUS)
 
@@ -386,6 +390,29 @@ class ApiApp:
         """Every (path, {method: endpoint}) of the API."""
         e = _Endpoint
         return [
+            (
+                f"{API_PREFIX}/login/local",
+                {
+                    "POST": e(
+                        self.local_login, access="public", mutating=True, body="json"
+                    )
+                },
+            ),
+            (
+                f"{API_PREFIX}/me/password",
+                {"PUT": e(self.local_password, mutating=True, body="json")},
+            ),
+            (
+                f"{API_PREFIX}/admin/local-accounts",
+                {
+                    "POST": e(
+                        self.create_local_account,
+                        access="owner",
+                        mutating=True,
+                        body="json",
+                    )
+                },
+            ),
             (
                 f"{API_PREFIX}/setup",
                 {
@@ -670,6 +697,10 @@ class ApiApp:
                     else "provider_configuration_unavailable"
                 )
                 return self._error(_Fail(code))
+            except SettingsConflict:
+                return self._error(_Fail("settings_conflict"))
+            except SettingsAccessDenied:
+                return self._error(_Fail("forbidden"))
             except TokenStoreError as exc:
                 logger.error("account api store failure: %s", type(exc).__name__)
                 return self._error(_Fail("token_store_unavailable"))
@@ -1332,13 +1363,41 @@ class ApiApp:
             raise _Fail("not_found")
         if not self.app.installation_limiter.allow(("installation",)):
             raise _Fail("rate_limited", {"retry_after_s": 600})
-        body, revision = self._settings_body(
-            ctx, {"revision", "code", "config", "client_secret"}
-        )
+        fields = {"revision", "code", "config", "client_secret"}
+        if "local_account" in (ctx.body or {}):
+            fields = {"revision", "code", "local_account"}
+            if "provider_id" in (ctx.body or {}):
+                fields |= {"provider_id", "config", "client_secret"}
+        body, revision = self._settings_body(ctx, fields)
         if not await run_store(providers.setup_available):
             raise _Fail("installation_already_initialized")
         if not await run_store(authority.verify, body["code"]):
             raise _Fail("installation_code_invalid")
+        if "local_account" in body:
+            from .login.local_accounts import LocalAccounts
+
+            local = body["local_account"]
+            if not isinstance(local, dict) or set(local) != {"username", "password"}:
+                raise _invalid("local_account")
+            extra = None
+            if "provider_id" in body:
+                if body["provider_id"] == "local":
+                    raise _invalid("provider_id")
+                extra = {
+                    "id": body["provider_id"],
+                    "config": body["config"],
+                    "client_secret": body["client_secret"],
+                }
+            await self._save_provider_config(
+                lambda: LocalAccounts(providers).initialize(
+                    name=local["username"],
+                    password=local["password"],
+                    revision=revision,
+                    now=int(self.app.clock()),
+                    provider=extra,
+                )
+            )
+            return self._ok({"redirect_to": "/account/sign-in"})
         await self._save_provider_config(
             lambda: providers.initialize(
                 config=body["config"],
@@ -1348,6 +1407,105 @@ class ApiApp:
             )
         )
         return self._ok({"redirect_to": "/auth/login/entra"})
+
+    def _local_accounts(self) -> LocalAccounts:
+        from .login.local_accounts import LocalAccounts
+
+        if self.app.provider_store is None:
+            raise _Fail("not_found")
+        return LocalAccounts(self.app.provider_store)
+
+    async def local_login(self, ctx: _Ctx) -> Response:
+        from .accounts import ExternalClaims
+        from .identity import SignIn
+        from .login.local_accounts import LOCAL_ISSUER
+
+        body = ctx.body or {}
+        if set(body) - {"username", "password", "txn", "return_to"} or not {
+            "username",
+            "password",
+        } <= set(body):
+            raise _invalid("username")
+        name = _text(body, "username", max_chars=64)
+        password = _text(body, "password", max_chars=128)
+        if not self.app.local_login_limiter.allow(
+            ("local",)
+        ) or not self.app.local_user_limiter.allow((name.strip().lower(),)):
+            raise _Fail("rate_limited", {"retry_after_s": 600})
+        txn = body.get("txn")
+        waiting = None
+        if txn is not None:
+            if not isinstance(txn, str) or web._TXN_ID_RE.fullmatch(txn) is None:
+                raise _Fail("authorization_invalid")
+            if not await self.app.authz.consent.txn_open(
+                txn, ctx.request.cookies.get(self.app.authz.binding_cookie)
+            ):
+                raise _Fail("authorization_invalid")
+            waiting = txn
+        account = await run_store(
+            lambda: self._local_accounts().authenticate(
+                name, password, now=int(self.app.clock())
+            )
+        )
+        status = await run_store(self.app.store.get_principal_status, account.id)
+        if not status.active or status.session_epoch != account.session_epoch:
+            raise _Fail("local_login_failed")
+        ext = ExternalClaims(
+            "local",
+            LOCAL_ISSUER,
+            account.id,
+            display_name=account.display_name,
+            username=name,
+        )
+        outcome = SignIn(
+            status, ext, status.role == "owner" and status.role_source != "rules", False
+        )
+        completed = self.app._complete_sign_in(
+            outcome,
+            now=self.app.clock(),
+            waiting=waiting,
+            return_to=body.get("return_to"),
+        )
+        response = self._ok({"redirect_to": completed.headers["location"]})
+        response.raw_headers.extend(
+            (key, value) for key, value in completed.raw_headers if key == b"set-cookie"
+        )
+        return response
+
+    async def local_password(self, ctx: _Ctx) -> Response:
+        body = ctx.body or {}
+        if set(body) != {"current_password", "new_password"}:
+            raise _invalid("new_password")
+        assert ctx.session is not None
+        account_id = ctx.session.acct
+        if not self.app.local_user_limiter.allow(("password", account_id)):
+            raise _Fail("rate_limited", {"retry_after_s": 600})
+        await run_store(
+            lambda: self._local_accounts().change_password(
+                account_id,
+                body["current_password"],
+                body["new_password"],
+                now=int(self.app.clock()),
+            )
+        )
+        response = self._ok({"redirect_to": "/account/sign-in"})
+        self.app.clear_cookie(response, web.SESSION_COOKIE)
+        return response
+
+    async def create_local_account(self, ctx: _Ctx) -> Response:
+        body, revision = self._settings_body(ctx, {"revision", "username", "password"})
+        assert ctx.session is not None
+        actor = ctx.session.acct
+        account, revision = await run_store(
+            lambda: self._local_accounts().create(
+                name=body["username"],
+                password=body["password"],
+                actor=actor,
+                revision=revision,
+                now=int(self.app.clock()),
+            )
+        )
+        return self._ok({"account_id": account, "revision": revision})
 
     async def login_provider_settings(self, ctx: _Ctx) -> Response:
         providers = self.app.provider_store
@@ -2103,7 +2261,11 @@ class ApiApp:
                     }
                     for v in views
                 ],
-                "linkable": [e.id for e in logins.entries() if e.id not in linked],
+                "linkable": [
+                    e.id
+                    for e in logins.entries()
+                    if e.id not in linked and e.id != "local"
+                ],
                 "fresh": self.app._signed_in_recently(session),
                 "fresh_window_s": FRESH_WINDOW_SECONDS,
             }

@@ -5,13 +5,15 @@ from threading import Barrier
 
 import pytest
 from dbbackend import IS_POSTGRES, pg_database
-from sqlalchemy import inspect, text
+from sqlalchemy import insert, inspect, select, text
 
 from canvas_mcp.core.selfhost.db import schema
 from canvas_mcp.core.selfhost.db.engine import Database
 from canvas_mcp.core.selfhost.db.errors import TokenStoreError
 from canvas_mcp.core.selfhost.db.migrations import baseline_v1
 from canvas_mcp.core.selfhost.db.migrations import runner as migrate
+from canvas_mcp.core.selfhost.db.repos import Repositories
+from canvas_mcp.core.selfhost.db.types import new_id
 
 
 @pytest.fixture
@@ -28,9 +30,9 @@ def db(tmp_path):
         made.dispose()
 
 
-def test_graph_is_one_frozen_revision_and_metadata_matches_real_upgrade(db):
-    assert migrate.known_revisions() == {"0001_v1_baseline"}
-    assert migrate.head_revision() == baseline_v1.BASELINE_REVISION
+def test_graph_preserves_frozen_baseline_and_metadata_matches_real_upgrade(db):
+    assert migrate.known_revisions() == {"0001_v1_baseline", "0002_local_credentials"}
+    assert migrate.head_revision() == "0002_local_credentials"
     assert migrate.current(db).state == migrate.STATE_UNINITIALIZED
     migrate.ensure_ready(db)
     first = migrate.current(db)
@@ -50,6 +52,49 @@ def test_auto_migrate_off_does_not_partially_create_a_database(db):
         migrate.ensure_ready(db, auto=False)
     with db.read() as conn:
         assert inspect(conn).get_table_names() == []
+
+
+def test_beta5_upgrade_preserves_accounts_provider_ciphertext_and_database_identity(db):
+    account_id = new_id()
+    with db.row_write() as conn:
+        migrate._apply(conn, "0001_v1_baseline")
+        Repositories(db.kind).accounts.insert(
+            conn,
+            account_id=account_id,
+            status="active",
+            role="owner",
+            role_source="bootstrap",
+            admitted_via="bootstrap",
+            display_name="Owner",
+            now=1,
+        )
+        conn.execute(
+            insert(schema.login_providers).values(
+                id="entra",
+                protocol="entra",
+                configured=True,
+                config_source="db",
+                config={"client_id": "preserved-client"},
+                secret_key_id="k1",
+                secret_nonce=b"n" * 12,
+                secret_ciphertext=b"old encrypted secret",
+                created_at=1,
+                updated_at=1,
+            )
+        )
+        accounts = conn.execute(select(schema.accounts)).all()
+        providers = conn.execute(select(schema.login_providers)).all()
+    before = migrate.current(db)
+    assert before.state == migrate.STATE_BEHIND
+    migrate.ensure_ready(db)
+    after = migrate.current(db)
+    assert after.state == migrate.STATE_CURRENT
+    assert after.database_id == before.database_id
+    with db.read() as conn:
+        assert conn.execute(select(schema.accounts)).all() == accounts
+        assert conn.execute(select(schema.login_providers)).all() == providers
+        assert conn.execute(select(schema.local_credentials)).all() == []
+        assert migrate.compare_schema(conn) == []
 
 
 @pytest.mark.parametrize(

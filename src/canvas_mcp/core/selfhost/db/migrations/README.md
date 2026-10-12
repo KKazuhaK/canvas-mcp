@@ -4,6 +4,12 @@ Keep all schema upgrade, migration, backup and database transfer code in this
 package. Application repositories and the normal connection pool must not
 contain DDL upgrades, legacy data adapters or foreign-key-off connections.
 
+`0001_v1_baseline` remains the frozen nineteen-table baseline.
+`0002_local_credentials` is an additive twentieth table for salted password
+hashes. Automatic upgrade preserves existing accounts, sealed provider/Canvas
+credentials and the database identity. Existing installations do not gain a
+default password or reopen first-install setup.
+
 The two-file container deployment saves its automatically generated encryption
 and session keys in `/data/runtime-secrets.json`. Back up and restore this private
 file together with the database. A SQL-only backup does not include it. Keep any

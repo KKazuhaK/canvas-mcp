@@ -7,6 +7,9 @@ import type { ApiErrorCode, ErrorParams } from './types'
 // server's own code lists.
 const CODE_SET: Record<ApiErrorCode, true> = {
   invalid_provider_configuration: true,
+  invalid_local_credentials: true,
+  local_username_taken: true,
+  local_login_failed: true,
   provider_secret_required: true,
   provider_identity_binding_changed: true,
   too_many_providers: true,

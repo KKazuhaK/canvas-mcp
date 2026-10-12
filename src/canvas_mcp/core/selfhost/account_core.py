@@ -460,6 +460,8 @@ class AccountCore:
         )
         self.link_limiter = window(5, 600, _RATE_LIMIT_MAX_KEYS, clock)
         self.installation_limiter = window(5, 600, 1, clock)
+        self.local_login_limiter = window(60, 600, 1, clock)
+        self.local_user_limiter = window(10, 600, _RATE_LIMIT_MAX_KEYS, clock)
         self.unlink_limiter = window(10, 600, _RATE_LIMIT_MAX_KEYS, clock)
         self._client_factory = http_client_factory or (
             lambda: httpx.AsyncClient(timeout=10, follow_redirects=False)

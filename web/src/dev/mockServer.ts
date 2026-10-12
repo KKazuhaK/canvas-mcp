@@ -569,6 +569,9 @@ const ok = <T>(data: T, status = 200): Ok<T> => ({ status, data })
 const noContent = (): Ok<void> => ({ status: 204, data: '' as unknown as void })
 const STATUS: Partial<Record<ApiErrorCode, number>> = {
   invalid_provider_configuration: 422,
+  invalid_local_credentials: 422,
+  local_username_taken: 409,
+  local_login_failed: 401,
   provider_secret_required: 422,
   provider_identity_binding_changed: 409,
   too_many_providers: 422,
@@ -706,27 +709,43 @@ route('GET /providers', 'public', (_c, s) =>
   }),
 )
 
+route('POST /login/local', 'public', (c, s) => {
+  if (c.body.username !== 'admin' || c.body.password !== 'a long private local password') return fail('local_login_failed')
+  s.signedIn = true
+  s.me.account.provider_id = 'local'
+  return ok({ redirect_to: c.body.txn ? `/account/consent?txn=${c.body.txn}` : typeof c.body.return_to === 'string' ? c.body.return_to : '/account/' })
+})
+route('PUT /me/password', 'active', (_c, s) => { s.signedIn = false; return ok({ redirect_to: '/account/sign-in' }) })
+route('POST /admin/local-accounts', 'owner', (c, s) => {
+  if (c.body.revision !== s.settings.revision) return fail('settings_conflict')
+  s.settings.revision += 1
+  return ok({ account_id: acct(9), revision: s.settings.revision })
+})
 route('GET /setup', 'public', (_c, s) => ok({ initialized: s.setupInitialized, revision: s.settings.revision, callback_uri: 'https://canvas.example.test/auth/callback/entra' }))
 route('POST /setup', 'public', (c, s) => {
   if (s.setupInitialized) return fail('installation_already_initialized')
   if (c.body.code !== 'A'.repeat(43)) return fail('installation_code_invalid')
   if (c.body.revision !== s.settings.revision) return fail('settings_conflict')
-  if (typeof c.body.client_secret !== 'string' || c.body.client_secret.length < 16) return fail('provider_secret_required')
+  const local = c.body.local_account as { username?: string; password?: string } | undefined
+  if (!local || typeof local.password !== 'string' || local.password.length < 15) return fail('invalid_local_credentials')
+  if (c.body.provider_id && (typeof c.body.client_secret !== 'string' || c.body.client_secret.length < 16)) return fail('provider_secret_required')
   s.setupInitialized = true
-  s.settings.revision += 1
-  return ok({ redirect_to: '/auth/login/entra' })
+  s.settings.revision += c.body.provider_id ? 2 : 1
+  const external = s.providers.filter((provider) => provider.id === c.body.provider_id)
+  s.providers = [{ id: 'local', kind: 'local', icon: 'key', name: 'Local account', start_url: '/account/sign-in' }, ...external]
+  return ok({ redirect_to: '/account/sign-in' })
 })
 route('GET /admin/login-providers', 'owner', (_c, s) => ok({ revision: s.settings.revision, public_base_url: 'https://canvas.example.test', providers: s.providerConfigurations }))
 route('PUT /admin/login-providers/{id}', 'owner', (c, s) => {
   if (c.body.revision !== s.settings.revision) return fail('settings_conflict')
   const id = decodeURIComponent(c.match[1])
   const old = s.providerConfigurations.find((provider) => provider.id === id)
-  if (!old && (typeof c.body.client_secret !== 'string' || c.body.client_secret.length < 16)) return fail('provider_secret_required')
+  if (!old && id !== 'local' && (typeof c.body.client_secret !== 'string' || c.body.client_secret.length < 16)) return fail('provider_secret_required')
   if (typeof c.body.enabled !== 'boolean' || typeof c.body.rank !== 'number' || !c.body.config || typeof c.body.config !== 'object' || Array.isArray(c.body.config)) return fail('invalid_provider_configuration')
   const value: LoginProviderConfiguration = {
     id, protocol: id.startsWith('oidc:') ? 'oidc' : id as LoginProviderConfiguration['protocol'],
     enabled: c.body.enabled, rank: c.body.rank, config: c.body.config as LoginProviderConfiguration['config'],
-    secret_present: true, callback_uri: `https://canvas.example.test/auth/callback/${id.replace(':', '/')}`,
+    secret_present: id !== 'local', callback_uri: id === 'local' ? '' : `https://canvas.example.test/auth/callback/${id.replace(':', '/')}`,
   }
   s.providerConfigurations = [...s.providerConfigurations.filter((provider) => provider.id !== id), value]
   s.settings.revision += 1

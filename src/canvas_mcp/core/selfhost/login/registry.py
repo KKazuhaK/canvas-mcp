@@ -112,6 +112,17 @@ class LoginRuntime:
         )
         out: list[ProviderEntry] = []
         for provider_id in self.config.order:
+            if provider_id == "local":
+                out.append(
+                    ProviderEntry(
+                        "local",
+                        "local",
+                        snapshot.name("local") if snapshot else "Local account",
+                        "key",
+                        "/account/sign-in",
+                    )
+                )
+                continue
             provider = self.providers[provider_id]
             out.append(
                 ProviderEntry(
@@ -153,6 +164,8 @@ def build_login_runtime(
     limiters = rate_limiters or build_rate_limiters("memory")
     providers: dict[str, LoginProvider] = {}
     for provider_id in config.order:
+        if provider_id == "local":
+            continue
         built: Any
         if provider_id == PROVIDER_ENTRA:
             built = build_entra_provider(

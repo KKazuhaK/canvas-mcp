@@ -8,6 +8,7 @@ import { useTranslation } from 'react-i18next'
 import { isUnauthenticated } from '@/api/errors'
 import type { MeResponse } from '@/api/types'
 import ErrorNotice from '@/components/ErrorNotice'
+import LocalPasswordSettings from '@/components/LocalPasswordSettings'
 import McpUrlCard from '@/components/McpUrlCard'
 import PageHeader from '@/components/PageHeader'
 import TokenSection from '@/components/token/TokenSection'
@@ -51,6 +52,7 @@ function AccountHome({ me }: { me: MeResponse }) {
       <Box sx={{ display: 'grid', gap: 2 }}>
         {me.canvas ? <TokenSection canvas={me.canvas} /> : null}
         <McpUrlCard />
+        {me.account.provider_id === 'local' && <LocalPasswordSettings />}
       </Box>
     </>
   )

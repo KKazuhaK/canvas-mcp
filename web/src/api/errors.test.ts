@@ -10,6 +10,9 @@ describe('closed error code set', () => {
     expect([...API_ERROR_CODES].sort()).toEqual(
       [
         // session and transport
+        'invalid_local_credentials',
+        'local_username_taken',
+        'local_login_failed',
         'not_authenticated',
         'csrf_invalid',
         'origin_not_allowed',

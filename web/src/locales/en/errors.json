@@ -68,5 +68,8 @@
   "not_enrolled": "No Canvas token is enrolled.",
   "settings_conflict": "Settings changed elsewhere. Reload before saving.",
   "confirmation_required": "This removal affects existing Canvas bindings. Confirm the affected schools to continue.",
-  "pilot_profile_restricted": "The pilot profile requires exactly one school with directory search turned off."
+  "pilot_profile_restricted": "The pilot profile requires exactly one school with directory search turned off.",
+  "invalid_local_credentials": "Use a valid username and a password of 15–128 characters.",
+  "local_username_taken": "That username is already in use.",
+  "local_login_failed": "The username or password is incorrect, or local sign-in is unavailable."
 }

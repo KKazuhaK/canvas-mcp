@@ -89,7 +89,7 @@ class LinkingService:
             return Refusal("pending_approval")
         if not app._signed_in_recently(session):
             return Refusal("reauth_required", {"max_age_s": 600})
-        if rt.entry(provider_id) is None:
+        if provider_id == "local" or rt.entry(provider_id) is None:
             return Refusal("validation_failed", {"field": "provider"})
         if not app.link_limiter.allow((session.acct,)):
             return Refusal("rate_limited", {"retry_after_s": LIMIT_WINDOW_S})

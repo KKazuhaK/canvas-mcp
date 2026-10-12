@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from fastmcp import FastMCP
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse
+from starlette.responses import PlainTextResponse, RedirectResponse
 from starlette.types import ASGIApp
 
 from ..config import Config
@@ -530,6 +530,12 @@ def install_selfhost(
             **account_options,
         },
     )
+
+    @mcp.custom_route("/", methods=["GET"])
+    async def home(request: Request) -> RedirectResponse:
+        return RedirectResponse(
+            "/account/", status_code=303, headers={"Cache-Control": "no-store"}
+        )
 
     @mcp.custom_route(HEALTH_PATH, methods=["GET"])
     async def healthz(request: Request) -> PlainTextResponse:

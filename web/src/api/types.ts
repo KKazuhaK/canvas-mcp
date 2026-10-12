@@ -70,10 +70,13 @@ export type ApiOnlyErrorCode =
   | 'installation_code_invalid'
   | 'provider_configuration_unavailable'
   | 'installation_authority_unavailable'
+  | 'invalid_local_credentials'
+  | 'local_username_taken'
+  | 'local_login_failed'
 
 export interface LoginProviderConfiguration {
   id: string
-  protocol: 'entra' | 'google' | 'github' | 'oidc'
+  protocol: 'entra' | 'google' | 'github' | 'oidc' | 'local'
   enabled: boolean
   rank: number
   config: Record<string, string | string[] | boolean>
@@ -100,8 +103,10 @@ export interface SetupStatus {
 export interface SetupRequest {
   revision: number
   code: string
-  config: LoginProviderConfiguration['config']
-  client_secret: string
+  local_account: { username: string; password: string }
+  provider_id?: string
+  config?: LoginProviderConfiguration['config']
+  client_secret?: string
 }
 
 /** Codes that only ever arrive as ?error= on /account/sign-in, never as JSON. */
@@ -135,7 +140,7 @@ export interface ApiErrorBody {
 export type ProviderIcon = 'microsoft' | 'google' | 'github' | 'key'
 export interface Provider {
   id: string
-  kind: 'oidc' | 'oauth2'
+  kind: 'oidc' | 'oauth2' | 'local'
   name: string
   icon: ProviderIcon
   /** The server-side redirect that starts the sign-in (a full-page navigation). */

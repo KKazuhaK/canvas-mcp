@@ -52,9 +52,7 @@ def test_removed_settings_cannot_be_uncommented_from_the_template(name):
 
 def test_template_has_safe_read_only_defaults():
     values = assignments()
-    assert set(values) == {
-        "PUBLIC_BASE_URL",
-    }
+    assert set(values) == {"PUBLIC_BASE_URL", "DATABASE_URL"}
     assert (
         not {
             "ALLOWED_WRITE_TOOLS",

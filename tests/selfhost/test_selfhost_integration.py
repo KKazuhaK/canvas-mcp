@@ -122,6 +122,12 @@ def text_of(result: dict[str, Any]) -> str:
 
 
 class TestAuthentication:
+    def test_root_opens_account_ui_without_a_bearer(self, stack):
+        response = stack.client.get("/", follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"] == "/account/"
+        assert response.headers["cache-control"] == "no-store"
+
     def test_no_bearer_is_401_with_a_bearer_challenge(self, stack):
         response = rpc(stack, None, "tools/list")
         assert response.status_code == 401

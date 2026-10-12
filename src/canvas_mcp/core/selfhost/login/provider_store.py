@@ -28,6 +28,7 @@ _SEALED = next(entry for entry in SEALED if entry.table is s.login_providers)
 class ProviderSnapshot:
     revision: int
     providers: tuple[ProviderConfiguration, ...]
+    local_installed: bool = False
 
 
 class ProviderConfigStore:
@@ -92,6 +93,8 @@ class ProviderConfigStore:
 
     def _decode(self, row: Any) -> ProviderConfiguration:
         try:
+            if row["id"] == "local" and row["config_source"] == "db":
+                return validate_provider("local", row["config"], None)
             if row["config_source"] != "db" or row["secret_ciphertext"] is None:
                 raise ValueError
             secret = self.keys.decrypt(
@@ -115,9 +118,19 @@ class ProviderConfigStore:
             return self._snapshot_in(conn)
 
     def _snapshot_in(self, conn: Connection) -> ProviderSnapshot:
+        local = s.login_providers.alias("local_registration")
+        local_installed = exists(
+            select(local.c.id).where(
+                local.c.id == "local", local.c.config_source == "db"
+            )
+        ).label("local_installed")
         rows = (
             conn.execute(
-                select(s.server_state.c.settings_revision, s.login_providers)
+                select(
+                    s.server_state.c.settings_revision,
+                    s.login_providers,
+                    local_installed,
+                )
                 .select_from(
                     s.server_state.outerjoin(
                         s.login_providers, s.login_providers.c.configured
@@ -134,6 +147,7 @@ class ProviderConfigStore:
         return ProviderSnapshot(
             int(rows[0]["settings_revision"]),
             tuple(self._decode(row) for row in rows if row["id"] is not None),
+            bool(rows[0]["local_installed"]),
         )
 
     def validate_in(self, conn: Connection) -> None:
@@ -212,7 +226,7 @@ class ProviderConfigStore:
                 .mappings()
                 .one_or_none()
             )
-            if value.client_secret is None:
+            if value.client_secret is None and identifier != "local":
                 if old is None or old["secret_ciphertext"] is None:
                     raise ProviderConfigurationError("provider_secret_required")
                 self._decode(old)  # Refuse retaining a damaged or unknown-key secret.
@@ -229,7 +243,7 @@ class ProviderConfigStore:
                 any(issuer != value.issuer for issuer in identities)
                 or old is not None
                 and old["config"] is not None
-                and old["config"].get("client_id") != value.config["client_id"]
+                and old["config"].get("client_id") != value.config.get("client_id")
             ):
                 raise ProviderConfigurationError("provider_identity_binding_changed")
             active = set(

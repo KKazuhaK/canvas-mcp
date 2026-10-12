@@ -1,8 +1,9 @@
 {
   "installation": {
     "title": "Configure sign-in",
-    "help": "Enter the installation code from the container logs and your Microsoft Entra app registration. Configuration is saved in the database.",
-    "code": "Installation code"
+    "help": "Create the local administrator with the installation code from the container logs. You can also configure an external sign-in provider now, or add providers later in Settings. All account and provider configuration is saved in the database.",
+    "code": "Installation code",
+    "method": "External sign-in (optional)"
   },
   "title": "Admin",
   "ownerOnly": "Only owners can see the admin pages.",
@@ -308,5 +309,13 @@
     "notDirectory": "Not listed in the public directory; it can still be featured.",
     "directoryUnknown": "The public directory could not be checked.",
     "cancel": "Cancel"
+  },
+  "localAccount": {
+    "name": "Local account",
+    "only": "Local account only",
+    "owner": "Local administrator",
+    "create": "Create local account",
+    "help": "Creates an active regular account. Local sign-in must be enabled. Public registration is closed.",
+    "created": "Local account created."
   }
 }

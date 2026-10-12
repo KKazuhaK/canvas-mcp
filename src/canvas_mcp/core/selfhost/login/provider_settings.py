@@ -23,6 +23,8 @@ def settings_from_database(
     owner = "Canvas.Owner"
     for provider in snapshot.providers:
         values = provider.config
+        if provider.id == "local":
+            continue
         if provider.client_secret is None:
             raise ProviderConfigurationError("provider_configuration_unavailable")
         if provider.id == "entra":
@@ -65,8 +67,15 @@ def settings_from_database(
     policy = replace(policy, rules=rules, owner_rules=owner_rules)
     if infrastructure.access_source is not None:
         problems: list[str] = []
+        source = dict(infrastructure.access_source)
+        if (
+            not any(source.values())
+            and snapshot.local_installed
+            and not any(p.id == "entra" for p in snapshot.providers)
+        ):
+            source["ACCESS_POLICY"] = "approval"
         policy = parse_access_settings(
-            infrastructure.access_source,
+            source,
             tenant_id=tenant,
             required_role=required,
             owner_role=owner,
