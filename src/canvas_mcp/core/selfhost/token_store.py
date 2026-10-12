@@ -1528,6 +1528,40 @@ class TokenStore:
         with self._db.read() as conn:
             return self._repos.providers.configured(conn)
 
+    def database_managed_login_providers(self) -> bool:
+        """A durable DB-owned registration excludes all old environment inventory."""
+        with self._db.read() as conn:
+            return self._database_managed_login_providers_in(conn)
+
+    @staticmethod
+    def _database_managed_login_providers_in(conn: Connection) -> bool:
+        from sqlalchemy import exists, select
+
+        from .db import schema
+
+        return bool(
+            conn.execute(
+                select(
+                    exists(
+                        select(schema.login_providers.c.id).where(
+                            schema.login_providers.c.config_source == "db"
+                        )
+                    )
+                )
+            ).scalar_one()
+        )
+
+    def _provider_lists_in(
+        self,
+        conn: Connection,
+        listed: Collection[str] | None,
+        additional: Sequence[Collection[str]] = (),
+    ) -> tuple[list[str] | None, ...]:
+        """Governed writes use current DB enablement, even if their caller saw an older set."""
+        if self._database_managed_login_providers_in(conn):
+            return (sorted(self._repos.providers.configured(conn)),)
+        return tuple(_listed(value) for value in (listed, *additional))
+
     def lookup_identity(
         self, provider_id: str, issuer: str, subject: str
     ) -> str | None:
@@ -1594,7 +1628,7 @@ class TokenStore:
             )
             existing = None if row is None else _status(row).facts
             active_owners = repos.accounts.count_active_owners(conn)
-            listed = _listed(listed_providers)
+            listed = self._provider_lists_in(conn, listed_providers)[0]
             usable_owners = repos.accounts.count_usable_owners(conn, listed)
             is_bootstrap = acc.is_bootstrap_identity(ext, policy)
             owner_usable = True
@@ -1873,8 +1907,9 @@ class TokenStore:
                 return UnlinkResult(UNLINK_LAST, ident.provider_id)
             if row.status == STATUS_ACTIVE and row.role == ROLE_OWNER:
                 rows = repos.identities.for_account(conn, account_id)
-                for provider_list in (listed_providers, *additional_provider_lists):
-                    listed = _listed(provider_list)
+                for listed in self._provider_lists_in(
+                    conn, listed_providers, additional_provider_lists
+                ):
                     usable_before = acc.owner_is_usable(
                         role=row.role,
                         status=row.status,
@@ -2215,7 +2250,7 @@ class TokenStore:
             if row is None:
                 return False
             if row.status == STATUS_ACTIVE and row.role == ROLE_OWNER:
-                listed = _listed(listed_providers)
+                listed = self._provider_lists_in(conn, listed_providers)[0]
                 others = self._repos.accounts.usable_owner_ids(
                     conn, listed, exclude=account_id, for_update=True
                 )
@@ -2316,8 +2351,9 @@ class TokenStore:
                 and row.role == ROLE_OWNER
                 and not allow_last_owner
             ):
-                for provider_list in (listed_providers, *additional_provider_lists):
-                    listed = _listed(provider_list)
+                for listed in self._provider_lists_in(
+                    conn, listed_providers, additional_provider_lists
+                ):
                     usable_others = repos.accounts.usable_owner_ids(
                         conn, listed, exclude=account_id, for_update=True
                     )
@@ -2491,7 +2527,7 @@ class TokenStore:
                     r.provider_id
                     for r in self._repos.identities.for_account(conn, account_id)
                 ]
-                listed = _listed(listed_providers)
+                listed = self._provider_lists_in(conn, listed_providers)[0]
                 usable_now = acc.owner_is_usable(
                     role=row.role,
                     status=row.status,

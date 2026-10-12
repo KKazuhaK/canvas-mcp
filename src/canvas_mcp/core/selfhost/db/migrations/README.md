@@ -20,7 +20,9 @@ database is refused rather than silently generating a different identity.
 - `provider_environment.py`: explicit adoption of old provider configuration,
   exposed by `token_admin login-providers --import-env`; the CLI imports this
   adapter lazily only when the operator requests adoption. It also contains
-  guarded removal of an old beta's entirely empty startup metadata.
+  guarded removal of an old beta's entirely empty startup metadata and the
+  legacy environment owner-inventory checks. Native DB-owned registrations
+  exclude those old environment checks entirely.
   Adoption is atomic and never replaces database-owned values.
 - `legacy_setup_env.sh`: legacy environment export for deliberate adoption.
   New installations never use this helper or generate keys manually.

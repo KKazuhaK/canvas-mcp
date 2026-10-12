@@ -17,7 +17,12 @@ from canvas_mcp.core.selfhost.login.provider_config import ProviderConfiguration
 from canvas_mcp.core.selfhost.login.provider_settings import settings_from_database
 from canvas_mcp.core.selfhost.login.provider_store import ProviderConfigStore
 from canvas_mcp.core.selfhost.settings import load_selfhost_settings
-from canvas_mcp.core.selfhost.token_store import Keyring
+from canvas_mcp.core.selfhost.token_store import (
+    OPERATOR,
+    AccessActionRefused,
+    Keyring,
+    TokenStore,
+)
 
 from .. import test_server_settings
 from ..test_settings import _env
@@ -255,6 +260,54 @@ def test_policy_validation_rolls_back_configuration_revision_secret_and_audit(db
     assert providers.load_snapshot() == before
     with db.read() as conn:
         assert conn.execute(select(s.audit_log.c.id)).all() == audit_before
+
+
+@pytest.mark.parametrize("operation", ["disable", "delete"])
+def test_owner_write_uses_provider_enablement_committed_after_the_callers_read(
+    providers, db, operation
+):
+    save(providers, db)
+    providers.save(
+        "google",
+        config={"client_id": "123456.apps.googleusercontent.com"},
+        client_secret=SECRET,
+        enabled=True,
+        rank=1,
+        revision=revision(db),
+        actor=None,
+        now=101,
+    )
+    store = TokenStore(db, Keyring([("k1", b"1" * 32)]), clock=lambda: 102)
+    store.create_operator_account(
+        provider_id="entra",
+        issuer="https://login.microsoftonline.com/" + CONFIG["tenant_id"] + "/v2.0",
+        subject=new_id(),
+        role="owner",
+        status="active",
+    )
+    google = store.create_operator_account(
+        provider_id="google",
+        issuer="https://accounts.google.com",
+        subject="1234567890",
+        role="owner",
+        status="active",
+    )
+    stale = store.recorded_login_providers()
+    assert stale == {"entra", "google"}
+    save(providers, db, enabled=False, client_secret=None)
+    assert store.recorded_login_providers() == {"google"}
+    with pytest.raises(AccessActionRefused) as refusal:
+        if operation == "disable":
+            store.disable_principal(
+                google,
+                actor=OPERATOR,
+                reason="operator_disabled",
+                listed_providers=stale,
+            )
+        else:
+            store.delete_account(google, listed_providers=stale)
+    assert refusal.value.code == "last_owner"
+    assert store.get_principal_status(google).active
 
 
 @pytest.mark.parametrize(

@@ -290,6 +290,7 @@ def test_promote_owner_fixes_the_same_stranded_owner_for_the_operator(
     try:
         google = frozenset({"google"})
         assert first.store.count_usable_owners(google) == 0
+        historic_google_only(first.store)
         assert first.store.promote_owner(key, listed_providers=google) is True
         assert first.store.count_usable_owners(google) == 1
         assert first.store.get_principal_status(key).role_source == "operator"

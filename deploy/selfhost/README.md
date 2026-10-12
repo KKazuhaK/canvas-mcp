@@ -34,8 +34,8 @@ invitation, then assign the appropriate app role. Use
 [Microsoft's B2B invitation guide](https://learn.microsoft.com/en-us/entra/external-id/b2b-quickstart-add-guest-users-portal).
 The real guest sign-in and client refresh flow still need staging validation.
 
-Google, GitHub and generic OIDC can be offered alongside Entra through
-`SELFHOST_LOGIN_PROVIDERS`. Register these callbacks in their respective apps:
+Google, GitHub and generic OIDC can be configured alongside Entra in
+Admin > Settings. Register these callbacks in their respective apps:
 
 | Provider | Web callback |
 | --- | --- |
@@ -44,9 +44,11 @@ Google, GitHub and generic OIDC can be offered alongside Entra through
 | GitHub | `/auth/callback/github` |
 | OIDC slug `school` | `/auth/callback/oidc/school` |
 
-See [env.reference.example](env.reference.example) for provider credentials, explicit admission and
-owner rules. Without Entra, delete its active settings and configure rules for
-the listed providers plus a bootstrap owner. Never link accounts by matching
+Provider credentials, role names, enablement and button order belong in the
+database. See [env.reference.example](env.reference.example) for optional global
+admission and owner policy overrides. Configure admission rules for optional
+providers before offering them to users. Removing Entra requires another usable
+owner path. Never link accounts by matching
 email addresses; users link identities while signed in.
 
 ## Prepare Docker
@@ -218,10 +220,10 @@ Retention policy can preserve audit history after deletion.
 
 | Sensitive material | Custodian and purpose |
 | --- | --- |
-| `CANVAS_TOKEN_KEYS` | Operator environment and protected backups; credential/sealed-secret encryption and derived local JWT keys |
-| `ACCOUNT_SESSION_SECRET` | Operator environment; browser session and sign-in protection |
-| External provider client secrets | Operator environment; authenticating the app to the configured IdP |
-| Canvas credentials and reserved provider/OAuth-app seals | SQL database; decrypted only by the service/operator with the keyring |
+| `CANVAS_TOKEN_KEYS` | Private persistent key file and protected backups; optional explicit environment override; credential/sealed-secret encryption and derived local JWT keys |
+| `ACCOUNT_SESSION_SECRET` | Private persistent key file; optional explicit environment override; browser session and sign-in protection |
+| External provider client secrets | Encrypted SQL database fields; authenticating the app to the configured IdP; never returned by the configuration API |
+| Canvas credentials and reserved Canvas OAuth-app seals | SQL database; decrypted only by the service/operator with the keyring |
 | Browser cookies, OAuth codes, refresh tokens and protocol state | Short-lived bearer/protocol material; never log or publish it |
 
 Account/identity names, school bindings, statuses and audit metadata are stored

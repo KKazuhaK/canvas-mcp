@@ -670,6 +670,63 @@ class TestLoginProviders:
 
 
 class TestDatabaseLoginCommands:
+    def test_operator_can_read_revision_without_loading_damaged_provider_configuration(
+        self, cli_env, monkeypatch, capsys
+    ):
+        from sqlalchemy import select, update
+
+        from canvas_mcp.core.selfhost.db import schema
+
+        for name, value in env().items():
+            monkeypatch.setenv(name, value)
+        assert token_admin.main(["login-providers", "--import-env"]) == 0
+        capsys.readouterr()
+        store = token_admin._open_store()
+        try:
+            with store.database.write() as conn:
+                revision = conn.execute(
+                    select(schema.server_state.c.settings_revision)
+                ).scalar_one()
+                conn.execute(
+                    update(schema.login_providers).values(
+                        config={"invalid_field": "damaged-private-configuration"}
+                    )
+                )
+            assert token_admin.main(["login-providers", "--revision"]) == 0
+            assert capsys.readouterr().out.strip() == str(revision)
+            assert token_admin.main(["login-providers"]) == 2
+            assert "damaged-private-configuration" not in capsys.readouterr().err
+        finally:
+            store.close()
+
+    def test_database_inventory_excludes_legacy_environment_governance(
+        self, cli_env, monkeypatch, capsys
+    ):
+        from canvas_mcp.core.selfhost.db.migrations import provider_environment
+
+        for name, value in env().items():
+            monkeypatch.setenv(name, value)
+        assert token_admin.main(["login-providers", "--import-env"]) == 0
+        capsys.readouterr()
+        monkeypatch.setenv("SELFHOST_LOGIN_PROVIDERS", "github")
+        monkeypatch.setattr(
+            provider_environment,
+            "_environment_providers",
+            lambda: pytest.fail(
+                "DB-owned inventory must not read legacy environment providers"
+            ),
+        )
+        store = token_admin._open_store()
+        try:
+            assert token_admin._listed_providers(store) == {"entra"}
+            assert token_admin._protected_provider_lists(store) == (
+                frozenset({"entra"}),
+            )
+            token_admin._note_assumed_entra_only(store)
+            assert capsys.readouterr().err == ""
+        finally:
+            store.close()
+
     def test_explicit_import_is_once_and_closes_setup(
         self, cli_env, monkeypatch, capsys
     ):
