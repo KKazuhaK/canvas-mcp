@@ -32,7 +32,7 @@ def _read(path: Path) -> dict[str, str] | None:
             path,
             os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError):
         return None
     except OSError:
         raise RuntimeSecretsError(

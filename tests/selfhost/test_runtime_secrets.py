@@ -76,6 +76,16 @@ def test_bad_login_configuration_writes_no_secret_file(tmp_path):
     assert not (tmp_path / SECRETS_FILE).exists()
 
 
+def test_file_in_place_of_data_directory_is_not_a_saved_secret_file(tmp_path):
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("retained", encoding="utf-8")
+    env = minimal(blocker)
+    assert with_saved_secrets(env) == env
+    with pytest.raises(RuntimeSecretsError, match="Cannot save runtime secrets"):
+        initialize_secrets(env)
+    assert blocker.read_text(encoding="utf-8") == "retained"
+
+
 def test_explicit_keys_are_preserved_and_blank_keys_are_not_replaced(tmp_path):
     secret = base64.b64encode(b"x" * 32).decode()
     env = {
