@@ -10,6 +10,12 @@ from canvas_mcp.core.selfhost.db import schema as s
 from canvas_mcp.core.selfhost.db.migrations import runner, transfer
 from canvas_mcp.core.selfhost.db.sealed import verify
 from canvas_mcp.core.selfhost.db.types import new_id
+from canvas_mcp.core.selfhost.login.local_accounts import (
+    LOCAL_ISSUER,
+    LocalAccounts,
+    password_hash,
+)
+from canvas_mcp.core.selfhost.login.provider_store import ProviderConfigStore
 from canvas_mcp.core.selfhost.token_store import (
     KeyringError,
     TokenStore,
@@ -33,6 +39,37 @@ def source(tmp_path):
         conn.execute(
             update(s.login_providers).values(
                 display_name="School", sort_rank=3, configured=True
+            )
+        )
+        conn.execute(
+            insert(s.login_providers).values(
+                id="local",
+                protocol="local",
+                configured=True,
+                config_source="db",
+                config={},
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        store._repos.identities.insert(
+            conn,
+            account_id=account,
+            provider_id="local",
+            issuer=LOCAL_ISSUER,
+            subject=account,
+            username="student.local",
+            email=None,
+            email_verified=False,
+            now=NOW,
+        )
+        conn.execute(
+            insert(s.local_credentials).values(
+                account_id=account,
+                username="student.local",
+                password_hash=password_hash("transfer-local-password-0123456789"),
+                created_at=NOW,
+                updated_at=NOW,
             )
         )
         conn.execute(
@@ -265,6 +302,15 @@ def test_all_lifecycle_tables_copy_native_types_and_sequences_and_skip_ephemeral
             ).scalar_one()
             == 20001
         )
+    # A copied hash, local identity and provider must work together on native PG,
+    # not merely survive a byte-for-byte table comparison.
+    local = LocalAccounts(ProviderConfigStore(target, ring))
+    assert (
+        local.authenticate(
+            "student.local", "transfer-local-password-0123456789", now=NOW + 1
+        ).id
+        == account
+    )
 
 
 @pytest.mark.postgres
