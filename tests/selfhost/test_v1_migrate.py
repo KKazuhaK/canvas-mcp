@@ -1,6 +1,8 @@
 """The real squashed graph, compatibility gate and atomic creation transaction."""
 
+import ast
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Barrier
 
 import pytest
@@ -48,6 +50,25 @@ def test_graph_preserves_frozen_baseline_and_metadata_matches_real_upgrade(db):
         assert set(inspect(conn).get_table_names()) == set(schema.metadata.tables) | {
             schema.VERSION_TABLE
         }
+
+
+def test_contract_explicit_constraint_names_fit_the_postgres_identifier_limit():
+    from sqlalchemy.dialects.postgresql import dialect
+
+    revision = (
+        Path(migrate.__file__).parent / "versions" / "0003_account_login_policy.py"
+    )
+    tree = ast.parse(revision.read_text(encoding="utf-8"))
+    postgres = dialect()
+    checked = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "name" and isinstance(keyword.value, ast.Constant):
+                postgres.validate_identifier(keyword.value.value)
+                checked += 1
+    assert checked >= 10
 
 
 def test_auto_migrate_off_does_not_partially_create_a_database(db):

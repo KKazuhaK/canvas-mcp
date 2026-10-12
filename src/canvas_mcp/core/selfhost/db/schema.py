@@ -327,7 +327,11 @@ account_allowed_login_providers = Table(
     Column(
         "account_id",
         Uuid(),
-        ForeignKey("account_login_policy.account_id", ondelete="CASCADE"),
+        ForeignKey(
+            "account_login_policy.account_id",
+            ondelete="CASCADE",
+            name="fk_account_allowed_login_providers_policy",
+        ),
         primary_key=True,
     ),
     Column(

@@ -144,6 +144,15 @@ assertion that omitted the canonical OAuth issuer's trailing slash; the correcte
 assertion requires a new exact-head native image run. This candidate is not a
 published deployment image yet.
 
+The corrected native image boot/recreation passed on SQLite. Its PostgreSQL
+startup exposed an explicit FK name exceeding PostgreSQL's identifier limit;
+the runtime metadata and contract now share a shorter name. A portability
+regression checks the contract's explicit constraint names before runtime.
+The corrected schema/migration/account-policy checks passed 46 tests with seven
+backend-only skips, and the real-graph migration suite passed all 19 checks.
+Native PostgreSQL and final Docker CI remain required; superseded failed runs
+were cancelled after recording their failures.
+
 ## Historical checkpoints
 
 The sections below retain dated development checkpoints. Their earlier

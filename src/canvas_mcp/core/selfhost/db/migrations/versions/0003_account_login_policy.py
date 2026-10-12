@@ -231,7 +231,7 @@ def upgrade() -> None:
             ["account_id"],
             ["account_login_policy.account_id"],
             ondelete="CASCADE",
-            name="fk_account_allowed_login_providers_account_id_account_login_policy",
+            name="fk_account_allowed_login_providers_policy",
         ),
         sa.ForeignKeyConstraint(
             ["provider_id"],
