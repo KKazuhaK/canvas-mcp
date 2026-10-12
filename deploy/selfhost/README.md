@@ -44,7 +44,7 @@ Google, GitHub and generic OIDC can be offered alongside Entra through
 | GitHub | `/auth/callback/github` |
 | OIDC slug `school` | `/auth/callback/oidc/school` |
 
-See [env.example](env.example) for provider credentials, explicit admission and
+See [env.reference.example](env.reference.example) for provider credentials, explicit admission and
 owner rules. Without Entra, delete its active settings and configure rules for
 the listed providers plus a bootstrap owner. Never link accounts by matching
 email addresses; users link identities while signed in.
@@ -58,47 +58,39 @@ the upstream Azure deployment. The image builds React and installs locked Python
 dependencies, including document extraction and PostgreSQL. It runs as UID/GID
 10001, keeps the root filesystem read-only and writes persistent data to `/data`.
 
-For a published, reviewed v1 image, download `docker-compose.yml`, optional
-`docker-compose.postgres.yml`, `env.example` and `setup-env.sh` from the same
-reviewed revision. Set `CANVAS_MCP_IMAGE` to that v1 version or immutable digest.
-There is deliberately no automatic `latest` fallback. Pre-v1 images do not
-accept the v1 configuration. Do not assume the current `edge` image is v1.
-
-For a source build, check out the reviewed branch/commit and work in
-`deploy/selfhost`. Use the repository's `docker-compose.build.yml` override.
-The image name entered below can be `canvas-mcp:selfhost-v1-local`.
+Deployment needs exactly two files: `docker-compose.yml` and `.env`. Download
+`env.example` as `.env`, fill its four required values (public origin and the
+three Entra credentials), and run:
 
 ```sh
-cd deploy/selfhost
-bash setup-env.sh
-# Keep an offline/private copy of .env; it contains the encryption keyring.
-docker compose -f docker-compose.yml -f docker-compose.build.yml config --quiet
-docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
-docker compose logs --tail 50
-curl -fsS http://127.0.0.1:8819/healthz
+docker compose up -d
 ```
 
-`setup-env.sh` prompts for the public origin, Entra tenant/client IDs, image and
-client secret. It generates two separate random secrets with local OpenSSL and
-writes `.env` with mode 600. It refuses to overwrite an existing file and never
-prints secrets. Download the script before running it; do not pipe it into Bash.
-The default is read-only and anonymized. `--enable-writes` raises the operator
-ceiling; `--real-names` explicitly disables anonymization. Schools are managed
-in the database after sign-in, rather than by a setup flag.
+The image defaults to `ghcr.io/kkazuhak/canvas-mcp:beta`. Set `CANVAS_MCP_IMAGE`
+only to choose another reviewed version or digest. The container generates its
+internal encryption keyring and browser-session secret once, saving a private
+`/data/runtime-secrets.json` on the persistent data volume. Recreating the
+container keeps the same keys. No host environment exports, OpenSSL commands,
+setup script or other downloaded files are required. The defaults are student,
+read-only and anonymized. Schools are managed after sign-in.
 
-To configure manually, copy [env.example](env.example) to `.env`, set its active
-required values and run `chmod 600 .env`. Generate `CANVAS_TOKEN_KEYS` once as
-`k1:` followed by `openssl rand -base64 32`; generate `ACCOUNT_SESSION_SECRET`
-separately with the same command. Preserve them with database backups. Editing
-`.env` requires `docker compose up -d` to recreate the container; restarting it
-alone does not reload its environment. Never rerun setup over an enrolled store.
+Use `docker compose ps` to observe readiness; `up -d` returns before the health
+check completes. Editing `.env` requires `docker compose up -d` to recreate the
+container. Keep `.env` private and preserve the persistent volume. If an existing
+database has lost its original keys, startup refuses to generate replacements.
+Existing explicitly configured keys remain supported; keep those keys in `.env`.
 
-For a published image, omit the build override:
+[env.reference.example](env.reference.example) is the optional full settings
+reference. `setup-env.sh` remains an optional manual-key configuration helper,
+not a deployment requirement. Upgrade, backup and transfer procedures stay in
+the isolated migration package.
+
+For a source build, select `CANVAS_MCP_IMAGE=canvas-mcp:selfhost-v1-local` in
+`.env` and use the repository's build override:
 
 ```sh
-docker compose config --quiet
-docker compose up -d
-docker compose logs --tail 50
+docker compose -f docker-compose.yml -f docker-compose.build.yml config --quiet
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
 ### Optional PostgreSQL

@@ -22,15 +22,15 @@ The reviewed multi-architecture staging image and its immutable digest are in
    Invite friends as B2B guests and assign `Canvas.User`; include a guest whose
    home account is in another tenant in the later acceptance checks. Optional
    Google, GitHub or OIDC providers remain off unless explicitly configured.
-3. Use [the Docker instructions](README.md#prepare-docker) from the reviewed
-   revision. Run `bash setup-env.sh` inside `deploy/selfhost`; it prompts for the
-   origin, Entra IDs, image name and client secret and writes a private `.env`.
-   It does not prompt for a school. For a source build, select the local image
-   name and use `docker-compose.build.yml`; for a published image, pin its v1
-   version or digest. Keep an offline copy of `.env` and the encryption keyring.
-   Use [the PostgreSQL override](README.md#optional-postgresql) only when selected;
-   it publishes no database port. Never point an enrolled SQLite installation
-   at an empty PostgreSQL database without the explicit transfer procedure.
+3. Download only `docker-compose.yml` and `env.example` from the reviewed revision.
+   Save the latter as `.env`, fill its four required values, and run
+   `docker compose up -d`. No setup script or manual key generation is required.
+   The beta image is the Compose default; override `CANVAS_MCP_IMAGE` only to pin
+   another reviewed version/digest. The image generates and persists its own
+   internal keys in `/data/runtime-secrets.json`, private to UID 10001. Preserve
+   the data volume and `.env` when recreating the container. Explicit keys from
+   an existing deployment remain supported and must be retained. Optional source
+   builds and PostgreSQL are covered by the repository's advanced reference.
 4. Start the container using the chosen Compose files. Confirm the local
    `/healthz` response, inspect the startup log, and run:
 

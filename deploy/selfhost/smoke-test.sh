@@ -234,4 +234,6 @@ PY
   docker rm -f "$PROVIDERS_C" >/dev/null
   ok "optional provider starts (no code exchange or real sign-in)"
 fi
+docker rm -f "$MAIN" >/dev/null 2>&1 || true
+bash "$(dirname -- "${BASH_SOURCE[0]}")/compose-smoke-test.sh" "$IMAGE"
 echo "SMOKE TEST PASSED"

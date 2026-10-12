@@ -85,6 +85,9 @@ ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     MCP_SERVER_NAME=canvas-mcp \
+    CANVAS_ROLE=student \
+    TIMEZONE=America/Los_Angeles \
+    MCP_MAX_RESULT_CHARS=140000 \
     ENABLE_DATA_ANONYMIZATION=true \
     EXECUTE_TYPESCRIPT_ENABLED=false \
     MCP_AUTH_MODE=selfhost \
@@ -107,4 +110,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 
 # One process, one replica: confirmation tokens, caches and rate limits live in
 # process memory.
+ENTRYPOINT ["python", "-m", "canvas_mcp.core.selfhost.container"]
 CMD ["canvas-mcp-server", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8819"]
