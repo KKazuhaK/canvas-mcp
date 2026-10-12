@@ -59,6 +59,57 @@ and inventory checks remain in the removable migration package.
 ## Deployable staging image
 
 The current published staging release is
+[v1.14.0-beta.7](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.7).
+The account/login redesign is merged through
+[fork PR #10](https://github.com/KKazuhaK/canvas-mcp/pull/10), with release source
+`d19623918ffd458768973871e3573a248bb051e9`. Account UUIDs remain permanent;
+one unique account UPN drives local login. Provider-neutral issuer/subject
+ownership survives email changes and supports multiple OIDC registrations.
+Each SSO registration independently opts into matching-email association,
+without another mailbox challenge. Account method restrictions and SSO locks
+take precedence. Audited administrator unlock preserves the original identity
+and protects the final usable administrator.
+
+PUBLIC_BASE_URL seeds SQL once. Later confirmed domain changes belong in
+Settings, invalidate sessions/codes/grants, and require restarting the service
+and updating proxy/provider callbacks. Contract migration 0003 preserves
+account ids, local login names/hashes and existing identity aliases, and raises
+compatibility floor to 2. All upgrade/adoption/backup/transfer code stays in the
+isolated migrations package. Preserve the existing .env and canvas-mcp-data
+volume. SQLite keeps an automatic pre-upgrade backup; PostgreSQL needs an
+operator backup. Returning to an older image requires the matching old database.
+
+Deployment still uses only
+[docker-compose.yml](https://github.com/KKazuhaK/canvas-mcp/releases/download/v1.14.0-beta.7/docker-compose.yml)
+and the complete [.env template](https://github.com/KKazuhaK/canvas-mcp/releases/download/v1.14.0-beta.7/default.env).
+Existing deployments keep their files and run `docker compose pull` followed by
+`docker compose up -d --wait`. No host/system environment variables are set.
+The beta and 1.14.0-beta.7 image aliases both resolve to `sha256:b2eba17b179548d64489b7cb52734089258041f775a796ee0260641711c2f39b`;
+native linux/amd64 and linux/arm64 labels identify the release source above.
+
+- Reviewed complete [CI](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38289432633)
+  passed on the identical pre-squash file tree, including 482 frontend checks.
+- Independent post-merge [complete CI](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38293755401)
+  passed all jobs. PostgreSQL latest and locked each passed 4,333 tests with
+  eleven skips. Post-merge local migration/policy/origin checks passed 58 tests.
+- Native [release image checks](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38296420627)
+  passed SQLite/PostgreSQL container smoke and actual Compose boot/recreation.
+- Downloaded release asset SHA-256: Compose
+  `91e193483bb76bd13879c02bdbd21c7d7e1aefede4db0bc5cd9d40fcbf192b9f`;
+  env template `4f0e1ff437d4d6b26943e0a6e8c2e2ef044f1fb9a5a2b2a5a6ed2af634f25075`.
+- Stable latest remains
+  `sha256:9eeeaea8365ecad39ea02704b867f2dfae03521c229938ce78e8937fcbf1cdfb`.
+
+Real IdP/B2B/client/proxy and consecutive-day refresh acceptance remain pending.
+The October 12 public probe returned 200 from /healthz but nginx HTML 404 from
+both OAuth discovery paths under /.well-known/. Those paths must reach the
+application before client acceptance. No production/client compatibility row
+is marked passed. This release source is the tested merge commit; later
+documentation checkpoints do not change that immutable source or image.
+
+## Historical beta.6 staging image
+
+The preceding published staging release was
 [v1.14.0-beta.6](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.6).
 Local accounts and selectable optional external login are merged through
 [fork PR #9](https://github.com/KKazuhaK/canvas-mcp/pull/9), at
@@ -121,7 +172,10 @@ refresh. Keep production and client compatibility claims gated until these
 observations are complete; a stable release also requires them. Earlier branch labels below use the current name;
 commit IDs and historical release tags retain their original evidence.
 
-## Account login redesign candidate
+## Historical account login redesign checkpoints
+
+The checkpoints below record pre-publication work. The complete reviewed and
+post-merge matrices and beta.7 publication above supersede their pending gates.
 
 The next candidate adds permanent account UPNs, provider-neutral issuer/subject
 ownership, per-provider opt-in automatic association, account restrictions and
