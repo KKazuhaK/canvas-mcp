@@ -915,6 +915,9 @@ def _access(store: TokenStore) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
+        from .runtime_secrets import with_saved_secrets
+
+        os.environ.update(with_saved_secrets(os.environ))
         if args.command == "db":
             return _run_db(args)
         if args.command == "login-providers":

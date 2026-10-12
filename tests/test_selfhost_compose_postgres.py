@@ -109,7 +109,7 @@ def test_ci_requires_both_dependency_runtimes_on_postgres() -> None:
 
 
 def test_the_env_template_documents_the_database_settings_without_values() -> None:
-    env = (SELFHOST / "env.example").read_text(encoding="utf-8")
+    env = (SELFHOST / "env.reference.example").read_text(encoding="utf-8")
     for name in (
         "DATABASE_URL",
         "DATABASE_AUTO_MIGRATE",

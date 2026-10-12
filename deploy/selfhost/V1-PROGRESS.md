@@ -29,21 +29,34 @@ proxy and multiday refresh acceptance remain required. The owner approved
 `v1.14.0-beta.3` for staging before those live checks, superseding the initial
 first-tag timing gate. The development/publishing branch is `selfhost`, while
 `main` remains the upstream mirror. New version names carry no school suffix.
-Upstream PRs #490, #491 and #494 await maintainer review. The new beta is being prepared,
-and no real-client compatibility row is marked passed.
+Upstream PRs #490, #491 and #494 await maintainer review. The hosting stack is
+maintained independently on the fork; upstream changes are not merged into
+`selfhost` automatically. No real-client compatibility row is marked passed.
+
+`v1.14.0-beta.3` is published. The two-file deployment follow-up in fork PR #6
+reduces initial configuration to the public origin and three Entra credentials,
+defaults Compose to the beta image, and automatically persists separate random
+encryption/session keys on the data volume. Native image smoke checks exercise
+the actual Compose and minimal `.env`, operator CLI and container recreation.
+This follow-up must pass its complete CI matrix before the next beta publication.
 
 ## Deployable staging image
 
-Use [OPERATOR.md](OPERATOR.md) with a fresh v1 database. This is the reviewed
-development image for staging, not a v1 release tag. Pin the immutable index in
-`.env`; do not use the moving `edge` channel for the acceptance record:
+Use a fresh v1 database. The current published staging release is
+[v1.14.0-beta.3](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.3).
+It still requires explicit internal keys in `.env`; the automatic two-file
+startup described above is awaiting its next beta release. For repeatable
+acceptance, pin this immutable index rather than the moving `edge` channel:
 
 ```dotenv
-CANVAS_MCP_IMAGE=ghcr.io/kkazuhak/canvas-mcp@sha256:2c777d4f957bda7bb0e4f4b5718e23bdb48754a613eed689427ad6c5ff4f1d84
+CANVAS_MCP_IMAGE=ghcr.io/kkazuhak/canvas-mcp@sha256:3959d1641edeef9c6e5b10754502a079ff78a86dfa2b5b5146892058af10d5d8
 ```
 
-- Source: `b739665ef0fc8e146e0c4d13aead964efb322d66`.
-- Registry version: `edge-b739665`; platforms: `linux/amd64`, `linux/arm64`.
+- Source: `42a501a550edf93631708cbe9a8bb6afe683b232`.
+- Registry version: `1.14.0-beta.3`; platforms: `linux/amd64`, `linux/arm64`.
+- The complete source [CI matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38184914895)
+  and native multi-architecture [release image checks](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38186065476)
+  passed; both beta aliases identify the same source and digest.
 - The pre-v1 stable image is left in place at digest
   `sha256:9eeeaea8365ecad39ea02704b867f2dfae03521c229938ce78e8937fcbf1cdfb`.
 - Final reviewed CI: locked SQLite 8,026 passed / 64 skipped; Windows

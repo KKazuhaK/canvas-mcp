@@ -24,7 +24,7 @@ def service(document) -> dict:
 
 
 def test_image_and_pull_policy(service):
-    assert service["image"].startswith("${CANVAS_MCP_IMAGE:?")
+    assert service["image"] == "${CANVAS_MCP_IMAGE:-ghcr.io/kkazuhak/canvas-mcp:beta}"
     assert service["pull_policy"] == "always"
     assert service["restart"] == "unless-stopped"
 

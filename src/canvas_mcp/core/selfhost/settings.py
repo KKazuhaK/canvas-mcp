@@ -29,6 +29,7 @@ from .db.url import (
 )
 from .login.config import LoginProvidersConfig, parse_login_providers
 from .profile import PILOT_DISABLED_TOOLS, read_profile
+from .runtime_secrets import RuntimeSecretsError, with_saved_secrets
 
 AUTH_MODE_ENV = "MCP_AUTH_MODE"
 AUTH_MODE_SELFHOST = "selfhost"
@@ -569,11 +570,15 @@ def _parse_disabled_tools(raw: str, problems: list[str]) -> tuple[str, ...]:
 def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSettings:
     """Parse and validate every variable of the mode, reporting all problems at once."""
     source = os.environ if env is None else env
+    problems: list[str] = []
+    try:
+        source = with_saved_secrets(source)
+    except RuntimeSecretsError as exc:
+        problems.append(str(exc))
 
     def get(name: str) -> str:
         return (source.get(name) or "").strip()
 
-    problems: list[str] = []
     removed = set(REMOVED_SETTINGS) & source.keys()
     removed.update(
         name for name in source if re.fullmatch(r"OIDC_[A-Z0-9_]+_DISPLAY_NAME", name)

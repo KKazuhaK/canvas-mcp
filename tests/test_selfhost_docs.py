@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import ipaddress
 import re
 from pathlib import Path
@@ -36,20 +35,16 @@ def assignments():
 @pytest.mark.parametrize(
     "name",
     [
-        "CANVAS_MCP_IMAGE",
-        "MCP_AUTH_MODE",
         "PUBLIC_BASE_URL",
         "ENTRA_TENANT_ID",
         "ENTRA_CLIENT_ID",
         "ENTRA_CLIENT_SECRET",
-        "ACCOUNT_SESSION_SECRET",
-        "CANVAS_TOKEN_KEYS",
     ],
 )
 def test_required_active_template_values_exist_without_live_secrets(name):
     values = assignments()
     assert name in values
-    assert values[name] == ("selfhost" if name == "MCP_AUTH_MODE" else "")
+    assert values[name] == ""
 
 
 @pytest.mark.parametrize("name", tuple(REMOVED_SETTINGS))
@@ -60,8 +55,12 @@ def test_removed_settings_cannot_be_uncommented_from_the_template(name):
 
 def test_template_has_safe_read_only_defaults():
     values = assignments()
-    assert values["CANVAS_ROLE"] == "student"
-    assert values["MCP_MAX_RESULT_CHARS"] == "140000"
+    assert set(values) == {
+        "PUBLIC_BASE_URL",
+        "ENTRA_TENANT_ID",
+        "ENTRA_CLIENT_ID",
+        "ENTRA_CLIENT_SECRET",
+    }
     assert (
         not {
             "ALLOWED_WRITE_TOOLS",
@@ -85,26 +84,25 @@ def test_unedited_template_is_refused():
 
 
 def test_filled_template_is_accepted_by_current_settings(tmp_path):
+    from canvas_mcp.core.selfhost.runtime_secrets import initialize_secrets
+
     values = assignments()
-    secret = base64.b64encode(bytes(range(32))).decode()
     values.update(
         PUBLIC_BASE_URL="https://canvas.example.test",
         ENTRA_TENANT_ID="11111111-2222-3333-4444-555555555555",
         ENTRA_CLIENT_ID="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         ENTRA_CLIENT_SECRET="not-a-real-secret-0123456789",
-        ACCOUNT_SESSION_SECRET=secret,
-        CANVAS_TOKEN_KEYS="k1:" + secret,
         SELFHOST_DATA_DIR=str(tmp_path),
         CANVAS_MCP_IMAGE="canvas-mcp:selfhost-v1-local",
     )
-    settings = load_selfhost_settings(values)
+    settings = load_selfhost_settings(initialize_secrets(values))
     assert settings.public_base_url == values["PUBLIC_BASE_URL"]
     assert settings.course_state == "request_local"
 
 
 def test_commented_student_write_tools_match_the_server_allowlist():
     names = (
-        re.search(r"^# STUDENT_WRITE_TOOLS=(.*)$", text("env.example"), re.M)
+        re.search(r"^# STUDENT_WRITE_TOOLS=(.*)$", text("env.reference.example"), re.M)
         .group(1)
         .split(",")
     )
@@ -120,7 +118,7 @@ def test_all_current_settings_reads_are_documented():
     )
     names = set(re.findall(r'get\("([A-Z][A-Z0-9_]+)"\)', source))
     names |= set(re.findall(r'^\w+_ENV = "([A-Z][A-Z0-9_]+)"', account_source, re.M))
-    documented = text("env.example")
+    documented = text("env.reference.example")
     assert len(names) >= 12
     assert not names - set(re.findall(r"\b[A-Z][A-Z0-9_]+\b", documented))
 

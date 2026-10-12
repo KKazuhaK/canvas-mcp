@@ -4,6 +4,12 @@ Keep all schema upgrade, migration, backup and database transfer code in this
 package. Application repositories and the normal connection pool must not
 contain DDL upgrades, legacy data adapters or foreign-key-off connections.
 
+The two-file container deployment saves its automatically generated encryption
+and session keys in `/data/runtime-secrets.json`. Back up and restore this private
+file together with the database. A SQL-only backup does not include it. Keep any
+explicit key overrides in `.env` as well; a missing key file on an existing
+database is refused rather than silently generating a different identity.
+
 - `runner.py`: schema compatibility checks, upgrade execution and SQLite backup.
 - `connections.py`: dedicated migration transactions and PostgreSQL migration
   lock connections; these never enter the request pool.
