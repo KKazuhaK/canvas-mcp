@@ -42,6 +42,7 @@ class IdentityStore(Protocol):
         ip: str = "unknown",
         ua_hash: str | None = None,
         listed_providers: Collection[str] | None = None,
+        expected_revision: int | None = None,
     ) -> Resolution: ...
 
     def record_auth_event(
@@ -65,6 +66,7 @@ class IdentityStore(Protocol):
         *,
         expected_epoch: int,
         ua_hash: str | None = None,
+        expected_revision: int | None = None,
     ) -> LinkResult: ...
 
     def unlink_identity(
@@ -114,6 +116,7 @@ class IdentityService:
         access_policy: AccessPolicy,
         *,
         login_providers: Collection[str] | None = None,
+        expected_revision: int | None = None,
     ) -> None:
         # The providers of SELFHOST_LOGIN_PROVIDERS decide which owners are usable (None: every
         # provider is listed, which is only right for tests and the Entra-only default).
@@ -123,6 +126,7 @@ class IdentityService:
         self._store = store
         self.claims_policy = claims_policy
         self.access_policy = access_policy
+        self.expected_revision = expected_revision
 
     # -- the MCP path ----------------------------------------------------------------
 
@@ -184,6 +188,7 @@ class IdentityService:
             ip=ip,
             ua_hash=ua_hash,
             listed_providers=self.login_providers,
+            expected_revision=self.expected_revision,
         )
         key = resolution.principal_key
         if resolution.outcome == "deny" or resolution.status is None:
@@ -226,6 +231,7 @@ class IdentityService:
             self.access_policy,
             expected_epoch=expected_epoch,
             ua_hash=ua_hash,
+            expected_revision=self.expected_revision,
         )
         return result
 

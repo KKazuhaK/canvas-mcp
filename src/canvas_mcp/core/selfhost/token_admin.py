@@ -33,6 +33,7 @@ import os
 import pathlib
 import re
 import sys
+import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -121,6 +122,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--check",
         action="store_true",
         help="also fetch each OpenID Connect provider's discovery document and keys (network)",
+    )
+    action = providers.add_mutually_exclusive_group()
+    action.add_argument(
+        "--import-env",
+        action="store_true",
+        help="explicitly adopt legacy environment credentials once",
+    )
+    action.add_argument(
+        "--configure",
+        metavar="PROVIDER",
+        help="operator recovery: read provider configuration JSON from stdin",
+    )
+    sub.add_parser(
+        "setup-code", help="print a private first-install code, renewing it if expired"
     )
     sub.add_parser(
         "list",
@@ -825,6 +840,11 @@ def _quiet_login_config() -> Iterator[None]:
 
 def _run_login_providers(args: argparse.Namespace) -> int:
     """``login-providers``: what is configured, and with ``--check`` whether the providers answer."""
+    from canvas_mcp.core.selfhost.login.provider_config import (
+        ProviderConfigurationError,
+    )
+    from canvas_mcp.core.selfhost.login.provider_settings import settings_from_database
+    from canvas_mcp.core.selfhost.login.provider_store import ProviderConfigStore
     from canvas_mcp.core.selfhost.settings import (
         SelfhostConfigError,
         load_selfhost_settings,
@@ -832,9 +852,63 @@ def _run_login_providers(args: argparse.Namespace) -> int:
 
     try:
         settings = load_selfhost_settings()
+        store = _open_store()
+        try:
+            providers = ProviderConfigStore(
+                store.database, Keyring.parse(settings.canvas_token_keys_raw)
+            )
+            if args.import_env:
+                from .db.migrations.provider_environment import (
+                    import_provider_settings,
+                    load_provider_environment,
+                )
+
+                import_provider_settings(load_provider_environment(), providers)
+            if args.configure:
+                import json
+
+                try:
+                    raw = sys.stdin.read(8193)
+                    body = json.loads(raw) if len(raw.encode("utf-8")) <= 8192 else None
+                except (ValueError, UnicodeError):
+                    body = None
+                required = {"config", "enabled", "rank", "revision"}
+                if (
+                    not isinstance(body, dict)
+                    or set(body) - required - {"client_secret"}
+                    or not required <= set(body)
+                    or type(body["revision"]) is not int
+                    or body["revision"] < 0
+                ):
+                    print(
+                        "error: Invalid provider configuration input", file=sys.stderr
+                    )
+                    return EXIT_CONFIG
+                from .db.settings_repo import SettingsConflict
+
+                try:
+                    providers.save(
+                        args.configure,
+                        config=body["config"],
+                        enabled=body["enabled"],
+                        rank=body["rank"],
+                        revision=body["revision"],
+                        client_secret=body.get("client_secret"),
+                        actor=None,
+                        now=int(time.time()),
+                    )
+                except SettingsConflict:
+                    print("error: Configuration revision changed", file=sys.stderr)
+                    return EXIT_CONFIG
+            settings = settings_from_database(settings, providers.load_snapshot())
+        finally:
+            store.close()
     except SelfhostConfigError as exc:
         for problem in exc.problems:
             print(f"error: {problem}", file=sys.stderr)
+        return EXIT_CONFIG
+    except ProviderConfigurationError:
+        print("error: Stored login configuration is unavailable", file=sys.stderr)
         return EXIT_CONFIG
     login = settings.login_providers
     base = settings.public_base_url
@@ -924,6 +998,32 @@ def main(argv: list[str] | None = None) -> int:
             return _run_login_providers(args)
         store = _open_store()
         try:
+            if args.command == "setup-code":
+                from .login.installation import InstallationAuthority
+                from .login.provider_config import ProviderConfigurationError
+                from .login.provider_store import ProviderConfigStore
+                from .settings import load_selfhost_settings
+
+                settings = load_selfhost_settings()
+                authority = InstallationAuthority(
+                    ProviderConfigStore(
+                        store.database, Keyring.parse(settings.canvas_token_keys_raw)
+                    ),
+                    settings.data_dir,
+                )
+                try:
+                    code = authority.issue()
+                except ProviderConfigurationError:
+                    print(
+                        "error: Installation authorization is unavailable",
+                        file=sys.stderr,
+                    )
+                    return EXIT_CONFIG
+                if code is None:
+                    print("error: Installation is already configured", file=sys.stderr)
+                    return EXIT_NOT_FOUND
+                print(code)
+                return EXIT_OK
             if args.command in {"schools", "providers", "settings"}:
                 from .config_cli import refusal, run
                 from .config_store import SchoolRemovalConfirmation

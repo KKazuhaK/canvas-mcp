@@ -1,4 +1,9 @@
 {
+  "installation": {
+    "title": "配置登录",
+    "help": "输入容器日志中的初始化码和 Microsoft Entra 应用注册信息，配置将保存到数据库。",
+    "code": "初始化码"
+  },
   "title": "管理",
   "ownerOnly": "只有所有者可以查看管理页面。",
   "actions": {
@@ -250,6 +255,12 @@
     "lastUsed": "最近使用"
   },
   "providerConfig": {
+    "title": "登录提供方配置",
+    "reload": "重新加载登录配置",
+    "edit": "编辑 {{provider}}",
+    "type": "提供方类型",
+    "slug": "OIDC 标识",
+    "add": "添加登录提供方",
     "callback": "回调地址",
     "callbackHelp": "在登录服务商处注册这个准确的 Web 回调地址。",
     "tenant": "目录（租户）ID",

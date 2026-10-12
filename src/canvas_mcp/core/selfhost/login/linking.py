@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 from ..account_ops import IdentityView, Linked, LinkStarted, Refusal, Unlinked
 from ..accounts import ExternalClaims
+from ..db.errors import LoginConfigurationChanged
 from ..db.workers import run_store
 from ..token_store import AccessActionRefused, LinkedIdentity
 from .ceremony import (
@@ -128,6 +129,7 @@ class LinkingService:
             le=session.ep,
             li=session.iat,
             iat=now,
+            revision=app.login_bundle.revision,
         )
         state = await rt.flow_store.put(
             FLOW_KIND,
@@ -179,6 +181,8 @@ class LinkingService:
                     ua_hash=app._ua_hash(request),
                 )
             )
+        except LoginConfigurationChanged:
+            return Refusal("state_invalid")
         except Exception as exc:  # noqa: BLE001
             logger.error("account link failed: %s", type(exc).__name__)
             return Refusal("token_store_unavailable")

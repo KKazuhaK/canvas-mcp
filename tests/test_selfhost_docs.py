@@ -36,9 +36,6 @@ def assignments():
     "name",
     [
         "PUBLIC_BASE_URL",
-        "ENTRA_TENANT_ID",
-        "ENTRA_CLIENT_ID",
-        "ENTRA_CLIENT_SECRET",
     ],
 )
 def test_required_active_template_values_exist_without_live_secrets(name):
@@ -57,9 +54,6 @@ def test_template_has_safe_read_only_defaults():
     values = assignments()
     assert set(values) == {
         "PUBLIC_BASE_URL",
-        "ENTRA_TENANT_ID",
-        "ENTRA_CLIENT_ID",
-        "ENTRA_CLIENT_SECRET",
     }
     assert (
         not {
@@ -89,15 +83,13 @@ def test_filled_template_is_accepted_by_current_settings(tmp_path):
     values = assignments()
     values.update(
         PUBLIC_BASE_URL="https://canvas.example.test",
-        ENTRA_TENANT_ID="11111111-2222-3333-4444-555555555555",
-        ENTRA_CLIENT_ID="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-        ENTRA_CLIENT_SECRET="not-a-real-secret-0123456789",
         SELFHOST_DATA_DIR=str(tmp_path),
         CANVAS_MCP_IMAGE="canvas-mcp:selfhost-v1-local",
     )
     settings = load_selfhost_settings(initialize_secrets(values))
     assert settings.public_base_url == values["PUBLIC_BASE_URL"]
     assert settings.course_state == "request_local"
+    assert settings.login_providers.order == ()
 
 
 def test_commented_student_write_tools_match_the_server_allowlist():

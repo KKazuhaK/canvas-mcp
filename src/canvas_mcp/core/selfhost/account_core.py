@@ -90,6 +90,7 @@ from canvas_mcp.core.selfhost.tool_prefs import (
 from .config_snapshot import CURRENT_CONFIG, ConfigSnapshots
 from .custody import CustodyAcknowledgement
 from .db.workers import run_store
+from .login.runtime_config import CURRENT_LOGIN, DatabaseLoginRuntime, LoginBundle
 from .pagination import DEFAULT_LIMIT, Page
 from .routes import ACCOUNT_PREFIX as ACCOUNT_PATH
 from .routes import AUTH_LOGIN as _LOGIN_PATH  # noqa: F401 - shared API contract
@@ -102,7 +103,10 @@ if TYPE_CHECKING:
     from canvas_mcp.core.selfhost.authz.models import GrantRecord
     from canvas_mcp.core.selfhost.authz.runtime import AuthzRuntime
     from canvas_mcp.core.selfhost.login.flows import ExternalSignIn
+    from canvas_mcp.core.selfhost.login.installation import InstallationAuthority
+    from canvas_mcp.core.selfhost.login.provider_store import ProviderConfigStore
     from canvas_mcp.core.selfhost.login.registry import LoginRuntime
+    from canvas_mcp.core.selfhost.settings import SelfhostSettings
 
 logger = logging.getLogger("canvas_mcp.selfhost.account")
 
@@ -382,8 +386,6 @@ Handler = Callable[[Request], Awaitable[Response]]
 
 class AccountCore:
     authz: AuthzRuntime
-    logins: LoginRuntime
-    external: ExternalSignIn
 
     def __init__(
         self,
@@ -403,21 +405,32 @@ class AccountCore:
         authz: AuthzRuntime,
         logins: LoginRuntime,
         snapshots: ConfigSnapshots,
+        provider_store: ProviderConfigStore | None = None,
+        installation: InstallationAuthority | None = None,
+        infrastructure: SelfhostSettings | None = None,
     ) -> None:
         window = (rate_limiters or build_rate_limiters("memory")).sliding_window
         self.authz = authz
-        self.logins = logins
-        self.session_pids: frozenset[str] = logins.accepted_pids
         self.snapshots = snapshots
         from canvas_mcp.core.selfhost.login.flows import ExternalSignIn
 
-        self.external = ExternalSignIn(self, logins)
+        self._login_bundle = LoginBundle(
+            None, logins, identity, ExternalSignIn(self, logins)
+        )
+        self.provider_store = provider_store
+        self.installation = installation
+        self.login_manager = (
+            DatabaseLoginRuntime(
+                self, infrastructure, provider_store, self._login_bundle
+            )
+            if infrastructure is not None and provider_store is not None
+            else None
+        )
         self.cfg = cfg
         self.write_tools = write_tools
         self.tool_prefs = tool_prefs
         self.base = cfg.public_base_url.rstrip("/")
         self.store = store
-        self.identity = identity
         self.clock = clock
         self.codec = _CookieCodec(cfg.session_secret)
         self._ua_key = HKDF(
@@ -446,6 +459,7 @@ class AccountCore:
             clock,
         )
         self.link_limiter = window(5, 600, _RATE_LIMIT_MAX_KEYS, clock)
+        self.installation_limiter = window(5, 600, 1, clock)
         self.unlink_limiter = window(10, 600, _RATE_LIMIT_MAX_KEYS, clock)
         self._client_factory = http_client_factory or (
             lambda: httpx.AsyncClient(timeout=10, follow_redirects=False)
@@ -455,6 +469,34 @@ class AccountCore:
         )
         self._resolve_host: HostResolver = resolve_host or system_resolve
         self._canvas_whoami = canvas_whoami or self._default_whoami
+
+    @property
+    def login_bundle(self) -> LoginBundle:
+        pinned = CURRENT_LOGIN.get()
+        if pinned is not None and pinned[0] is self:
+            return pinned[1]
+        return self.login_manager.current if self.login_manager else self._login_bundle
+
+    @property
+    def logins(self) -> LoginRuntime:
+        return self.login_bundle.logins
+
+    @property
+    def identity(self) -> IdentityService:
+        return self.login_bundle.identity
+
+    @property
+    def external(self) -> ExternalSignIn:
+        return self.login_bundle.external
+
+    @property
+    def session_pids(self) -> frozenset[str]:
+        return self.logins.accepted_pids
+
+    async def refresh_login_config(self) -> None:
+        if self.login_manager is not None:
+            bundle = await run_store(self.login_manager.get)
+            CURRENT_LOGIN.set((self, bundle))
 
     @property
     def schools(self) -> SchoolPolicy:
@@ -672,6 +714,9 @@ class AccountCore:
             return_to = sanitize_return_to(request.query_params.get("return_to"))
         carried = self._carry(txn_id, reauth, return_to)
         entries = self.logins.entries()
+        if not entries and self.installation is not None:
+            if await run_store(self.installation.providers.setup_available):
+                return self.redirect("/account/setup", 303)
         if len(entries) == 1:
             suffix = "?" + urllib.parse.urlencode(carried) if carried else ""
             return self.redirect(entries[0].start_path + suffix, 303)

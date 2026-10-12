@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from canvas_mcp.core.selfhost.settings import load_selfhost_settings
+from canvas_mcp.core.selfhost.db.migrations.provider_environment import (
+    load_provider_environment,
+)
 from canvas_mcp.server import _selfhost_summary
 
 from .test_provider_settings import (
@@ -19,13 +21,13 @@ from .test_provider_settings import (
 
 
 def test_entra_only_summary_has_no_provider_line() -> None:
-    lines = _selfhost_summary(load_selfhost_settings(env(SELFHOST_AUTH_MODE=None)))
+    lines = _selfhost_summary(load_provider_environment(env(SELFHOST_AUTH_MODE=None)))
     assert not any("Sign-in providers" in line for line in lines)
     assert any(line.startswith("  Entra tenant: ") for line in lines)
     assert any(line.startswith("  Entra client: ") for line in lines)
     # Listing entra explicitly changes nothing.
     explicit = _selfhost_summary(
-        load_selfhost_settings(
+        load_provider_environment(
             env(SELFHOST_AUTH_MODE=None, SELFHOST_LOGIN_PROVIDERS="entra")
         )
     )
@@ -33,14 +35,14 @@ def test_entra_only_summary_has_no_provider_line() -> None:
 
 
 def test_entra_only_summary_includes_the_native_authorization_server() -> None:
-    local = _selfhost_summary(load_selfhost_settings(env()))
+    local = _selfhost_summary(load_provider_environment(env()))
     assert not any("Sign-in providers" in line for line in local)
     assert any(line.startswith("  Entra tenant: ") for line in local)
     assert any(line.startswith("  Roles: user=") for line in local)
 
 
 def test_multi_provider_summary_names_providers_and_no_secret() -> None:
-    settings = load_selfhost_settings(
+    settings = load_provider_environment(
         env(
             SELFHOST_LOGIN_PROVIDERS="google,entra,github,oidc:school",
             **google(),
@@ -59,7 +61,7 @@ def test_multi_provider_summary_names_providers_and_no_secret() -> None:
 
 
 def test_without_entra_the_tenant_and_client_lines_are_omitted() -> None:
-    settings = load_selfhost_settings(
+    settings = load_provider_environment(
         env(
             SELFHOST_LOGIN_PROVIDERS="google",
             ACCESS_RULES="google:domain:example.edu",

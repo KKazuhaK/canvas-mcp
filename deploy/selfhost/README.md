@@ -59,8 +59,7 @@ dependencies, including document extraction and PostgreSQL. It runs as UID/GID
 10001, keeps the root filesystem read-only and writes persistent data to `/data`.
 
 Deployment needs exactly two files: `docker-compose.yml` and `.env`. Download
-`env.example` as `.env`, fill its four required values (public origin and the
-three Entra credentials), and run:
+`env.example` as `.env`, fill `PUBLIC_BASE_URL`, and run:
 
 ```sh
 docker compose up -d
@@ -73,6 +72,15 @@ internal encryption keyring and browser-session secret once, saving a private
 container keeps the same keys. No host environment exports, OpenSSL commands,
 setup script or other downloaded files are required. The defaults are student,
 read-only and anonymized. Schools are managed after sign-in.
+
+Open `PUBLIC_BASE_URL/account/setup`. Use the installation code from
+`docker compose logs canvas-mcp` and enter your Entra app registration there.
+The code expires after 30 minutes; obtain another with
+`docker compose exec canvas-mcp python -m canvas_mcp.core.selfhost.token_admin setup-code`.
+Login credentials and enablement are encrypted/database-managed through
+Admin > Settings. Existing database-owned values always win over environment
+credentials. Old deployments can explicitly adopt their previous provider
+environment once with `token_admin login-providers --import-env`.
 
 Use `docker compose ps` to observe readiness; `up -d` returns before the health
 check completes. Editing `.env` requires `docker compose up -d` to recreate the

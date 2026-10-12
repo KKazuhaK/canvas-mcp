@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from ..accounts import AccessRule
-from ..settings import SelfhostSettings
+from ..accounts import AccessRule, parse_access_settings
+from ..settings import SelfhostConfigError, SelfhostSettings
 from .config import GitHubConfig, GoogleConfig, LoginProvidersConfig, OidcConfig
 from .provider_config import ProviderConfigurationError
 from .provider_store import ProviderSnapshot
@@ -62,6 +62,24 @@ def settings_from_database(
         else rule
         for rule in policy.owner_rules
     )
+    policy = replace(policy, rules=rules, owner_rules=owner_rules)
+    if infrastructure.access_source is not None:
+        problems: list[str] = []
+        policy = parse_access_settings(
+            infrastructure.access_source,
+            tenant_id=tenant,
+            required_role=required,
+            owner_role=owner,
+            problems=problems,
+            providers=tuple(provider.id for provider in snapshot.providers) or None,
+            issuers={
+                provider.id: provider.issuer
+                for provider in snapshot.providers
+                if provider.protocol == "oidc"
+            },
+        )
+        if problems:
+            raise SelfhostConfigError(problems)
     return replace(
         infrastructure,
         tenant_id=tenant,
@@ -69,7 +87,7 @@ def settings_from_database(
         client_secret=secret,
         required_role=required,
         owner_role=owner,
-        access_policy=replace(policy, rules=rules, owner_rules=owner_rules),
+        access_policy=policy,
         login_providers=LoginProvidersConfig(
             order=tuple(provider.id for provider in snapshot.providers),
             google=google,

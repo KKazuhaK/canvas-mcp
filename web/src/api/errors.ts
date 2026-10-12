@@ -6,6 +6,14 @@ import type { ApiErrorCode, ErrorParams } from './types'
 // test tests/selfhost/test_account_api_contract.py compares this table with the
 // server's own code lists.
 const CODE_SET: Record<ApiErrorCode, true> = {
+  invalid_provider_configuration: true,
+  provider_secret_required: true,
+  provider_identity_binding_changed: true,
+  too_many_providers: true,
+  installation_already_initialized: true,
+  installation_code_invalid: true,
+  provider_configuration_unavailable: true,
+  installation_authority_unavailable: true,
   not_authenticated: true,
   csrf_invalid: true,
   origin_not_allowed: true,

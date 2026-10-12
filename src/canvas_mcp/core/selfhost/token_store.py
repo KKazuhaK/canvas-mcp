@@ -1540,6 +1540,21 @@ class TokenStore:
 
     # -- accounts: sign-in and admission -------------------------------------------
 
+    @staticmethod
+    def _require_login_revision(conn: Connection, expected: int | None) -> None:
+        if expected is None:
+            return
+        from sqlalchemy import select
+
+        from .db import schema
+        from .db.errors import LoginConfigurationChanged
+
+        actual = conn.execute(
+            select(schema.server_state.c.settings_revision)
+        ).scalar_one()
+        if actual != expected:
+            raise LoginConfigurationChanged()
+
     def resolve_identity(
         self,
         ext: ExternalClaims,
@@ -1550,6 +1565,7 @@ class TokenStore:
         ip: str = "unknown",
         ua_hash: str | None = None,
         listed_providers: Collection[str] | None = None,
+        expected_revision: int | None = None,
     ) -> Resolution:
         """Decide and apply, in one transaction, what an external identity may do.
 
@@ -1569,6 +1585,7 @@ class TokenStore:
         repos = self._repos
         surface = acc.SURFACE_ACCOUNT
         with self._db.write() as conn:
+            self._require_login_revision(conn, expected_revision)
             account_id = repos.identities.lookup(conn, *ext.identity)
             row = (
                 repos.accounts.get(conn, account_id, for_update=True)
@@ -1712,6 +1729,7 @@ class TokenStore:
         *,
         expected_epoch: int,
         ua_hash: str | None = None,
+        expected_revision: int | None = None,
     ) -> LinkResult:
         """Attach an external identity to an existing, active account in one transaction.
 
@@ -1732,6 +1750,7 @@ class TokenStore:
         repos = self._repos
         provider = ext.provider_id
         with self._db.write() as conn:
+            self._require_login_revision(conn, expected_revision)
             row = repos.accounts.get(conn, account_id, for_update=True)
             if (
                 row is None

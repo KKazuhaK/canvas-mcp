@@ -29,9 +29,9 @@ def test_a_missing_iss_is_refused_after_a_restart_when_the_provider_advertises_r
         ps.school.iss_param = True
         app = account_app(ps.stack)
         assert app.logins is not None
-        school = app.logins.providers["oidc:school"]
         person = ps.person()
         start = person.start("school")
+        school = app.logins.providers["oidc:school"]
         assert school.requires_iss() is True
         # A restart: the flow record is in the database, the discovery snapshot is not.
         school.discovery._snapshot = None
@@ -48,9 +48,9 @@ def test_a_provider_that_cannot_be_reached_at_the_callback_fails_closed(
         ps.school.iss_param = True
         app = account_app(ps.stack)
         assert app.logins is not None
-        school = app.logins.providers["oidc:school"]
         person = ps.person()
         start = person.start("school")
+        school = app.logins.providers["oidc:school"]
         callback = person.callback_url("school", start, iss=None)
         school.discovery._snapshot = None
         ps.school.discovery_overrides = {"issuer": "https://elsewhere.example"}

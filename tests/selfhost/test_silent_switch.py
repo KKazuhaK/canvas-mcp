@@ -18,6 +18,9 @@ from canvas_mcp.core.selfhost import token_admin
 from canvas_mcp.core.selfhost.app import prepare_selfhost
 from canvas_mcp.core.selfhost.db.engine import Database
 from canvas_mcp.core.selfhost.db.migrations import runner as migrate
+from canvas_mcp.core.selfhost.db.migrations.provider_environment import (
+    load_provider_environment,
+)
 from canvas_mcp.core.selfhost.db.migrations.transfer import (
     refuse_silent_switch,
     target_holds_rows,
@@ -25,7 +28,6 @@ from canvas_mcp.core.selfhost.db.migrations.transfer import (
 from canvas_mcp.core.selfhost.db.url import default_sqlite_path
 from canvas_mcp.core.selfhost.settings import (
     SelfhostConfigError,
-    load_selfhost_settings,
 )
 from canvas_mcp.core.selfhost.token_store import (
     Keyring,
@@ -138,7 +140,7 @@ class TestStartup:
         _disabled_legacy_file(env)
         # What `token_admin db upgrade` (or a failed import) leaves: a schema, no rows.
         migrate.ensure_ready(Database.sqlite(env / "other.sqlite3"), auto=True)
-        settings = load_selfhost_settings(
+        settings = load_provider_environment(
             _settings_env(env, DATABASE_URL=_other_url(env))
         )
         with pytest.raises(SelfhostConfigError) as refused:
@@ -147,7 +149,7 @@ class TestStartup:
 
     def test_a_missing_target_is_refused_before_anything_is_created(self, env) -> None:
         _disabled_legacy_file(env)
-        settings = load_selfhost_settings(
+        settings = load_provider_environment(
             _settings_env(env, DATABASE_URL=_other_url(env))
         )
         with pytest.raises(SelfhostConfigError):
@@ -161,7 +163,7 @@ class TestStartup:
         store.initialize()
         make_account(store, OID, status="disabled")
         store.close()
-        settings = load_selfhost_settings(
+        settings = load_provider_environment(
             _settings_env(env, DATABASE_URL=_other_url(env))
         )
         runtime = prepare_selfhost(settings)
@@ -170,7 +172,7 @@ class TestStartup:
 
     def test_the_default_layout_starts_unchanged(self, env) -> None:
         _disabled_legacy_file(env)
-        runtime = prepare_selfhost(load_selfhost_settings(_settings_env(env)))
+        runtime = prepare_selfhost(load_provider_environment(_settings_env(env)))
         assert runtime.store.get_principal_status(acct_key(OID)).disabled
         runtime.store.close()
 
@@ -206,7 +208,7 @@ class TestOperatorCli:
     ) -> None:
         assert token_admin.main(["disable", acct_key(OTHER)]) == token_admin.EXIT_CONFIG
         capsys.readouterr()
-        settings = load_selfhost_settings(
+        settings = load_provider_environment(
             _settings_env(env, DATABASE_URL=_other_url(env))
         )
         with pytest.raises(SelfhostConfigError):
@@ -216,7 +218,7 @@ class TestOperatorCli:
         assert token_admin.main(["db", "upgrade"]) == 0
         assert token_admin.main(["db", "current"]) == 0
         capsys.readouterr()
-        settings = load_selfhost_settings(
+        settings = load_provider_environment(
             _settings_env(env, DATABASE_URL=_other_url(env))
         )
         with pytest.raises(SelfhostConfigError):
@@ -233,7 +235,7 @@ class TestPostgres:
 
     def _prepare(self, env: pathlib.Path) -> None:
         runtime = prepare_selfhost(
-            load_selfhost_settings(_settings_env(env, DATABASE_URL=PG_URL))
+            load_provider_environment(_settings_env(env, DATABASE_URL=PG_URL))
         )
         runtime.store.close()
 

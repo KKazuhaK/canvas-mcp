@@ -1,8 +1,10 @@
-"""Environment contract of the self-hosted server.
+"""Infrastructure environment contract of the self-hosted server.
 
 Every variable is parsed here and every problem is collected, so one failed
 start shows the operator everything that needs fixing. Messages name the
-variable and never include its value: several of them are secrets.
+variable and never include its value: several of them are secrets. Login
+credentials come from database snapshots; an explicit import adapter supplies
+old provider input without making the environment a runtime credential layer.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from .db.url import (
     parse_database_url,
     sqlite_target,
 )
-from .login.config import LoginProvidersConfig, parse_login_providers
+from .login.config import LoginProvidersConfig, ProviderSettingsInput
 from .profile import PILOT_DISABLED_TOOLS, read_profile
 from .runtime_secrets import RuntimeSecretsError, with_saved_secrets
 
@@ -85,19 +87,13 @@ ACCOUNT_WEB_DIST_ENV = "ACCOUNT_WEB_DIST"
 #: Where the container image keeps the built account UI.
 DEFAULT_ACCOUNT_WEB_DIST = "/app/web-dist"
 
-_GUID_RE = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-)
 _SCOPE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-_ROLE_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/_-]+={0,2}$")
-_RESERVED_TENANTS = frozenset({"common", "organizations", "consumers"})
 _OIDC_SCOPES = frozenset({"openid", "profile", "email", "offline_access"})
 _LOOPBACK_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
-MIN_CLIENT_SECRET_CHARS = 16
 MIN_SESSION_SECRET_BYTES = 32
 MIN_SESSION_TTL_SECONDS = 60
 MAX_SESSION_TTL_SECONDS = 3600
@@ -177,6 +173,7 @@ class SelfhostSettings:
     # is the default. Without
     # Entra, ``tenant_id``, ``client_id`` and ``client_secret`` are empty strings.
     login_providers: LoginProvidersConfig = field(default_factory=LoginProvidersConfig)
+    access_source: Mapping[str, str] | None = field(default=None, repr=False)
 
     mcp_path: ClassVar[str] = "/mcp"
 
@@ -274,18 +271,6 @@ def _parse_public_base_url(raw: str, problems: list[str]) -> tuple[str, str] | N
     host_part = f"[{host}]" if ":" in host else host
     netloc = host_part if port is None else f"{host_part}:{port}"
     return f"https://{netloc}", host
-
-
-def _guid(name: str, raw: str, problems: list[str]) -> str:
-    if not raw:
-        problems.append(f"{name} is required (a GUID)")
-        return ""
-    if not _GUID_RE.match(raw):
-        problems.append(
-            f"{name} must be a GUID such as 00000000-0000-0000-0000-000000000000"
-        )
-        return ""
-    return raw.lower()
 
 
 def _parse_redirect_uris(raw: str, problems: list[str]) -> tuple[str, ...]:
@@ -567,7 +552,11 @@ def _parse_disabled_tools(raw: str, problems: list[str]) -> tuple[str, ...]:
     return tuple(sorted(set(entries)))
 
 
-def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSettings:
+def load_selfhost_settings(
+    env: Mapping[str, str] | None = None,
+    *,
+    _provider_input: ProviderSettingsInput | None = None,
+) -> SelfhostSettings:
     """Parse and validate every variable of the mode, reporting all problems at once."""
     source = os.environ if env is None else env
     problems: list[str] = []
@@ -599,29 +588,12 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
         # spelling of this origin has to be the one every client derives from the URL.
         problems.append("PUBLIC_BASE_URL must not include the default port")
 
-    login = parse_login_providers(source, problems)
-
-    tenant_id = ""
-    client_id = ""
-    client_secret = ""
-    if login.entra_enabled:
-        tenant_raw = get("ENTRA_TENANT_ID")
-        if tenant_raw.lower() in _RESERVED_TENANTS:
-            problems.append(
-                "ENTRA_TENANT_ID must be the directory (tenant) GUID, not "
-                "common, organizations or consumers"
-            )
-        else:
-            tenant_id = _guid("ENTRA_TENANT_ID", tenant_raw, problems)
-        client_id = _guid("ENTRA_CLIENT_ID", get("ENTRA_CLIENT_ID"), problems)
-
-        client_secret = get("ENTRA_CLIENT_SECRET")
-        if not client_secret:
-            problems.append("ENTRA_CLIENT_SECRET is required")
-        elif len(client_secret) < MIN_CLIENT_SECRET_CHARS:
-            problems.append(
-                f"ENTRA_CLIENT_SECRET must be at least {MIN_CLIENT_SECRET_CHARS} characters"
-            )
+    supplied = _provider_input or ProviderSettingsInput(LoginProvidersConfig(order=()))
+    problems.extend(supplied.problems)
+    login = supplied.login
+    tenant_id = supplied.tenant_id
+    client_id = supplied.client_id
+    client_secret = supplied.client_secret
 
     # This scope belongs to this authorization server, independently of sign-in providers.
     api_scope = get("MCP_SCOPE") or DEFAULT_MCP_SCOPE
@@ -632,21 +604,8 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
             "MCP_SCOPE must be a custom MCP scope, not an OpenID Connect scope"
         )
 
-    required_role = get("ENTRA_REQUIRED_ROLE") or DEFAULT_REQUIRED_ROLE
-    owner_role = get("ENTRA_OWNER_ROLE") or DEFAULT_OWNER_ROLE
-    if login.entra_enabled:
-        if not _ROLE_RE.match(required_role):
-            problems.append(
-                "ENTRA_REQUIRED_ROLE must match [A-Za-z0-9._-] and be 1 to 120 characters"
-            )
-        if not _ROLE_RE.match(owner_role):
-            problems.append(
-                "ENTRA_OWNER_ROLE must match [A-Za-z0-9._-] and be 1 to 120 characters"
-            )
-        if required_role == owner_role:
-            problems.append(
-                "ENTRA_REQUIRED_ROLE and ENTRA_OWNER_ROLE must be different roles"
-            )
+    required_role = supplied.required_role
+    owner_role = supplied.owner_role
 
     redirect_uris = _parse_redirect_uris(get("OAUTH_ALLOWED_REDIRECT_URIS"), problems)
 
@@ -708,14 +667,33 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
         profile = ""
     if profile == "pilot":
         disabled_tools = tuple(sorted(set(disabled_tools) | PILOT_DISABLED_TOOLS))
-    access_policy = parse_access_settings(
-        source,
-        tenant_id=tenant_id,
-        required_role=required_role,
-        owner_role=owner_role,
-        problems=problems,
-        providers=login.ids,
-        issuers=login.issuers(),
+    access_source = {
+        name: value
+        for name, value in source.items()
+        if name
+        in {
+            "ACCESS_POLICY",
+            "ACCESS_RULES",
+            "ACCESS_FALLBACK",
+            "OWNER_RULES",
+            "ACCESS_OPEN_ACKNOWLEDGE_PUBLIC",
+            "SELFHOST_BOOTSTRAP_OWNER",
+            "TRUSTED_PROXY_CIDRS",
+            "ACCOUNT_LINK_BY_VERIFIED_EMAIL",
+        }
+    }
+    access_policy = (
+        parse_access_settings(
+            source,
+            tenant_id=tenant_id,
+            required_role=required_role,
+            owner_role=owner_role,
+            problems=problems,
+            providers=login.ids,
+            issuers=login.issuers(),
+        )
+        if _provider_input is not None
+        else default_policy(required_role, owner_role)
     )
 
     if problems or base is None:
@@ -745,4 +723,5 @@ def load_selfhost_settings(env: Mapping[str, str] | None = None) -> SelfhostSett
         account_web_dist=Path(web_dist_raw),
         authz=authz,
         login_providers=login,
+        access_source=None if _provider_input is not None else access_source,
     )

@@ -54,9 +54,14 @@ def test_upgrade_ddl_and_alembic_remain_inside_the_migration_package():
 
 def test_only_documented_startup_and_cli_bridges_import_upgrade_tooling():
     allowed = {
-        "app.py": {"db.migrations", "db.migrations.transfer"},
+        "app.py": {
+            "db.migrations",
+            "db.migrations.transfer",
+            "db.migrations.provider_environment",
+        },
         "token_store.py": {"db.migrations"},
         "token_admin.py": {
+            "db.migrations.provider_environment",
             "db.migrations.cli",
             "canvas_mcp.core.selfhost.db.migrations.transfer",
         },

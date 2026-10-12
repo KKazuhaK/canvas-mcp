@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -56,6 +57,29 @@ class ProviderConfigStore:
                     .where(s.login_providers.c.config_source == "db")
                     .order_by(s.login_providers.c.sort_rank, s.login_providers.c.id)
                 ).mappings()
+            )
+
+    def public_snapshot(self) -> tuple[int, tuple[dict[str, Any], ...]]:
+        """One statement binds redacted registrations to their configuration revision."""
+        with self.database.read() as conn:
+            rows = (
+                conn.execute(
+                    select(s.server_state.c.settings_revision, s.login_providers)
+                    .select_from(
+                        s.server_state.outerjoin(
+                            s.login_providers, s.login_providers.c.config_source == "db"
+                        )
+                    )
+                    .where(s.server_state.c.id == 1)
+                    .order_by(s.login_providers.c.sort_rank, s.login_providers.c.id)
+                )
+                .mappings()
+                .all()
+            )
+            if not rows:
+                raise ProviderConfigurationError("provider_configuration_unavailable")
+            return int(rows[0]["settings_revision"]), tuple(
+                self._public(row) for row in rows if row["id"] is not None
             )
 
     def _decode(self, row: Any) -> ProviderConfiguration:
@@ -143,6 +167,7 @@ class ProviderConfigStore:
         actor: str | None,
         now: int,
         _initial: bool = False,
+        _connection: Connection | None = None,
     ) -> int:
         value = validate_provider(identifier, config, client_secret)
         if (
@@ -151,7 +176,9 @@ class ProviderConfigStore:
             or not 0 <= rank < MAX_PROVIDERS
         ):
             raise ProviderConfigurationError()
-        with self.database.write() as conn:
+        with (
+            self.database.write() if _connection is None else nullcontext(_connection)
+        ) as conn:
             if _initial and not self.setup_available_in(conn):
                 raise ProviderConfigurationError("installation_already_initialized")
             new_revision = ConfigStore._authorize(conn, actor, revision, now)
@@ -198,7 +225,7 @@ class ProviderConfigStore:
                 raise ProviderConfigurationError("too_many_providers")
             if (
                 active != current
-                and self.repos.accounts.count_active_owners(conn) > 0
+                and self.repos.accounts.count_usable_owners(conn, sorted(current)) > 0
                 and not self.repos.accounts.count_usable_owners(conn, sorted(active))
             ):
                 raise ProviderConfigurationError("last_owner")

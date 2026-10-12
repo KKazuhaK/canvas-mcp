@@ -318,7 +318,8 @@ def test_session_uses_one_authoritative_query_and_leaves_no_context(stack, brows
     assert response.status_code == 200
     assert response.json()["selected"] is None
     assert sum("FROM accounts a CROSS JOIN server_state" in sql for sql in seen) == 1
-    assert len(seen) == 2  # session snapshot + primary credential display
+    assert len(seen) == 3  # provider generation + session snapshot + primary credential display
+    assert sum("FROM accounts" in statement and "session_epoch" in statement for statement in seen) == 1
     assert CURRENT_CONFIG.get() is None
 
 

@@ -30,6 +30,8 @@ if TYPE_CHECKING:
     from ..tool_policy import ToolPolicy
     from .authz.runtime import AuthzRuntime
     from .config_snapshot import ConfigSnapshots
+    from .login.installation import InstallationAuthority
+    from .login.provider_store import ProviderConfigStore
     from .token_store import TokenStore
 
 HEALTH_PATH = "/healthz"
@@ -53,6 +55,8 @@ class SelfhostRuntime:
     tool_prefs: ToolPrefsCache
     authz: AuthzRuntime
     snapshots: ConfigSnapshots
+    provider_store: ProviderConfigStore | None = None
+    installation: InstallationAuthority | None = None
     limiters: RateLimiters = field(
         default_factory=lambda: build_rate_limiters("memory")
     )
@@ -324,14 +328,29 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
     # check: when that refuses the start, the operator's next step is a token_admin command,
     # and it must judge owners by the list that was refused, not by an older one. An
     # Entra-only server with no earlier record writes nothing.
+    from .login.provider_config import ProviderConfigurationError
+
     try:
         issuer_problems = _provider_issuer_problems(settings, store)
         if issuer_problems:
             raise SelfhostConfigError(issuer_problems)
-        store.record_login_providers(settings.login_providers.order)
+        from .db.migrations.provider_environment import (
+            clear_unconfigured_metadata,
+            import_provider_settings,
+        )
+        from .login.installation import InstallationAuthority
+        from .login.provider_settings import settings_from_database
+        from .login.provider_store import ProviderConfigStore
+
+        provider_store = ProviderConfigStore(store.database, keyring)
+        if settings.login_providers.order:
+            import_provider_settings(settings, provider_store)
+        else:
+            clear_unconfigured_metadata(provider_store)
+        settings = settings_from_database(settings, provider_store.load_snapshot())
         from .config_snapshot import ConfigSnapshots
 
-        snapshots = ConfigSnapshots(store.database, settings.login_providers)
+        snapshots = ConfigSnapshots(store.database, None)
         if settings.profile == "pilot":
             from .profile import PilotProfileViolation
 
@@ -339,7 +358,19 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
                 snapshots.enable_pilot()
             except PilotProfileViolation as exc:
                 raise SelfhostConfigError([str(exc)]) from None
-        owner_problem = _owner_path_problem(settings, store)
+        installation = InstallationAuthority(provider_store, settings.data_dir)
+        owner_problem = (
+            None
+            if provider_store.setup_available()
+            else _owner_path_problem(settings, store)
+        )
+    except ProviderConfigurationError:
+        store.close()
+        raise SelfhostConfigError(
+            [
+                "database-managed login configuration cannot be loaded; restore its original keys or explicitly import the previous provider configuration"
+            ]
+        ) from None
     except StoreUnavailable:
         store.close()
         raise SelfhostConfigError(
@@ -373,6 +404,8 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         limiters=build_rate_limiters(settings.state_backend),
         authz=authz,
         snapshots=snapshots,
+        provider_store=provider_store,
+        installation=installation,
     )
 
 
@@ -429,6 +462,11 @@ def install_selfhost(
 
     settings = runtime.settings
     spa = load_account_spa(settings)
+    if runtime.installation is not None:
+        code = runtime.installation.issue()
+        if code is not None:
+            print(f"Setup URL: {settings.public_base_url}/account/setup", flush=True)
+            print(f"Installation code (expires in 30 minutes): {code}", flush=True)
     from .. import course_files
 
     course_files.ALLOW_OFF_CANVAS_DOWNLOADS = settings.profile != "pilot"
@@ -481,6 +519,9 @@ def install_selfhost(
             "authz": runtime.authz,
             "logins": logins,
             "snapshots": runtime.snapshots,
+            "provider_store": runtime.provider_store,
+            "installation": runtime.installation,
+            "infrastructure": settings,
             **account_options,
         },
     )

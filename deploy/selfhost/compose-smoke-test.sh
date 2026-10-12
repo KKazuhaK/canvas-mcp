@@ -21,9 +21,6 @@ cp -- "$SOURCE/docker-compose.yml" "$WORK/docker-compose.yml"
 umask 077
 cat >"$WORK/.env" <<EOF
 PUBLIC_BASE_URL=https://mcp.example.com
-ENTRA_TENANT_ID=11111111-2222-3333-4444-555555555555
-ENTRA_CLIENT_ID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
-ENTRA_CLIENT_SECRET=smoke-not-a-real-secret-0123456789
 CANVAS_MCP_IMAGE=$IMAGE
 EOF
 compose config --quiet
@@ -32,6 +29,28 @@ OWN_VOLUME=true
 compose up -d --pull never --wait --wait-timeout 120
 curl -fsS http://127.0.0.1:8819/healthz
 compose exec -T canvas-mcp python -m canvas_mcp.core.selfhost.token_admin check
+# First-install configuration uses the HTTP API, not provider environment variables.
+compose exec -T canvas-mcp python - <<'PY'
+import json
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+def api(method, body=None):
+    request = Request('http://127.0.0.1:8819/api/v1/setup',
+        data=None if body is None else json.dumps(body).encode(), method=method,
+        headers={'Host': 'mcp.example.com', 'Origin': 'https://mcp.example.com', 'Content-Type': 'application/json'})
+    with urlopen(request, timeout=10) as response:
+        assert response.status == 200
+        return json.load(response)
+
+status = api('GET')
+assert status['initialized'] is False
+code = json.loads(Path('/data/installation-code.json').read_text())['code']
+api('POST', {'revision': status['revision'], 'code': code,
+    'config': {'tenant_id': '11111111-2222-3333-4444-555555555555', 'client_id': 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'},
+    'client_secret': 'smoke-not-a-real-secret-0123456789'})
+assert api('GET')['initialized'] is True
+PY
 # Seal a throwaway value and a browser-session key fingerprint before recreation.
 compose exec -T canvas-mcp python - <<'PY'
 import base64, hashlib, json, os
@@ -47,6 +66,8 @@ PY
 compose up -d --pull never --force-recreate --wait --wait-timeout 120
 compose exec -T canvas-mcp python - <<'PY'
 import base64, hashlib, json, os, stat
+from canvas_mcp.core.selfhost.app import prepare_selfhost
+from canvas_mcp.core.selfhost.settings import load_selfhost_settings
 from pathlib import Path
 from canvas_mcp.core.selfhost.runtime_secrets import with_saved_secrets
 from canvas_mcp.core.selfhost.token_store import Keyring
@@ -58,7 +79,15 @@ assert hashlib.sha256(env['ACCOUNT_SESSION_SECRET'].encode()).hexdigest() == pay
 info = Path('/data/runtime-secrets.json').stat()
 assert stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == 10001
 assert 'CANVAS_TOKEN_KEYS' not in os.environ and 'ACCOUNT_SESSION_SECRET' not in os.environ
+assert not any(name.startswith('ENTRA_') for name in os.environ)
+runtime = prepare_selfhost(load_selfhost_settings(env))
+try:
+    providers = runtime.provider_store
+    assert providers.load_snapshot().providers[0].client_secret == 'smoke-not-a-real-secret-0123456789'
+    assert not providers.setup_available()
+finally:
+    runtime.store.close()
 PY
 compose exec -T canvas-mcp python -m canvas_mcp.core.selfhost.token_admin check
 curl -fsS http://127.0.0.1:8819/.well-known/oauth-authorization-server >/dev/null
-echo "TWO-FILE COMPOSE TEST PASSED: healthy boot, CLI and sealed value survive recreation"
+echo "TWO-FILE COMPOSE TEST PASSED: origin-only boot, HTTP setup and encrypted configuration survive recreation"

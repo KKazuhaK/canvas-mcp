@@ -35,6 +35,7 @@ from starlette.responses import Response
 from .. import account_core as web
 from ..account_ops import Refusal
 from ..accounts import Denied
+from ..db.errors import LoginConfigurationChanged
 from ..db.workers import run_store
 from ..identity import SignIn
 from .ceremony import (
@@ -109,6 +110,7 @@ class ExternalSignIn:
             le=None,
             li=None,
             iat=now,
+            revision=app.login_bundle.revision,
         )
         try:
             state = await self.rt.flow_store.put(
@@ -201,9 +203,14 @@ class ExternalSignIn:
             record is None
             or record.p != provider.id
             or record.ru != provider.redirect_uri
+            or app.login_bundle.revision is not None
+            and record.revision != app.login_bundle.revision
         ):
             return self._failure(link, "state_invalid", 400, provider)
         link = record.pp == "link"
+        if record.revision is not None:
+            if await run_store(app.snapshots.revision) != record.revision:
+                return self._failure(link, "state_invalid", 400, provider)
 
         issuer = request.query_params.get("iss")
         if issuer is not None:
@@ -266,6 +273,8 @@ class ExternalSignIn:
                     ua_hash=app._ua_hash(request),
                 )
             )
+        except LoginConfigurationChanged:
+            return self._failure(link, "state_invalid", 400, provider)
         except Exception as exc:  # noqa: BLE001
             logger.error("account sign-in status check failed: %s", type(exc).__name__)
             return self._failure(link, "token_store_unavailable", 503, provider)

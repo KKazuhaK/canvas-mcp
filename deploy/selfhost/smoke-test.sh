@@ -37,9 +37,6 @@ SESSION_SECRET="$(openssl rand -base64 32 | tr -d '\r\n')"
 TOKEN_KEYS="k1:$(openssl rand -base64 32 | tr -d '\r\n')"
 ENV=(
   -e MCP_AUTH_MODE=selfhost -e PUBLIC_BASE_URL="$PUBLIC"
-  -e ENTRA_TENANT_ID="${SMOKE_ENTRA_TENANT_ID:-11111111-2222-3333-4444-555555555555}"
-  -e ENTRA_CLIENT_ID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
-  -e ENTRA_CLIENT_SECRET=smoke-not-a-real-secret-0123456789
   -e CANVAS_ROLE=student
 )
 NETWORK=()
@@ -73,7 +70,27 @@ docker run -d --name "$MAIN" --read-only --tmpfs /tmp --cap-drop ALL \
   --security-opt no-new-privileges:true "${NETWORK[@]}" -v "$VOLUME:/data" \
   -p "127.0.0.1:${PORT}:8819" "${ENV[@]}" "$IMAGE" >/dev/null
 wait_for "$MAIN"
-ok "non-root, read-only image boots with a fresh SQL store"
+ok "non-root, read-only image boots without provider credentials"
+docker exec -i "$MAIN" python - "${SMOKE_ENTRA_TENANT_ID:-11111111-2222-3333-4444-555555555555}" <<'PY' || fail "HTTP first-install setup"
+import json, sys
+from pathlib import Path
+from urllib.request import Request, urlopen
+def setup(method, body=None):
+    request = Request('http://127.0.0.1:8819/api/v1/setup', method=method,
+        data=None if body is None else json.dumps(body).encode(),
+        headers={'Host': 'mcp.example.com', 'Origin': 'https://mcp.example.com', 'Content-Type': 'application/json'})
+    with urlopen(request, timeout=10) as response:
+        assert response.status == 200
+        return json.load(response)
+status = setup('GET')
+assert not status['initialized']
+code = json.loads(Path('/data/installation-code.json').read_text())['code']
+setup('POST', {'revision': status['revision'], 'code': code,
+    'config': {'tenant_id': sys.argv[1], 'client_id': 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'},
+    'client_secret': 'smoke-not-a-real-secret-0123456789'})
+assert setup('GET')['initialized']
+PY
+ok "private first-install authority configures login through the HTTP API"
 
 # (b) local OAuth metadata and unauthenticated MCP
 status 200 /.well-known/oauth-authorization-server
@@ -208,8 +225,37 @@ if [ -n "${SMOKE_EXPECT_PROVIDERS:-}" ]; then
   docker run -d --name "$PROVIDERS_C" --read-only --tmpfs /tmp --cap-drop ALL \
     --security-opt no-new-privileges:true "${NETWORK[@]}" -v "$PROVIDERS_VOLUME:/data" \
     -p "127.0.0.1:${PORT}:8819" "${ENV[@]}" "${PROVIDER_ENV[@]}" \
+    -e ENTRA_TENANT_ID="${SMOKE_ENTRA_TENANT_ID:-11111111-2222-3333-4444-555555555555}" \
+    -e ENTRA_CLIENT_ID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee \
+    -e ENTRA_CLIENT_SECRET=smoke-not-a-real-secret-0123456789 \
     -e "SELFHOST_LOGIN_PROVIDERS=entra${PROVIDER_LIST}" "$IMAGE" >/dev/null
   wait_for "$PROVIDERS_C"
+  docker exec -i "$PROVIDERS_C" python - <<'PY' || fail "explicit provider adoption"
+import io, json, os, sys
+from canvas_mcp.core.selfhost import token_admin
+from canvas_mcp.core.selfhost.runtime_secrets import with_saved_secrets
+from canvas_mcp.core.selfhost.db.migrations.provider_environment import load_provider_environment
+from canvas_mcp.core.selfhost.login.provider_store import ProviderConfigStore
+from canvas_mcp.core.selfhost.token_store import Keyring
+os.environ.update(with_saved_secrets(os.environ))
+assert token_admin.main(['login-providers', '--import-env']) == 0
+settings = load_provider_environment()
+store = token_admin._open_store()
+try:
+    repository = ProviderConfigStore(store.database, Keyring.parse(settings.canvas_token_keys_raw))
+    # PostgreSQL may already hold the first smoke's Entra configuration. Adoption
+    # never overwrites it; optional additions use the normal governed operator CLI.
+    for rank, identifier in enumerate(settings.login_providers.order):
+        if identifier == 'entra':
+            continue
+        value = settings.login_providers.google if identifier == 'google' else settings.login_providers.github
+        sys.stdin = io.StringIO(json.dumps({'revision': repository.load_snapshot().revision,
+            'config': {'client_id': value.client_id}, 'client_secret': value.client_secret,
+            'enabled': True, 'rank': rank}))
+        assert token_admin.main(['login-providers', '--configure', identifier]) == 0
+finally:
+    store.close()
+PY
   status 200 /api/v1/providers
   python3 - "$WORKDIR/body" "entra${PROVIDER_LIST}" <<'PY' || fail "optional provider list"
 import json, sys

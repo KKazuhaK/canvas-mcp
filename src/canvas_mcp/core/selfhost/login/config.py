@@ -151,6 +151,19 @@ class LoginProvidersConfig:
         return {cfg.provider_id: cfg.issuer for cfg in self.oidc}
 
 
+@dataclass(frozen=True)
+class ProviderSettingsInput:
+    """Explicit protocol input for the removable environment import adapter."""
+
+    login: LoginProvidersConfig
+    tenant_id: str = ""
+    client_id: str = ""
+    client_secret: str = field(default="", repr=False)
+    required_role: str = "Canvas.User"
+    owner_role: str = "Canvas.Owner"
+    problems: tuple[str, ...] = ()
+
+
 def env_prefix(slug: str) -> str:
     """``OIDC_<SLUG>_``: the variable prefix of a generic provider (``-`` becomes ``_``)."""
     return "OIDC_" + slug.upper().replace("-", "_") + "_"

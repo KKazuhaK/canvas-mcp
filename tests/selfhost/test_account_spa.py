@@ -667,8 +667,11 @@ class TestSignInFailures:
     def test_identity_refusal_exposes_only_a_known_code(
         self, spa: Stack, monkeypatch, code, expected
     ):
+        app = account_app(spa)
+        assert app.login_manager is not None
+        app.login_manager.get()
         monkeypatch.setattr(
-            account_app(spa).identity,
+            app.identity,
             "sign_in_external",
             lambda *args, **kwargs: Denied(code, "secret <b>provider text</b>"),
         )

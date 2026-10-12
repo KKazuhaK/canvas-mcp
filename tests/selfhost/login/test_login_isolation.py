@@ -29,14 +29,24 @@ BLOCK = textwrap.dedent(
 
 
 def _run(code: str) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, "PYTHONPATH": str(SRC), "PYTHON_DOTENV_DISABLED": "1", "PYTHONUTF8": "1"}
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(SRC),
+        "PYTHON_DOTENV_DISABLED": "1",
+        "PYTHONUTF8": "1",
+    }
     return subprocess.run(
         [sys.executable, "-c", BLOCK + textwrap.dedent(code)],
-        capture_output=True, text=True, env=env, timeout=120,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
     )
 
 
-def test_the_provider_config_and_settings_import_without_joserfc_or_the_data_layer() -> None:
+def test_the_provider_config_and_settings_import_without_joserfc_or_the_data_layer() -> (
+    None
+):
     result = _run(
         """
         import canvas_mcp.core.selfhost.login.config
@@ -53,7 +63,7 @@ def test_the_provider_config_and_settings_import_without_joserfc_or_the_data_lay
     assert result.stdout.strip().endswith("ok")
 
 
-def test_an_entra_only_start_never_imports_the_relying_party_modules() -> None:
+def test_infrastructure_settings_never_import_the_relying_party_modules() -> None:
     session = base64.b64encode(bytes(range(32))).decode()
     result = _run(
         f"""
@@ -66,7 +76,7 @@ def test_an_entra_only_start_never_imports_the_relying_party_modules() -> None:
             "ACCOUNT_SESSION_SECRET": "{session}",
             "CANVAS_TOKEN_KEYS": "k1:" + "A" * 43 + "=",
         }})
-        assert settings.login_providers.single
+        assert not settings.login_providers.order
         loaded = [m for m in sys.modules if m.startswith("canvas_mcp.core.selfhost.login")]
         assert loaded == ["canvas_mcp.core.selfhost.login", "canvas_mcp.core.selfhost.login.config"], loaded
         print("ok")
@@ -77,7 +87,12 @@ def test_an_entra_only_start_never_imports_the_relying_party_modules() -> None:
 
 
 def test_the_account_pages_load_no_relying_party_module_by_themselves() -> None:
-    env = {**os.environ, "PYTHONPATH": str(SRC), "PYTHON_DOTENV_DISABLED": "1", "PYTHONUTF8": "1"}
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(SRC),
+        "PYTHON_DOTENV_DISABLED": "1",
+        "PYTHONUTF8": "1",
+    }
     code = textwrap.dedent(
         """
         import sys
@@ -90,7 +105,11 @@ def test_the_account_pages_load_no_relying_party_module_by_themselves() -> None:
         """
     )
     result = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().endswith("ok")

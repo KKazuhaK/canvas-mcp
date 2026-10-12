@@ -7,6 +7,8 @@ import {
   type RouteKey,
 } from './contract'
 import type {
+  LoginProviderSave,
+  SetupRequest,
   AdminAction,
   PageQuery,
   FeaturedSchoolsRequest,
@@ -45,6 +47,10 @@ async function call<K extends RouteKey>(key: K, options: CallOptions<K> = {}): P
 // ---- public ---------------------------------------------------------------------
 
 export const getProviders = () => call('GET /providers')
+export const getSetupStatus = () => call('GET /setup')
+export const initializeLogin = (body: SetupRequest) => call('POST /setup', { body })
+export const getLoginProviderSettings = () => call('GET /admin/login-providers')
+export const saveLoginProvider = (id: string, body: LoginProviderSave) => call('PUT /admin/login-providers/{id}', { id, body })
 
 // ---- self -----------------------------------------------------------------------
 

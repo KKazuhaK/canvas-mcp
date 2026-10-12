@@ -1,4 +1,9 @@
 {
+  "installation": {
+    "title": "Configure sign-in",
+    "help": "Enter the installation code from the container logs and your Microsoft Entra app registration. Configuration is saved in the database.",
+    "code": "Installation code"
+  },
   "title": "Admin",
   "ownerOnly": "Only owners can see the admin pages.",
   "actions": {
@@ -250,6 +255,12 @@
     "lastUsed": "Last used"
   },
   "providerConfig": {
+    "title": "Login provider configuration",
+    "reload": "Reload login configuration",
+    "edit": "Edit {{provider}}",
+    "type": "Provider type",
+    "slug": "OIDC identifier",
+    "add": "Add login provider",
     "callback": "Callback URL",
     "callbackHelp": "Register this exact Web callback with your sign-in provider.",
     "tenant": "Directory (tenant) ID",

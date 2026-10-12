@@ -197,6 +197,25 @@ def test_disabling_the_last_usable_owner_provider_rolls_back(providers, db):
     assert providers.load_enabled()[0].id == "entra"
 
 
+def test_operator_can_repair_an_already_stranded_provider_inventory(providers, db):
+    save(providers, db)
+    add_account(db)
+    with db.write() as conn:
+        conn.execute(update(s.login_providers).values(configured=False))
+    providers.save(
+        "google",
+        config={"client_id": "123456.apps.googleusercontent.com"},
+        client_secret=SECRET,
+        enabled=True,
+        rank=1,
+        revision=revision(db),
+        actor=None,
+        now=101,
+    )
+    save(providers, db, client_secret=None)
+    assert {provider.id for provider in providers.load_enabled()} == {"entra", "google"}
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

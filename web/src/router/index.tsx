@@ -7,6 +7,7 @@ import ConsentView from '@/views/ConsentView'
 import HomeView from '@/views/HomeView'
 import SignInMethodsView from '@/views/SignInMethodsView'
 import SignInView from '@/views/SignInView'
+import SetupView from '@/views/SetupView'
 import { NotFoundView, RouteError } from '@/views/StateViews'
 import TokenView from '@/views/TokenView'
 import WriteToolsView from '@/views/WriteToolsView'
@@ -33,6 +34,7 @@ export const routes: RouteObject[] = [
           // The server-side sign-in lives at /auth/login and /auth/callback (not
           // routes of this app); this page is where a failed sign-in comes back to.
           { path: 'sign-in', element: <SignInView />, handle: { titleKey: 'common:actions.signIn' } },
+          { path: 'setup', element: <SetupView />, handle: { titleKey: 'admin:installation.title' } },
         ],
       },
       // `/` chooses its own frame: signed-out landing or the account page.

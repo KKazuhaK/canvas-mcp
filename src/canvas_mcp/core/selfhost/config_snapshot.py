@@ -124,7 +124,7 @@ class ConfigSnapshots:
     def __init__(
         self,
         database: Database,
-        providers: LoginProvidersConfig,
+        providers: LoginProvidersConfig | None,
         *,
         resolve_host: HostResolver = system_resolve,
     ) -> None:
@@ -265,7 +265,10 @@ class ConfigSnapshots:
                 continue
             default, protocol, icon = provider_defaults(identifier)
             name = provider_display_name(row["display_name"])
-            configured = bool(row["configured"] and identifier in self.providers.ids)
+            configured = bool(
+                row["configured"]
+                and (self.providers is None or identifier in self.providers.ids)
+            )
             effective = name or default
             if configured:
                 if (
@@ -286,7 +289,10 @@ class ConfigSnapshots:
                     row["sort_rank"],
                 )
             )
-        if {p.id for p in displays if p.configured} != self.providers.ids:
+        if (
+            self.providers is not None
+            and {p.id for p in displays if p.configured} != self.providers.ids
+        ):
             raise ValueError("missing configured provider")
         featured, private = [], []
         for row in schools:

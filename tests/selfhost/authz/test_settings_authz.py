@@ -158,7 +158,7 @@ class TestValidatedAtStartup:
             SELFHOST_AUTH_MODE="x",
             ACCESS_TOKEN_TTL="x",
             CIMD_FETCH_TIMEOUT_S="99",
-            ENTRA_CLIENT_ID="x",
+            PUBLIC_BASE_URL="invalid",
         )
         assert len(problems) >= 4
 

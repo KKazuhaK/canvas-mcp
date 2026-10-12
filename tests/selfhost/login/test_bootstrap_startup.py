@@ -16,9 +16,11 @@ from canvas_mcp.core.selfhost.accounts import (
     evaluate_admission,
 )
 from canvas_mcp.core.selfhost.app import prepare_selfhost
+from canvas_mcp.core.selfhost.db.migrations.provider_environment import (
+    load_provider_environment,
+)
 from canvas_mcp.core.selfhost.settings import (
     SelfhostConfigError,
-    load_selfhost_settings,
 )
 
 from ..authz.stack import default_env
@@ -85,7 +87,7 @@ def test_pending_bootstrap_owner_keeps_admission_after_rules_change(
             "SELFHOST_BOOTSTRAP_OWNER": "token_admin",
         },
     )
-    runtime = prepare_selfhost(load_selfhost_settings(base))
+    runtime = prepare_selfhost(load_provider_environment(base))
     try:
         pending = runtime.identity.sign_in_external(gext())
         assert not isinstance(pending, acc.Denied) and pending.pending
@@ -99,7 +101,7 @@ def test_pending_bootstrap_owner_keeps_admission_after_rules_change(
         "ACCESS_RULES": "google:domain:example.edu",
         "SELFHOST_BOOTSTRAP_OWNER": f"google:{GSUB}",
     }
-    runtime = prepare_selfhost(load_selfhost_settings(bootstrap))
+    runtime = prepare_selfhost(load_provider_environment(bootstrap))
     try:
         signed = runtime.identity.sign_in_external(gext())
         assert not isinstance(signed, acc.Denied) and signed.owner
@@ -107,7 +109,7 @@ def test_pending_bootstrap_owner_keeps_admission_after_rules_change(
     finally:
         runtime.store.close()
     runtime = prepare_selfhost(
-        load_selfhost_settings(
+        load_provider_environment(
             {
                 **bootstrap,
                 "ACCESS_RULES": "google:domain:other.edu",
@@ -135,7 +137,7 @@ def test_operator_promoted_owner_keeps_admission_after_rules_change(
             "SELFHOST_BOOTSTRAP_OWNER": "token_admin",
         },
     )
-    runtime = prepare_selfhost(load_selfhost_settings(base))
+    runtime = prepare_selfhost(load_provider_environment(base))
     try:
         signed = runtime.identity.sign_in_external(gext())
         assert not isinstance(signed, acc.Denied) and not signed.owner
@@ -150,7 +152,7 @@ def test_operator_promoted_owner_keeps_admission_after_rules_change(
     finally:
         runtime.store.close()
     runtime = prepare_selfhost(
-        load_selfhost_settings(
+        load_provider_environment(
             {
                 **base,
                 "ACCESS_RULES": "google:domain:other.edu",
@@ -178,7 +180,7 @@ def test_used_oidc_provider_cannot_change_issuer_under_the_same_slug(
             "SELFHOST_BOOTSTRAP_OWNER": "oidc:school:owner",
         },
     )
-    runtime = prepare_selfhost(load_selfhost_settings(base))
+    runtime = prepare_selfhost(load_provider_environment(base))
     try:
         signed = runtime.identity.sign_in_external(
             ExternalClaims(
@@ -193,7 +195,7 @@ def test_used_oidc_provider_cannot_change_issuer_under_the_same_slug(
     replacement = "https://idp.example.edu/realms/replacement"
     with pytest.raises(SelfhostConfigError) as caught:
         prepare_selfhost(
-            load_selfhost_settings({**base, "OIDC_SCHOOL_ISSUER": replacement})
+            load_provider_environment({**base, "OIDC_SCHOOL_ISSUER": replacement})
         )
     message = " ".join(caught.value.problems)
     assert "OIDC_SCHOOL_ISSUER" in message and "new slug" in message
@@ -213,6 +215,25 @@ def link_google(store, key: str) -> None:  # type: ignore[no-untyped-def]
     assert result.ok, result
 
 
+def historic_google_only(store) -> None:  # type: ignore[no-untyped-def]
+    """Seed a stranded historical inventory, bypassing current last-owner safeguards."""
+    from sqlalchemy import update
+
+    from canvas_mcp.core.selfhost.db import schema
+
+    with store.database.write() as conn:
+        conn.execute(
+            update(schema.login_providers)
+            .where(schema.login_providers.c.id == "entra")
+            .values(configured=False)
+        )
+        conn.execute(
+            update(schema.server_state).values(
+                settings_revision=schema.server_state.c.settings_revision + 1
+            )
+        )
+
+
 def test_a_stranded_rules_owner_named_as_the_bootstrap_identity_signs_in_as_an_owner(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -220,21 +241,22 @@ def test_a_stranded_rules_owner_named_as_the_bootstrap_identity_signs_in_as_an_o
     base_env = default_env(
         tmp_path, **BOTH
     )  # built once: on PostgreSQL building it resets the schema
-    first = prepare_selfhost(load_selfhost_settings(base_env))
+    first = prepare_selfhost(load_provider_environment(base_env))
     sign_in(first.store, OID_A, owner=True)
     key = acct_key(OID_A)
     link_google(first.store, key)
+    historic_google_only(first.store)
     first.store.close()
 
     # Entra is delisted and no bootstrap is named: refused, recommending SELFHOST_BOOTSTRAP_OWNER.
     google_only = {**base_env, **NO_ENTRA}
     with pytest.raises(SelfhostConfigError) as info:
-        prepare_selfhost(load_selfhost_settings(google_only))
+        prepare_selfhost(load_provider_environment(google_only))
     assert "SELFHOST_BOOTSTRAP_OWNER" in info.value.problems[0]
 
     # The operator names X's own Google identity: the server starts, and the sign-in is an owner session.
     named = {**google_only, "SELFHOST_BOOTSTRAP_OWNER": f"google:{GSUB}"}
-    runtime = prepare_selfhost(load_selfhost_settings(named))
+    runtime = prepare_selfhost(load_provider_environment(named))
     try:
         listed = runtime.settings.login_providers.ids
         assert runtime.store.count_usable_owners(listed) == 0
@@ -253,7 +275,7 @@ def test_a_stranded_rules_owner_named_as_the_bootstrap_identity_signs_in_as_an_o
     finally:
         runtime.store.close()
     # With a usable owner the startup check is satisfied without the bootstrap identity.
-    again = prepare_selfhost(load_selfhost_settings(google_only))
+    again = prepare_selfhost(load_provider_environment(google_only))
     again.store.close()
 
 
@@ -261,7 +283,7 @@ def test_promote_owner_fixes_the_same_stranded_owner_for_the_operator(
     tmp_path: pathlib.Path,
 ) -> None:
     base_env = default_env(tmp_path, **BOTH)
-    first = prepare_selfhost(load_selfhost_settings(base_env))
+    first = prepare_selfhost(load_provider_environment(base_env))
     sign_in(first.store, OID_A, owner=True)
     key = acct_key(OID_A)
     link_google(first.store, key)
@@ -274,7 +296,7 @@ def test_promote_owner_fixes_the_same_stranded_owner_for_the_operator(
     finally:
         first.store.close()
     # The operator's choice now starts a google-only server with no bootstrap identity at all.
-    runtime = prepare_selfhost(load_selfhost_settings({**base_env, **NO_ENTRA}))
+    runtime = prepare_selfhost(load_provider_environment({**base_env, **NO_ENTRA}))
     runtime.store.close()
 
 
@@ -288,7 +310,7 @@ def test_a_bootstrap_account_the_rules_no_longer_admit_does_not_stop_the_server(
         "ACCESS_RULES": "google:domain:example.edu",
     }
     base_env = default_env(tmp_path, **rules, SELFHOST_BOOTSTRAP_OWNER="token_admin")
-    first = prepare_selfhost(load_selfhost_settings(base_env))
+    first = prepare_selfhost(load_provider_environment(base_env))
     # X signs in once as a user, admitted by the domain rule.
     assert not isinstance(first.identity.sign_in_external(gext()), acc.Denied)
     xkey = first.store.lookup_identity("google", acc.GOOGLE_ISSUER, GSUB)
@@ -308,7 +330,7 @@ def test_a_bootstrap_account_the_rules_no_longer_admit_does_not_stop_the_server(
         "ACCESS_RULES": "google:domain:other.edu",
         "SELFHOST_BOOTSTRAP_OWNER": f"google:{GSUB}",
     }
-    runtime = prepare_selfhost(load_selfhost_settings(moved))
+    runtime = prepare_selfhost(load_provider_environment(moved))
     try:
         listed = runtime.settings.login_providers.ids
         assert runtime.store.count_usable_owners(listed) == 0
@@ -329,7 +351,7 @@ def test_a_bootstrap_account_the_rules_no_longer_admit_does_not_stop_the_server(
     # The rules still do not admit X, but the owner is a personal admission now: it can sign in
     # again, also after a restart (the bootstrap no longer applies, so only that admission holds).
     for _ in range(2):
-        restarted = prepare_selfhost(load_selfhost_settings(moved))
+        restarted = prepare_selfhost(load_provider_environment(moved))
         try:
             assert (
                 restarted.store.get_principal_status(xkey).admitted_via == "bootstrap"
@@ -347,11 +369,12 @@ def test_a_re_sourced_owner_the_rules_do_not_admit_keeps_signing_in_after_a_rest
 ) -> None:
     # X: an Entra-rule owner (admitted by the owner rule while the policy was open) who linked Google.
     base_env = default_env(tmp_path, **BOTH)
-    first = prepare_selfhost(load_selfhost_settings(base_env))
+    first = prepare_selfhost(load_provider_environment(base_env))
     sign_in(first.store, OID_A, owner=True)
     key = acct_key(OID_A)
     link_google(first.store, key)
     assert first.store.get_principal_status(key).admitted_via == "rules"
+    historic_google_only(first.store)
     first.store.close()
     # Entra is delisted, the policy becomes rules that do not admit Google, and the operator
     # names X's Google identity as the bootstrap owner.
@@ -363,7 +386,7 @@ def test_a_re_sourced_owner_the_rules_do_not_admit_keeps_signing_in_after_a_rest
         "SELFHOST_BOOTSTRAP_OWNER": f"google:{GSUB}",
     }
     for _ in range(3):  # three starts, each followed by a sign-in
-        runtime = prepare_selfhost(load_selfhost_settings(named))
+        runtime = prepare_selfhost(load_provider_environment(named))
         try:
             signed = runtime.identity.sign_in_external(gext())
             assert not isinstance(signed, acc.Denied) and signed.owner, signed
@@ -384,16 +407,17 @@ def test_the_record_of_a_refused_start_is_the_list_it_was_refused_for(
     from canvas_mcp.core.selfhost import token_admin
 
     base_env = default_env(tmp_path, **BOTH)
-    first = prepare_selfhost(load_selfhost_settings(base_env))
+    first = prepare_selfhost(load_provider_environment(base_env))
     sign_in(first.store, OID_A, owner=True)
     key = acct_key(OID_A)
     link_google(first.store, key)
     assert first.store.recorded_login_providers() == frozenset({"entra", "google"})
+    historic_google_only(first.store)
     first.store.close()
     # Entra is delisted and nobody is named: startup refuses and recommends token_admin.
     google_only = {**base_env, **NO_ENTRA}
     with pytest.raises(SelfhostConfigError) as info:
-        prepare_selfhost(load_selfhost_settings(google_only))
+        prepare_selfhost(load_provider_environment(google_only))
     assert "promote-owner ACCOUNT" in info.value.problems[0]
     # The operator follows it from a shell with the new variables: the stale list ("entra,google")
     # must not make X look usable ("nothing to do ... already an owner").
@@ -402,7 +426,7 @@ def test_the_record_of_a_refused_start_is_the_list_it_was_refused_for(
     capsys.readouterr()
     assert token_admin.main(["promote-owner", key]) == 0
     assert "promoted 1 account to owner" in capsys.readouterr().out
-    runtime = prepare_selfhost(load_selfhost_settings(google_only))
+    runtime = prepare_selfhost(load_provider_environment(google_only))
     try:
         assert runtime.store.recorded_login_providers() == frozenset({"google"})
         assert runtime.store.get_principal_status(key).role_source == "operator"
@@ -499,18 +523,29 @@ def test_the_server_records_the_providers_it_runs_with(tmp_path: pathlib.Path) -
             "ACCESS_POLICY",
         )
     }
-    # Every deployment reconciles its database provider inventory, including Entra alone.
-    plain = prepare_selfhost(load_selfhost_settings(entra_only))
+    # The explicit compatibility import initializes the database once.
+    plain = prepare_selfhost(load_provider_environment(entra_only))
     assert plain.store.recorded_login_providers() == frozenset({"entra"})
     plain.store.close()
-    # Listing more providers records them (a restart with the same list writes nothing new).
-    runtime = prepare_selfhost(load_selfhost_settings(both))
-    assert runtime.store.recorded_login_providers() == frozenset({"entra", "google"})
+    # Subsequent environment changes cannot override database-owned configuration.
+    runtime = prepare_selfhost(load_provider_environment(both))
+    assert runtime.store.recorded_login_providers() == frozenset({"entra"})
+    assert runtime.provider_store is not None
+    runtime.provider_store.save(
+        "google",
+        config={"client_id": GOOGLE_ID},
+        client_secret=GOOGLE_SECRET,
+        enabled=True,
+        rank=1,
+        revision=runtime.provider_store.load_snapshot().revision,
+        actor=None,
+        now=1_800_000_000,
+    )
     runtime.store.close()
-    again = prepare_selfhost(load_selfhost_settings(both))
+    again = prepare_selfhost(load_provider_environment(both))
     assert again.store.recorded_login_providers() == frozenset({"entra", "google"})
     again.store.close()
-    # Going back to Entra alone replaces the record, so a stale list is never read.
-    back = prepare_selfhost(load_selfhost_settings(entra_only))
-    assert back.store.recorded_login_providers() == frozenset({"entra"})
+    # Returning to old environment values preserves the saved database choice.
+    back = prepare_selfhost(load_provider_environment(entra_only))
+    assert back.store.recorded_login_providers() == frozenset({"entra", "google"})
     back.store.close()

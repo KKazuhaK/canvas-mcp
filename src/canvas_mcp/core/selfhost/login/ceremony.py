@@ -74,6 +74,7 @@ class FlowRecord:
     li: int | None
     iat: int
     v: int = 1
+    revision: int | None = None
 
     def to_json(self) -> bytes:
         raw = json.dumps(
@@ -91,6 +92,7 @@ class FlowRecord:
                 "le": self.le,
                 "li": self.li,
                 "iat": self.iat,
+                **({"revision": self.revision} if self.revision is not None else {}),
             },
             separators=(",", ":"),
         ).encode("utf-8")
@@ -125,6 +127,9 @@ class FlowRecord:
                 le=None if epoch is None else _int(epoch),
                 li=None if issued is None else _int(issued),
                 iat=_int(data["iat"]),
+                revision=None
+                if data.get("revision") is None
+                else _int(data["revision"]),
             )
         except (KeyError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
             raise ValueError("invalid flow record") from None
