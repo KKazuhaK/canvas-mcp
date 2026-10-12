@@ -327,3 +327,91 @@ def test_local_registration_without_password_has_no_secret_and_cannot_be_linked(
         settings = client.get("/api/v1/admin/login-providers")
         assert settings.status_code == 200
         assert settings.json()["providers"][0]["secret_present"] is False
+
+
+def test_local_login_completes_pkce_consent_and_password_change_revokes_mcp(
+    tmp_path, monkeypatch
+):
+    from canvas_mcp.core.selfhost.custody import CustodyAcknowledgement
+    from canvas_mcp.core.selfhost.settings import load_selfhost_settings
+
+    from ..authz import stack as stack_module
+    from ..authz.stack import (
+        CANVAS_HOST,
+        CLAUDE_REDIRECT,
+        Browser,
+        local_stack,
+        pkce,
+        query_of,
+    )
+
+    # This installation exercises native database setup, not the harness's
+    # explicit legacy environment-adoption adapter.
+    monkeypatch.setattr(stack_module, "load_provider_environment", load_selfhost_settings)
+    with local_stack(
+        tmp_path,
+        monkeypatch,
+        env={
+            "ENTRA_TENANT_ID": "",
+            "ENTRA_CLIENT_ID": "",
+            "ENTRA_CLIENT_SECRET": "",
+        },
+    ) as stack:
+        code = stack.runtime.installation.issue()
+        assert initialize(stack.client, code).status_code == 200
+        browser = Browser(stack)
+        client_id = stack.register()
+        verifier, challenge = pkce()
+        started = browser.start(stack.authorize_params(client_id, challenge))
+        assert started.status_code == 302
+        choice = browser.get(started.headers["location"])
+        assert choice.status_code == 303
+        txn = query_of(choice.headers["location"])["txn"]
+        signed_in = browser.api(
+            "POST",
+            "/login/local",
+            body={
+                "username": "admin",
+                "password": PASSWORD,
+                "txn": txn,
+            },
+        )
+        assert signed_in.status_code == 200, signed_in.text
+        me = browser.api("GET", "/me").json()
+        stack.store.put(
+            principal_key=me["account"]["key"],
+            api_token="local-test-pat-0123456789",
+            canvas_user_id="1",
+            canvas_user_name="Local Owner",
+            canvas_host=CANVAS_HOST,
+            custody=CustodyAcknowledgement(1, int(stack.clock())),
+        )
+        approved = browser.decide_api(signed_in.json()["redirect_to"])
+        token = stack.token(
+            grant_type="authorization_code",
+            code=approved.query["code"],
+            client_id=client_id,
+            redirect_uri=CLAUDE_REDIRECT,
+            code_verifier=verifier,
+        )
+        assert token.status_code == 200, token.text
+        bundle = token.json()
+        assert stack.mcp_status(bundle["access_token"]) == 200
+        changed = browser.api(
+            "PUT",
+            "/me/password",
+            csrf=me["csrf_token"],
+            body={
+                "current_password": PASSWORD,
+                "new_password": "a replacement local password",
+            },
+        )
+        assert changed.status_code == 200, changed.text
+        assert stack.mcp_status(bundle["access_token"]) == 401
+        refreshed = stack.token(
+            grant_type="refresh_token",
+            refresh_token=bundle["refresh_token"],
+            client_id=client_id,
+        )
+        assert refreshed.status_code == 401, refreshed.text
+        assert refreshed.json()["error"] == "invalid_grant"
