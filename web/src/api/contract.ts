@@ -1,4 +1,5 @@
 import type {
+  SiteAddressResponse,
   LoginProviderSave,
   LoginProviderSettings,
   SetupStatus,
@@ -47,12 +48,20 @@ import type {
 export interface Contract {
   'POST /login/local': { body: { username: string; password: string; txn?: string; return_to?: string }; response: { redirect_to: string } }
   'PUT /me/password': { body: { current_password: string; new_password: string }; response: { redirect_to: string } }
+  'PUT /me/upn': { body: { upn: string }; response: { redirect_to: string } }
+  'POST /me/local-password': { body: { password: string }; response: { redirect_to: string } }
   'POST /admin/local-accounts': { body: { revision: number; username: string; password: string }; response: { account_id: string; revision: number } }
   'GET /setup': { response: SetupStatus }
   'POST /setup': { body: SetupRequest; response: { redirect_to: string } }
   'GET /admin/login-providers': { response: LoginProviderSettings }
   'PUT /admin/login-providers/{id}': { body: LoginProviderSave; response: LoginProviderSettings }
   'GET /admin/settings': { response: AdminSettingsResponse }
+  'PUT /admin/settings/site': { body: { revision: number; public_base_url: string; confirm: boolean }; response: SiteAddressResponse }
+  'GET /admin/settings/login-policy': { response: { revision: number; policy: Record<string, boolean> } }
+  'PUT /admin/settings/login-policy': { body: { revision: number; policy: Record<string, boolean> }; response: { revision: number; policy: Record<string, boolean> } }
+  'GET /admin/accounts/{id}/login-policy': { response: { revision: number; policy: { allow_multiple: boolean | null; allowed_providers: string[] | null; sso_lock_provider: string | null; sso_lock_exempt: boolean } } }
+  'PUT /admin/accounts/{id}/login-policy': { body: { revision: number; policy: { allow_multiple: boolean | null; allowed_providers: string[] | null } }; response: { revision: number; policy: { allow_multiple: boolean | null; allowed_providers: string[] | null; sso_lock_provider: string | null; sso_lock_exempt: boolean } } }
+  'POST /admin/accounts/{id}/unlock-sso': { body: { revision: number }; response: { revision: number; policy: { allow_multiple: boolean | null; allowed_providers: string[] | null; sso_lock_provider: string | null; sso_lock_exempt: boolean } } }
   'PUT /admin/settings/sign-in-methods': { body: { revision: number; names: Record<string, string | null> }; response: AdminSettingsResponse }
   'PUT /admin/settings/schools': { body: FeaturedSchoolsRequest; response: AdminSettingsResponse }
   'POST /admin/settings/schools/check': { body: { host: string }; response: SchoolCheckResponse }

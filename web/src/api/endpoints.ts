@@ -25,6 +25,12 @@ import type {
 
 const enc = encodeURIComponent
 
+export const getLoginPolicy = () => call('GET /admin/settings/login-policy')
+export const saveLoginPolicy = (body: BodyOf<'PUT /admin/settings/login-policy'>) => call('PUT /admin/settings/login-policy', { body })
+export const getAccountLoginPolicy = (id: string) => call('GET /admin/accounts/{id}/login-policy', { id })
+export const saveAccountLoginPolicy = (id: string, body: BodyOf<'PUT /admin/accounts/{id}/login-policy'>) => call('PUT /admin/accounts/{id}/login-policy', { id, body })
+export const unlockAccountSso = (id: string, revision: number) => call('POST /admin/accounts/{id}/unlock-sso', { id, body: { revision } })
+
 interface CallOptions<K extends RouteKey> {
   /** Replaces `{id}` in the path (percent-encoded). */
   id?: string
@@ -47,6 +53,8 @@ async function call<K extends RouteKey>(key: K, options: CallOptions<K> = {}): P
 // ---- public ---------------------------------------------------------------------
 
 export const loginLocal = (body: BodyOf<'POST /login/local'>) => call('POST /login/local', { body })
+export const saveAccountUpn = (upn: string) => call('PUT /me/upn', { body: { upn } })
+export const addLocalPassword = (password: string) => call('POST /me/local-password', { body: { password } })
 export const changeLocalPassword = (body: BodyOf<'PUT /me/password'>) => call('PUT /me/password', { body })
 export const createLocalAccount = (body: BodyOf<'POST /admin/local-accounts'>) => call('POST /admin/local-accounts', { body })
 export const getProviders = () => call('GET /providers')
@@ -197,6 +205,7 @@ export function signInUrl(
 }
 
 export const getAdminSettings = () => call('GET /admin/settings')
+export const saveSiteAddress = (revision: number, public_base_url: string) => call('PUT /admin/settings/site', { body: { revision, public_base_url, confirm: true } })
 export const saveProviderNames = (revision: number, names: Record<string, string | null>) => call('PUT /admin/settings/sign-in-methods', { body: { revision, names } })
 export const saveFeaturedSchools = (body: FeaturedSchoolsRequest) => call('PUT /admin/settings/schools', { body })
 export const checkSchool = (host: string) => call('POST /admin/settings/schools/check', { body: { host } })

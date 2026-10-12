@@ -10,6 +10,17 @@ hashes. Automatic upgrade preserves existing accounts, sealed provider/Canvas
 credentials and the database identity. Existing installations do not gain a
 default password or reopen first-install setup.
 
+`0003_account_login_policy` is the contract revision for account-level UPN,
+provider-instance association flags and generic issuer/subject ownership. It
+removes the redundant local username after preserving it as the account UPN,
+adds the account policy and allowlist tables, and raises compatibility floor to
+2. SQLite takes the existing automatic contract backup; PostgreSQL upgrades in
+one transaction. An older image requires restoring its matching database backup.
+Historical subjects owned by different accounts refuse the upgrade without
+merging or overwriting either account. This data-dependent backfill requires an
+online migration connection; offline SQL rendering remains available for the
+frozen baseline and additive local-credential revision, not for this contract.
+
 The two-file container deployment saves its automatically generated encryption
 and session keys in `/data/runtime-secrets.json`. Back up and restore this private
 file together with the database. A SQL-only backup does not include it. Keep any
@@ -29,6 +40,9 @@ database is refused rather than silently generating a different identity.
   guarded removal of an old beta's entirely empty startup metadata and the
   legacy environment owner-inventory checks. Native DB-owned registrations
   exclude those old environment checks entirely.
+- `site_environment.py`: one-time adoption of the previous environment-owned
+  public origin; subsequent edits use the normal governed configuration path.
+  Retain the stored setting when removing this adapter.
   Adoption is atomic and never replaces database-owned values.
 - `legacy_setup_env.sh`: legacy environment export for deliberate adoption.
   New installations never use this helper or generate keys manually.
@@ -55,9 +69,8 @@ handlers accept only the native v1 format and do not adopt old data or cookies.
 
 ## Later revisions
 
-The production graph still has one frozen v1 baseline. Tests build temporary
-future revision graphs against seeded databases; they do not ship a second
-revision. Every later revision declares boolean `CONTRACT` and
+The production graph retains its frozen v1 baseline. Tests build temporary
+future revision graphs against seeded current databases. Every later revision declares boolean `CONTRACT` and
 `NON_TRANSACTIONAL` flags (both default false).
 
 Expand revisions leave `server_state.compat_floor` unchanged. Contract revisions

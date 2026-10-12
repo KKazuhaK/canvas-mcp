@@ -468,6 +468,7 @@ function buildState(scenario: MockScenario): MockState {
     hasCatalog: scenario !== 'no-write-tools',
     schools,
     settings: {
+      site: { public_base_url: 'https://canvas.example.test', active_base_url: 'https://canvas.example.test', restart_required: false },
       revision: 1,
       sign_in_methods: (multi ? MULTI_PROVIDERS : [MULTI_PROVIDERS[0]]).map((p) => ({ id: p.id, protocol: p.id.startsWith('oidc:') ? 'oidc' : p.id, icon: p.icon, configured: true, default_name: p.name, display_name: null, effective_name: p.name })),
       schools: { directory_search: picker, featured: !picker ? [{ host: SCHOOL.host, display_name: SCHOOL.name, rank: 1, enrollments: 1, allow_private: false }] : [], warnings: [] },
@@ -745,6 +746,7 @@ route('PUT /admin/login-providers/{id}', 'owner', (c, s) => {
   const value: LoginProviderConfiguration = {
     id, protocol: id.startsWith('oidc:') ? 'oidc' : id as LoginProviderConfiguration['protocol'],
     enabled: c.body.enabled, rank: c.body.rank, config: c.body.config as LoginProviderConfiguration['config'],
+    auto_link_email: typeof c.body.auto_link_email === 'boolean' ? c.body.auto_link_email : old?.auto_link_email ?? false,
     secret_present: id !== 'local', callback_uri: id === 'local' ? '' : `https://canvas.example.test/auth/callback/${id.replace(':', '/')}`,
   }
   s.providerConfigurations = [...s.providerConfigurations.filter((provider) => provider.id !== id), value]
@@ -765,6 +767,47 @@ function refreshSchools(s: MockState) {
   s.schools = { mode: search || featured.length > 1 ? 'picker' : featured.length ? 'sole' : 'none', choices, selected: enrolled && choices.some((school) => school.host === enrolled.host) ? enrolled.host : null, sole: !search && featured.length === 1 ? { host: featured[0].host, name: featured[0].display_name || featured[0].host } : null, search_enabled: search }
 }
 route('GET /admin/settings', 'owner', (_c, s) => ok(s.settings))
+const loginPolicies = new WeakMap<MockState, Record<string, boolean>>()
+type AccountPolicy = ResponseOf<'GET /admin/accounts/{id}/login-policy'>['policy']
+const accountLoginPolicies = new WeakMap<MockState, Map<string, AccountPolicy>>()
+function accountPolicy(s: MockState, id: string): AccountPolicy {
+  return accountLoginPolicies.get(s)?.get(id) ?? { allow_multiple: null, allowed_providers: null, sso_lock_provider: null, sso_lock_exempt: false }
+}
+function putAccountPolicy(s: MockState, id: string, policy: AccountPolicy) {
+  if (!accountLoginPolicies.has(s)) accountLoginPolicies.set(s, new Map())
+  accountLoginPolicies.get(s)!.set(id, policy)
+}
+route('GET /admin/settings/login-policy', 'owner', (_c, s) => ok({ revision: s.settings.revision, policy: loginPolicies.get(s) ?? { allow_multiple: true, lock_first_sso: false, block_conflicting_registration: false } }))
+route('PUT /admin/settings/login-policy', 'owner', (c, s) => {
+  if (c.body.revision !== s.settings.revision) return fail('settings_conflict')
+  const policy = c.body.policy as Record<string, boolean>
+  if (!policy || Object.keys(policy).sort().join() !== 'allow_multiple,block_conflicting_registration,lock_first_sso' || Object.values(policy).some((value) => typeof value !== 'boolean')) return fail('validation_failed')
+  loginPolicies.set(s, policy); s.settings.revision++
+  return ok({ revision: s.settings.revision, policy })
+})
+route('GET /admin/accounts/{id}/login-policy', 'owner', (c, s) => ok({ revision: s.settings.revision, policy: accountPolicy(s, decodeURIComponent(c.match[1])) }))
+route('PUT /admin/accounts/{id}/login-policy', 'owner', (c, s) => {
+  if (c.body.revision !== s.settings.revision) return fail('settings_conflict')
+  const id = decodeURIComponent(c.match[1])
+  const policy = { ...accountPolicy(s, id), ...c.body.policy as { allow_multiple: boolean | null; allowed_providers: string[] | null } }
+  putAccountPolicy(s, id, policy); s.settings.revision++
+  return ok({ revision: s.settings.revision, policy })
+})
+route('POST /admin/accounts/{id}/unlock-sso', 'owner', (c, s) => {
+  if (c.body.revision !== s.settings.revision) return fail('settings_conflict')
+  const id = decodeURIComponent(c.match[1])
+  const policy = { ...accountPolicy(s, id), allow_multiple: true, sso_lock_provider: null, sso_lock_exempt: true }
+  putAccountPolicy(s, id, policy); s.settings.revision++
+  return ok({ revision: s.settings.revision, policy })
+})
+route('PUT /admin/settings/site', 'owner', (c, s) => {
+  if (c.body.revision !== s.settings.revision) return fail('settings_conflict')
+  if (c.body.confirm !== true || typeof c.body.public_base_url !== 'string' || !/^https:\/\/[a-z0-9.-]+(?::[0-9]+)?\/?$/i.test(c.body.public_base_url)) return fail('validation_failed', { field: 'public_base_url' })
+  const value = c.body.public_base_url.replace(/\/$/, '')
+  s.settings.revision += 1
+  s.settings.site = { public_base_url: value, active_base_url: s.settings.site.active_base_url, restart_required: value !== s.settings.site.active_base_url }
+  return ok({ revision: s.settings.revision, site: s.settings.site })
+})
 route('PUT /admin/settings/sign-in-methods', 'owner', (c, s) => {
   const conflict = settingsConflict(c, s)
   if (conflict) return conflict
@@ -807,6 +850,14 @@ route('PUT /admin/settings/schools', 'owner', (c, s) => {
 })
 
 route('GET /me', 'session', (_c, s) => ok(meView(s)))
+route('PUT /me/upn', 'session', (c) => {
+  if (typeof c.body.upn !== 'string' || !/^[a-z0-9][a-z0-9.@_+-]{2,253}$/i.test(c.body.upn)) return fail('validation_failed', { field: 'upn' })
+  return ok({ redirect_to: '/account/sign-in' })
+})
+route('POST /me/local-password', 'active', (c) => {
+  if (typeof c.body.password !== 'string' || c.body.password.length < 15) return fail('invalid_local_credentials')
+  return ok({ redirect_to: '/account/sign-in' })
+})
 
 route('GET /me/canvas-token', 'active', (_c, s) => ok(s.canvas))
 

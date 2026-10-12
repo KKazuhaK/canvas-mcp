@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import re
 import secrets
 import threading
 
@@ -15,19 +14,20 @@ from ..config_store import ConfigStore
 from ..db import schema as s
 from ..db.rows import AccountRow
 from ..db.types import new_id
+from .account_policy import method_allowed, normalize_upn
 from .provider_config import ProviderConfigurationError
 from .provider_store import ProviderConfigStore
 
 LOCAL_ISSUER = "urn:canvas-mcp:local"
-_USERNAME = re.compile(r"[a-z0-9][a-z0-9._-]{2,63}")
 _HASH_LOCK = threading.BoundedSemaphore(2)
 _DUMMY_SALT = b"canvas-local-dummy-salt"
 
 
 def username(value: object) -> str:
-    if not isinstance(value, str) or not _USERNAME.fullmatch(value.strip().lower()):
-        raise ProviderConfigurationError("invalid_local_credentials")
-    return value.strip().lower()
+    try:
+        return normalize_upn(value)
+    except ValueError:
+        raise ProviderConfigurationError("invalid_local_credentials") from None
 
 
 def _password(value: object) -> str:
@@ -94,9 +94,7 @@ class LocalAccounts:
         now: int,
     ) -> str:
         if conn.execute(
-            select(s.local_credentials.c.account_id).where(
-                s.local_credentials.c.username == name
-            )
+            select(s.accounts.c.id).where(s.accounts.c.upn == name)
         ).first():
             raise ProviderConfigurationError("local_username_taken")
         account_id = new_id()
@@ -108,6 +106,7 @@ class LocalAccounts:
             role_source="bootstrap" if owner else None,
             admitted_via="bootstrap" if owner else "operator",
             display_name=name,
+            upn=name,
             now=now,
             approved_by=actor,
         )
@@ -117,7 +116,7 @@ class LocalAccounts:
             provider_id="local",
             issuer=LOCAL_ISSUER,
             subject=account_id,
-            username=name,
+            username="",
             email=None,
             email_verified=False,
             now=now,
@@ -125,7 +124,6 @@ class LocalAccounts:
         conn.execute(
             insert(s.local_credentials).values(
                 account_id=account_id,
-                username=name,
                 password_hash=hashed,
                 created_at=now,
                 updated_at=now,
@@ -213,9 +211,9 @@ class LocalAccounts:
         with self.database.read() as conn:
             credential = (
                 conn.execute(
-                    select(s.local_credentials).where(
-                        s.local_credentials.c.username == name
-                    )
+                    select(s.local_credentials)
+                    .join(s.accounts)
+                    .where(s.accounts.c.upn == name)
                 )
                 .mappings()
                 .one_or_none()
@@ -237,6 +235,8 @@ class LocalAccounts:
                 not self._enabled(conn)
                 or account is None
                 or account.status != "active"
+                or account.upn != name
+                or not method_allowed(conn, account.id, "local")
                 or current != hashed
                 or identity != account.id
             ):
@@ -245,7 +245,7 @@ class LocalAccounts:
                 conn, account.id, display_name=name, now=now
             )
             self.repos.identities.touch(
-                conn, "local", LOCAL_ISSUER, account.id, username=name, now=now
+                conn, "local", LOCAL_ISSUER, account.id, username="", now=now
             )
             self.repos.auth_events.append(
                 conn,
@@ -303,4 +303,54 @@ class LocalAccounts:
                 "account",
                 account_id,
                 {},
+            )
+
+    def add_password(
+        self, account_id: str, password: object, *, expected_epoch: int, now: int
+    ) -> None:
+        hashed = password_hash(password)
+        with self.database.write() as conn:
+            self.repos.codes.delete_unconsumed_for_account(conn, account_id)
+            account = self.repos.accounts.get(conn, account_id, for_update=True)
+            if (
+                not self._enabled(conn)
+                or account is None
+                or account.status != "active"
+                or account.session_epoch != expected_epoch
+                or not account.upn
+                or account.upn_required
+                or not method_allowed(conn, account_id, "local", linking=True)
+            ):
+                raise ProviderConfigurationError("local_login_failed")
+            if conn.execute(
+                select(s.local_credentials.c.account_id).where(
+                    s.local_credentials.c.account_id == account_id
+                )
+            ).first():
+                raise ProviderConfigurationError("invalid_local_credentials")
+            self.repos.identities.insert(
+                conn,
+                account_id=account_id,
+                provider_id="local",
+                issuer=LOCAL_ISSUER,
+                subject=account_id,
+                username="",
+                email=None,
+                email_verified=False,
+                now=now,
+            )
+            conn.execute(
+                insert(s.local_credentials).values(
+                    account_id=account_id,
+                    password_hash=hashed,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            self.repos.accounts.end_sessions(conn, account_id, now)
+            self.repos.grants.revoke_for_account(
+                conn, account_id, reason="admission_lost", by=account_id, now=now
+            )
+            ConfigStore._audit(
+                conn, account_id, now, "local_password_added", "account", account_id, {}
             )

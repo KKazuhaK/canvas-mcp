@@ -59,39 +59,58 @@ and inventory checks remain in the removable migration package.
 ## Deployable staging image
 
 The current published staging release is
-[v1.14.0-beta.5](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.5).
+[v1.14.0-beta.6](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.6).
+Local accounts and selectable optional external login are merged through
+[fork PR #9](https://github.com/KKazuhaK/canvas-mcp/pull/9), at
+`3c6a4b2809a8f5493b9d145b89170c594b77f72c`. First installation creates a local
+administrator and optionally configures Entra, Google, GitHub or generic OIDC.
+Owners create regular local accounts in Settings. Passwords are salted scrypt
+hashes in SQL; password changes invalidate sessions, unused authorization codes
+and connected app grants. No public local registration is offered. The additive
+`0002_local_credentials` revision remains in the isolated migration package;
+the original nineteen-table baseline stays frozen.
+
 Download only its
-[docker-compose.yml](https://github.com/KKazuhaK/canvas-mcp/releases/download/v1.14.0-beta.5/docker-compose.yml)
-and [.env template](https://github.com/KKazuhaK/canvas-mcp/releases/download/v1.14.0-beta.5/default.env),
+[docker-compose.yml](https://github.com/KKazuhaK/canvas-mcp/releases/download/v1.14.0-beta.6/docker-compose.yml)
+and [.env template](https://github.com/KKazuhaK/canvas-mcp/releases/download/v1.14.0-beta.6/default.env),
 save the template as `.env`, fill `PUBLIC_BASE_URL` and run
-`docker compose up -d --wait`. No host environment exports, setup script or
-manual internal-key generation are required. Keep the persistent data volume;
-existing explicit keys remain supported and must be preserved with their data.
-Open `/account/setup`, use the private code from the container logs and enter
-the Entra app registration there. Existing environment-owned v1 registrations
-require deliberate one-time adoption; follow the migration package's guidance.
-The Compose default is `:beta`. For repeatable acceptance, optionally pin the
-immutable index in the same `.env`:
+`docker compose up -d --wait`. `DATABASE_URL` is optional for an existing
+PostgreSQL server. Existing deployments keep their `.env` and data volume,
+then run `docker compose pull` and `docker compose up -d --wait`.
+No host environment exports, setup script or manual internal-key generation are
+required. Open `/account/setup`, use the private code from the container logs
+and create the local administrator. Provider configuration belongs in the
+browser and database. Existing initialized installations do not reopen setup
+or gain a preset password.
+
+The Compose default is `:beta`. For repeatable acceptance, optionally pin:
 
 ```dotenv
-CANVAS_MCP_IMAGE=ghcr.io/kkazuhak/canvas-mcp@sha256:126685d919c88e7bff263825bb85215596797989ae9e371693f06c2b027b9e97
+CANVAS_MCP_IMAGE=ghcr.io/kkazuhak/canvas-mcp@sha256:ee1facc05aef1067cd782c8049da5a33d3dbbd7ddc5a41e96e5da5bcfc59661b
 ```
 
-- Source: `8147922dfa31b65d8cce70be5073f99f176edf8e`.
-- Registry version: `1.14.0-beta.5`; platforms: `linux/amd64`, `linux/arm64`.
-- The complete reviewed [CI matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38210066406),
-  independent [post-merge matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38212365685)
-  and native multi-architecture [release image checks](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38213937119)
-  passed; both beta aliases identify the same source and digest.
-- The pre-v1 stable image is left in place at digest
+- Source: `3c6a4b2809a8f5493b9d145b89170c594b77f72c`.
+- Registry version: `1.14.0-beta.6`; platforms: `linux/amd64`, `linux/arm64`.
+- Complete reviewed [CI matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38221903221)
+  passed. The squash merge has the identical file tree. PostgreSQL latest and
+  locked each passed 4,295 tests; Linux Python matrix runs passed 8,112 tests.
+  All 478 frontend tests passed. Local sign-in is exercised through real PKCE,
+  consent, token exchange and MCP, with old access and refresh tokens refused
+  after a password change. SQLite-to-PostgreSQL transfer verifies copied local
+  credentials by authenticating on the destination.
+- Independent post-merge [complete CI](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38224806048) also passed.
+- Native multi-architecture [release image checks](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38224841039)
+  passed actual Compose boot, initialization and container recreation. Registry
+  annotations confirm the source and version; both beta aliases match.
+- Downloaded release asset SHA-256: Compose
+  `91e193483bb76bd13879c02bdbd21c7d7e1aefede4db0bc5cd9d40fcbf192b9f`;
+  env template `79a8781d61206e55a0c4d95b82a351d93200a3905dff4bf8d099ed4396b30f24`.
+- The pre-v1 stable image remains at
   `sha256:9eeeaea8365ecad39ea02704b867f2dfae03521c229938ce78e8937fcbf1cdfb`.
-- The complete matrix includes Python 3.11-3.14, locked/latest PostgreSQL,
-  Windows, frontend, lint, code API, formal confirmation checks and amd64/arm64
-  Docker smoke tests. The reviewed Python 3.11 DNS timing check required one
-  failed-job retry; its code and threshold were unchanged. Post-merge CI passed
-  on its first attempt. Local self-host tests passed 4,180 with 54 platform/
-  database skips; frontend tests passed 477. Source and architecture labels
-  match independently. Downloaded release assets match their prepared SHA-256.
+
+The observed staging installation was still uninitialized on October 12.
+Its public OAuth authorization metadata path returned nginx HTML 404;
+`/.well-known/` must reach the application before real client acceptance.
 
 Deployment and live acceptance are pending. Record the staging origin, exact
 client versions, timestamps and secret-free evidence in the README's tested-client
@@ -101,6 +120,54 @@ both persistence backends, proxy failure/log redaction and consecutive-day
 refresh. Keep production and client compatibility claims gated until these
 observations are complete; a stable release also requires them. Earlier branch labels below use the current name;
 commit IDs and historical release tags retain their original evidence.
+
+## Account login redesign candidate
+
+The next candidate adds permanent account UPNs, provider-neutral issuer/subject
+ownership, per-provider opt-in automatic association, account restrictions and
+audited SSO unlock. It also adopts the public origin into SQL with an explicit
+domain-change/restart boundary. Existing beta.6 accounts and local hashes are
+preserved by isolated contract revision `0003_account_login_policy`; older
+images require restoration of their matching pre-upgrade database backup.
+
+Local checks: 481 frontend tests, production build/dist checks, 166-source-file
+mypy and Ruff passed. Focused regression checks passed 111 tests with nine
+platform skips; 18 real-graph migration checks passed, including populated
+beta.6 and conflicting canonical ownership rollback. Full selfhost regression,
+native PostgreSQL CI and both Docker architectures remain required before
+publication. Complete local selfhost regression passed 4,233 checks with 54
+platform skips. Additional focused checks passed 32 account-policy/site-origin
+checks, including case-insensitive UPN collision and a rename during password
+verification. The account-unlock UI sends only its governed unlock request,
+without deleting or linking identities. The initial Docker run exposed a smoke
+assertion that omitted the canonical OAuth issuer's trailing slash; the corrected
+assertion requires a new exact-head native image run. This candidate is not a
+published deployment image yet.
+
+The corrected native image boot/recreation passed on SQLite. Its PostgreSQL
+startup exposed an explicit FK name exceeding PostgreSQL's identifier limit;
+the runtime metadata and contract now share a shorter name. A portability
+regression checks the contract's explicit constraint names before runtime.
+The corrected schema/migration/account-policy checks passed 46 tests with seven
+backend-only skips, and the real-graph migration suite passed all 19 checks.
+Native PostgreSQL and final Docker CI remain required; superseded failed runs
+were cancelled after recording their failures.
+
+Both native architectures then passed actual SQLite and PostgreSQL Docker smoke.
+The final association regression also covers Google entering an existing Entra
+account through its saved mail-style provider login name after account UPN rename;
+81 account-policy/link-store checks passed. A new exact-head full matrix is
+required for that last runtime correction before publication.
+
+The full PostgreSQL latest run passed 4,329 checks and exposed four fixture
+failures: restarting via the whole-stack environment factory reset PostgreSQL
+public, and transfer still expected compatibility floor 1. Restart checks now
+reuse the running database target without resetting it, and transfer asserts
+floor 2. Focused SQLite checks passed 20 tests with seven PostgreSQL-only skips.
+CI runs the account/transfer/origin checks first on both PostgreSQL dependency
+sets, followed by the unchanged full suite. The job allowance is 30 minutes;
+an earlier slower runner reached the former 20-minute limit, while the complete
+latest result took 15 minutes. Final exact-head CI remains the publication gate.
 
 ## Historical checkpoints
 

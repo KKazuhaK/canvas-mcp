@@ -64,8 +64,14 @@ class AuthzRuntime:
             log_warning("oauth_admission_lost", reason="revocation_failed")
             return 0
 
-    async def grants_page(self, account_key: str, *, cursor: str | None = None, limit: int = DEFAULT_LIMIT) -> Page[GrantRecord]:
-        return await run_store(lambda: self.store.grants_page(account_key=account_key, cursor=cursor, limit=limit))
+    async def grants_page(
+        self, account_key: str, *, cursor: str | None = None, limit: int = DEFAULT_LIMIT
+    ) -> Page[GrantRecord]:
+        return await run_store(
+            lambda: self.store.grants_page(
+                account_key=account_key, cursor=cursor, limit=limit
+            )
+        )
 
     async def revoke_own_grant(self, grant_id: str, account_key: str) -> bool:
         return await self.grants.revoke_own(grant_id, account_key)

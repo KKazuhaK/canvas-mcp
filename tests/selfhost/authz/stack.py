@@ -438,7 +438,26 @@ class Browser:
 
     def sign_in(self, user: User, **claim_overrides: Any) -> httpx.Response:
         login = self.get("/auth/login/entra")
-        return self.entra_login(user, login, **claim_overrides)
+        response = self.entra_login(user, login, **claim_overrides)
+        # These OAuth fixtures represent an onboarded account. Complete the name
+        # selection through the real API; dedicated tests exercise the prior gate.
+        if response.status_code == 303 and "error=" not in response.headers.get(
+            "location", ""
+        ):
+            me = self.api("GET", "/me")
+            if me.status_code == 200 and me.json()["account"].get("upn_required"):
+                selected = self.api(
+                    "PUT",
+                    "/me/upn",
+                    body={"upn": user.oid + "@example.test"},
+                    csrf=me.json()["csrf_token"],
+                )
+                assert selected.status_code == 200, selected.text
+                if selected.json()["redirect_to"] == "/account/sign-in":
+                    response = self.entra_login(
+                        user, self.get("/auth/login/entra"), **claim_overrides
+                    )
+        return response
 
     # -- the app's request ------------------------------------------------------------------------
 
@@ -492,6 +511,16 @@ class Browser:
     def decide_api(self, location: str, decision: str = "approve") -> Landed:
         """What the consent screen does: read the request, decide, return where the browser goes."""
         txn = query_of(location)["txn"]
+        me = self.api("GET", "/me")
+        if me.status_code == 200 and me.json()["account"].get("upn_required"):
+            account = me.json()["account"]
+            chosen = self.api(
+                "PUT",
+                "/me/upn",
+                body={"upn": account["id"] + "@example.test"},
+                csrf=me.json()["csrf_token"],
+            )
+            assert chosen.status_code == 200, chosen.text
         csrf = self.csrf_token()
         shown = self.api("GET", f"/consent?txn={txn}")
         assert shown.status_code == 200, shown.text

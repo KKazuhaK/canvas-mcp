@@ -71,6 +71,7 @@ const CODE_SET: Record<ApiErrorCode, true> = {
   bad_subject: true,
   bad_roles: true,
   access_denied: true,
+  use_existing_sign_in: true,
   signups_paused: true,
   authorization_invalid: true,
 }

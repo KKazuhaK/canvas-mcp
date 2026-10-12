@@ -72,6 +72,15 @@ def open_request(
         login = browser.get(url)
         assert login.status_code == 302
         browser.entra_login(user, login)
+        me = browser.api("GET", "/me")
+        if me.status_code == 200 and me.json()["account"].get("upn_required"):
+            selected = browser.api(
+                "PUT",
+                "/me/upn",
+                body={"upn": user.oid + "@example.test"},
+                csrf=me.json()["csrf_token"],
+            )
+            assert selected.status_code == 200, selected.text
     return browser, txn
 
 
@@ -532,9 +541,13 @@ class TestMyGrants:
         assert gone.status_code == 204 and gone.content == b""
         assert react.mcp_status(tokens["access_token"]) == 401
         assert react.refresh(client_id, tokens["refresh_token"]).status_code == 401
-        assert browser.api("GET", "/me/grants").json() == {"grants": [], "next_cursor": None}
+        assert browser.api("GET", "/me/grants").json() == {
+            "grants": [],
+            "next_cursor": None,
+        }
         reason = raw_sql(
-            react.store, "SELECT revoked_reason, CAST(revoked_by AS TEXT) FROM oauth_grants"
+            react.store,
+            "SELECT revoked_reason, CAST(revoked_by AS TEXT) FROM oauth_grants",
         )[0]
         assert reason == ("user_revoked", react.account_of(ALICE))
         # the second try is the same as an unknown id
@@ -654,7 +667,8 @@ class TestAdminGrants:
         assert done.status_code == 200 and done.json() == {"changed": True}
         assert react.mcp_status(tokens["access_token"]) == 401
         assert raw_sql(
-            react.store, "SELECT revoked_reason, CAST(revoked_by AS TEXT) FROM oauth_grants"
+            react.store,
+            "SELECT revoked_reason, CAST(revoked_by AS TEXT) FROM oauth_grants",
         )[0] == ("owner_revoked", owner_key)
         audit = [e for e in react.store.iter_audit() if e.action == "grant_revoked"]
         assert (
@@ -667,7 +681,8 @@ class TestAdminGrants:
             and audit[0].detail["client_kind"] == "dcr"
         )
         assert browser.api("GET", f"/admin/accounts/{alice_id}/grants").json() == {
-            "grants": [], "next_cursor": None
+            "grants": [],
+            "next_cursor": None,
         }
         # asking again, or for something that never existed, changes nothing
         assert browser.api("DELETE", f"/admin/grants/{gid}", csrf=csrf).json() == {

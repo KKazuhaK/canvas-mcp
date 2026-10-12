@@ -9,6 +9,7 @@ import { isUnauthenticated } from '@/api/errors'
 import type { MeResponse } from '@/api/types'
 import ErrorNotice from '@/components/ErrorNotice'
 import LocalPasswordSettings from '@/components/LocalPasswordSettings'
+import AccountUpnSettings from '@/components/AccountUpnSettings'
 import McpUrlCard from '@/components/McpUrlCard'
 import PageHeader from '@/components/PageHeader'
 import TokenSection from '@/components/token/TokenSection'
@@ -41,18 +42,20 @@ function SignedOutHome() {
 
 function AccountHome({ me }: { me: MeResponse }) {
   const { t } = useTranslation()
+  const providers = useProviders()
   return (
     <>
       <PageHeader
         title={t('account:home.title')}
         subtitle={t('account:home.signedInAs', {
-          name: me.account.username || me.account.display_name,
+          name: me.account.upn || me.account.username || me.account.display_name,
         })}
       />
       <Box sx={{ display: 'grid', gap: 2 }}>
+        <AccountUpnSettings account={me.account} />
         {me.canvas ? <TokenSection canvas={me.canvas} /> : null}
         <McpUrlCard />
-        {me.account.provider_id === 'local' && <LocalPasswordSettings />}
+        {(me.account.has_local_password || me.account.provider_id === 'local') ? <LocalPasswordSettings /> : !me.account.upn_required && providers.data?.providers.some((provider) => provider.id === 'local') ? <LocalPasswordSettings creating /> : null}
       </Box>
     </>
   )

@@ -2,6 +2,7 @@ import HourglassTopIcon from '@mui/icons-material/HourglassTop'
 import Alert from '@mui/material/Alert'
 import AlertTitle from '@mui/material/AlertTitle'
 import Box from '@mui/material/Box'
+import AccountUpnSettings from '@/components/AccountUpnSettings'
 import Button from '@mui/material/Button'
 import Card from '@mui/material/Card'
 import CardContent from '@mui/material/CardContent'
@@ -239,5 +240,6 @@ export default function ConsentView() {
       </PublicLayout>
     )
   }
+  if (me.data?.account.upn_required) return <PublicLayout><AccountUpnSettings account={me.data.account} /></PublicLayout>
   return <ConsentCard txn={txn} />
 }

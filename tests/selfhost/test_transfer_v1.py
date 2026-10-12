@@ -66,10 +66,24 @@ def source(tmp_path):
         conn.execute(
             insert(s.local_credentials).values(
                 account_id=account,
-                username="student.local",
                 password_hash=password_hash("transfer-local-password-0123456789"),
                 created_at=NOW,
                 updated_at=NOW,
+            )
+        )
+        conn.execute(
+            s.accounts.update()
+            .where(s.accounts.c.id == account)
+            .values(upn="student.local")
+        )
+        conn.execute(
+            insert(s.account_login_policy).values(
+                account_id=account, allow_multiple=True
+            )
+        )
+        conn.execute(
+            insert(s.account_allowed_login_providers).values(
+                account_id=account, provider_id="local"
             )
         )
         conn.execute(
@@ -251,7 +265,7 @@ def test_all_lifecycle_tables_copy_native_types_and_sequences_and_skip_ephemeral
             state["compat_floor"],
             state["jwt_epoch"],
             state["settings_revision"],
-        ) == (1, 17, 13)
+        ) == (2, 17, 13)
         assert verify(dst, ring, all_values=True) == 3
         assert (
             dst.execute(

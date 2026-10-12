@@ -9,8 +9,9 @@ import Typography from '@mui/material/Typography'
 import { useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import LoginHistory from '@/components/LoginHistory'
+import AccountUpnSettings from '@/components/AccountUpnSettings'
 import { keys } from '@/query/keys'
-import { useLogout } from '@/query/hooks'
+import { useLogout, useMe } from '@/query/hooks'
 
 /**
  * Account exists but an owner has not approved it yet. Token form and write tools stay
@@ -20,8 +21,10 @@ export default function PendingView() {
   const { t } = useTranslation()
   const client = useQueryClient()
   const logout = useLogout()
+  const me = useMe()
   return (
     <Box sx={{ display: 'grid', gap: 2 }}>
+      {me.data?.account.upn_required && <AccountUpnSettings account={me.data.account} />}
       <Card component="section" aria-labelledby="pending-title">
         <CardContent sx={{ display: 'grid', gap: 2 }}>
           <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center' }}>

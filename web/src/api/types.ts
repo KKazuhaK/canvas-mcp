@@ -78,6 +78,7 @@ export interface LoginProviderConfiguration {
   id: string
   protocol: 'entra' | 'google' | 'github' | 'oidc' | 'local'
   enabled: boolean
+  auto_link_email?: boolean
   rank: number
   config: Record<string, string | string[] | boolean>
   secret_present: boolean
@@ -87,6 +88,7 @@ export interface LoginProviderSave {
   revision: number
   config: LoginProviderConfiguration['config']
   enabled: boolean
+  auto_link_email?: boolean
   rank: number
   client_secret?: string
 }
@@ -119,6 +121,7 @@ export type SignInErrorCode =
   | 'bad_subject'
   | 'bad_roles'
   | 'access_denied'
+  | 'use_existing_sign_in'
   | 'access_disabled'
   | 'signups_paused'
   | 'token_store_unavailable'
@@ -240,6 +243,9 @@ export type SelfStatus = 'active' | 'pending'
 export type UiLocale = 'en' | 'zh'
 
 export interface Account {
+  upn?: string
+  upn_required?: boolean
+  has_local_password?: boolean
   id: string
   key: string
   display_name: string
@@ -463,6 +469,8 @@ export interface AdminIdentity {
 }
 
 export interface AdminAccount {
+  upn?: string
+  upn_required?: boolean
   id: string
   key: string
   display_name: string
@@ -526,6 +534,7 @@ export interface AdminSchool {
 }
 export interface AdminSettingsResponse {
   revision: number
+  site: SiteAddress
   sign_in_methods: {
     id: string; protocol: string; icon: ProviderIcon; configured: boolean
     default_name: string; display_name: string | null; effective_name: string
@@ -533,6 +542,15 @@ export interface AdminSettingsResponse {
   schools: { directory_search: boolean; featured: AdminSchool[]; warnings: string[] }
   retention: { auth_events_days: number; audit_days: number }
   affected_enrollments?: Record<string, number>
+}
+export interface SiteAddress {
+  public_base_url: string
+  active_base_url: string
+  restart_required: boolean
+}
+export interface SiteAddressResponse {
+  revision: number
+  site: SiteAddress
 }
 export interface FeaturedSchoolsRequest {
   revision: number

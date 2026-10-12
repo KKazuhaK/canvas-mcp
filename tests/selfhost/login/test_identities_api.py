@@ -288,7 +288,7 @@ class TestList:
         )
         assert github["email_verified"] is True
         assert (
-            by_provider["entra"]["email"] is None
+            by_provider["entra"]["email"] == "ada@example.edu"
             and by_provider["entra"]["email_verified"] is False
         )
 

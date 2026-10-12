@@ -173,7 +173,7 @@ class TestIdentityIsTheDirectoryObjectId:
         b = entra_external_claims(claims(oid=other, email="same@example.test"), POLICY)
         assert isinstance(a, ExternalClaims) and isinstance(b, ExternalClaims)
         assert a.identity != b.identity
-        assert a.email is None and not a.email_verified  # never trusted, never stored
+        assert a.email == "same@example.test" and not a.email_verified
 
     def test_names_are_bounded(self) -> None:
         ext = entra_external_claims(

@@ -17,7 +17,7 @@ describe('Database login installation', () => {
       expect(screen.getByRole('option', { name })).toBeInTheDocument()
     }
     await user.click(screen.getByRole('option', { name: 'Local account only' }))
-    for (const [label, value] of [[/^Installation code/, 'A'.repeat(43)], [/^Username/, 'admin'], [/^Password/, 'a long private local password'], [/^Confirm password/, 'a long private local password']] as const) {
+    for (const [label, value] of [[/^Installation code/, 'A'.repeat(43)], [/^Account UPN/, 'admin'], [/^Password/, 'a long private local password'], [/^Confirm password/, 'a long private local password']] as const) {
       await user.click(screen.getByLabelText(label)); await user.paste(value)
     }
     const seen = recordRequests()
@@ -26,7 +26,7 @@ describe('Database login installation', () => {
     const body = JSON.parse(seen.find((request) => request.url === '/setup' && request.method === 'POST')!.data as string)
     expect(body.local_account.username).toBe('admin')
     expect(body).not.toHaveProperty('provider_id')
-    await user.click(screen.getByLabelText(/^Username/)); await user.paste('admin')
+    await user.click(screen.getByLabelText(/^Account UPN/)); await user.paste('admin')
     await user.click(screen.getByLabelText(/^Password/)); await user.paste('wrong')
     await user.click(screen.getByRole('button', { name: 'Sign in with local account' }))
     expect(await screen.findByText('The username or password is incorrect, or local sign-in is unavailable.')).toBeInTheDocument()
@@ -47,7 +47,7 @@ describe('Database login installation', () => {
     expect(await screen.findByRole('heading', { name: 'Configure sign-in' })).toBeInTheDocument()
     const seen = recordRequests()
     await user.click(screen.getByLabelText(/^Installation code/)); await user.paste('A'.repeat(43))
-    await user.click(screen.getByLabelText(/^Username/)); await user.paste('admin')
+    await user.click(screen.getByLabelText(/^Account UPN/)); await user.paste('admin')
     await user.click(screen.getByLabelText(/^Password/)); await user.paste('a long private local password')
     await user.click(screen.getByLabelText(/^Confirm password/)); await user.paste('a long private local password')
     await user.click(screen.getByRole('combobox', { name: 'External sign-in (optional)' }))

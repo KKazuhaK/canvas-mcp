@@ -866,5 +866,6 @@ def _standing_ok(account: Any, session_epoch: int) -> bool:
     return (
         account is not None
         and account.status == acc.STATUS_ACTIVE
+        and not account.upn_required
         and account.session_epoch == session_epoch
     )

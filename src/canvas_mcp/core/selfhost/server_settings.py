@@ -1,7 +1,8 @@
 """Typed, database-owned server settings and public display-name validation.
 
-The environment never seeds these settings. Missing database rows use the code
-defaults; only directory search is editable through the v1 account panel.
+Missing database rows use the code defaults. The canonical site address is
+adopted once from the first-install environment by isolated upgrade tooling;
+subsequent site edits require the dedicated credential-revoking save path.
 """
 
 from __future__ import annotations
@@ -17,17 +18,21 @@ MAX_SETTING_BYTES = 8192
 
 @dataclass(frozen=True)
 class SettingSpec:
-    value_type: type[bool] | type[int]
-    default: bool | int
+    value_type: type[bool] | type[int] | type[str]
+    default: bool | int | str
     minimum: int | None = None
     maximum: int | None = None
     sensitive: bool = False
     editable_in_panel: bool = False
 
-    def validate(self, value: object) -> bool | int:
+    def validate(self, value: object) -> bool | int | str:
         # bool is an int subclass, but a retention value cannot be a checkbox.
         if type(value) is not self.value_type:
             raise ValueError("setting has the wrong type")
+        if isinstance(value, str):
+            from .site_url import validate_site_url
+
+            return validate_site_url(value)
         if not isinstance(value, (bool, int)):
             raise ValueError("setting has the wrong type")
         if self.minimum is not None and value < self.minimum:
@@ -41,6 +46,7 @@ class SettingSpec:
 
 SETTINGS: Mapping[str, SettingSpec] = MappingProxyType(
     {
+        "site.public_base_url": SettingSpec(str, "", editable_in_panel=True),
         "schools.directory_search": SettingSpec(bool, True, editable_in_panel=True),
         "retention.auth_events_days": SettingSpec(int, 90, minimum=7, maximum=3650),
         "retention.audit_days": SettingSpec(int, 0, minimum=0, maximum=3650),
@@ -48,7 +54,9 @@ SETTINGS: Mapping[str, SettingSpec] = MappingProxyType(
 )
 
 
-def validate_setting(key: str, value: object, *, panel: bool = False) -> bool | int:
+def validate_setting(
+    key: str, value: object, *, panel: bool = False
+) -> bool | int | str:
     spec = SETTINGS.get(key)
     if spec is None:
         raise ValueError("unknown setting")

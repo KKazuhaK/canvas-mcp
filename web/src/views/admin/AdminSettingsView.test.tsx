@@ -29,7 +29,7 @@ describe('Database-managed settings', () => {
     await user.click(screen.getByRole('switch', { name: 'School directory search' }))
     await user.click(screen.getByRole('button', { name: 'Save search setting' }))
     expect(await screen.findByText('No schools are offered. Add a featured school or enable directory search.')).toBeInTheDocument()
-    expect(screen.getByRole('switch')).not.toBeChecked()
+    expect(screen.getByRole('switch', { name: 'School directory search' })).not.toBeChecked()
   })
 
   it('confirms the affected bindings before removing an offered school', async () => {

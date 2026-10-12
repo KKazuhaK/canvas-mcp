@@ -32,6 +32,10 @@ def revision_graph(tmp_path, monkeypatch):
         source / "versions/0002_local_credentials.py",
         directory / "versions/0002_local_credentials.py",
     )
+    shutil.copyfile(
+        source / "versions/0003_account_login_policy.py",
+        directory / "versions/0003_account_login_policy.py",
+    )
     monkeypatch.setattr(migrate, "_MIGRATIONS_DIR", directory)
     migrate._script.cache_clear()
 
@@ -41,7 +45,7 @@ def revision_graph(tmp_path, monkeypatch):
         contract=False,
         non_transactional=False,
         revision="0002_policy",
-        down="0002_local_credentials",
+        down="0003_account_login_policy",
     ):
         script = f"""from alembic import op
 import sqlalchemy as sa
@@ -89,11 +93,11 @@ def test_contract_automatically_backs_up_and_preserves_strict_rowid_indexes_and_
             batch.drop_column('obsolete')
         with rebuild_sqlite_table('settings') as batch:
             batch.drop_column('obsolete')
-        op.execute('UPDATE server_state SET compat_floor=2')
+        op.execute('UPDATE server_state SET compat_floor=3')
     """,
         contract=True,
     )
-    monkeypatch.setattr(migrate, "SCHEMA_EPOCH", 2)
+    monkeypatch.setattr(migrate, "SCHEMA_EPOCH", 3)
     migrate.ensure_ready(db)
     assert migrate.current(db).state == "current"
     backups = list(
@@ -102,11 +106,11 @@ def test_contract_automatically_backs_up_and_preserves_strict_rowid_indexes_and_
     assert len(backups) == 1
     with sqlite3.connect(backups[0]) as backup:
         assert backup.execute("SELECT compat_floor FROM server_state").fetchone() == (
-            1,
+            2,
         )
         assert backup.execute(
             "SELECT version_num FROM canvas_mcp_alembic_version"
-        ).fetchone() == ("0002_local_credentials",)
+        ).fetchone() == ("0003_account_login_policy",)
         assert "obsolete" in {
             row[1] for row in backup.execute("PRAGMA table_info(audit_log)")
         }
@@ -166,7 +170,7 @@ def test_expand_does_not_raise_floor_or_create_a_contract_backup(db, revision_gr
     migrate.ensure_ready(db)
     revision_graph("op.create_index('ix_future_display', 'accounts', ['display_name'])")
     migrate.ensure_ready(db)
-    assert migrate.current(db).compat_floor == 1
+    assert migrate.current(db).compat_floor == 2
     if db.sqlite_path is not None:
         assert list(db.sqlite_path.parent.glob("*.bak")) == []
 
@@ -174,16 +178,16 @@ def test_expand_does_not_raise_floor_or_create_a_contract_backup(db, revision_gr
 @pytest.mark.parametrize(
     "contract,floor,pattern",
     [
-        (True, 1, "contract revision must raise"),
-        (False, 2, "expand revision must preserve"),
-        (True, 3, "unsupported compatibility floor"),
+        (True, 2, "contract revision must raise"),
+        (False, 3, "expand revision must preserve"),
+        (True, 4, "unsupported compatibility floor"),
     ],
 )
 def test_floor_policy_failure_rolls_back_ddl_and_revision(
     db, revision_graph, monkeypatch, contract, floor, pattern
 ):
     migrate.ensure_ready(db)
-    monkeypatch.setattr(migrate, "SCHEMA_EPOCH", 2)
+    monkeypatch.setattr(migrate, "SCHEMA_EPOCH", 3)
     revision_graph(
         f"op.create_table('temporary_policy', sa.Column('id', sa.Integer(), primary_key=True))\n"
         f"op.execute('UPDATE server_state SET compat_floor={floor}')",
@@ -195,13 +199,13 @@ def test_floor_policy_failure_rolls_back_ddl_and_revision(
         assert "temporary_policy" not in inspect(conn).get_table_names()
         assert (
             conn.exec_driver_sql("SELECT compat_floor FROM server_state").scalar_one()
-            == 1
+            == 2
         )
         assert (
             conn.exec_driver_sql(
                 "SELECT version_num FROM canvas_mcp_alembic_version"
             ).scalar_one()
-            == "0002_local_credentials"
+            == "0003_account_login_policy"
         )
 
 
@@ -209,12 +213,12 @@ def test_contract_floor_raise_is_checked_on_each_backend(
     db, revision_graph, monkeypatch
 ):
     migrate.ensure_ready(db)
-    monkeypatch.setattr(migrate, "SCHEMA_EPOCH", 2)
+    monkeypatch.setattr(migrate, "SCHEMA_EPOCH", 3)
     revision_graph(
-        "op.execute('UPDATE server_state SET compat_floor=2')", contract=True
+        "op.execute('UPDATE server_state SET compat_floor=3')", contract=True
     )
     migrate.ensure_ready(db)
-    assert migrate.current(db).compat_floor == 2
+    assert migrate.current(db).compat_floor == 3
     assert migrate.current(db).state == "current"
 
 
@@ -316,7 +320,7 @@ def test_nontransactional_plan_refuses_atomic_modes_before_any_revision(
             conn.exec_driver_sql(
                 "SELECT version_num FROM canvas_mcp_alembic_version"
             ).scalar_one()
-            == "0002_local_credentials"
+            == "0003_account_login_policy"
         )
 
 

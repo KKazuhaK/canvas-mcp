@@ -445,6 +445,61 @@ class ApiApp:
                 {"GET": e(self.admin_settings, access="owner")},
             ),
             (
+                f"{API_PREFIX}/admin/settings/site",
+                {
+                    "PUT": e(
+                        self.save_site_url, access="owner", mutating=True, body="json"
+                    )
+                },
+            ),
+            (
+                f"{API_PREFIX}/me/upn",
+                {"PUT": e(self.save_upn, access="session", mutating=True, body="json")},
+            ),
+            (
+                f"{API_PREFIX}/me/local-password",
+                {
+                    "POST": e(
+                        self.add_local_password,
+                        access="active",
+                        mutating=True,
+                        body="json",
+                    )
+                },
+            ),
+            (
+                f"{API_PREFIX}/admin/settings/login-policy",
+                {
+                    "GET": e(self.login_policy, access="owner"),
+                    "PUT": e(
+                        self.save_login_policy,
+                        access="owner",
+                        mutating=True,
+                        body="json",
+                    ),
+                },
+            ),
+            (
+                f"{API_PREFIX}/admin/accounts/{{id}}/login-policy",
+                {
+                    "GET": e(self.login_policy, access="owner"),
+                    "PUT": e(
+                        self.save_login_policy,
+                        access="owner",
+                        mutating=True,
+                        body="json",
+                    ),
+                },
+            ),
+            (
+                f"{API_PREFIX}/admin/accounts/{{id}}/unlock-sso",
+                {
+                    "POST": e(
+                        self.unlock_sso, access="owner", mutating=True, body="json"
+                    )
+                },
+            ),
+            (
                 f"{API_PREFIX}/admin/settings/sign-in-methods",
                 {
                     "PUT": e(
@@ -1005,6 +1060,13 @@ class ApiApp:
         locale = ctx.request.cookies.get(web.LANG_COOKIE)
         zone = getattr(web._display_tz(), "key", None)
         key = session.acct
+        account_name = {"upn": session.upn, "upn_required": False}
+        if app.provider_store is not None:
+            from .login.account_names import AccountNames
+
+            account_name = await run_store(
+                AccountNames(app.provider_store.database).read, key
+            )
         return self._ok(
             {
                 "account": {
@@ -1012,6 +1074,7 @@ class ApiApp:
                     "key": key,
                     "display_name": _clean(session.name),
                     "username": _clean(session.upn, 254),
+                    **account_name,
                     "provider_id": session.pid,
                     "role": "owner" if session.owner else "user",
                     "status": "pending" if pending else "active",
@@ -1426,7 +1489,7 @@ class ApiApp:
             "password",
         } <= set(body):
             raise _invalid("username")
-        name = _text(body, "username", max_chars=64)
+        name = _text(body, "username", max_chars=254)
         password = _text(body, "password", max_chars=128)
         if not self.app.local_login_limiter.allow(
             ("local",)
@@ -1492,6 +1555,25 @@ class ApiApp:
         self.app.clear_cookie(response, web.SESSION_COOKIE)
         return response
 
+    async def add_local_password(self, ctx: _Ctx) -> Response:
+        body = ctx.body or {}
+        _closed(body, required=("password",))
+        assert ctx.session is not None
+        account_id, epoch = ctx.session.acct, ctx.session.ep
+        if not self.app.local_user_limiter.allow(("password", account_id)):
+            raise _Fail("rate_limited", {"retry_after_s": 600})
+        await run_store(
+            lambda: self._local_accounts().add_password(
+                account_id,
+                body["password"],
+                expected_epoch=epoch,
+                now=int(self.app.clock()),
+            )
+        )
+        response = self._ok({"redirect_to": "/account/sign-in"})
+        self.app.clear_cookie(response, web.SESSION_COOKIE)
+        return response
+
     async def create_local_account(self, ctx: _Ctx) -> Response:
         body, revision = self._settings_body(ctx, {"revision", "username", "password"})
         assert ctx.session is not None
@@ -1544,6 +1626,8 @@ class ApiApp:
             raise _Fail("not_found")
         fields = {"revision", "config", "enabled", "rank"}
         body = ctx.body or {}
+        if "auto_link_email" in body:
+            fields.add("auto_link_email")
         if "client_secret" in body:
             fields.add("client_secret")
         body, revision = self._settings_body(ctx, fields)
@@ -1556,12 +1640,94 @@ class ApiApp:
                 client_secret=body.get("client_secret"),
                 enabled=body["enabled"],
                 rank=body["rank"],
+                auto_link_email=body.get("auto_link_email"),
                 revision=revision,
                 actor=actor,
                 now=int(self.app.clock()),
             )
         )
         return await self.login_provider_settings(ctx)
+
+    async def login_policy(self, ctx: _Ctx) -> Response:
+        from .login.policy_store import AccountPolicyStore
+
+        providers = self.app.provider_store
+        if providers is None:
+            raise _Fail("not_found")
+        store = AccountPolicyStore(providers.database)
+        return self._ok(
+            await run_store(
+                store.read, (self._target(ctx) if "id" in ctx.params else None)
+            )
+        )
+
+    async def save_upn(self, ctx: _Ctx) -> Response:
+        from .login.account_names import AccountNames
+
+        providers, session = self.app.provider_store, ctx.session
+        if providers is None:
+            raise _Fail("not_found")
+        assert session is not None
+        _closed(ctx.body or {}, required=("upn",))
+        reauthenticate = await run_store(
+            lambda: AccountNames(providers.database).save(
+                (ctx.body or {})["upn"],
+                account_id=session.acct,
+                expected_epoch=session.ep,
+                now=int(self.app.clock()),
+            )
+        )
+        response = self._ok(
+            {"redirect_to": "/account/sign-in" if reauthenticate else "/account"}
+        )
+        if reauthenticate:
+            self.app.clear_cookie(response, web.SESSION_COOKIE)
+        return response
+
+    async def save_login_policy(self, ctx: _Ctx) -> Response:
+        from .login.policy_store import AccountPolicyStore
+
+        body, revision = self._settings_body(ctx, {"revision", "policy"})
+        if not isinstance(body["policy"], dict):
+            raise _invalid("policy")
+        assert ctx.session is not None
+        actor = ctx.session.acct
+        providers = self.app.provider_store
+        if providers is None:
+            raise _Fail("not_found")
+        store = AccountPolicyStore(providers.database)
+        await self._save_provider_config(
+            lambda: store.save(
+                body["policy"],
+                account_id=(self._target(ctx) if "id" in ctx.params else None),
+                revision=revision,
+                actor=actor,
+                now=int(self.app.clock()),
+            )
+        )
+        return await self.login_policy(ctx)
+
+    async def unlock_sso(self, ctx: _Ctx) -> Response:
+        from .login.policy_store import AccountPolicyStore
+
+        body, revision = self._settings_body(ctx, {"revision"})
+        assert ctx.session is not None
+        actor = ctx.session.acct
+        providers = self.app.provider_store
+        if providers is None:
+            raise _Fail("not_found")
+        store = AccountPolicyStore(providers.database)
+        await self._save_provider_config(
+            lambda: store.save(
+                {},
+                account_id=self._target(ctx),
+                unlock=True,
+                revision=revision,
+                actor=actor,
+                now=int(self.app.clock()),
+            )
+        )
+        return await self.login_policy(ctx)
 
     @staticmethod
     def _settings_body(ctx: _Ctx, fields: set[str]) -> tuple[dict[str, Any], int]:
@@ -1583,6 +1749,12 @@ class ApiApp:
         )
         return {
             "revision": snapshot.revision,
+            "site": {
+                "public_base_url": snapshot.settings["site.public_base_url"]
+                or self.app.base,
+                "active_base_url": self.app.base,
+                "restart_required": False,
+            },
             "sign_in_methods": [
                 {
                     "id": p.id,
@@ -1617,6 +1789,36 @@ class ApiApp:
 
     async def admin_settings(self, ctx: _Ctx) -> Response:
         return self._ok(await self._settings_view())
+
+    async def save_site_url(self, ctx: _Ctx) -> Response:
+        from .site_url import validate_site_url
+
+        body, revision = self._settings_body(
+            ctx, {"revision", "public_base_url", "confirm"}
+        )
+        if body["confirm"] is not True:
+            raise _invalid("confirm")
+        try:
+            value = validate_site_url(body["public_base_url"])
+        except ValueError:
+            raise _invalid("public_base_url") from None
+        assert ctx.session is not None
+        actor = ctx.session.acct
+        revision = await run_store(
+            lambda: self.config_store.site_url(
+                value, revision=revision, actor=actor, now=int(self.app.clock())
+            )
+        )
+        return self._ok(
+            {
+                "revision": revision,
+                "site": {
+                    "public_base_url": value,
+                    "active_base_url": self.app.base,
+                    "restart_required": value != self.app.base,
+                },
+            }
+        )
 
     async def _save_config(self, operation: Callable[[], int]) -> None:
         try:
@@ -1831,6 +2033,8 @@ class ApiApp:
             "key": key,
             "display_name": _clean(status.display_name),
             "username": _clean(identity.username if identity is not None else "", 254),
+            "upn": status.upn,
+            "upn_required": status.upn_required,
             "role": "owner" if status.is_owner else "user",
             "status": status.status,
             "disabled_reason": status.disabled_reason

@@ -16,6 +16,7 @@ export interface EditableProvider {
   rank: number
   config: Record<string, string | string[] | boolean>
   secret_present: boolean
+  auto_link_email?: boolean
 }
 
 export interface ProviderSave {
@@ -23,6 +24,7 @@ export interface ProviderSave {
   enabled: boolean
   rank: number
   client_secret?: string
+  auto_link_email?: boolean
 }
 
 export default function ProviderConfigurationForm({ provider, callbackUri, onSave, installation = false, disabled = false }: {
@@ -37,6 +39,7 @@ export default function ProviderConfigurationForm({ provider, callbackUri, onSav
   const [secret, setSecret] = useState('')
   const [enabled, setEnabled] = useState(provider.enabled)
   const [rank, setRank] = useState(provider.rank)
+  const [autoLinkEmail, setAutoLinkEmail] = useState(provider.auto_link_email ?? false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
   function text(key: string, fallback = '') {
@@ -52,6 +55,7 @@ export default function ProviderConfigurationForm({ provider, callbackUri, onSav
     setBusy(true)
     setError(null)
     const values: ProviderSave = { config, enabled, rank }
+    if (!installation && provider.protocol !== 'local') values.auto_link_email = autoLinkEmail
     if (secret.length > 0) values.client_secret = secret
     try {
       await onSave(values)
@@ -89,6 +93,7 @@ export default function ProviderConfigurationForm({ provider, callbackUri, onSav
       </>}
       </>}
       {!installation && <>
+        {provider.protocol !== 'local' && <FormControlLabel control={<Switch checked={autoLinkEmail} disabled={busy} onChange={(_, value) => setAutoLinkEmail(value)} />} label={t('admin:providerConfig.autoLinkEmail')} />}
         <TextField type="number" label={t('admin:providerConfig.position')} value={rank + 1} disabled={busy} slotProps={{ htmlInput: { min: 1, max: 8, step: 1 } }} onChange={(event) => setRank(Number(event.target.value) - 1)} />
         <FormControlLabel control={<Switch checked={enabled} disabled={busy} onChange={(_, value) => setEnabled(value)} />} label={t('admin:providerConfig.enabled')} />
       </>}

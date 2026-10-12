@@ -106,7 +106,6 @@ class SqlAccountRepo:
         row = conn.execute(stmt).mappings().one_or_none()
         return None if row is None else AccountRow(**row)
 
-
     def count_active_owners(
         self, conn: Connection, *, exclude: str | None = None
     ) -> int:
@@ -138,9 +137,41 @@ class SqlAccountRepo:
         """
 
         def holds(*conditions: Any) -> Any:
+            policy = t.account_login_policy
+            permitted = t.account_allowed_login_providers
+            restricted = (
+                select(policy.c.account_id)
+                .where(policy.c.account_id == _a.c.id, policy.c.restrict_providers)
+                .correlate(_a)
+                .exists()
+            )
+            allowed = (
+                select(permitted.c.account_id)
+                .where(
+                    permitted.c.account_id == _a.c.id,
+                    permitted.c.provider_id == _ei.c.provider_id,
+                )
+                .correlate(_a, _ei)
+                .exists()
+            )
+            wrong_lock = (
+                select(policy.c.account_id)
+                .where(
+                    policy.c.account_id == _a.c.id,
+                    policy.c.sso_lock_provider.is_not(None),
+                    policy.c.sso_lock_provider != _ei.c.provider_id,
+                )
+                .correlate(_a, _ei)
+                .exists()
+            )
             return (
                 select(_ei.c.account_id)
-                .where(_ei.c.account_id == _a.c.id, *conditions)
+                .where(
+                    _ei.c.account_id == _a.c.id,
+                    or_(~restricted, allowed),
+                    or_(_ei.c.provider_id == "local", ~wrong_lock),
+                    *conditions,
+                )
                 .exists()
             )
 
@@ -197,6 +228,8 @@ class SqlAccountRepo:
         display_name: str,
         now: int,
         approved_by: str | None = None,
+        upn: str | None = None,
+        upn_required: bool = False,
         disabled_reason: str | None = None,
         disabled_by: str | None = None,
     ) -> None:
@@ -209,6 +242,8 @@ class SqlAccountRepo:
                 role_seen_at=now if role == ROLE_OWNER else None,
                 admitted_via=admitted_via,
                 display_name=display_name,
+                upn=("account_" + account_id.replace("-", "")) if upn is None else upn,
+                upn_required=upn_required,
                 created_at=now,
                 approved_at=now
                 if status == STATUS_ACTIVE and approved_by is not None
@@ -356,6 +391,25 @@ class SqlIdentityRepo:
         SqlProviderRepo(cast(Dialect, conn.dialect.name)).ensure(
             conn, provider_id, now=now
         )
+        ownership = t.external_identity_owners
+        conn.execute(
+            _upsert_insert(cast(Dialect, conn.dialect.name), ownership)
+            .values(issuer=issuer, subject=subject, account_id=account_id)
+            .on_conflict_do_nothing(
+                index_elements=[ownership.c.issuer, ownership.c.subject]
+            )
+        )
+        owner = conn.execute(
+            select(ownership.c.account_id).where(
+                ownership.c.issuer == issuer, ownership.c.subject == subject
+            )
+        ).scalar_one()
+        if owner != account_id:
+            from .errors import TokenStoreError
+
+            raise TokenStoreError(
+                "external identity already belongs to another account"
+            )
         conn.execute(
             insert(_ei).values(
                 id=new_id(),
@@ -454,7 +508,20 @@ class SqlIdentityRepo:
         )
 
     def delete_one(self, conn: Connection, identity_id: str, account_id: str) -> bool:
-        return (
+        row = conn.execute(
+            select(_ei.c.issuer, _ei.c.subject, _ei.c.provider_id).where(
+                _ei.c.id == identity_id, _ei.c.account_id == account_id
+            )
+        ).first()
+        if row is None:
+            return False
+        if row.provider_id == "local":
+            conn.execute(
+                delete(t.local_credentials).where(
+                    t.local_credentials.c.account_id == account_id
+                )
+            )
+        removed = (
             conn.execute(
                 delete(_ei).where(
                     _ei.c.id == identity_id, _ei.c.account_id == account_id
@@ -462,6 +529,23 @@ class SqlIdentityRepo:
             ).rowcount
             == 1
         )
+        if (
+            removed
+            and not conn.execute(
+                select(_ei.c.id).where(
+                    _ei.c.issuer == row.issuer, _ei.c.subject == row.subject
+                )
+            ).first()
+        ):
+            owners = t.external_identity_owners
+            conn.execute(
+                delete(owners).where(
+                    owners.c.issuer == row.issuer,
+                    owners.c.subject == row.subject,
+                    owners.c.account_id == account_id,
+                )
+            )
+        return removed
 
 
 class SqlProviderRepo:
@@ -701,7 +785,6 @@ class SqlCanvasCredentialRepo:
             .one_or_none()
         )
         return None if row is None else CredentialRow(**row)
-
 
     def count(self, conn: Connection) -> int:
         return int(conn.execute(select(func.count()).select_from(_ct)).scalar_one())

@@ -33,7 +33,7 @@ export default function SetupView() {
   if (query.data.initialized) return <Navigate to="/sign-in" replace />
   const status = query.data
   const identifier = kind === 'oidc' ? `oidc:${slug}` : kind
-  const valid = /^[a-z0-9][a-z0-9._-]{2,63}$/i.test(username.trim()) && password.length >= 15 && password.length <= 128 && password === confirm && code.length > 0 && (kind !== 'oidc' || /^[a-z][a-z0-9-]{0,31}$/.test(slug))
+  const valid = /^[a-z0-9][a-z0-9.@_+-]{2,253}$/i.test(username.trim()) && password.length >= 15 && password.length <= 128 && password === confirm && code.length > 0 && (kind !== 'oidc' || /^[a-z][a-z0-9-]{0,31}$/.test(slug))
   async function save(values?: ProviderSave) {
     if (!valid || busy) return
     setBusy(true)

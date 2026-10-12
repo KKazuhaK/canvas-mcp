@@ -208,7 +208,8 @@
       "access_disabled": "访问已被关闭",
       "signups_paused": "暂停注册",
       "pending_approval": "等待审批",
-      "identity_linked": "已添加登录方式"
+      "identity_linked": "已添加登录方式",
+      "use_existing_sign_in": "请使用原登录方式"
     },
     "empty": "还没有登录记录。",
     "sessionsTitle": "会话",

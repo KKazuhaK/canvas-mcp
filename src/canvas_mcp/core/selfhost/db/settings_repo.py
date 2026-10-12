@@ -30,9 +30,9 @@ class SettingsAccessDenied(Exception):
 
 @dataclass(frozen=True)
 class TypedSettings:
-    values: Mapping[str, bool | int]
+    values: Mapping[str, bool | int | str]
 
-    def __getitem__(self, key: str) -> bool | int:
+    def __getitem__(self, key: str) -> bool | int | str:
         return self.values[key]
 
 
@@ -58,6 +58,11 @@ VALUES (:now,:actor_kind,:actor,'setting_changed','setting',:key,:detail)
 def read_settings(conn: Connection) -> TypedSettings:
     values = {key: spec.default for key, spec in SETTINGS.items()}
     for row in conn.execute(_READ).mappings():
+        if row["key"] == "login.account_policy":
+            from ..login.account_policy import parse_policy
+
+            parse_policy(row["value"])
+            continue
         if row["key"] not in SETTINGS:
             # Do not log stored keys or values from a newer deployment.
             logger.warning("Ignoring an unknown server setting")
@@ -77,6 +82,8 @@ def save_setting(
     reset: bool = False,
 ) -> int:
     """Save or reset one value; the caller commits only after successful return."""
+    if key == "site.public_base_url":
+        raise ValueError("site address changes require credential revocation")
     spec = SETTINGS.get(key)
     if spec is None:
         raise ValueError("unknown setting")

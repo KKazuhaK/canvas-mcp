@@ -581,12 +581,7 @@ def load_selfhost_settings(
     # Removed variables must produce one clear problem, rather than being parsed again.
     source = {name: value for name, value in source.items() if name not in removed}
 
-    base = _parse_public_base_url(get("PUBLIC_BASE_URL"), problems)
     authz = _parse_authz_settings(get, problems)
-    if base is not None and base[0].endswith(":443"):
-        # The issuer and the token audience are compared as exact strings, so the one
-        # spelling of this origin has to be the one every client derives from the URL.
-        problems.append("PUBLIC_BASE_URL must not include the default port")
 
     supplied = _provider_input or ProviderSettingsInput(LoginProvidersConfig(order=()))
     problems.extend(supplied.problems)
@@ -652,6 +647,23 @@ def load_selfhost_settings(
         allow_external_sqlite=allow_outside,
         problems=problems,
     )
+    from .db.errors import StoreUnavailable
+    from .site_url import saved_site_url
+
+    base: tuple[str, str] | None = None
+    try:
+        stored_base = saved_site_url(database) if database is not None else None
+        base = _parse_public_base_url(stored_base or get("PUBLIC_BASE_URL"), problems)
+    except StoreUnavailable:
+        problems.append(
+            "the token database cannot be opened or is not a valid database; database-managed site address cannot be loaded"
+        )
+    except (ValueError, OSError):
+        problems.append(
+            "database-managed site address cannot be loaded from the token database"
+        )
+    if base is not None and base[0].endswith(":443"):
+        problems.append("PUBLIC_BASE_URL must not include the default port")
     auto_migrate = _parse_auto_migrate(get(AUTO_MIGRATE_ENV), problems)
     state_backend = _parse_state_backend(get(STATE_BACKEND_ENV), problems)
     web_dist_raw = get(ACCOUNT_WEB_DIST_ENV) or DEFAULT_ACCOUNT_WEB_DIST

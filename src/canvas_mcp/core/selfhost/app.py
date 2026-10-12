@@ -335,9 +335,22 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         issuer_problems = _provider_issuer_problems(settings, store)
         if issuer_problems:
             raise SelfhostConfigError(issuer_problems)
+        from dataclasses import replace
+        from urllib.parse import urlsplit
+
         from .db.migrations.provider_environment import (
             clear_unconfigured_metadata,
             import_provider_settings,
+        )
+        from .db.migrations.site_environment import adopt_site_url
+
+        canonical = adopt_site_url(
+            store.database, settings.public_base_url, now=int(time.time())
+        )
+        settings = replace(
+            settings,
+            public_base_url=canonical,
+            public_host=urlsplit(canonical).hostname or "",
         )
         from .login.installation import InstallationAuthority
         from .login.provider_settings import settings_from_database
@@ -355,7 +368,9 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         settings = settings_from_database(settings, provider_store.load_snapshot())
         from .config_snapshot import ConfigSnapshots
 
-        snapshots = ConfigSnapshots(store.database, None)
+        snapshots = ConfigSnapshots(
+            store.database, None, active_base_url=settings.public_base_url
+        )
         if settings.profile == "pilot":
             from .profile import PilotProfileViolation
 
