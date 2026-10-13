@@ -991,11 +991,7 @@ class ApiApp:
             }
         invalid = info.status == STATUS_INVALID
         reason = info.invalid_reason if info.invalid_reason in INVALID_REASONS else None
-        hint = (
-            info.access_expires_at
-            if info.expiry_source == "canvas"
-            else info.expires_hint_at
-        )
+        hint = info.access_expires_at if info.expiry_source == "canvas" else None
         notice = "none"
         if not invalid and hint is not None:
             now = self.app.clock()
@@ -1008,11 +1004,7 @@ class ApiApp:
                 )
                 * 86400
             ):
-                notice = (
-                    "soon"
-                    if now < hint + (0 if info.expiry_source == "canvas" else 86400)
-                    else "passed"
-                )
+                notice = "soon" if now < hint else "passed"
         return {
             "custody": custody_status,
             "state": "invalid" if invalid else "active",
@@ -1025,9 +1017,7 @@ class ApiApp:
             or info.invalid_reason != REASON_REVOKED_BY_ADMIN,
             "expires_on": web._fmt_utc_date(hint) if hint is not None else None,
             "expiry_notice": notice,
-            "expiry_source": info.expiry_source
-            if info.expiry_source == "canvas" or hint is not None
-            else "unknown",
+            "expiry_source": "canvas" if info.expiry_source == "canvas" else "unknown",
             "expires_at": _ts(info.access_expires_at)
             if info.expiry_source == "canvas"
             else None,
@@ -1207,7 +1197,6 @@ class ApiApp:
             optional=(
                 "school",
                 "school_sig",
-                "expires_on",
                 "confirm_identity_change",
                 "custody",
             ),
@@ -1225,14 +1214,12 @@ class ApiApp:
         token = _text(body, "canvas_token", max_chars=1024)
         school = _text(body, "school", max_chars=253, nullable=True)
         signature = _text(body, "school_sig", max_chars=128, nullable=True)
-        expires = _text(body, "expires_on", max_chars=32, nullable=True)
         confirmation = _text(
             body, "confirm_identity_change", max_chars=128, nullable=True
         )
         outcome = await self.app.enroll_token(
             session,
             token_raw=token,
-            expires_raw=expires,
             school_raw=school,
             confirm_raw=confirmation,
             pick_signature=signature or None,

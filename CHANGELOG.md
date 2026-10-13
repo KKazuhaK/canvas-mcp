@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read Canvas token expiry metadata when supported, show its provenance and guide
   replacement from the home page. Add database-owned SMTP settings, account email
   opt-in and bounded, durable expiry reminders independent of site traffic.
+- Use only Canvas-reported expiry for notices and mail. Remove the manual date
+  field and reject it in the token API. Distinguish unavailable metadata from
+  confirmed no expiry; retain old typed dates in storage without using them.
 - Preserve existing credentials through isolated migrations; require schema epoch
   3 for the new sealed SMTP data and its key verification/rotation registry.
 

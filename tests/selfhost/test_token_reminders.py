@@ -62,7 +62,7 @@ async def test_reminders_require_opt_in_and_only_send_once_per_stage(running):
         conn.execute(
             update(s.canvas_credentials)
             .where(s.canvas_credentials.c.account_id == account)
-            .values(expires_hint_at=now + 3 * 86400)
+            .values(expiry_source="canvas", access_expires_at=now + 3 * 86400)
         )
     sent = []
     runner = ReminderRunner(
@@ -98,7 +98,7 @@ async def test_disabled_account_and_replaced_generation_are_not_sent(running):
         conn.execute(
             update(s.canvas_credentials)
             .where(s.canvas_credentials.c.account_id == account)
-            .values(expires_hint_at=now + 86400)
+            .values(expiry_source="canvas", access_expires_at=now + 86400)
         )
     runner = ReminderRunner(
         mail,
@@ -243,7 +243,7 @@ async def test_failed_delivery_has_bounded_retries_and_does_not_log_smtp_secrets
         conn.execute(
             update(s.canvas_credentials)
             .where(s.canvas_credentials.c.account_id == account)
-            .values(expires_hint_at=now + 3 * 86400)
+            .values(expiry_source="canvas", access_expires_at=now + 3 * 86400)
         )
     attempts = []
 
@@ -265,7 +265,7 @@ async def test_failed_delivery_has_bounded_retries_and_does_not_log_smtp_secrets
 
 
 @pytest.mark.asyncio
-async def test_manual_date_keeps_the_same_day_grace_as_home_page(running):
+async def test_legacy_manual_date_cannot_send_or_claim_reminders(running):
     mail = configure(running)
     account = running.enroll(ALICE)
     now = int(running.clock())
@@ -276,7 +276,11 @@ async def test_manual_date_keeps_the_same_day_grace_as_home_page(running):
         conn.execute(
             update(s.canvas_credentials)
             .where(s.canvas_credentials.c.account_id == account)
-            .values(expires_hint_at=now - 3600)
+            .values(
+                expiry_source="manual",
+                expires_hint_at=now - 3600,
+                access_expires_at=now - 3600,
+            )
         )
     subjects = []
     runner = ReminderRunner(
@@ -285,11 +289,45 @@ async def test_manual_date_keeps_the_same_day_grace_as_home_page(running):
         now=running.clock,
         sender=lambda *args, **kwargs: subjects.append(kwargs["subject"]),
     )
-    assert await runner.run() == 1
-    assert subjects == ["Canvas API token expires soon"]
+    assert runner.candidates(7) == []
+    assert await runner.run() == 0
+    assert subjects == []
+    with running.store.database.read() as conn:
+        row = dict(conn.execute(s.canvas_credentials.select()).mappings().first())
+    row.update(email="alice@example.test", locale="en")
+    assert runner.claim(row, stage="expired", expiry=now - 3600) is None
     running.clock.advance(86400)
-    assert await runner.run() == 1
-    assert subjects[-1] == "Canvas API token expired"
+    assert await runner.run() == 0
+    assert subjects == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["manual", "canvas"])
+async def test_unknown_or_explicitly_unlimited_expiry_never_sends(running, source):
+    mail = configure(running)
+    account = running.enroll(ALICE)
+    now = int(running.clock())
+    mail.save_preferences(
+        account, enabled=True, email="alice@example.test", locale="en", epoch=0, now=now
+    )
+    with running.store.database.write() as conn:
+        conn.execute(
+            update(s.canvas_credentials)
+            .where(s.canvas_credentials.c.account_id == account)
+            .values(
+                expiry_source=source,
+                access_expires_at=None,
+                expires_hint_at=now + 86400,
+            )
+        )
+    runner = ReminderRunner(
+        mail,
+        base_url="https://canvas.example.test",
+        now=running.clock,
+        sender=lambda *a, **k: pytest.fail("must not send"),
+    )
+    assert runner.candidates(7) == []
+    assert await runner.run() == 0
 
 
 def test_two_workers_share_one_delivery_claim_and_reject_stale_mail_settings(running):
@@ -305,7 +343,7 @@ def test_two_workers_share_one_delivery_claim_and_reject_stale_mail_settings(run
         conn.execute(
             update(s.canvas_credentials)
             .where(s.canvas_credentials.c.account_id == account)
-            .values(expires_hint_at=now + 86400)
+            .values(expiry_source="canvas", access_expires_at=now + 86400)
         )
     runner = ReminderRunner(
         mail, base_url="https://canvas.example.test", now=running.clock

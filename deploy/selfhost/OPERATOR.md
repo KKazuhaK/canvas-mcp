@@ -116,8 +116,9 @@ are required.
 When verifying a Canvas token, the service attempts the documented read-only token
 metadata endpoint. A response must match the submitted token hint and the verified
 Canvas user. A supported response supplies the real UTC expiry or reports no
-permanent expiry. Unavailable or forbidden metadata falls back to the date entered
-by the user, and the account page shows its source. Existing active tokens can
+permanent expiry. Unavailable or forbidden metadata leaves expiry unknown; there
+is no manually entered fallback. Old typed dates remain in storage but are never
+displayed or used for notices or mail. Existing active tokens can
 use **Re-check token** to read supported expiry without re-entering the token or
 revoking connected apps. Tokens are never regenerated
 in Canvas by this feature; the home page guides the user to create and save a new

@@ -23,21 +23,6 @@ interface IdentityChange {
   confirmation: string
 }
 
-/** Allow one calendar day for browser/server timezone differences; the server validates expiry. */
-function earliestExpiryLocal(): string {
-  const now = new Date()
-  now.setDate(now.getDate() - 1)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
-}
-
-/** The server refused the expiry date itself (a past or unreadable date). */
-function isExpiryRefusal(error: unknown): boolean {
-  return (
-    error instanceof ApiError && error.code === 'validation_failed' && error.params.field === 'expires_on'
-  )
-}
-
 function asText(value: unknown): string {
   return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
 }
@@ -70,7 +55,6 @@ export default function TokenForm({
   useEffect(() => { setAcknowledged(false) }, [noticeVersion])
   const schools = useSchools()
   const [value, setValue] = useState('')
-  const [expiresOn, setExpiresOn] = useState('')
   const [picked, setPicked] = useState<SchoolSelection | null | undefined>(undefined)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<unknown>(null)
@@ -80,7 +64,6 @@ export default function TokenForm({
   const picker = schoolData?.mode === 'picker'
   const selection = picked !== undefined ? picked : schoolData ? initialSelection(schoolData) : null
   const needsSchool = schoolData?.mode === 'none' || (picker && selection === null)
-  const expiryRefused = isExpiryRefusal(error)
 
   async function send(confirmation: string | null) {
     if (!acknowledged || !noticeAvailable || noticeVersion === undefined || needsSchool) return
@@ -96,7 +79,6 @@ export default function TokenForm({
       body.school = selection.host
       if (selection.sig !== null) body.school_sig = selection.sig
     }
-    if (expiresOn) body.expires_on = expiresOn
     if (confirmation !== null) body.confirm_identity_change = confirmation
 
     setPending(true)
@@ -105,7 +87,6 @@ export default function TokenForm({
     try {
       await putCanvasToken(body)
       setChange(null)
-      setExpiresOn('')
       useToast.getState().show(t('account:enroll.saved'))
       await refreshAfterTokenChange(client)
       onSaved?.()
@@ -182,22 +163,8 @@ export default function TokenForm({
           },
         }}
       />
-      <TextField
-        label={t('account:enroll.expires')}
-        name="expires_on"
-        type="date"
-        value={expiresOn}
-        onChange={(e) => {
-          setExpiresOn(e.target.value)
-          if (expiryRefused) setError(null)
-        }}
-        disabled={pending || change !== null}
-        error={expiryRefused}
-        helperText={expiryRefused ? t('account:enroll.expiresInvalid') : t('account:enroll.expiresHelper')}
-        slotProps={{ inputLabel: { shrink: true }, htmlInput: { min: earliestExpiryLocal() } }}
-        sx={{ maxWidth: 260 }}
-      />
-      {error && !expiryRefused ? <ErrorNotice error={error} /> : null}
+      <Alert severity="info" role="note">{t('account:enroll.expiryAutomatic')}</Alert>
+      {error ? <ErrorNotice error={error} /> : null}
       <Box>
         <Button
           type="submit"

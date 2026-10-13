@@ -93,7 +93,6 @@ describe('the wire shape of every endpoint', () => {
       custody: { acknowledged: true, notice_version: 1 },
       school: 'canvas.example.edu',
       school_sig: 'sig',
-      expires_on: '2027-01-31',
       confirm_identity_change: 'conf',
     })
     expect(seen[0].method).toBe('PUT')
@@ -103,7 +102,6 @@ describe('the wire shape of every endpoint', () => {
       custody: { acknowledged: true, notice_version: 1 },
       school: 'canvas.example.edu',
       school_sig: 'sig',
-      expires_on: '2027-01-31',
       confirm_identity_change: 'conf',
     })
     expect(seen[0].headers['x-csrf-token']).toBe('c')

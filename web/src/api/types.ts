@@ -192,7 +192,7 @@ export interface CanvasTokenStatus {
   /** The date the person noted when enrolling (YYYY-MM-DD). */
   expires_on: string | null
   expiry_notice: ExpiryNotice
-  expiry_source?: 'canvas' | 'manual' | 'unknown'
+  expiry_source?: 'canvas' | 'unknown'
   expires_at?: string | null
   /** https link to the school's own Canvas settings page, or null. */
   settings_url: string | null
@@ -207,7 +207,6 @@ export interface CanvasTokenRequest {
   canvas_token: string
   school?: string | null
   school_sig?: string | null
-  expires_on?: string | null
   confirm_identity_change?: string | null
 }
 

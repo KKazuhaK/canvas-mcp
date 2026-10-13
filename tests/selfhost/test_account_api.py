@@ -886,38 +886,20 @@ class TestCanvasTokenRead:
         assert body["recheck_allowed"] is allowed
 
     def test_the_expiry_reminder(self, h: Harness, user: Api) -> None:
-        day = 86400
-        # h.now is 2027-01-15 08:00 UTC; the hint is stored as midnight UTC.
-        base = int(h.now) - int(h.now) % day
-        put_row(
-            h.store,
-            OID,
-            token=CANVAS_TOKEN,
-            name="Ada",
-            canvas_user_id="42",
-            expires_hint_at=base + 30 * day,
-        )
-        body = user.get("/me/canvas-token").json()
-        assert body["expires_on"] == "2027-02-14" and body["expiry_notice"] == "none"
-        for delta, notice in ((6 * day, "soon"), (0, "soon"), (-1 * day, "passed")):
-            put_row(
-                h.store,
-                OID,
-                token=CANVAS_TOKEN,
-                name="Ada",
-                canvas_user_id="42",
-                expires_hint_at=base + delta,
+        for delta, notice in (
+            (30 * 86400, "none"),
+            (6 * 86400, "soon"),
+            (0, "passed"),
+            (-86400, "passed"),
+        ):
+            h.whoami_result = CanvasIdentity("42", "Ada", True, int(h.now) + delta)
+            response = user.put(
+                "/me/canvas-token",
+                {"custody": ACKNOWLEDGED, "canvas_token": CANVAS_TOKEN},
             )
-            assert user.get("/me/canvas-token").json()["expiry_notice"] == notice, delta
-        put_row(
-            h.store,
-            OID,
-            token=CANVAS_TOKEN,
-            name="Ada",
-            canvas_user_id="42",
-            expires_hint_at=base + 8 * day,
-        )
-        assert user.get("/me/canvas-token").json()["expiry_notice"] == "none"
+            assert response.status_code == 200
+            assert response.json()["expiry_notice"] == notice
+            assert response.json()["expiry_source"] == "canvas"
 
     def test_a_school_the_server_no_longer_offers(self, h: Harness, user: Api) -> None:
         put_row(
@@ -965,23 +947,11 @@ class TestCanvasTokenSave:
         )
         assert [r[0] for r in audit_rows(h)].count("token_replaced") == 1
 
-    def test_the_expiry_date_is_stored(self, h: Harness, user: Api) -> None:
-        response = user.put(
-            "/me/canvas-token",
-            {
-                "custody": ACKNOWLEDGED,
-                "canvas_token": CANVAS_TOKEN,
-                "expires_on": "2027-03-01",
-            },
-        )
-        assert response.json()["expires_on"] == "2027-03-01"
-
-    @pytest.mark.parametrize(
-        "value",
-        ["2027-02-30", "yesterday", "2027-1-1", "2020-01-01", "2099-01-01", "x" * 40],
-    )
-    def test_a_bad_expiry_date_is_422(self, h: Harness, user: Api, value: str) -> None:
-        params = error_of(
+    @pytest.mark.parametrize("value", [None, "2027-03-01", "yesterday", 20270101])
+    def test_manual_expiry_input_is_rejected(
+        self, h: Harness, user: Api, value: Any
+    ) -> None:
+        error_of(
             user.put(
                 "/me/canvas-token",
                 {
@@ -993,8 +963,8 @@ class TestCanvasTokenSave:
             422,
             "validation_failed",
         )
-        assert params == {"field": "expires_on"}
         assert h.whoami_calls == []
+        assert h.store.info(KEY) is None
 
     @pytest.mark.parametrize(
         "token", ["short", "has space " + "x" * 30, "ü" * 30, "x" * 600, ""]

@@ -41,13 +41,9 @@ class ReminderRunner:
     def candidates(self, days: int) -> list[Mapping[str, Any]]:
         now = int(self.now())
         c, a, p = s.canvas_credentials, s.accounts, s.notification_preferences
-        expiry = case(
-            (c.c.expiry_source == "canvas", c.c.access_expires_at),
-            else_=c.c.expires_hint_at,
-        )
+        expiry = c.c.access_expires_at
         d = s.notification_deliveries
-        grace = case((c.c.expiry_source == "canvas", 0), else_=86400)
-        stage = case((expiry + grace <= now, "expired"), else_="soon")
+        stage = case((expiry <= now, "expired"), else_="soon")
         already_handled = exists(
             select(d.c.id).where(
                 d.c.credential_id == c.c.id,
@@ -82,6 +78,7 @@ class ReminderRunner:
                     .where(
                         a.c.status == "active",
                         c.c.status == "active",
+                        c.c.expiry_source == "canvas",
                         c.c.is_primary,
                         p.c.enabled,
                         ~already_handled,
@@ -109,10 +106,7 @@ class ReminderRunner:
             s.notification_preferences,
             s.notification_deliveries,
         )
-        actual_expiry = case(
-            (c.c.expiry_source == "canvas", c.c.access_expires_at),
-            else_=c.c.expires_hint_at,
-        )
+        actual_expiry = c.c.access_expires_at
         with self.store.database.write() as conn:
             if (
                 revision is not None
@@ -138,6 +132,7 @@ class ReminderRunner:
                     c.c.id == row["id"],
                     c.c.generation == row["generation"],
                     c.c.status == "active",
+                    c.c.expiry_source == "canvas",
                     c.c.is_primary,
                     a.c.status == "active",
                     p.c.enabled,
@@ -152,10 +147,9 @@ class ReminderRunner:
             canonical = settings["site.public_base_url"]
             if canonical and canonical != self.base_url:
                 return None
-            grace = 0 if standing.expiry_source == "canvas" else 86400
             if expiry > now + int(
                 settings["notifications.token_reminder_days"]
-            ) * 86400 or (stage == "expired") != (expiry + grace <= now):
+            ) * 86400 or (stage == "expired") != (expiry <= now):
                 return None
             old = conn.execute(select(d).where(d.c.id == identifier)).mappings().first()
             if old and (
@@ -207,8 +201,7 @@ class ReminderRunner:
         sent = 0
         for row in await run_store(self.candidates, settings.config["reminder_days"]):
             expiry = int(row["expiry"])
-            grace = 0 if row["expiry_source"] == "canvas" else 86400
-            stage = "expired" if expiry + grace <= self.now() else "soon"
+            stage = "expired" if expiry <= self.now() else "soon"
             current = await run_store(self.store.load)
             if not current.config["enabled"]:
                 break
@@ -225,11 +218,7 @@ class ReminderRunner:
                 continue
             identifier, attempt = claim
             timestamp = dt.datetime.fromtimestamp(expiry, tz=dt.UTC)
-            date = (
-                timestamp.isoformat()
-                if row["expiry_source"] == "canvas"
-                else timestamp.date().isoformat()
-            )
+            date = timestamp.isoformat()
             messages = TEMPLATES.get(row["locale"], TEMPLATES["en"])
             subject = messages[stage]
             body = messages["body"].format(date=date, url=self.base_url)

@@ -69,7 +69,7 @@ function EnrolledCard({ canvas }: { canvas: CanvasTokenStatus }) {
   const recheck = useRecheckCanvasToken()
   const remove = useDeleteCanvasToken()
   const [confirmOpen, setConfirmOpen] = useState(false)
-  const expires = formatCalendarDate(canvas.expires_on, lang)
+  const expires = canvas.expiry_source === 'canvas' ? formatCalendarDate(canvas.expires_on, lang) : null
 
   return (
     <Card component="section" aria-labelledby="enrolled-title">
@@ -107,9 +107,11 @@ function EnrolledCard({ canvas }: { canvas: CanvasTokenStatus }) {
               ) : null}
             </Detail>
           ) : null}
-          {expires ? <Detail label={t('account:enrolled.expires')}>{expires}</Detail> : null}
+          <Detail label={t('account:enrolled.expires')}>
+            {expires ?? t(canvas.expiry_source === 'canvas' ? 'account:expiry.never' : 'account:expiry.sources.unknown')}
+          </Detail>
           <Detail label={t('account:expiry.source')}>
-            {t(`account:expiry.sources.${canvas.expiry_source === 'canvas' ? 'canvas' : canvas.expires_on ? 'manual' : 'unknown'}`)}
+            {t(`account:expiry.sources.${canvas.expiry_source === 'canvas' ? 'canvas' : 'unknown'}`)}
           </Detail>
           {canvas.expiry_source === 'canvas' && canvas.expires_at ? <Detail label={t('account:expiry.exact')}><TimeText iso={canvas.expires_at} /></Detail> : null}
           <Detail label={t('account:enrolled.lastUsed')}>
@@ -220,20 +222,19 @@ function InvalidBanner({ canvas }: { canvas: CanvasTokenStatus }) {
 function ExpiryBanner({ canvas, onReplace }: { canvas: CanvasTokenStatus; onReplace: () => void }) {
   const { t } = useTranslation()
   const lang = useLanguage((s) => s.lang)
-  if (canvas.expiry_notice === 'none') {
-    if (canvas.expires_on !== null || canvas.expiry_source === 'canvas') return null
+  if (canvas.expiry_source !== 'canvas') {
     return <Alert severity="info" role="note">
       <AlertTitle>{t('account:expiry.unknownTitle')}</AlertTitle>
       {t('account:expiry.unknownBody')}
-      <Box sx={{ mt: 1 }}><Button onClick={onReplace}>{t('account:expiry.update')}</Button></Box>
     </Alert>
   }
+  if (canvas.expiry_notice === 'none') return null
   const date = formatCalendarDate(canvas.expires_on, lang) ?? ''
   const passed = canvas.expiry_notice === 'passed'
   return (
     <Alert severity={passed ? 'warning' : 'info'} role="note">
       <AlertTitle>{passed ? t('account:expiry.passedTitle') : t('account:expiry.soonTitle')}</AlertTitle>
-      {t(`account:expiry.${canvas.expiry_source === 'canvas' ? (passed ? 'canvasPassedBody' : 'canvasSoonBody') : (passed ? 'passedBody' : 'soonBody')}`, { date })}
+      {t(`account:expiry.${passed ? 'canvasPassedBody' : 'canvasSoonBody'}`, { date })}
       <Box sx={{ mt: 1 }}><Button variant="outlined" onClick={onReplace}>{t('account:expiry.replace')}</Button></Box>
     </Alert>
   )
