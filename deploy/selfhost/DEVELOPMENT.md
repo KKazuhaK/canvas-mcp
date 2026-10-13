@@ -6,13 +6,18 @@ and [B0-REVIEW.md](B0-REVIEW.md). P7 and v1 are merged into `selfhost`.
 Both complete final-head CI matrices passed, and the native amd64/arm64 Docker
 image passed SQLite and PostgreSQL container smoke and is published for staging.
 V1-PROGRESS records its immutable digest and the separate post-merge CI run.
-Real staging/client/IdP/proxy and multiday refresh acceptance remain outstanding
-are required for production/client compatibility claims. On 2026-10-11 the owner
+Read the [current completion audit](V1-PROGRESS.md#handoff-completion-audit)
+before treating any unchecked item in this original inventory as new work.
+Real staging/client/IdP/proxy and multiday refresh acceptance remain partly
+outstanding and are required for production/client compatibility claims. On 2026-10-11 the owner
 approved an early v1 beta for staging acceptance. The development/publishing
 branch is now `selfhost`; `main` remains the upstream mirror. New release tags
 use `vX.Y.Z-beta.N` (or an unsuffixed stable version), with no school suffix.
 Branch labels in the original inventory below are normalized to the current
 name; historical commit IDs and previously published tags remain unchanged.
+The owner's later decision supersedes the upstream-sync steps below: maintain
+`selfhost` independently; do not merge upstream updates into it. Existing small
+upstream PRs remain separate work, with merge decisions left to the maintainer.
 All schema upgrades, backups and
 database transfer tooling are isolated under
 `src/canvas_mcp/core/selfhost/db/migrations/`. Its README describes the removal
@@ -650,6 +655,13 @@ None of these has been done. They gate the first v1 tag (V1-DESIGN 2.4, step 8).
 - [ ] nginx and Caddy limits and log redaction (no tokens, codes, `state`, `txn` or secrets in access logs, including `/auth/*` callbacks).
 - [ ] Docker smoke test is CI-only; on the server run `token_admin check` and `/healthz`.
 
+Current client guidance, checked October 13: [Claude's remote-versus-desktop
+connector documentation](https://support.claude.com/en/articles/11725091-when-to-use-desktop-and-web-connectors)
+describes remote connectors as available across client surfaces through the
+Claude account. Use the existing remote connection for Desktop acceptance,
+not a local stdio substitution. This vendor capability is not evidence of this
+server's compatibility: record a real Desktop build and tool result separately.
+
 ### 6.13 [RES] Known residuals worth fixing (small, independent)
 
 | Residual | Where | Suggested fix | Size |
@@ -678,7 +690,11 @@ None of these has been done. They gate the first v1 tag (V1-DESIGN 2.4, step 8).
 5. Fork-only features (multi-school, React UI, accounts, authz, v1) are not sent upstream.
 6. No response: wait about two weeks, then one polite ping; never close a PR unilaterally (default).
 
-### 7.2 Syncing upstream into the fork
+### 7.2 Syncing upstream into the fork (historical, superseded)
+
+**Do not execute this sequence on `selfhost`.** The owner now maintains the
+selfhost product independently from upstream updates. This old sequence is kept
+only to explain the original inventory and the already completed B0 history.
 
 1. `git fetch origin`; `git rev-list --count selfhost..origin/main` (7 at snapshot, before fetching).
 2. On a clean `selfhost` (or a branch from it): `git merge origin/main -m "Merge upstream main (YYYY-MM-DD, <topic>) into selfhost"`. Real merge commits, no rebase.
