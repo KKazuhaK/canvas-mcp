@@ -201,6 +201,29 @@ def source(tmp_path):
                 updated_at=NOW,
             )
         )
+        conn.execute(
+            insert(s.notification_preferences).values(
+                account_id=account,
+                enabled=True,
+                email="student@example.test",
+                locale="zh",
+                updated_at=NOW,
+            )
+        )
+        conn.execute(
+            insert(s.notification_deliveries).values(
+                id="d" * 64,
+                account_id=account,
+                credential_id=credential.credential_id,
+                generation=credential.credential_generation,
+                expires_at=NOW + 86400,
+                stage="soon",
+                status="sent",
+                attempts=1,
+                lease_until=NOW + 3600,
+                updated_at=NOW,
+            )
+        )
     try:
         yield store, path, ring, account, credential
     finally:
@@ -245,7 +268,7 @@ def test_all_lifecycle_tables_copy_native_types_and_sequences_and_skip_ephemeral
     checksum = digest(path)
     report = transfer.import_sqlite(target, path, ring)
     assert digest(path) == checksum
-    assert report.sealed_values_checked == 3
+    assert report.sealed_values_checked == 4
     assert set(report.counts) == {table.name for table in transfer.copied_tables()}
     assert all(count >= 1 for count in report.counts.values())
     with store.database.read() as src, target.read() as dst:
@@ -265,8 +288,8 @@ def test_all_lifecycle_tables_copy_native_types_and_sequences_and_skip_ephemeral
             state["compat_floor"],
             state["jwt_epoch"],
             state["settings_revision"],
-        ) == (2, 17, 13)
-        assert verify(dst, ring, all_values=True) == 3
+        ) == (3, 17, 13)
+        assert verify(dst, ring, all_values=True) == 4
         assert (
             dst.execute(
                 text("SELECT pg_typeof(id)::text FROM accounts LIMIT 1")
