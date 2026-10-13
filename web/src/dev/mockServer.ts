@@ -150,6 +150,8 @@ function activeCanvas(): CanvasTokenStatus {
     invalid_since: null,
     recheck_allowed: true,
     expires_on: inDays(60),
+    expiry_source: 'canvas',
+    expires_at: ago(-60 * 24 * 60),
     expiry_notice: 'none',
     settings_url: `https://${SCHOOL.host}/profile/settings`,
     enrolled_at: ago(60 * 24 * 6),
@@ -368,7 +370,7 @@ function buildState(scenario: MockScenario): MockState {
         : scenario === 'revoked'
           ? invalidCanvas('revoked_by_admin')
           : scenario === 'expiring'
-            ? { ...activeCanvas(), expires_on: inDays(3), expiry_notice: 'soon' as const }
+            ? { ...activeCanvas(), expires_on: inDays(3), expires_at: ago(-60 * 24 * 3), expiry_notice: 'soon' as const }
             : pending
               ? emptyCanvas()
               : activeCanvas()
@@ -913,7 +915,6 @@ route('PUT /me/canvas-token', 'active', (c, s) => {
     'canvas_token',
     'school',
     'school_sig',
-    'expires_on',
     'confirm_identity_change',
     'custody',
   ])
@@ -924,14 +925,6 @@ route('PUT /me/canvas-token', 'active', (c, s) => {
   if (s.scenario === 'rate-limited') return fail('rate_limited', { retry_after_s: 30 })
   const token = typeof c.body.canvas_token === 'string' ? c.body.canvas_token : ''
   if (!/^[A-Za-z0-9~._-]{20,512}$/.test(token)) return fail('token_invalid_format')
-
-  const expires = c.body.expires_on
-  if (typeof expires === 'string' && expires !== '') {
-    // Like the server: a real date, today or later.
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(expires) || expires < new Date().toISOString().slice(0, 10)) {
-      return fail('validation_failed', { field: 'expires_on' })
-    }
-  }
 
   let school = SCHOOL
   if (s.schools.mode === 'picker') {
@@ -977,7 +970,9 @@ route('PUT /me/canvas-token', 'active', (c, s) => {
     invalid_reason: null,
     invalid_since: null,
     recheck_allowed: true,
-    expires_on: typeof expires === 'string' && expires !== '' ? expires : null,
+    expires_on: null,
+    expiry_source: 'unknown',
+    expires_at: null,
     expiry_notice: 'none',
     settings_url: `https://${school.host}/profile/settings`,
     enrolled_at: s.canvas.enrolled_at ?? now,

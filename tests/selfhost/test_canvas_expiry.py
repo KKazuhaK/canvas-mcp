@@ -85,7 +85,7 @@ async def test_redirect_is_not_followed_with_credentials():
     assert not result.known and len(requests) == 1
 
 
-def test_binding_reads_real_expiry_and_keeps_manual_date_as_fallback(tmp_path):
+def test_binding_reads_real_expiry_without_a_manual_date(tmp_path):
     from .account_fixture import build_harness, sign_in
     from .test_account_api import ACKNOWLEDGED, Api
 
@@ -116,7 +116,6 @@ def test_binding_reads_real_expiry_and_keeps_manual_date_as_fallback(tmp_path):
         "/me/canvas-token",
         body={
             "canvas_token": TOKEN,
-            "expires_on": "2031-02-03",
             "custody": ACKNOWLEDGED,
         },
     )
@@ -127,6 +126,50 @@ def test_binding_reads_real_expiry_and_keeps_manual_date_as_fallback(tmp_path):
     assert body["expires_at"] == "2030-02-03T04:05:06Z"
     assert len(calls) == 2 and all(request.method == "GET" for request in calls)
     assert TOKEN not in response.text
+
+
+def test_legacy_manual_date_is_preserved_but_never_displayed_or_used(tmp_path):
+    from .account_fixture import CANVAS_TOKEN, KEY, OID, build_harness, put_row, sign_in
+    from .test_account_api import Api
+
+    h = build_harness(tmp_path)
+    sign_in(h)
+    hint = int(h.now) - 86400
+    put_row(
+        h.store,
+        OID,
+        token=CANVAS_TOKEN,
+        name="Canvas User",
+        canvas_user_id="42",
+        expires_hint_at=hint,
+    )
+    response = Api(h).get("/me/canvas-token")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["expiry_source"] == "unknown"
+    assert body["expires_on"] is None and body["expires_at"] is None
+    assert body["expiry_notice"] == "none"
+    assert h.store.info(KEY).expires_hint_at == hint
+
+
+@pytest.mark.parametrize("known", [False, True])
+def test_missing_metadata_and_explicit_no_expiry_are_distinct(tmp_path, known):
+    from canvas_mcp.core.selfhost.account_core import CanvasIdentity
+
+    from .account_fixture import CANVAS_TOKEN, build_harness, sign_in
+    from .test_account_api import ACKNOWLEDGED, Api
+
+    h = build_harness(tmp_path)
+    sign_in(h)
+    h.whoami_result = CanvasIdentity("42", "Canvas User", known, None)
+    response = Api(h).put(
+        "/me/canvas-token", {"canvas_token": CANVAS_TOKEN, "custody": ACKNOWLEDGED}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["expiry_source"] == ("canvas" if known else "unknown")
+    assert body["expires_on"] is None and body["expires_at"] is None
+    assert body["expiry_notice"] == "none" and body["state"] == "active"
 
 
 def test_existing_active_token_can_read_expiry_without_replacement_or_revocation(

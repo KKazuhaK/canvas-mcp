@@ -133,51 +133,21 @@ describe('Canvas token form', () => {
     expect((await tokenInput()).value).toBe('')
   })
 
-  it('sends the optional expiry date when one is entered', async () => {
+  it('uses automatic expiry and never offers or sends a manual date', async () => {
     const user = userEvent.setup()
     await renderApp('/token', 'featured')
     const seen = recordRequests()
     await user.type(await tokenInput(), GOOD)
-    await user.type(screen.getByLabelText(/Expiry date/), '2031-02-03')
+    expect(screen.queryByLabelText(/Expiry date/)).toBeNull()
+    expect(screen.getByText(/Expiry is read automatically from Canvas/)).toBeVisible()
     await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
     await user.click(screen.getByRole('button', { name: 'Verify and save' }))
     await screen.findByText('Canvas token enrolled')
     expect(bodyOf(seen.find((r) => r.method === 'PUT'))).toEqual({
       canvas_token: GOOD,
       custody: { acknowledged: true, notice_version: 1 },
-      expires_on: '2031-02-03',
     })
-    expect(screen.getByText('Expires')).toBeInTheDocument()
-  })
-
-  it('leaves a day for server timezone differences and shows server expiry refusals', async () => {
-    const user = userEvent.setup()
-    await renderApp('/token', 'featured')
-    const token = await tokenInput()
-    const expiry = screen.getByLabelText(/Expiry date/)
-    expect(expiry).toHaveAttribute('min', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/))
-    // A server whose calendar is still yesterday must remain able to accept its current date.
-    const yesterday = new Date()
-    yesterday.setDate(yesterday.getDate() - 1)
-    const date = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`
-    expect(expiry.getAttribute('min')! <= date).toBe(true)
-    await user.type(token, GOOD)
-    await user.type(expiry, '2020-01-01')
-    await user.click(screen.getByRole('checkbox', { name: 'I have read this notice' }))
-    await user.click(screen.getByRole('button', { name: 'Verify and save' }))
-
-    expect(
-      await screen.findByText('That expiry date is not valid. Pick today or a later date.'),
-    ).toBeInTheDocument()
-    expect(expiry).toHaveAttribute('aria-invalid', 'true')
-    // The field-level text replaces the generic sentence.
-    expect(screen.queryByText(/Some of the information is not valid/)).toBeNull()
-    expect(screen.queryByRole('alert')).toBeNull()
-
-    // Fixing the date clears the complaint.
-    await user.clear(expiry)
-    await user.type(expiry, '2031-02-03')
-    expect(expiry).not.toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByText('Token expiry date is unknown')).toBeVisible()
   })
 
   it('clears the field after a server failure and shows the localized reason', async () => {
@@ -358,6 +328,28 @@ describe('replacing a token for a different Canvas user', () => {
 })
 
 describe('the enrolled token', () => {
+  it.each(['unknown', 'canvas'] as const)('distinguishes %s metadata without a manual-date fallback', async (source) => {
+    await renderApp('/token', 'enrolled', () => {
+      const inner = http.defaults.adapter as (config: InternalAxiosRequestConfig) => Promise<AxiosResponse>
+      http.defaults.adapter = async (config) => {
+        const response = await inner(config)
+        const canvas = config.url === '/me' ? response.data.canvas : config.url === '/me/canvas-token' ? response.data : null
+        if (canvas) Object.assign(canvas, { expiry_source: source, expires_on: null, expires_at: null, expiry_notice: 'none' })
+        return response
+      }
+    })
+    await screen.findByText('Canvas token enrolled')
+    if (source === 'canvas') {
+      expect(screen.getByText('Never expires')).toBeVisible()
+      expect(screen.queryByText('Token expiry date is unknown')).toBeNull()
+    } else {
+      expect(screen.getByText('Token expiry date is unknown')).toBeVisible()
+      expect(screen.queryByText('Never expires')).toBeNull()
+    }
+    expect(screen.queryByText('Date you entered')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Enter expiry date or update token' })).toBeNull()
+  })
+
   it('shows the details, the school, the expiry date and the settings link', async () => {
     await renderApp('/token', 'enrolled')
     expect(await screen.findByText('Canvas token enrolled')).toBeInTheDocument()
@@ -395,7 +387,7 @@ describe('the enrolled token', () => {
     expect(await screen.findByLabelText(/Canvas access token/)).toBeVisible()
   })
 
-  it('warns before the noted expiry date', async () => {
+  it('warns before the Canvas-reported expiry time', async () => {
     await renderApp('/token', 'expiring')
     expect(await screen.findByText('Your Canvas token expires soon')).toBeInTheDocument()
   })

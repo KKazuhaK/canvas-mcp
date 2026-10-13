@@ -66,7 +66,62 @@ and inventory checks remain in the removable migration package.
 
 ## Deployable staging image
 
-The current published staging release is
+`v1.14.0-beta.9` was published on 2026-10-13 UTC from
+`82fd81e0d001119c4cad1d7c1030833e52f2af0a`, the squash merge of
+[PR #13](https://github.com/KKazuhaK/canvas-mcp/pull/13). The merge has the identical
+file tree to reviewed head `b03c6a795e9a45dfab463c035b71139acefef4bf`.
+The [reviewed-head matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38342368893)
+and [post-merge matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38344422827)
+passed, including all supported Python versions, Windows, latest/locked
+PostgreSQL, web checks and both native Docker architectures on SQLite/PostgreSQL.
+Each PostgreSQL group passed 90 preflight checks and 4,396 complete selfhost
+checks (11 skips). Locked Linux passed 8,214 tests (65 skips), Windows 8,208
+(71 skips), and the primary checkout 8,205 (74 skips). The UI passed all 498 tests;
+the primary UI build and distribution checks passed too.
+
+The [release image workflow](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38356178848)
+passed on native amd64 and arm64. Anonymous registry inspection of the index and
+both architecture labels confirmed source `82fd81e` and version `1.14.0-beta.9`.
+Both `:beta` and `:1.14.0-beta.9` resolve to:
+
+`ghcr.io/kkazuhak/canvas-mcp@sha256:d52daf0fc11b4957b295cae500f062e5b375caacb9fc312fa31eab1c9bc7bb4c`
+
+Stable `:latest` remained
+`sha256:9eeeaea8365ecad39ea02704b867f2dfae03521c229938ce78e8937fcbf1cdfb`.
+The [prerelease](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.9)
+contains only `docker-compose.yml` and `default.env` (save as `.env`). Downloaded
+bytes match the repository blobs and the existing beta.8 deployment files:
+
+- Compose SHA-256: `91e193483bb76bd13879c02bdbd21c7d7e1aefede4db0bc5cd9d40fcbf192b9f`.
+- Environment template SHA-256: `4f0e1ff437d4d6b26943e0a6e8c2e2ef044f1fb9a5a2b2a5a6ed2af634f25075`.
+
+The release adds database-managed browser duration (default 7 days), corrected
+expired-session redirects, supported Canvas expiry discovery and active-token
+rechecks, plus opt-in SMTP reminders. SMTP secrets participate in transfer and
+rotation. Upgrade/adoption code remains isolated under migrations. Back up before
+upgrading: the new sealed column raises compatibility floor to 3, and an older
+image needs its matching database backup. No new environment values are needed.
+
+The owner reported deployed labels matching the full source above and version
+`1.14.0-beta.9`. Live account settings show 10,080 minutes and the protected local
+administrator entry point. A session remained signed in beyond the old 15-minute
+limit; seven elapsed days have not yet been observed. Reopening the old duplicated
+basename return target and completing sign-in reached the correct account home.
+An active-token recheck succeeded without replacement; this school's metadata did
+not supply usable automatic expiry, so beta.9 retained its manual fallback.
+The original claude.ai connector then completed one successful `get_my_profile`
+call after upgrade, without interactive connector reauthorization or Canvas writes.
+Personal results were not displayed. Health and both OAuth discovery endpoints
+returned 200; the new notification API returned 401 without authentication.
+SMTP configuration is being supplied by the owner; connection and actual delivery
+remain unverified. Earlier beta.8 client observations below remain partial. B2B
+guest, other client surfaces, account disablement, key rotation/proxy failure and
+consecutive-day refresh acceptance remain outstanding. There is no available B2B
+test guest, and no client compatibility row is promoted by this release.
+
+## Historical beta.8 staging image
+
+The earlier published staging release was
 [v1.14.0-beta.8](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.8),
 from `85ffeca785885efdfce83121c5004ef22df6c858` and
 [fork PR #11](https://github.com/KKazuhaK/canvas-mcp/pull/11).
@@ -1015,7 +1070,7 @@ and the first v1 tag remain outstanding.
   150 source files passed. A new complete exact-head matrix is required.
 
 
-### Account sessions and expiry reminders — implementation pending publication
+### Account sessions and expiry reminders — implementation checkpoint
 
 - Browser duration is SQL-owned, defaults to 7 days, and keeps sensitive-operation
   reauthentication separate. Expiry redirects handle the production basename and
@@ -1030,8 +1085,29 @@ and the first v1 tag remain outstanding.
 - The final complete local suite passed 8,204 tests with 74 skips; the account UI
   passed all 498 tests. Ruff, Linux-target mypy, UI lint/typecheck, production build
   and distribution checks passed. Exact-head PostgreSQL, locked-dependency and
-  native Docker CI remain required before publication; deployed beta.8 is unchanged.
+  native Docker CI were required before publication. The beta.9 release record
+  above supplies their completed results and the subsequent live observations.
 - On October 12, the original claude.ai connection made another successful, read-only
   `get_my_profile` call more than one hour after its first successful call, without
   interactive reauthentication or Canvas writes. This is an elapsed-time observation;
   refresh HTTP traffic was not captured. Consecutive-day validation is still pending.
+
+### Automatic expiry only — implementation checkpoint
+
+- Token enrollment and replacement no longer offer or accept a manually entered
+  date. Only Canvas metadata drives home-page notices and SMTP delivery; unavailable
+  metadata remains unknown, while explicit null expiration means no permanent
+  expiry. Unknown and unlimited tokens remain usable but receive no expiry mail.
+- Historical typed dates remain stored without rewriting account IDs, identities,
+  token ciphertexts, credential generations or app grants. They are neither exposed
+  as expiration nor selected/claimed by reminder workers. No schema or environment
+  change is needed; existing migration history remains frozen and isolated.
+- Local complete Python checks passed 8,202 tests with 75 skips before the last four
+  additional state/notification regressions. The final expiry/reminder group passed
+  all 31 checks; docs/English plus that group passed 64 checks. Complete UI checks
+  passed 497 tests; the final token-view group passed 28 after two new state checks.
+  Ruff, Linux-target changed-source mypy, UI lint, production build and distribution
+  checks passed. The local Chinese form was inspected without the manual input.
+- Exact-head PostgreSQL, locked-dependency and Docker CI remain required before
+  deployment. The live beta.9 school check did not return usable automatic expiry;
+  this observation must not be described as successful automatic discovery.

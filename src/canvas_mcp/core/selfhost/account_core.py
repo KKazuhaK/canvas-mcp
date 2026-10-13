@@ -14,7 +14,7 @@ import time
 import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime, timedelta, tzinfo
+from datetime import UTC, datetime, tzinfo
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import httpx
@@ -129,7 +129,6 @@ _SIGN_IN_HISTORY = 20
 _AUDIT_PAGE = 100
 _SESSION_SCOPE_KEY = "canvas_mcp.session"
 _EXPIRY_REMINDER_DAYS = 7
-_EXPIRY_MAX_YEARS = 10
 _FILTER_NEEDS_REENROLL = "needs_reenroll"
 _SEARCH_LIMIT_ATTEMPTS = 30
 _SEARCH_LIMIT_WINDOW_SECONDS = 600
@@ -356,32 +355,11 @@ def _display_tz() -> tzinfo:
 
 
 def _fmt_utc_date(value: int) -> str:
-    """The calendar date a user typed for a token expiry (stored as midnight UTC)."""
+    """The UTC calendar date of a Canvas-reported token expiration."""
     try:
         return datetime.fromtimestamp(value, tz=UTC).strftime("%Y-%m-%d")
     except (OverflowError, OSError, ValueError):
         return "-"
-
-
-def _parse_expiry(raw: str, now: float) -> int | None | Literal["invalid"]:
-    """The expiry date from the optional form field as epoch seconds (midnight UTC).
-
-    ``None`` for an empty field; ``"invalid"`` for anything that is not a real
-    calendar date between today and ``_EXPIRY_MAX_YEARS`` years ahead.
-    """
-    text = raw.strip()
-    if not text:
-        return None
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
-        return "invalid"
-    try:
-        day = date.fromisoformat(text)
-    except ValueError:
-        return "invalid"
-    today = datetime.fromtimestamp(now, tz=UTC).date()
-    if day < today or day > today + timedelta(days=365 * _EXPIRY_MAX_YEARS):
-        return "invalid"
-    return int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp())
 
 
 Handler = Callable[[Request], Awaitable[Response]]
@@ -991,7 +969,6 @@ class AccountCore:
         session: _Session,
         *,
         token_raw: str,
-        expires_raw: str,
         school_raw: str,
         confirm_raw: str,
         custody: CustodyAcknowledgement,
@@ -1001,7 +978,7 @@ class AccountCore:
         """Verify a pasted Canvas token with Canvas and store it; the school, or why not.
 
         The one sequence behind both ``POST /account/token`` and the JSON API, in
-        this order: rate limit, token shape, expiry date, the school (operator
+        this order: rate limit, token shape, the school (operator
         list or directory, then DNS), Canvas itself, the identity-change
         confirmation, and the store's own check that the account is still active.
         Nothing is sent to a school before the school checks have passed.
@@ -1019,9 +996,6 @@ class AccountCore:
         token = token_raw.strip()
         if not _TOKEN_RE.fullmatch(token):
             return Refusal("token_invalid_format")
-        expiry = _parse_expiry(expires_raw, self.clock())
-        if isinstance(expiry, str):
-            return Refusal("validation_failed", {"field": "expires_on"})
         if require_pick_signature:
             enrolled = await run_store(self._safe_info, session)
             needs_proof = self._directory_pick(school_raw, enrolled)
@@ -1085,7 +1059,7 @@ class AccountCore:
                     canvas_user_id=identity.user_id,
                     canvas_user_name=identity.name,
                     canvas_host=school.host,
-                    expires_hint_at=expiry,
+                    expires_hint_at=None,
                     expiry_source="canvas" if identity.expiry_known else "manual",
                     access_expires_at=identity.expires_at,
                     custody=custody,
