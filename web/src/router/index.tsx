@@ -94,7 +94,7 @@ export function createAppRouter() {
   return createBrowserRouter(routes, { basename: ROUTER_BASENAME })
 }
 
-/** For tests: same route table, in-memory history, no basename. */
-export function createTestRouter(initialEntries: string[]) {
-  return createMemoryRouter(routes, { initialEntries })
+/** For tests: same route table and optional production basename. */
+export function createTestRouter(initialEntries: string[], basename?: string) {
+  return createMemoryRouter(routes, { initialEntries, basename })
 }

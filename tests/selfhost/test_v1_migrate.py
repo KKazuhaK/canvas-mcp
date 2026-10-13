@@ -37,12 +37,14 @@ def test_graph_preserves_frozen_baseline_and_metadata_matches_real_upgrade(db):
         "0002_local_credentials",
         "0003_account_login_policy",
         "0004_onboarding_and_icons",
+        "0005_canvas_expiry",
+        "0006_token_email_reminders",
     }
-    assert migrate.head_revision() == "0004_onboarding_and_icons"
+    assert migrate.head_revision() == "0006_token_email_reminders"
     assert migrate.current(db).state == migrate.STATE_UNINITIALIZED
     migrate.ensure_ready(db)
     first = migrate.current(db)
-    assert first.state == migrate.STATE_CURRENT and first.compat_floor == 2
+    assert first.state == migrate.STATE_CURRENT and first.compat_floor == 3
     assert first.database_id is not None
     migrate.ensure_ready(db, auto=False)
     assert migrate.current(db) == first
@@ -305,7 +307,7 @@ def test_pre_v1_is_refused_without_adopting_or_touching_data(db, revision):
         assert "server_state" not in inspect(conn).get_table_names()
 
 
-@pytest.mark.parametrize("floor,expected", [(2, "newer"), (3, "too_new")])
+@pytest.mark.parametrize("floor,expected", [(3, "newer"), (4, "too_new")])
 def test_unknown_revision_runs_only_when_compatibility_floor_allows_it(
     db, floor, expected, caplog
 ):
@@ -318,7 +320,7 @@ def test_unknown_revision_runs_only_when_compatibility_floor_allows_it(
             "UPDATE canvas_mcp_alembic_version SET version_num='9999_expand'"
         )
     assert migrate.current(db).state == expected
-    if floor == 2:
+    if floor == 3:
         migrate.ensure_ready(db)
         assert "database is newer than this release" in caplog.text
     else:
@@ -340,7 +342,7 @@ def test_unknown_revision_runs_only_when_compatibility_floor_allows_it(
 def test_even_a_known_head_is_refused_if_its_floor_is_too_new(db):
     migrate.ensure_ready(db)
     with db.row_write() as conn:
-        conn.exec_driver_sql("UPDATE server_state SET compat_floor=3")
+        conn.exec_driver_sql("UPDATE server_state SET compat_floor=4")
     with pytest.raises(TokenStoreError, match="compatibility floor"):
         migrate.ensure_ready(db)
 
@@ -402,9 +404,67 @@ def test_offline_upgrade_contains_frozen_ddl_and_no_legacy_tables(dialect):
         "external_identity_owners",
         "account_login_policy",
         "account_allowed_login_providers",
+        "mail_settings",
+        "notification_preferences",
+        "notification_deliveries",
     }:
         assert "CREATE TABLE " + table + " " in sql
     assert "canvas_mcp_alembic_version" in sql and "0001_v1_baseline" in sql
     assert "CREATE TABLE meta " not in sql and "CREATE TABLE canvas_tokens " not in sql
     with pytest.raises(RuntimeError, match="online migration connection"):
         migrate.render_sql(dialect)
+
+
+def test_beta8_upgrade_preserves_canvas_credential_and_blocks_old_key_registry(
+    db, monkeypatch
+):
+    account, credential = new_id(), new_id()
+    connection = db.row_write if IS_POSTGRES else lambda: migrate.sqlite_migration(db)
+    with connection() as conn:
+        migrate._apply(conn, "0004_onboarding_and_icons")
+        conn.execute(
+            text(
+                "INSERT INTO accounts(id,status,role,admitted_via,upn,created_at,updated_at) VALUES (:id,'active','user','operator','kept@example.test',1,1)"
+            ),
+            {"id": account},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO canvas_schools(host,origin,display_name,created_at,updated_at) VALUES ('canvas.example.edu','https://canvas.example.edu','Canvas',1,1)"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO canvas_credentials(id,account_id,canvas_host,kind,is_primary,generation,key_id,nonce,ciphertext,canvas_user_id,canvas_user_name,status,created_at,updated_at,expires_hint_at,custody_notice_version,custody_ack_at) VALUES (:id,:account,'canvas.example.edu','pat',true,0,'k1',:nonce,:ciphertext,'42','Preserved','active',1,1,1896321906,1,1)"
+            ),
+            {
+                "id": credential,
+                "account": account,
+                "nonce": b"n" * 12,
+                "ciphertext": b"preserved ciphertext",
+            },
+        )
+        before = conn.execute(
+            text(
+                "SELECT id,account_id,key_id,nonce,ciphertext,expires_hint_at FROM canvas_credentials"
+            )
+        ).one()
+    migrate.ensure_ready(db)
+    with db.read() as conn:
+        assert (
+            conn.execute(
+                text(
+                    "SELECT id,account_id,key_id,nonce,ciphertext,expires_hint_at FROM canvas_credentials"
+                )
+            ).one()
+            == before
+        )
+        assert (
+            conn.execute(
+                text("SELECT expiry_source FROM canvas_credentials")
+            ).scalar_one()
+            == "manual"
+        )
+    monkeypatch.setattr(migrate, "SCHEMA_EPOCH", 2)
+    with pytest.raises(TokenStoreError, match="compatibility floor"):
+        migrate.ensure_ready(db)

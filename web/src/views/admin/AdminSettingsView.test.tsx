@@ -7,6 +7,40 @@ import { recordRequests } from '@/test/fixtures'
 import { renderApp } from '@/test/renderWithProviders'
 
 describe('Database-managed settings', () => {
+  it('saves SMTP configuration without showing or retaining its password', async () => {
+    const user = userEvent.setup()
+    await renderApp('/admin/settings', 'owner')
+    const seen = recordRequests()
+    await user.click(await screen.findByRole('switch', { name: 'Enable reminder emails' }))
+    await user.type(screen.getByLabelText('SMTP host'), 'smtp.example.test')
+    await user.type(screen.getByLabelText('SMTP username'), 'mailer')
+    await user.type(screen.getByLabelText('Sender email'), 'canvas@example.test')
+    const password = screen.getByLabelText('SMTP password')
+    await user.type(password, 'test-mail-secret')
+    await user.click(screen.getByRole('button', { name: 'Save email settings' }))
+    await waitFor(() => expect(seen.some((r) => r.url === '/admin/settings/mail' && r.method === 'PUT')).toBe(true))
+    const saved = seen.find((r) => r.url === '/admin/settings/mail' && r.method === 'PUT')!
+    expect(JSON.parse(saved.data as string)).toMatchObject({ revision: 1, password: 'test-mail-secret', config: { enabled: true, security: 'starttls', reminder_days: 7 } })
+    expect(saved.headers['x-csrf-token']).toBe('mock-csrf-token-not-a-secret')
+    await waitFor(() => expect(screen.getByLabelText('SMTP password')).toHaveValue(''))
+    expect(screen.queryByText('test-mail-secret')).toBeNull()
+  })
+
+  it('saves browser duration independently of the sensitive-operation window', async () => {
+    const user = userEvent.setup()
+    await renderApp('/admin/settings', 'owner')
+    const input = await screen.findByLabelText('Duration (minutes, 1–43200)')
+    expect(input).toHaveValue(10080)
+    const seen = recordRequests()
+    await user.click(screen.getByRole('button', { name: '30 days' }))
+    await user.click(screen.getByRole('button', { name: 'Save sign-in duration' }))
+    await waitFor(() => expect(seen.some((r) => r.url === '/admin/settings/browser-session')).toBe(true))
+    const saved = seen.find((r) => r.url === '/admin/settings/browser-session')!
+    expect(JSON.parse(saved.data as string)).toEqual({ revision: 1, ttl_seconds: 2592000 })
+    expect(saved.headers['x-csrf-token']).toBe('mock-csrf-token-not-a-secret')
+    expect(screen.getByText(/within the last 10 minutes/)).toBeVisible()
+  })
+
   it('saves sign-in names with the revision and CSRF header', async () => {
     const user = userEvent.setup()
     await renderApp('/admin/settings', 'owner')

@@ -226,6 +226,9 @@ def test_runs_as_a_module(env) -> None:
     _seed(env)
     child_env = dict(os.environ)
     child_env["PYTHONUTF8"] = "1"
+    # Exercise this checkout, including in a worktree whose interpreter is installed elsewhere.
+    source = pathlib.Path(__file__).resolve().parents[2] / "src"
+    child_env["PYTHONPATH"] = str(source) + os.pathsep + child_env.get("PYTHONPATH", "")
     result = subprocess.run(
         [sys.executable, "-m", "canvas_mcp.core.selfhost.token_admin", "check"],
         capture_output=True,

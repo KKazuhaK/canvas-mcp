@@ -595,6 +595,8 @@ class TestSignInReturn:
         ("value", "expected"),
         [
             ("/account/token", True),
+            ("/account/account/", False),
+            ("/account/%61ccount/token", False),
             ("/account", False),
             ("/account?x=1", False),
             ("//x", False),

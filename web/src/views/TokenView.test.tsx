@@ -370,8 +370,29 @@ describe('the enrolled token', () => {
     expect(link).toHaveAttribute('target', '_blank')
     expect(link).toHaveAttribute('rel', 'noopener noreferrer')
     expect(screen.queryByLabelText(/Canvas access token/)).toBeNull() // replace form is collapsed
-    // A valid token has nothing to re-check.
-    expect(screen.queryByRole('button', { name: 'Re-check token' })).toBeNull()
+    // Existing tokens can refresh supported expiry without entering or replacing the PAT.
+    expect(screen.getByRole('button', { name: 'Re-check token' })).toBeVisible()
+  })
+
+  it('verifies an existing token without asking for its value', async () => {
+    const user = userEvent.setup()
+    await renderApp('/token', 'enrolled')
+    const seen = recordRequests()
+    await user.click(await screen.findByRole('button', { name: 'Re-check token' }))
+    await waitFor(() => expect(seen.some((r) => r.url === '/me/canvas-token/recheck')).toBe(true))
+    const request = seen.find((r) => r.url === '/me/canvas-token/recheck')!
+    expect(request.method).toBe('POST')
+    expect(request.headers['x-csrf-token']).toBe('mock-csrf-token-not-a-secret')
+    expect(screen.queryByLabelText(/Canvas access token/)).toBeNull()
+  })
+
+  it('opens replacement from the expiry reminder on the home page', async () => {
+    const user = userEvent.setup()
+    await renderApp('/', 'expiring')
+    expect(await screen.findByText('Your Canvas token expires soon')).toBeVisible()
+    expect(screen.queryByLabelText(/Canvas access token/)).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Update Canvas token' }))
+    expect(await screen.findByLabelText(/Canvas access token/)).toBeVisible()
   })
 
   it('warns before the noted expiry date', async () => {

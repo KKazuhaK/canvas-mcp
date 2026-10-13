@@ -285,7 +285,7 @@ v1 rules (V1-DESIGN 4.12): one hand-written baseline `0001_v1_baseline` that doe
 All env parsing: `settings.py` (+ `login/config.py`). Documented in `deploy/selfhost/env.example`; `tests/test_selfhost_docs.py` requires every setting to be documented. "(v1: removed)" means the setting refuses startup with a message naming the replacement (V1-DESIGN 2.3).
 - Mode/URL: `MCP_AUTH_MODE=entra-oauth` (v1: renamed `MCP_AUTH_MODE=selfhost`, D9), `SELFHOST_AUTH_MODE` (`entra_proxy` default | `local`; v1: removed), `PUBLIC_BASE_URL`.
 - Entra: `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`, `ENTRA_REQUIRED_ROLE` (`Canvas.User`), `ENTRA_OWNER_ROLE` (`Canvas.Owner`), `ENTRA_API_SCOPE` (v1: renamed `MCP_SCOPE`, default `Canvas.Access`, D9).
-- Also in `settings.py`: `OAUTH_ALLOWED_REDIRECT_URIS` (redirect allow-list, defaults in `DEFAULT_REDIRECT_URIS`), `ACCOUNT_SESSION_TTL_SECONDS` (default 900, allowed 60-3600).
+- Also in `settings.py`: `OAUTH_ALLOWED_REDIRECT_URIS` (redirect allow-list, defaults in `DEFAULT_REDIRECT_URIS`), `ACCOUNT_SESSION_TTL_SECONDS` (first-install adoption only; default 604800, allowed 60-2592000; subsequent changes use database-owned administrator settings).
 - Secrets: `CANVAS_TOKEN_KEYS`, `OAUTH_JWT_SIGNING_KEY` (v1: removed; JWT keys derive from `CANVAS_TOKEN_KEYS`), `ACCOUNT_SESSION_SECRET`.
 - Storage: `SELFHOST_DATA_DIR`, `DATABASE_URL`, `DATABASE_AUTO_MIGRATE`, `SELFHOST_STATE_BACKEND` (`memory` only), `FASTMCP_HOME` (REQUIRED today, absolute path; `env.example` sets `/data/fastmcp`; v1: no longer used, ignored, removed from image and docs).
 - UI: `ACCOUNT_UI` (v1: removed, D5), `ACCOUNT_WEB_DIST`.

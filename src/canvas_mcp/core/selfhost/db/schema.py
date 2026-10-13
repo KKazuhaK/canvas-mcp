@@ -20,7 +20,7 @@ from sqlalchemy import (
 from .types import Bytes, Epoch, Flag, JsonDoc, Key, Uuid
 
 VERSION_TABLE = "canvas_mcp_alembic_version"
-SCHEMA_EPOCH = 2
+SCHEMA_EPOCH = 3
 metadata = MetaData(
     naming_convention={
         "pk": "pk_%(table_name)s",
@@ -445,6 +445,7 @@ canvas_credentials = Table(
     Column("last_used_at", Epoch),
     Column("last_verified_at", Epoch),
     Column("expires_hint_at", Epoch),
+    Column("expiry_source", Key, nullable=False, server_default=text("'manual'")),
     Column("access_expires_at", Epoch),
     Column("scopes", Text),
     Column("custody_notice_version", Integer(), nullable=False),
@@ -835,4 +836,91 @@ Index(
 Index(
     "ix_account_allowed_login_providers_provider_id",
     account_allowed_login_providers.c.provider_id,
+)
+
+
+mail_settings = Table(
+    "mail_settings",
+    metadata,
+    Column("id", Key, primary_key=True),
+    Column("config", JsonDoc(), nullable=False),
+    Column("key_id", Key),
+    Column("nonce", Bytes),
+    Column("ciphertext", Bytes),
+    Column("updated_at", Epoch, nullable=False),
+    CheckConstraint("id = 'smtp'", name="id"),
+    CheckConstraint(
+        "(key_id IS NULL) = (nonce IS NULL) AND (nonce IS NULL) = (ciphertext IS NULL)",
+        name="secret",
+    ),
+    info={
+        "lifecycle": "durable",
+        "sealed": {
+            "key_id": "key_id",
+            "nonce": "nonce",
+            "ciphertext": "ciphertext",
+            "prefix": "canvas-mcp/mail-settings/v1",
+            "fields": ("id", "key_id"),
+        },
+    },
+    sqlite_strict=True,
+    sqlite_with_rowid=False,
+)
+
+notification_preferences = Table(
+    "notification_preferences",
+    metadata,
+    Column(
+        "account_id",
+        Uuid(),
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("enabled", Flag(), nullable=False),
+    Column("email", Text, nullable=False),
+    Column("locale", Key, nullable=False),
+    Column("updated_at", Epoch, nullable=False),
+    CheckConstraint("length(email) BETWEEN 0 AND 254", name="email"),
+    CheckConstraint("locale IN ('en','zh')", name="locale"),
+    CheckConstraint("enabled IN (0,1)", name="enabled_boolean").ddl_if(
+        dialect="sqlite"
+    ),
+    info={"lifecycle": "durable"},
+    sqlite_strict=True,
+    sqlite_with_rowid=False,
+)
+
+notification_deliveries = Table(
+    "notification_deliveries",
+    metadata,
+    Column("id", Key, primary_key=True),
+    Column(
+        "account_id",
+        Uuid(),
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column(
+        "credential_id",
+        Uuid(),
+        ForeignKey("canvas_credentials.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("generation", Epoch, nullable=False),
+    Column("expires_at", Epoch, nullable=False),
+    Column("stage", Key, nullable=False),
+    Column("status", Key, nullable=False),
+    Column("attempts", Integer(), nullable=False),
+    Column("lease_until", Epoch, nullable=False),
+    Column("updated_at", Epoch, nullable=False),
+    CheckConstraint("stage IN ('soon','expired')", name="stage"),
+    CheckConstraint("status IN ('claimed','sent','failed')", name="status"),
+    CheckConstraint("attempts BETWEEN 1 AND 3", name="attempts"),
+    info={"lifecycle": "durable"},
+    sqlite_strict=True,
+    sqlite_with_rowid=False,
+)
+Index("ix_notification_deliveries_account_id", notification_deliveries.c.account_id)
+Index(
+    "ix_notification_deliveries_credential_id", notification_deliveries.c.credential_id
 )

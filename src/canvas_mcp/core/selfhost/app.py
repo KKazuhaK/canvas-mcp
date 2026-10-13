@@ -338,6 +338,9 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         from dataclasses import replace
         from urllib.parse import urlsplit
 
+        from .db.migrations.browser_session_environment import (
+            adopt_browser_session_duration,
+        )
         from .db.migrations.provider_environment import (
             clear_unconfigured_metadata,
             import_provider_settings,
@@ -350,6 +353,11 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
         settings = replace(
             settings,
             public_base_url=canonical,
+            account_session_ttl_seconds=adopt_browser_session_duration(
+                store.database,
+                settings.account_session_ttl_seconds,
+                now=int(time.time()),
+            ),
             public_host=urlsplit(canonical).hostname or "",
         )
         from .login.installation import InstallationAuthority
@@ -576,8 +584,10 @@ def build_selfhost_asgi_app(
     """
     settings = runtime.settings
     from .edge_guard import SelfhostEdgeGuard
+    from .mail import MailStore
     from .maintenance import MaintenanceRunner
     from .request_context import LocalClaimsResolver, SelfhostRequestContextMiddleware
+    from .token_reminders import ReminderRunner
 
     identity = LocalClaimsResolver(runtime.authz.issuer)
     app = mcp.http_app(
@@ -615,5 +625,14 @@ def build_selfhost_asgi_app(
         app,
         clock=clock or time.monotonic,
         maintenance=maintenance,
+        reminders=(
+            ReminderRunner(
+                MailStore(runtime.store.database, runtime.provider_store.keys),
+                base_url=settings.public_base_url,
+                now=runtime.authz.clock,
+            )
+            if runtime.provider_store
+            else None
+        ),
         rate_limiters=runtime.limiters,
     )

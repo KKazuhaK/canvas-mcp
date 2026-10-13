@@ -6,7 +6,7 @@
 const SITE_PREFIX = '/account'
 const MAX_LENGTH = 512
 /** Server routes that are not SPA pages, so they are never a place to return to. */
-const FORBIDDEN_PREFIXES = ['/api/v1', '/auth/login', '/auth/callback']
+const FORBIDDEN_PREFIXES = ['/api/v1', '/auth/login', '/auth/callback', '/account/account']
 // C0 controls, DEL and the C1 range: browsers strip some of these inside URLs,
 // which is how '/\t/evil.example' becomes '//evil.example'.
 // eslint-disable-next-line no-control-regex
@@ -67,14 +67,17 @@ export const SITE_BASE = SITE_PREFIX
 export const SIGN_IN_PATH = '/sign-in'
 
 /**
- * In-app sign-in path for a router location (basename already stripped). The
+ * In-app sign-in path for a route location, with or without its basename. The
  * `return_to` is the full site path, kept only if it passes sanitizeReturnTo.
  */
 export function loginPathFor(routerPath: string): string {
   const pathOnly = routerPath.split(/[?#]/, 1)[0]
-  if (pathOnly === SIGN_IN_PATH) return SIGN_IN_PATH
-  const target = sanitizeReturnTo(`${SITE_BASE}${routerPath === '/' ? '' : routerPath}`)
-  if (target && target !== SITE_BASE) {
+  if (pathOnly === SIGN_IN_PATH || pathOnly === `${SITE_BASE}${SIGN_IN_PATH}`) return SIGN_IN_PATH
+  const fullPath = pathOnly === SITE_BASE || pathOnly.startsWith(`${SITE_BASE}/`)
+    ? routerPath
+    : `${SITE_BASE}${routerPath === '/' ? '' : routerPath}`
+  const target = sanitizeReturnTo(fullPath)
+  if (target && target !== SITE_BASE && target !== `${SITE_BASE}/`) {
     return `${SIGN_IN_PATH}?${new URLSearchParams({ return_to: target }).toString()}`
   }
   return SIGN_IN_PATH

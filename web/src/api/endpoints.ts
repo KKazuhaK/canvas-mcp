@@ -209,4 +209,12 @@ export const saveSiteAddress = (revision: number, public_base_url: string) => ca
 export const saveProviderNames = (revision: number, names: Record<string, string | null>) => call('PUT /admin/settings/sign-in-methods', { body: { revision, names } })
 export const saveFeaturedSchools = (body: FeaturedSchoolsRequest) => call('PUT /admin/settings/schools', { body })
 export const checkSchool = (host: string) => call('POST /admin/settings/schools/check', { body: { host } })
+export const saveBrowserSession = (revision: number, ttl_seconds: number) => call('PUT /admin/settings/browser-session', { body: { revision, ttl_seconds } })
 export const saveDirectorySearch = (revision: number, enabled: boolean) => call('PUT /admin/settings/directory-search', { body: { revision, enabled } })
+
+export const getNotificationPreferences = () => call('GET /notifications')
+export const saveNotificationPreferences = (body: BodyOf<'PUT /notifications'>) => call('PUT /notifications', { body })
+export const getMailSettings = () => call('GET /admin/settings/mail')
+export const saveMailSettings = (body: BodyOf<'PUT /admin/settings/mail'>) => call('PUT /admin/settings/mail', { body })
+
+export const testMailSettings = () => call('POST /admin/settings/mail/test')

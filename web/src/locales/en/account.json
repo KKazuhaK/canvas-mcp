@@ -27,7 +27,7 @@
     "field": "Canvas access token",
     "helper": "{{min}} to {{max}} characters. It is checked against Canvas, stored encrypted and never shown again.",
     "expires": "Expiry date (optional)",
-    "expiresHelper": "The date you set in Canvas. It is only used to remind you before the token stops working.",
+    "expiresHelper": "We try to read the expiry from Canvas when verifying. If the school does not provide it, this date is used for reminders.",
     "expiresInvalid": "That expiry date is not valid. Pick today or a later date.",
     "submit": "Verify and save",
     "submitting": "Verifying…",
@@ -53,7 +53,7 @@
     "recheck": "Re-check token",
     "rechecking": "Checking…",
     "restored": "Canvas accepts the token again.",
-    "unchanged": "Nothing changed.",
+    "unchanged": "Check complete. See the current token status and expiry above.",
     "replace": {
       "summary": "Replace token",
       "submit": "Verify and replace"
@@ -84,7 +84,20 @@
     "soonTitle": "Your Canvas token expires soon",
     "soonBody": "You noted that it expires on {{date}}. Create a new token in Canvas and replace this one before then.",
     "passedTitle": "The expiry date you noted has passed",
-    "passedBody": "You noted that it expires on {{date}}. Canvas may reject it now, so replace it with a new token."
+    "passedBody": "You noted that it expires on {{date}}. Canvas may reject it now, so replace it with a new token.",
+    "unknownTitle": "Token expiry date is unknown",
+    "unknownBody": "Re-check the token to try reading its expiry from Canvas. If the school does not provide it, enter the date from Canvas when adding or replacing your token.",
+    "update": "Enter expiry date or update token",
+    "replace": "Update Canvas token",
+    "canvasSoonBody": "Canvas reports that this token expires on {{date}}. Create and save a new token before then.",
+    "canvasPassedBody": "Canvas reports that this token expired on {{date}}. Create and save a new token.",
+    "source": "Expiry date source",
+    "exact": "Expiry time",
+    "sources": {
+      "canvas": "Read from Canvas",
+      "manual": "Date you entered",
+      "unknown": "Not available"
+    }
   },
   "writeTools": {
     "title": "Write tools",
@@ -291,5 +304,14 @@
     "banner": "Please acknowledge the updated Canvas token custody notice before using Canvas tools.",
     "open": "Read notice",
     "reload": "This notice version needs an updated account app. Reload this page before acknowledging."
+  },
+  "notifications": {
+    "title": "Token expiry email reminders",
+    "help": "Receive a reminder within {{days}} days before the recorded expiry date, and another if it expires. The email links here to update your token.",
+    "enabled": "Email me token expiry reminders",
+    "email": "Reminder email address",
+    "save": "Save reminder preferences",
+    "saved": "Reminder preferences saved.",
+    "unavailable": "The administrator has not enabled email delivery. You can save your preference now; the home page still shows expiry reminders."
   }
 }

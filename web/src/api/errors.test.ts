@@ -29,6 +29,7 @@ describe('closed error code set', () => {
         'rate_limited',
         'token_store_unavailable',
         'internal_error',
+        'mail_unavailable',
         // Canvas token
         'token_invalid_format',
         'token_rejected',

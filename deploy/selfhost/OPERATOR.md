@@ -95,3 +95,47 @@ epoch change, use `token_admin rotate-jwt-key` and verify reconnect/refresh
 behavior. These are separate operations. Keep operator host access restricted;
 never include secrets, bearer tokens, authorization codes or cookies in an
 acceptance report.
+
+
+## Browser sessions and Canvas token reminders
+
+In **Admin → Settings**, browser sign-in duration is database-owned and defaults
+on first installation to 7 days. The legacy environment override is adopted only
+once. Changes need no restart: shortening also limits existing sessions; a longer
+duration takes effect at the next sign-in. Sensitive administrator actions still
+require a sign-in within the last 10 minutes.
+
+The same page configures SMTP with verified STARTTLS or TLS and a reminder window
+of 1–90 days (default 7). The password is encrypted in the database and included
+in normal key verification, rotation and database transfer. Save the settings,
+then use **Test saved SMTP connection** to check connection, certificates and
+authentication; this test does not send an email. Users opt in and save a reminder
+recipient on their account home page. No additional deployment environment values
+are required.
+
+When verifying a Canvas token, the service attempts the documented read-only token
+metadata endpoint. A response must match the submitted token hint and the verified
+Canvas user. A supported response supplies the real UTC expiry or reports no
+permanent expiry. Unavailable or forbidden metadata falls back to the date entered
+by the user, and the account page shows its source. Existing active tokens can
+use **Re-check token** to read supported expiry without re-entering the token or
+revoking connected apps. Tokens are never regenerated
+in Canvas by this feature; the home page guides the user to create and save a new
+token. Token values are never included in reminder messages.
+
+Email delivery is checked at startup and hourly, independently of web traffic.
+Each bounded pass considers at most 100 eligible credentials. Shared SQL claims
+prevent concurrent workers from sending the same stage together. A successful
+pre-expiry notice and a successful expiry notice are each recorded once per token
+generation and expiry. Failed attempts wait at least an hour and stop after three
+attempts; SMTP acknowledgement loss can still cause a retry of an already delivered
+message. Disabled accounts, opt-out, deleted/replaced credentials and unknown
+expiry are excluded. Check container logs for the redacted delivery-failure message.
+
+**Before upgrading from beta.8 or earlier, take a database backup.** The SMTP
+revision raises compatibility floor to 3 because older key tooling cannot verify
+or rotate this newly sealed secret. Existing account IDs, identities and token
+ciphertexts are preserved. SQLite's normal contract migration automatically saves
+its pre-upgrade backup; PostgreSQL needs the operator's existing backup procedure.
+Running an older image after this upgrade requires restoring its matching backup.
+The runnable deployment remains just Compose plus the complete `.env` template.

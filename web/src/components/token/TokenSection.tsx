@@ -108,6 +108,10 @@ function EnrolledCard({ canvas }: { canvas: CanvasTokenStatus }) {
             </Detail>
           ) : null}
           {expires ? <Detail label={t('account:enrolled.expires')}>{expires}</Detail> : null}
+          <Detail label={t('account:expiry.source')}>
+            {t(`account:expiry.sources.${canvas.expiry_source === 'canvas' ? 'canvas' : canvas.expires_on ? 'manual' : 'unknown'}`)}
+          </Detail>
+          {canvas.expiry_source === 'canvas' && canvas.expires_at ? <Detail label={t('account:expiry.exact')}><TimeText iso={canvas.expires_at} /></Detail> : null}
           <Detail label={t('account:enrolled.lastUsed')}>
             <TimeText iso={canvas.last_used_at} />
           </Detail>
@@ -174,9 +178,8 @@ function EnrolledCard({ canvas }: { canvas: CanvasTokenStatus }) {
   )
 }
 
-function ReplaceDisclosure({ defaultExpanded }: { defaultExpanded: boolean }) {
+function ReplaceDisclosure({ expanded, setExpanded }: { expanded: boolean; setExpanded: (value: boolean) => void }) {
   const { t } = useTranslation()
-  const [expanded, setExpanded] = useState(defaultExpanded)
   return (
     <Accordion
       expanded={expanded}
@@ -214,16 +217,24 @@ function InvalidBanner({ canvas }: { canvas: CanvasTokenStatus }) {
   )
 }
 
-function ExpiryBanner({ canvas }: { canvas: CanvasTokenStatus }) {
+function ExpiryBanner({ canvas, onReplace }: { canvas: CanvasTokenStatus; onReplace: () => void }) {
   const { t } = useTranslation()
   const lang = useLanguage((s) => s.lang)
-  if (canvas.expiry_notice === 'none') return null
+  if (canvas.expiry_notice === 'none') {
+    if (canvas.expires_on !== null || canvas.expiry_source === 'canvas') return null
+    return <Alert severity="info" role="note">
+      <AlertTitle>{t('account:expiry.unknownTitle')}</AlertTitle>
+      {t('account:expiry.unknownBody')}
+      <Box sx={{ mt: 1 }}><Button onClick={onReplace}>{t('account:expiry.update')}</Button></Box>
+    </Alert>
+  }
   const date = formatCalendarDate(canvas.expires_on, lang) ?? ''
   const passed = canvas.expiry_notice === 'passed'
   return (
     <Alert severity={passed ? 'warning' : 'info'} role="note">
       <AlertTitle>{passed ? t('account:expiry.passedTitle') : t('account:expiry.soonTitle')}</AlertTitle>
-      {passed ? t('account:expiry.passedBody', { date }) : t('account:expiry.soonBody', { date })}
+      {t(`account:expiry.${canvas.expiry_source === 'canvas' ? (passed ? 'canvasPassedBody' : 'canvasSoonBody') : (passed ? 'passedBody' : 'soonBody')}`, { date })}
+      <Box sx={{ mt: 1 }}><Button variant="outlined" onClick={onReplace}>{t('account:expiry.replace')}</Button></Box>
     </Alert>
   )
 }
@@ -257,16 +268,17 @@ function AcknowledgeCard({ version }: { version: number }) {
 }
 
 export default function TokenSection({ canvas }: { canvas: CanvasTokenStatus }) {
+  const [expanded, setExpanded] = useState(canvas.state === 'invalid')
   if (canvas.state === 'none') return <EnrollCard />
 
   return (
     <Box sx={{ display: 'grid', gap: 2 }}>
       {!canvas.custody.current ? <AcknowledgeCard key={canvas.custody.notice_version} version={canvas.custody.notice_version} /> : null}
       {canvas.state === 'invalid' ? <InvalidBanner canvas={canvas} /> : null}
-      <ExpiryBanner canvas={canvas} />
+      <ExpiryBanner canvas={canvas} onReplace={() => setExpanded(true)} />
       <EnrolledCard canvas={canvas} />
       {/* Open by default when the stored token is unusable: the fix is the next step. */}
-      <ReplaceDisclosure key={canvas.state} defaultExpanded={canvas.state === 'invalid'} />
+      <ReplaceDisclosure expanded={expanded} setExpanded={setExpanded} />
     </Box>
   )
 }

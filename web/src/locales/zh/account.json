@@ -27,7 +27,7 @@
     "field": "Canvas 访问令牌",
     "helper": "{{min}} 到 {{max}} 个字符。令牌会先在 Canvas 上校验，加密保存，之后不会再显示。",
     "expires": "到期日期（可选）",
-    "expiresHelper": "你在 Canvas 中设置的日期。仅用于在令牌失效前提醒你。",
+    "expiresHelper": "验证时会尝试自动读取 Canvas 到期时间。学校未提供时，使用您填写的日期提醒。",
     "expiresInvalid": "到期日期无效。请选择今天或之后的日期。",
     "submit": "验证并保存",
     "submitting": "验证中…",
@@ -53,7 +53,7 @@
     "recheck": "重新检查令牌",
     "rechecking": "检查中…",
     "restored": "Canvas 又接受这个令牌了。",
-    "unchanged": "没有变化。",
+    "unchanged": "验证完成。请以当前令牌状态和到期日期为准。",
     "replace": {
       "summary": "替换令牌",
       "submit": "验证并替换"
@@ -84,7 +84,20 @@
     "soonTitle": "你的 Canvas 令牌即将到期",
     "soonBody": "你记录的到期日期是 {{date}}。请在此之前在 Canvas 创建新令牌并替换这个。",
     "passedTitle": "你记录的到期日期已过",
-    "passedBody": "你记录的到期日期是 {{date}}。Canvas 现在可能会拒绝它，请换成新令牌。"
+    "passedBody": "你记录的到期日期是 {{date}}。Canvas 现在可能会拒绝它，请换成新令牌。",
+    "unknownTitle": "令牌到期日期未知",
+    "unknownBody": "可重新验证令牌，尝试读取 Canvas 到期时间。学校未提供时，请在添加或替换令牌时填写 Canvas 中的日期。",
+    "update": "填写到期日期或更新令牌",
+    "replace": "更新 Canvas 令牌",
+    "canvasSoonBody": "Canvas 显示此令牌将于 {{date}} 到期，请在到期前创建并保存新令牌。",
+    "canvasPassedBody": "Canvas 显示此令牌已于 {{date}} 到期，请创建并保存新令牌。",
+    "source": "到期日期来源",
+    "exact": "到期时间",
+    "sources": {
+      "canvas": "从 Canvas 自动获取",
+      "manual": "您填写的日期",
+      "unknown": "暂未获取"
+    }
   },
   "writeTools": {
     "title": "写入工具",
@@ -291,5 +304,14 @@
     "banner": "使用 Canvas 工具前，请阅读并确认更新后的令牌托管告知。",
     "open": "阅读告知",
     "reload": "此版本告知需要更新账户应用。请重新加载页面后再确认。"
+  },
+  "notifications": {
+    "title": "令牌到期邮件提醒",
+    "help": "在记录的到期日期前 {{days}} 天内接收提醒，到期后再提醒一次。邮件会引导您回到这里更新令牌。",
+    "enabled": "通过邮件提醒令牌到期",
+    "email": "提醒收件邮箱",
+    "save": "保存提醒偏好",
+    "saved": "提醒偏好已保存。",
+    "unavailable": "管理员尚未启用邮件发送。您可以先保存偏好；主页仍会显示到期提醒。"
   }
 }

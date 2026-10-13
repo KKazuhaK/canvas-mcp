@@ -73,7 +73,7 @@ from canvas_mcp.core.selfhost.token_health import TokenHealth
 from canvas_mcp.core.selfhost.token_store import (
     DISABLE_REASON_ADMIN,
     REASON_REVOKED_BY_ADMIN,
-    STATUS_INVALID,
+    STATUS_ACTIVE,
     AccessActionRefused,
     EnrollmentInfo,
     PrincipalDisabledError,
@@ -160,7 +160,7 @@ def any_method_route(
 
 
 _RETURN_TO_MAX_CHARS = 512
-_RETURN_TO_FORBIDDEN_PREFIXES = ("/api", "/auth")
+_RETURN_TO_FORBIDDEN_PREFIXES = ("/api", "/auth", "/account/account")
 SIGN_IN_ERROR_CODES = frozenset(
     {
         "use_existing_sign_in",
@@ -203,6 +203,8 @@ _SECURITY_HEADERS = {
 class CanvasIdentity:
     user_id: str
     name: str
+    expiry_known: bool = False
+    expires_at: int | None = None
 
 
 class CanvasCheckError(Exception):
@@ -220,7 +222,7 @@ CanvasWhoAmI = Callable[[str, str], Awaitable[CanvasIdentity]]
 class AccountConfig:
     public_base_url: str
     session_secret: bytes = field(repr=False)
-    session_ttl_seconds: int = 900
+    session_ttl_seconds: int = 7 * 86400
 
 
 def sanitize_return_to(value: str | None) -> str | None:
@@ -599,11 +601,19 @@ class AccountCore:
             or stored.session_epoch != cookie.ep
         ):
             return None
-        CURRENT_CONFIG.set(
-            await run_store(self.snapshots.get, stored.settings_revision)
-        )
+        snapshot = await run_store(self.snapshots.get, stored.settings_revision)
+        CURRENT_CONFIG.set(snapshot)
+        expiry = cookie.exp
+        if cookie.iat > 0:
+            expiry = min(
+                expiry,
+                cookie.iat + int(snapshot.settings["auth.browser_session_ttl_seconds"]),
+            )
+            if expiry <= self.clock():
+                return None
         return replace(
             cookie,
+            exp=expiry,
             owner=cookie.owner and stored.role == "owner" and stored.status == "active",
             pending=stored.status == "pending",
         )
@@ -788,7 +798,7 @@ class AccountCore:
             epoch=epoch,
         )
 
-    def _complete_sign_in(
+    async def _complete_sign_in(
         self, outcome: SignIn, *, now: float, waiting: Any, return_to: Any
     ) -> Response:
         """The session cookie and the landing page of a successful sign-in (every provider)."""
@@ -799,6 +809,9 @@ class AccountCore:
                 standing.owner_change, sign_in_key, reason="sign_in"
             )
 
+        revision = await run_store(self.snapshots.revision)
+        snapshot = await run_store(self.snapshots.get, revision)
+        duration = int(snapshot.settings["auth.browser_session_ttl_seconds"])
         issued = int(now)
         sealed = self._session_payload(
             acct=sign_in_key,
@@ -807,7 +820,7 @@ class AccountCore:
             upn=outcome.ext.username,
             owner=bool(outcome.owner),
             iat=issued,
-            exp=issued + self.cfg.session_ttl_seconds,
+            exp=issued + duration,
             csrf=secrets.token_urlsafe(32),
             epoch=standing.session_epoch,
         )
@@ -824,7 +837,7 @@ class AccountCore:
         response.set_cookie(
             SESSION_COOKIE,
             sealed,
-            max_age=self.cfg.session_ttl_seconds,
+            max_age=duration,
             **self._cookie_kwargs(),
         )
         return response
@@ -964,7 +977,14 @@ class AccountCore:
         if not isinstance(data, dict) or data.get("id") is None:
             raise CanvasCheckError("unavailable")
         name = data.get("name") or data.get("short_name") or ""
-        return CanvasIdentity(str(data["id"]), str(name)[:200])
+        from .canvas_expiry import fetch_expiry
+
+        expiry = await fetch_expiry(
+            token, api_url, str(data["id"]), client_factory=self._client_factory
+        )
+        return CanvasIdentity(
+            str(data["id"]), str(name)[:200], expiry.known, expiry.expires_at
+        )
 
     async def enroll_token(
         self,
@@ -1066,6 +1086,8 @@ class AccountCore:
                     canvas_user_name=identity.name,
                     canvas_host=school.host,
                     expires_hint_at=expiry,
+                    expiry_source="canvas" if identity.expiry_known else "manual",
+                    access_expires_at=identity.expires_at,
                     custody=custody,
                 )
             )
@@ -1201,12 +1223,14 @@ class AccountCore:
         return removed
 
     async def recheck_own_token(self, session: _Session) -> Rechecked | Refusal:
-        """Probe Canvas once with the stored token; restore it if Canvas accepts it.
+        """Verify the stored token and read supported expiry; restore an invalid token.
 
         Once a minute per account. ``not_found`` (nothing stored) and
         ``recheck_not_allowed`` (an administrator's decision) end the attempt
-        without asking Canvas; a token that is not invalid, or that was replaced
-        while Canvas was asked, is ``unchanged``.
+        without asking Canvas. An active token can be verified and its supported
+        expiry refreshed without changing the credential generation or session;
+        its credential standing remains ``unchanged``. A replaced token is never
+        updated by a late response.
         """
         if not self.recheck_limiter.allow((session.acct,)):
             return Refusal(
@@ -1215,8 +1239,6 @@ class AccountCore:
         info = await run_store(self._safe_info, session)
         if info is None:
             return Refusal("not_found")
-        if info.status != STATUS_INVALID:
-            return Rechecked("unchanged")
         if info.invalid_reason == REASON_REVOKED_BY_ADMIN:
             return Refusal("recheck_not_allowed")
         principal_key = self._principal_key(session)
@@ -1231,7 +1253,7 @@ class AccountCore:
         if stored is None:
             return Refusal("not_found")
         try:
-            await self._canvas_whoami(stored.api_token, school.api_url)
+            identity = await self._canvas_whoami(stored.api_token, school.api_url)
         except CanvasCheckError as exc:
             if exc.kind == "invalid":
                 logger.info("account recheck still rejected account=%s", session.acct)
@@ -1241,12 +1263,31 @@ class AccountCore:
                 return Refusal("token_rejected")
             audit.log_token_event("recheck", principal_key, outcome="unavailable")
             return Refusal("canvas_unavailable")
+        if identity.user_id != info.canvas_user_id:
+            return Refusal("validation_failed", {"field": "canvas_identity"})
+        if info.status == STATUS_ACTIVE:
+            changed = await run_store(
+                functools.partial(
+                    self.store.record_user_check,
+                    principal_key,
+                    expected_generation=stored.credential_generation,
+                    expected_epoch=session.ep,
+                    expiry_known=identity.expiry_known,
+                    access_expires_at=identity.expires_at,
+                )
+            )
+            if changed:
+                self.health.forget(principal_key)
+                audit.log_token_event("recheck", principal_key, outcome="verified")
+            return Rechecked("unchanged")
         restored = await run_store(
             functools.partial(
                 self.store.restore_active,
                 principal_key,
                 expected_updated_at=info.updated_at,
                 expected_generation=stored.credential_generation,
+                expiry_known=identity.expiry_known,
+                access_expires_at=identity.expires_at,
             )
         )
         if not restored:

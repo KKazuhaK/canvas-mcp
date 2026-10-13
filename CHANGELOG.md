@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Selfhost account sessions and token reminders (unreleased)
+
+- Default browser sign-in duration to 7 days and allow administrators to configure
+  it in the database; retain the separate sensitive-operation reauthentication
+  window. Fix repeated `/account` prefixes after session expiry.
+- Read Canvas token expiry metadata when supported, show its provenance and guide
+  replacement from the home page. Add database-owned SMTP settings, account email
+  opt-in and bounded, durable expiry reminders independent of site traffic.
+- Preserve existing credentials through isolated migrations; require schema epoch
+  3 for the new sealed SMTP data and its key verification/rotation registry.
+
 - **Self-hosted sign-in owner recovery:** bootstrap activation and operator promotion record personal admission so later access-rule changes cannot lock out an owner. Operator disable and unlink protect every configured provider list independently. A used OIDC provider cannot change issuer under the same slug; use a new slug for the transition.
 
 ### Added

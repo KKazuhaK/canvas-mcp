@@ -855,7 +855,7 @@ class TestCanvasTokenRead:
             "name": "Canvas",
             "offered": True,
         }
-        assert body["invalid_reason"] is None and body["recheck_allowed"] is False
+        assert body["invalid_reason"] is None and body["recheck_allowed"] is True
         assert body["settings_url"] == "https://canvas.example.edu/profile/settings"
         assert body["enrolled_at"] == "2027-01-15T08:00:00Z"
         assert body["last_used_at"] is None
@@ -1366,7 +1366,7 @@ class TestRecheck:
         put_row(h.store, OID, token=CANVAS_TOKEN, name="Ada", canvas_user_id="42")
         body = user.post("/me/canvas-token/recheck").json()
         assert body["result"] == "unchanged" and body["canvas"]["state"] == "active"
-        assert h.whoami_calls == []
+        assert h.whoami_calls == [CANVAS_TOKEN]
 
     def test_no_token_is_404(self, user: Api) -> None:
         error_of(user.post("/me/canvas-token/recheck"), 404, "not_found")
@@ -2938,6 +2938,7 @@ class TestEveryAnswer:
             "rate_limited",
             "token_store_unavailable",
             "internal_error",
+            "mail_unavailable",
             "token_invalid_format",
             "token_rejected",
             "token_unreadable",

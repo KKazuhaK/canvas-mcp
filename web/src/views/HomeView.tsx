@@ -9,6 +9,7 @@ import { isUnauthenticated } from '@/api/errors'
 import type { MeResponse } from '@/api/types'
 import ErrorNotice from '@/components/ErrorNotice'
 import LocalPasswordSettings from '@/components/LocalPasswordSettings'
+import NotificationSettings from '@/components/NotificationSettings'
 import AccountUpnSettings from '@/components/AccountUpnSettings'
 import McpUrlCard from '@/components/McpUrlCard'
 import PageHeader from '@/components/PageHeader'
@@ -54,6 +55,7 @@ function AccountHome({ me }: { me: MeResponse }) {
       <Box sx={{ display: 'grid', gap: 2 }}>
         <AccountUpnSettings account={me.account} />
         {me.canvas ? <TokenSection canvas={me.canvas} /> : null}
+        <NotificationSettings />
         <McpUrlCard />
         {(me.account.has_local_password || me.account.provider_id === 'local') ? <LocalPasswordSettings /> : !me.account.upn_required && providers.data?.providers.some((provider) => provider.id === 'local') ? <LocalPasswordSettings creating /> : null}
       </Box>

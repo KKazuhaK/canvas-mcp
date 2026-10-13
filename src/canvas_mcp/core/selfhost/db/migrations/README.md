@@ -1,3 +1,15 @@
+`0005_canvas_expiry` preserves the recorded manual expiry while adding provenance
+for authoritative Canvas metadata. `0006_token_email_reminders` adds sealed SMTP
+configuration, per-account opt-in and durable delivery claims. It raises the
+compatibility floor to 3 so an older key registry cannot report the SMTP secret
+as safely rotated. Existing credentials are preserved; rollback to an older image
+requires its pre-upgrade database backup.
+
+`browser_session_environment.py` contains one-time adoption of the former
+browser-duration environment setting; a stored database value wins on all later
+starts. Fresh installations default to 7 days. The account runtime contains no
+legacy adoption or backfill implementation.
+
 # Isolated database upgrade tooling
 
 `0004_onboarding_and_icons` adds nullable provider PNG presentation and assigns

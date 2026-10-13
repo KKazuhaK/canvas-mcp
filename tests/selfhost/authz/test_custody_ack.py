@@ -140,7 +140,8 @@ def test_success_replacement_and_delete_require_a_new_acknowledgement(ceremony):
         for entry in entries
         if entry.action in ("token_enrolled", "token_replaced")
     )
-    assert len(outbound) == 2
+    assert len(outbound) == 4
+    assert all(request.method == "GET" for request in outbound)
     assert browser.api("DELETE", "/me/canvas-token", csrf=csrf).status_code == 204
     del body["custody"]
     error(
@@ -148,7 +149,7 @@ def test_success_replacement_and_delete_require_a_new_acknowledgement(ceremony):
         422,
         "custody_ack_required",
     )
-    assert len(outbound) == 2
+    assert len(outbound) == 4
     assert stack.store.info(stack.account_of(ALICE)) is None
 
 
@@ -176,7 +177,7 @@ def test_version_bump_can_be_acknowledged_without_decryption_or_generation_chang
         new.credential_generation == old.credential_generation
         and new.credential_id == old.credential_id
     )
-    assert len(outbound) == 1
+    assert len(outbound) == 2
     entry = list(stack.store.iter_audit())[0]
     assert entry.action == "custody_notice_acknowledged" and entry.detail == {
         "old": 1,
@@ -226,7 +227,7 @@ def test_acknowledge_access_pipeline(ceremony, failure, status, code):
     elif failure == "content":
         headers["Content-Type"] = "text/plain"
     elif failure == "stale":
-        stack.clock.advance(1000)
+        stack.clock.advance(7 * 86400 + 1)
     else:
         key = stack.account_of(ALICE)
         with stack.store.database.write() as conn:

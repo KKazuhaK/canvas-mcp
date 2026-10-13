@@ -62,7 +62,13 @@ def test_default_checker_request_and_stored_identity(tmp_path: pathlib.Path) -> 
     )
     response = enroll(h)
     assert response.status_code == 200
-    (request,) = seen
+    assert len(seen) == 2
+    request, metadata = seen
+    assert metadata.method == "GET"
+    assert (
+        str(metadata.url) == "https://canvas.example.edu/api/v1/users/self/tokens/TTTTT"
+    )
+    assert metadata.headers["authorization"] == f"Bearer {CANVAS_TOKEN}"
     assert str(request.url) == "https://canvas.example.edu/api/v1/users/self"
     assert request.headers["authorization"] == f"Bearer {CANVAS_TOKEN}"
     assert request.headers["accept"] == "application/json"

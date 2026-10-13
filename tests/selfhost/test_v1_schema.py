@@ -86,6 +86,9 @@ def test_current_tables_with_a_lifecycle_and_registered_ciphertexts():
     expected = {
         "server_state",
         "settings",
+        "mail_settings",
+        "notification_preferences",
+        "notification_deliveries",
         "login_providers",
         "canvas_schools",
         "accounts",
@@ -278,7 +281,7 @@ def test_sqlite_strict_and_autoincrement_options(connection):
             "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != 'canvas_mcp_alembic_version'"
         )
     ).all()
-    assert len(tables) == 23
+    assert len(tables) == 26
     for name, ddl in tables:
         assert "STRICT" in ddl, name
         if name in {"auth_events", "audit_log"}:
@@ -286,6 +289,9 @@ def test_sqlite_strict_and_autoincrement_options(connection):
         if name in {
             "server_state",
             "settings",
+            "mail_settings",
+            "notification_preferences",
+            "notification_deliveries",
             "canvas_schools",
             "account_write_tools",
             "oauth_refresh_tokens",

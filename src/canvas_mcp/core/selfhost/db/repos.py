@@ -852,6 +852,8 @@ class SqlCanvasCredentialRepo:
         canvas_user_name: str,
         now: int,
         expires_hint_at: int | None,
+        expiry_source: str = "manual",
+        access_expires_at: int | None = None,
         custody_notice_version: int,
         custody_ack_at: int,
     ) -> None:
@@ -877,6 +879,8 @@ class SqlCanvasCredentialRepo:
             status="active",
             last_verified_at=now,
             expires_hint_at=expires_hint_at,
+            expiry_source=expiry_source,
+            access_expires_at=access_expires_at,
             custody_notice_version=custody_notice_version,
             custody_ack_at=custody_ack_at,
         )
@@ -896,6 +900,8 @@ class SqlCanvasCredentialRepo:
                 "status",
                 "last_verified_at",
                 "expires_hint_at",
+                "expiry_source",
+                "access_expires_at",
                 "custody_notice_version",
                 "custody_ack_at",
             )
@@ -904,7 +910,6 @@ class SqlCanvasCredentialRepo:
             invalid_reason=None,
             invalid_since=None,
             oauth_app_id=None,
-            access_expires_at=None,
             scopes=None,
         )
         conn.execute(stmt.on_conflict_do_update(index_elements=[_ct.c.id], set_=fields))
@@ -956,6 +961,8 @@ class SqlCanvasCredentialRepo:
         now: int,
         expected_updated_at: int | None,
         expected_generation: int | None,
+        expiry_known: bool = False,
+        access_expires_at: int | None = None,
     ) -> bool:
         stmt = (
             update(_ct)
@@ -971,6 +978,10 @@ class SqlCanvasCredentialRepo:
                 last_verified_at=now,
             )
         )
+        if expiry_known:
+            stmt = stmt.values(
+                expiry_source="canvas", access_expires_at=access_expires_at
+            )
         return (
             conn.execute(
                 self._guard(stmt, expected_updated_at, expected_generation)
@@ -990,6 +1001,33 @@ class SqlCanvasCredentialRepo:
             .scalar_subquery()
         )
         conn.execute(update(_ct).where(_ct.c.id == candidate).values(last_used_at=now))
+
+    def record_user_check(
+        self,
+        conn: Connection,
+        key: str,
+        *,
+        expected_generation: int,
+        now: int,
+        expiry_known: bool,
+        access_expires_at: int | None,
+    ) -> bool:
+        values: dict[str, Any] = {"last_verified_at": now}
+        if expiry_known:
+            values.update(expiry_source="canvas", access_expires_at=access_expires_at)
+        return (
+            conn.execute(
+                update(_ct)
+                .where(
+                    _ct.c.account_id == key,
+                    _ct.c.is_primary,
+                    _ct.c.status == STATUS_ACTIVE,
+                    _ct.c.generation == expected_generation,
+                )
+                .values(**values)
+            ).rowcount
+            == 1
+        )
 
     def mark_verified(
         self,

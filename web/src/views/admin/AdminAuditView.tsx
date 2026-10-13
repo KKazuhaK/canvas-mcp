@@ -15,6 +15,8 @@ import { PageSkeleton } from '../StateViews'
 /** The audit actions the server writes (token_store.AUDIT_ACTIONS); anything else shows as "Other". */
 const KNOWN_ACTIONS = [
   'site_address_changed',
+  'mail_settings_saved',
+  'notification_preferences_saved',
   'local_password_added',
   'account_upn_changed',
   'account_sso_locked',
@@ -41,6 +43,7 @@ const KNOWN_ACTIONS = [
   'token_replaced',
   'token_deleted',
   'token_marked_invalid',
+  'token_expiry_checked',
   'write_tools_changed',
   'schema_migrated',
   'pending_purged',

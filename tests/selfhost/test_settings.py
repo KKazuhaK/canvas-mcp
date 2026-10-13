@@ -63,7 +63,7 @@ class TestValidEnvironment:
         assert settings.required_role == "Canvas.User"
         assert settings.owner_role == "Canvas.Owner"
         assert settings.allowed_client_redirect_uris == DEFAULT_REDIRECT_URIS
-        assert settings.account_session_ttl_seconds == 900
+        assert settings.account_session_ttl_seconds == 604800
         assert settings.account_session_secret == bytes(range(32))
         assert settings.data_dir == Path("/data")
         assert not hasattr(settings, "fastmcp_home")
@@ -224,7 +224,7 @@ class TestSecrets:
             for p in _problems(ACCOUNT_SESSION_SECRET=None)
         )
 
-    @pytest.mark.parametrize("value", ["59", "3601", "abc", "-5"])
+    @pytest.mark.parametrize("value", ["59", "2592001", "abc", "-5"])
     def test_ttl_bounds(self, value):
         assert any(
             "ACCOUNT_SESSION_TTL_SECONDS" in p

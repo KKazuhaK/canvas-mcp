@@ -59,6 +59,7 @@ def test_only_documented_startup_and_cli_bridges_import_upgrade_tooling():
             "db.migrations.transfer",
             "db.migrations.provider_environment",
             "db.migrations.site_environment",
+            "db.migrations.browser_session_environment",
         },
         "token_store.py": {"db.migrations"},
         "token_admin.py": {
