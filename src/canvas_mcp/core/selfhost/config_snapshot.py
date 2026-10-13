@@ -18,6 +18,7 @@ from .db import schema as s
 from .db.engine import Database
 from .db.errors import StoreUnavailable
 from .db.settings_repo import TypedSettings
+from .login.account_policy import POLICY_KEY, parse_policy
 from .login.config import LoginProvidersConfig
 from .login.provider_icon import validate_icon
 from .routes import auth_login
@@ -265,6 +266,9 @@ class ConfigSnapshots:
         for row in settings:
             key = row["key"]
             if key is None:
+                continue
+            if key == POLICY_KEY:
+                parse_policy(row["value"])
                 continue
             if key not in SETTINGS:
                 logger.warning("Ignoring an unknown server setting")

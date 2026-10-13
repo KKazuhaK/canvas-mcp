@@ -76,7 +76,7 @@ describe('Connected apps', () => {
     await user.click(screen.getByRole('button', { name: 'Revoke: Sample Desktop Tool' }))
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByText('Disconnect Sample Desktop Tool?')).toBeInTheDocument()
-    expect(within(dialog).getByText(/loses access right away/)).toBeInTheDocument()
+    expect(within(dialog).getByText(/loses access on its next MCP request/)).toBeInTheDocument()
     expect(seen.find((request) => request.method === 'DELETE')).toBeUndefined()
 
     await user.click(within(dialog).getByRole('button', { name: 'Revoke' }))

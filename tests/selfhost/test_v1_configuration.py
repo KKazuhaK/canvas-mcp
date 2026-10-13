@@ -64,6 +64,55 @@ def test_neutral_defaults_and_frozen_snapshot(config):
         current.revision = 100
 
 
+@pytest.mark.parametrize("malformed", [False, True])
+def test_known_login_policy_is_validated_without_unknown_setting_warning(
+    config, caplog, malformed
+):
+    snapshots, _ = config
+    value = {
+        "allow_multiple": True,
+        "lock_first_sso": False,
+        "block_conflicting_registration": False,
+    }
+    if malformed:
+        value["allow_multiple"] = "private-invalid-value"
+    with snapshots.database.write() as conn:
+        conn.execute(
+            insert(s.settings).values(
+                key="login.account_policy", value=value, updated_at=100
+            )
+        )
+    if malformed:
+        with pytest.raises(StoreUnavailable):
+            ConfigSnapshots(snapshots.database, snapshots.providers, resolve_host=public)
+        assert "private-invalid-value" not in caplog.text
+    else:
+        current = ConfigSnapshots(
+            snapshots.database, snapshots.providers, resolve_host=public
+        ).current
+        assert current.schools.search_enabled
+        assert "unknown server setting" not in caplog.text
+
+
+def test_future_setting_stays_ignored_and_redacted_in_configuration_snapshot(
+    config, caplog
+):
+    snapshots, _ = config
+    with snapshots.database.write() as conn:
+        conn.execute(
+            insert(s.settings).values(
+                key="future.private-key", value="private-value", updated_at=100
+            )
+        )
+    current = ConfigSnapshots(
+        snapshots.database, snapshots.providers, resolve_host=public
+    ).current
+    assert current.schools.search_enabled
+    assert "unknown server setting" in caplog.text
+    assert "future.private-key" not in caplog.text
+    assert "private-value" not in caplog.text
+
+
 def test_warm_revision_reads_nothing_and_miss_rebuilds_three_queries(config):
     snapshots, store = config
     old = snapshots.current

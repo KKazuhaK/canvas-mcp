@@ -217,7 +217,7 @@
   },
   "apps": {
     "title": "Connected apps",
-    "intro": "These apps can use the Canvas tools as you through MCP. Revoking one cuts it off right away (within about 30 seconds at most); it has to ask for your approval again.",
+    "intro": "These apps can use the Canvas tools as you through MCP. Revoking one blocks its next MCP request; it has to ask for your approval again.",
     "empty": "No apps are connected.",
     "columns": {
       "app": "App",
@@ -234,7 +234,7 @@
     "revoke": "Revoke",
     "revokeLabel": "Revoke: {{name}}",
     "revokeTitle": "Disconnect {{name}}?",
-    "revokeBody": "The app loses access right away (within about 30 seconds at most) and has to ask for your approval again.",
+    "revokeBody": "The app loses access on its next MCP request and has to ask for your approval again.",
     "revoked": "App disconnected."
   },
   "consent": {
