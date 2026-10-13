@@ -35,7 +35,12 @@ ENDONYM_ONLY_FILES = (
     "web/src/locales/en/common.json",  # language switcher label for Chinese
 )
 
-# (4) Tests that assert the Chinese rendering of the translations above.
+# (4) Email message string tables, separate from their delivery implementation.
+TRANSLATION_FILES = {
+    "src/canvas_mcp/core/selfhost/email_translations.py": "English and Chinese reminder email string tables only",
+}
+
+# (5) Tests that assert the Chinese rendering of the translations above.
 ZH_RENDERING_TESTS = {
     "web/src/components/CustodyNotice.test.tsx": "asserts the Chinese custody notice translation",
     "web/src/i18n/i18n.test.ts": "asserts the Chinese strings the i18n setup loads",
@@ -43,14 +48,14 @@ ZH_RENDERING_TESTS = {
     "web/src/router/routing.test.tsx": "asserts the Chinese UI after switching language",
 }
 
-# (5) Upstream test data that deliberately contains non-ASCII text.
+# (6) Upstream test data that deliberately contains non-ASCII text.
 UPSTREAM_TEST_DATA = {
     "tests/core/test_course_resolver.py": "full-width digits as an identifier-parsing input",
     "tests/security/test_input_validation.py": "a Chinese string as an input-validation sample",
     "tests/security/test_sandbox_nonroot_user.py": "a non-ASCII string passed through the sandbox",
 }
 
-# (6) Binary files are skipped by extension, or by a NUL byte in the content.
+# (7) Binary files are skipped by extension, or by a NUL byte in the content.
 BINARY_SUFFIXES = frozenset(
     {
         ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".pdf", ".zip", ".gz",
@@ -59,7 +64,7 @@ BINARY_SUFFIXES = frozenset(
     }
 )  # fmt: skip
 
-WHOLE_FILE_ALLOWED = set(ZH_RENDERING_TESTS) | set(UPSTREAM_TEST_DATA)
+WHOLE_FILE_ALLOWED = set(TRANSLATION_FILES) | set(ZH_RENDERING_TESTS) | set(UPSTREAM_TEST_DATA)
 
 
 def _tracked_files() -> list[str]:

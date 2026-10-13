@@ -16,6 +16,7 @@ from ..logging import log_warning
 from .db import schema as s
 from .db.settings_repo import read_settings
 from .db.workers import run_store
+from .email_translations import TEMPLATES
 from .mail import MailStore, send_message
 
 INTERVAL = 3600
@@ -229,20 +230,9 @@ class ReminderRunner:
                 if row["expiry_source"] == "canvas"
                 else timestamp.date().isoformat()
             )
-            if row["locale"] == "zh":
-                subject = (
-                    "Canvas API 令牌已到期"
-                    if stage == "expired"
-                    else "Canvas API 令牌即将到期"
-                )
-                body = f"您绑定的 Canvas API 令牌到期时间为 {date}。\n请在 Canvas 创建新令牌，然后访问 {self.base_url}/account/token 更新。\n请勿通过邮件回复或发送令牌。"
-            else:
-                subject = (
-                    "Canvas API token expired"
-                    if stage == "expired"
-                    else "Canvas API token expires soon"
-                )
-                body = f"Your stored Canvas API token has an expiry date of {date}.\nCreate a new token in Canvas, then update it at {self.base_url}/account/token.\nNever reply with or email your token."
+            messages = TEMPLATES.get(row["locale"], TEMPLATES["en"])
+            subject = messages[stage]
+            body = messages["body"].format(date=date, url=self.base_url)
             success = False
             try:
                 await anyio.to_thread.run_sync(
