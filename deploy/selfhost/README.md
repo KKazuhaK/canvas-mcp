@@ -281,21 +281,17 @@ Fill in versions, date, tester and a secret-free evidence reference during stagi
 | Client/surface | Client version | Server version/image digest | Date | Tester | Result | Evidence | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | claude.ai web | Web; build not exposed | 1.14.0-beta.8, revision 85ffeca7 (operator output) | 2026-10-12 | Owner/live web check | Partial | [Live checkpoint](V1-PROGRESS.md#historical-beta8-staging-image) | Real CIMD/OAuth, 48 read-only tools, missing-token refusal and successful get_my_profile after enrollment. Consecutive-day refresh and broader acceptance pending. |
-| Claude Desktop | - | - | - | - | Not tested | - | Record platform and build |
+| Claude Desktop (shared remote connector) | Desktop build not separately observed | Shared web acceptance; no separate server observation | 2026-10-13 | Owner acceptance decision | Partial | [Acceptance scope](V1-PROGRESS.md#shared-remote-connector-acceptance) | Owner accepts the existing claude.ai remote-service evidence for the shared connector and waives a duplicate Desktop call. Desktop UI and build compatibility were not separately tested. |
 | Claude Code | 2.1.285, Windows, HTTP | Beta.10, then version-endpoint-confirmed beta.11 | 2026-10-13 | Owner/local client check | Partial | [Live checkpoint](V1-PROGRESS.md#claude-code-read-only-acceptance) | Real OAuth and one successful get_my_profile call per check with Sonnet; the beta.11 call reused the existing grant without interactive reauthorization. No other tools or writes. Earlier beta.8 next-request grant revocation passed. Consecutive-day refresh and broader acceptance remain pending; the temporary project connection is retained for that check. |
 | Claude mobile | - | - | - | - | Not tested | - | Support is not claimed |
 
-For Desktop acceptance, sign into the same Claude account as the existing web
-connector and check that Canvas MCP is available in its connector list. Current
+The owner accepts web and Desktop as one remote-service acceptance scope for
+the existing account-managed Canvas MCP connector; a duplicate Desktop call
+is no longer a HANDOFF gate. Current
 [client guidance](DEVELOPMENT.md#612-live-live-verification-checklist)
-describes remote connectors as account-managed and available across surfaces;
-this does not prove that this server works in a particular Desktop build.
-Use the existing remote connector, not a local stdio configuration. In a new
-Desktop chat, enable Canvas MCP and request exactly one `get_my_profile` call,
-no other tools or writes, with personal fields omitted from the answer. Record
-the actual application/platform version, successful tool result, UTC time and
-server version separately from the web observations. Keep the row Not tested
-until that real Desktop interaction has been observed.
+explains the shared account and cloud request path. This scope decision does
+not add a separately observed Desktop UI or build result, a local stdio result,
+or mobile acceptance. Claude Code retains its separate real HTTP-client evidence.
 
 ### Staging acceptance
 

@@ -655,12 +655,16 @@ None of these has been done. They gate the first v1 tag (V1-DESIGN 2.4, step 8).
 - [ ] nginx and Caddy limits and log redaction (no tokens, codes, `state`, `txn` or secrets in access logs, including `/auth/*` callbacks).
 - [ ] Docker smoke test is CI-only; on the server run `token_admin check` and `/healthz`.
 
-Current client guidance, checked October 13: [Claude's remote-versus-desktop
-connector documentation](https://support.claude.com/en/articles/11725091-when-to-use-desktop-and-web-connectors)
-describes remote connectors as available across client surfaces through the
-Claude account. Use the existing remote connection for Desktop acceptance,
-not a local stdio substitution. This vendor capability is not evidence of this
-server's compatibility: record a real Desktop build and tool result separately.
+Current acceptance scope, revised by the owner on October 13: the existing
+account-managed remote connector shares web/Desktop service acceptance, so
+a duplicate Desktop tool call is no longer required. The original checklist
+above is historical; see the current [acceptance record](V1-PROGRESS.md#shared-remote-connector-acceptance).
+[Claude's remote connector documentation](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
+describes account-managed connectors and Anthropic-cloud requests across
+client surfaces. Existing web evidence supports the accepted service scope;
+it does not establish a separately tested Desktop UI or build. Claude Code
+keeps its real HTTP-client evidence; mobile acceptance and local stdio are not
+implied by this scope decision.
 
 ### 6.13 [RES] Known residuals worth fixing (small, independent)
 

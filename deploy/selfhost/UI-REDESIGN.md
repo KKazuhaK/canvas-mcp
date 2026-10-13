@@ -1,6 +1,8 @@
 # Selfhost frontend usability follow-up
 
-Authorized by the owner after completing HANDOFF. Keep the existing major
+Originally ordered after HANDOFF; on October 13 the owner authorized frontend
+implementation in parallel with the remaining live checks. Those checks remain
+open and must not be represented as completed by frontend work. Keep the existing major
 account/admin areas, with English and Chinese interfaces, mobile layouts and
 the existing governed API. The aim is to make common tasks easy to find and
 understand, not merely restyle the same long forms.
