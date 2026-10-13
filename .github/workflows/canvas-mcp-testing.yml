@@ -306,12 +306,12 @@ jobs:
         python -m pip install -e ".[documents,selfhost,postgres]"
         python -m pip install pytest pytest-asyncio pyyaml respx
 
-    - name: Verify the account contract and persisted origin before the full suite
+    - name: Verify account, reminder and migration paths before the full suite
       env:
         TEST_DEPENDENCIES: ${{ matrix.dependencies }}
       run: |
         set -euo pipefail
-        checks=(tests/selfhost/test_v1_migrate.py tests/selfhost/test_transfer_v1.py tests/selfhost/test_site_url.py tests/selfhost/login/test_account_login_policy.py tests/selfhost/login/test_account_policy_api.py)
+        checks=(tests/selfhost/test_v1_migrate.py tests/selfhost/test_transfer_v1.py tests/selfhost/test_site_url.py tests/selfhost/login/test_account_login_policy.py tests/selfhost/login/test_account_policy_api.py tests/selfhost/test_token_reminders.py tests/selfhost/test_canvas_expiry.py)
         if [[ "$TEST_DEPENDENCIES" == locked ]]; then
           uv run --locked pytest "${checks[@]}" -q -p no:cacheprovider
         else
