@@ -5,6 +5,45 @@ This is a working checkpoint, not a deployment or release approval. Follow
 
 ## Current status
 
+Current deployment is beta.11. Start with the completion audit and current image
+record below; the later dated checkpoints preserve implementation history.
+
+### HANDOFF completion audit
+
+Checked on October 13 against the current source, published release, CI records
+and available live evidence. Automated checks prove their covered behavior;
+they do not replace the live checks in DEVELOPMENT 6.12. A beta deployment does
+not complete HANDOFF or authorize a stable release.
+
+| Original item | Current result | Evidence and remaining boundary |
+|---|---|---|
+| 6.1 B0/P7 | Published, independently reviewed, repaired and merged | [B0 review](B0-REVIEW.md), fork PR 4 and its post-merge CI. The historical sync happened before the owner's later independent-selfhost decision; no further sync is permitted. |
+| 6.1a v1 consolidation | Implemented and merged | Fork PR 5, current complete CI and native images. Later owner-requested account/session/notification work is recorded separately below. |
+| 6.2 provider naming | Implemented; automated validation passed | Governed provider configuration, React views, bilingual messages and current full CI. Later icon customization is implemented too. |
+| 6.3 schools and directory | Implemented; automated validation passed | Database-owned school policy, settings/API/CLI checks, address protection and current full CI. Exact live directory egress remains a 6.12 check. |
+| 6.4 custody acknowledgement | Implemented; real enrollment exercised | Custody/API/MCP regressions and owner-performed real enrollment. No unattended enrollment of others is claimed. |
+| 6.5 fork framing | Implemented | Neutral examples, independent-fork notices and documentation checks. |
+| 6.6 pilot/client documentation | Pilot restriction implemented; client acceptance partial | Pilot-mode regressions and tested-client table. Web and Code have successful live reads; Desktop has not been tested and mobile support is not claimed. |
+| 6.7 small upstream PRs | Submitted and updated; maintainer decision remains external | October 13 GitHub inspection: 490 is open/review required; 491 and 494 are open/approved. Their updates were not merged into `selfhost`. |
+| 6.8 proposal records | Implemented | Three historical proposal records plus their index; old claims retain their dates and UNVERIFIED marks. |
+| 6.9 issue 484 reply | No reply, as instructed | Historical proposal banners record the independent-fork decision; no new upstream pilot is claimed. |
+| 6.10 beta release | Published through beta.11 | Exact reviewed/post-merge matrices and native release smoke passed. Owner-authorized early betas supersede the original first-tag timing gate; stable publication is not authorized. |
+| 6.11 operator deployment | Implemented and deployed | Compose plus complete env template, unchanged assets, owner update confirmation, health/version/OAuth checks. |
+| 6.12 live verification | Incomplete | Detailed live boundary below; partial client observations must not be promoted to broad compatibility. |
+| 6.13 residuals | Source fixes implemented | Bilingual audit enum labels and identity actions, consistent rate-limit wording, native per-request authorization, accepted limitations in README. The manual expiry input was removed by the later automatic-only requirement. |
+
+Remaining live evidence is specific: Desktop; a B2B guest (the owner currently
+has no test guest); consecutive-day refresh including rotation/absolute TTL and
+grace behavior; whole-account disable followed by Entra removal/role aging;
+proxy limits, failure behavior and actual log redaction; live signing/encryption
+key rotation; and directory query egress. Enabled Entra tenant-member sign-in,
+custody enrollment, deployed-host CIMD fetch, web/Code read-only calls, operator
+store check and health are exercised. Only Entra and local are configured;
+unconfigured Google/GitHub/custom OIDC and mobile are not live-support claims.
+New owner-requested expiry and mail features additionally need this school's
+sanitized metadata diagnosis and actual delivery evidence. SMTP authentication
+alone proves neither email receipt nor reminder scheduling.
+
 The native runtime, required React UI, database-owned configuration, custody,
 maintenance, pagination, reserved contracts, operator/Docker guides, historical
 proposals and optional pilot profile are merged into `selfhost` through
@@ -65,6 +104,24 @@ enablement inside their transaction. All legacy environment adoption, export
 and inventory checks remain in the removable migration package.
 
 ## Deployable staging image
+
+The current prerelease is
+[v1.14.0-beta.11](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.11),
+source `af65c436bda3b9390c1923a877d4c340151cff48`, built at
+`2026-10-13T10:08:47Z`. Both `:beta` and `:1.14.0-beta.11` resolve to:
+
+`ghcr.io/kkazuhak/canvas-mcp@sha256:7bd4ada1c0ba542b2ed97faaf9d78124b216b88a324e93be5dbfffa461e94f2b`
+
+The [reviewed-head matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38374966678),
+[post-merge matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38378233262)
+and [native image publication](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38381338817)
+passed. The operator confirmed the upgrade; the public version endpoint and
+account footer match that source, version and build time. See the beta.11 live
+checkpoint below for the separate acceptance limits. Compose and env asset
+hashes remain the same as beta.9/10 below; no new system environment variables
+or deployment files are required. Stable `:latest` remains unchanged.
+
+## Historical beta.9 staging image
 
 `v1.14.0-beta.9` was published on 2026-10-13 UTC from
 `82fd81e0d001119c4cad1d7c1030833e52f2af0a`, the squash merge of
@@ -1137,3 +1194,65 @@ and the first v1 tag remain outstanding.
   report `dev`, `none`, `unknown`. Deployment still uses only Compose and the
   existing env template. Operator update confirmations are accepted without
   repeatedly requesting Docker label output.
+
+### Claude Code read-only acceptance
+
+- On October 13, Windows Claude Code 2.1.285 completed a new real OAuth
+  ceremony through the verified Claude CIMD identity and a loopback callback.
+  The owner personally approved Canvas.Access. The client reported Connected.
+- A Sonnet/low-effort call in a temporary project invoked exactly one
+  `mcp__canvas_acceptance__get_my_profile` tool, received a non-error result and
+  returned `PROFILE_READ_OK`, with process exit 0 and no permission denials.
+  Built-in tools were disabled; only that read was permitted. No Canvas write
+  or additional tool call occurred. Personal output was withheld; the raw local
+  response was replaced with a non-sensitive event-count/result record.
+- The endpoint was the operator-confirmed beta.10 deployment at this point;
+  beta.11 was building and was not yet reported deployed. After the operator
+  confirmed the upgrade, the version endpoint confirmed beta.11 and a second
+  check at 10:17:37 UTC again returned `PROFILE_READ_OK`, with one successful
+  profile tool call, exit 0 and no permission denials. It reused the same grant
+  without an interactive OAuth ceremony. This is not proof of refresh rotation
+  or consecutive-day operation. The temporary local project connection is
+  retained for subsequent elapsed-time/refresh checks,
+  without changing the global MCP list. Earlier beta.8 grant revocation remains
+  separate evidence. This client row is Partial until remaining live gates pass.
+
+### Beta.11 release and live acceptance
+
+- Reviewed head `e91631849c6b22c690cccd4034a89cf5490d0651` passed complete CI
+  run `38374966678`. PR 15 merged as
+  `af65c436bda3b9390c1923a877d4c340151cff48`; the merged tree matched the reviewed
+  tree, complete post-merge CI `38378233262` passed, and the local source suite
+  passed 8,230 checks with 74 skips. UI checks passed all 503 tests. Both latest
+  and locked PostgreSQL jobs and native amd64/arm64 SQLite, PostgreSQL and
+  Compose smoke passed. Image smoke also compared the installed version
+  endpoint with OCI labels.
+- Prerelease `v1.14.0-beta.11` was published on October 13 after release image
+  run `38381338817` passed. The `:beta` and `:1.14.0-beta.11` image index is
+  `sha256:7bd4ada1c0ba542b2ed97faaf9d78124b216b88a324e93be5dbfffa461e94f2b`;
+  both architecture labels match the source SHA, version `1.14.0-beta.11` and
+  UTC build time `2026-10-13T10:08:47Z`. Stable `:latest` was not moved. The two
+  deployment assets remain Compose plus the complete env template, with no
+  changes required to existing deployment or SMTP settings.
+- After the operator confirmed the upgrade, `/api/v1/version` and the account
+  footer showed those exact build values. Health and both OAuth discovery
+  endpoints returned 200. The existing browser session remained usable and
+  the active Canvas token recheck succeeded. Automatic expiry still displayed
+  unknown. Accepting the upstream `visible_token` mask fixes a proven parser
+  gap, but does not establish this deployed school's response or failure cause.
+  A bounded read-only server diagnostic is prepared to report only status,
+  field types and match booleans; no token, hint, URL, profile or raw response
+  is to be included in acceptance evidence.
+- Live expiry discovery and actual reminder delivery remain unverified.
+  Desktop, B2B guest, consecutive-day refresh, proxy failure/log redaction and
+  the remaining account-disable/key-rotation gates also remain outstanding.
+
+### Frontend follow-up authorized after HANDOFF
+
+The owner requested a full usability reorganization after the remaining HANDOFF
+tasks, retaining the current major areas and using PSP as an interaction
+reference. The current settings page stacks unrelated forms in one long view;
+account rows combine several management actions; the home view repeats token
+editing, mail settings and account-security forms. The implementation scope and
+acceptance criteria are in [UI-REDESIGN.md](UI-REDESIGN.md). This is pending work,
+not a claim that the frontend or live HANDOFF gates are complete.
