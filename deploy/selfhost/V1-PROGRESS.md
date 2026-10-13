@@ -1111,3 +1111,29 @@ and the first v1 tag remain outstanding.
 - Exact-head PostgreSQL, locked-dependency and Docker CI remain required before
   deployment. The live beta.9 school check did not return usable automatic expiry;
   this observation must not be described as successful automatic discovery.
+
+### Beta.10 deployment and automatic-expiry compatibility
+
+- Beta.10 source is `446d2c22887e9d5735430365830f75cff6da6ef3`; reviewed and
+  post-merge complete matrices passed, including both PostgreSQL dependency
+  sets and native amd64/arm64 Docker/Compose checks. The release image index is
+  `sha256:6301746f4fa197b86cbc473b6b9c8135d01bbc71fb9f241b8a196d556b3a09c8`.
+- The operator confirmed the update on October 13. Live checks confirmed the
+  automatic-only form, removal of historical typed dates from presentation,
+  active-token recheck and another successful read-only claude.ai profile call
+  through the existing connection without interactive OAuth reauthorization.
+  No refresh HTTP trace was captured. This is not completed consecutive-day
+  validation. SMTP connection, STARTTLS and authentication succeeded earlier;
+  actual reminder delivery and B2B guest sign-in remain unverified.
+- Automatic expiry remained unknown at this checkpoint. Canvas's current
+  upstream serializer emits an exact `visible_token` mask instead of the
+  documented `token_hint`; accepting only the latter was a compatibility gap.
+  The new parser regression covers the real response shape while rejecting
+  conflicting identifiers and other users. The deployed school's raw response
+  was not inspected, so its exact failure cause remains unconfirmed.
+- The next image embeds version, full source SHA and one UTC build timestamp
+  shared across architecture builds. Account/sign-in footers, startup logs,
+  `/api/v1/version` and OCI labels use that same stamp. Source builds honestly
+  report `dev`, `none`, `unknown`. Deployment still uses only Compose and the
+  existing env template. Operator update confirmations are accepted without
+  repeatedly requesting Docker label output.

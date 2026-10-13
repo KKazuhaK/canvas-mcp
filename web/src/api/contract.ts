@@ -1,4 +1,5 @@
 import type {
+  BuildInfo,
   SiteAddressResponse,
   LoginProviderSave,
   LoginProviderSettings,
@@ -49,6 +50,7 @@ import type {
  * route cannot be added on one side only. `void` means "204, no body".
  */
 export interface Contract {
+  'GET /version': { response: BuildInfo }
   'POST /login/local': { body: { username: string; password: string; txn?: string; return_to?: string }; response: { redirect_to: string } }
   'PUT /me/password': { body: { current_password: string; new_password: string }; response: { redirect_to: string } }
   'PUT /admin/accounts/{id}/upn': { body: { upn: string; revision: number }; response: { revision: number; account_id: string } }

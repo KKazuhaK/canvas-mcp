@@ -6,6 +6,7 @@ import { Link as RouterLink, Outlet } from 'react-router'
 import { useTranslation } from 'react-i18next'
 import LanguageToggle from '@/components/LanguageToggle'
 import ThemeToggle from '@/components/ThemeToggle'
+import BuildFooter from '@/components/BuildFooter'
 
 /** Centered-card shell for signed-out and hand-off screens. Used as a layout route or wrapper. */
 export default function PublicLayout({
@@ -49,6 +50,7 @@ export default function PublicLayout({
       >
         {children ?? <Outlet />}
       </Container>
+      <BuildFooter />
     </Box>
   )
 }

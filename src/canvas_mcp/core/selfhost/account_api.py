@@ -84,6 +84,7 @@ from canvas_mcp.core.selfhost.tool_prefs import (
 from canvas_mcp.core.tool_policy import TOOL_EFFECTS, Effect
 
 from . import custody
+from .build_info import build_info
 from .config_snapshot import CURRENT_CONFIG
 from .config_store import ConfigStore, SchoolRemovalConfirmation
 from .db.settings_repo import SettingsAccessDenied, SettingsConflict
@@ -598,6 +599,7 @@ class ApiApp:
                     )
                 },
             ),
+            (f"{API_PREFIX}/version", {"GET": e(self.version, access="public")}),
             (f"{API_PREFIX}/providers", {"GET": e(self.providers, access="public")}),
             (f"{API_PREFIX}/me", {"GET": e(self.me, access="session")}),
             (
@@ -1079,6 +1081,9 @@ class ApiApp:
             raise _Fail("write_tools_unavailable") from None
 
     # -- public ------------------------------------------------------------------------------
+
+    async def version(self, ctx: _Ctx) -> Response:
+        return self._ok(build_info())
 
     async def providers(self, ctx: _Ctx) -> Response:
         logins = self.app.logins

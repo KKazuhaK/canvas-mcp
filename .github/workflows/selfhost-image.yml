@@ -50,6 +50,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       label_version: ${{ steps.v.outputs.label_version }}
+      built_at: ${{ steps.v.outputs.built_at }}
       stable: ${{ steps.v.outputs.stable }}
       is_tag: ${{ steps.v.outputs.is_tag }}
     steps:
@@ -82,6 +83,7 @@ jobs:
           {
             echo "version=${version}"
             echo "label_version=${label_version}"
+            echo "built_at=$(date -u +%FT%TZ)"
             echo "stable=${stable}"
             echo "is_tag=${is_tag}"
           } >> "$GITHUB_OUTPUT"
@@ -125,6 +127,7 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ needs.meta.outputs.label_version }}
+            org.opencontainers.image.created=${{ needs.meta.outputs.built_at }}
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.description=Canvas LMS MCP server, self-hosted multi-user build (Entra ID sign-in, per-user Canvas tokens)
 
@@ -139,6 +142,10 @@ jobs:
           load: true
           push: false
           tags: canvas-mcp:smoke
+          build-args: |
+            BUILD_VERSION=${{ needs.meta.outputs.label_version }}
+            BUILD_COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ needs.meta.outputs.built_at }}
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Smoke test
@@ -162,6 +169,10 @@ jobs:
           file: Dockerfile.selfhost
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_VERSION=${{ needs.meta.outputs.label_version }}
+            BUILD_COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ needs.meta.outputs.built_at }}
           outputs: type=image,name=ghcr.io/kkazuhak/canvas-mcp,push-by-digest=true,name-canonical=true,push=true
           provenance: false
 
@@ -231,6 +242,7 @@ jobs:
           SOURCE: ${{ github.server_url }}/${{ github.repository }}
           REVISION: ${{ github.sha }}
           VERSION: ${{ needs.meta.outputs.label_version }}
+          BUILT_AT: ${{ needs.meta.outputs.built_at }}
         run: |
           set -euo pipefail
           tag_args=()
@@ -254,6 +266,7 @@ jobs:
             --annotation "index:org.opencontainers.image.source=${SOURCE}" \
             --annotation "index:org.opencontainers.image.revision=${REVISION}" \
             --annotation "index:org.opencontainers.image.version=${VERSION}" \
+            --annotation "index:org.opencontainers.image.created=${BUILT_AT}" \
             "${sources[@]}"
 
       - name: Read the index digest

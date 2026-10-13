@@ -3,7 +3,9 @@
 Canvas documents the token show endpoint and its expires_at field:
 https://developerdocs.instructure.com/services/canvas/resources/access_tokens
 Canvas AccessToken.token= derives token_hint from the first five unsharded characters.
-A successful response must match both that hint and the already verified user.
+Its token serializer can expose that hint as visible_token="<hint>..." instead:
+https://github.com/instructure/canvas-lms/blob/master/lib/api/v1/token.rb
+A successful response must match the hint or its exact mask and the verified user.
 """
 
 from __future__ import annotations
@@ -59,10 +61,16 @@ async def fetch_expiry(
                 data = json.loads(payload)
         if (
             not isinstance(data, dict)
-            or data.get("token_hint") != hint
             or str(data.get("user_id")) != user_id
             or "expires_at" not in data
         ):
+            return TokenExpiry()
+        identifiers = []
+        if "token_hint" in data:
+            identifiers.append(data["token_hint"] == hint)
+        if data.get("visible_token") is not None:
+            identifiers.append(data["visible_token"] == hint + "...")
+        if not identifiers or not all(identifiers):
             return TokenExpiry()
         value = data["expires_at"]
         if value is None:

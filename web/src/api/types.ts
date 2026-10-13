@@ -145,6 +145,11 @@ export interface ApiErrorBody {
 // ---- providers ---------------------------------------------------------------
 
 export type ProviderIcon = 'microsoft' | 'google' | 'github' | 'key'
+export interface BuildInfo {
+  version: string
+  commit: string
+  built_at: string
+}
 export interface Provider {
   id: string
   kind: 'oidc' | 'oauth2' | 'local'
