@@ -12,6 +12,7 @@ import logging
 import pathlib
 import sqlite3
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -2310,6 +2311,60 @@ def seed_people(h: Harness) -> None:
 
 
 class TestOwnerRead:
+    @pytest.mark.parametrize(
+        ("source", "offset", "notice"),
+        [
+            ("canvas", 30 * 86400, "none"),
+            ("canvas", 6 * 86400, "soon"),
+            ("canvas", 0, "passed"),
+            ("canvas", None, "none"),
+            ("manual", 6 * 86400, "none"),
+            ("manual", None, "none"),
+        ],
+    )
+    def test_admin_expiry_uses_only_canvas_metadata_without_changing_the_credential(
+        self, h: Harness, api: Api, source: str, offset: int | None, notice: str
+    ) -> None:
+        expiry = int(h.now) + offset if offset is not None else None
+        put_row(
+            h.store,
+            OID,
+            token=CANVAS_TOKEN,
+            name="Ada Canvas",
+            canvas_user_id="42",
+            expiry_source=source,
+            access_expires_at=expiry,
+            expires_hint_at=int(h.now) + 2 * 86400,
+        )
+        before = h.store.get(KEY)
+        sign_in_owner(h)
+        response = api.get("/admin/enrollments")
+        assert response.status_code == 200
+        row = next(item for item in response.json()["rows"] if item["key"] == KEY)
+        expected = expiry if source == "canvas" else None
+        assert row["enrollment"]["expiry_source"] == (
+            "canvas" if source == "canvas" else "unknown"
+        )
+        assert row["enrollment"]["expiry_notice"] == notice
+        assert row["enrollment"]["expires_at"] == (
+            datetime.fromtimestamp(expected, UTC).isoformat().replace("+00:00", "Z")
+            if expected is not None
+            else None
+        )
+        assert row["enrollment"]["expires_on"] == (
+            datetime.fromtimestamp(expected, UTC).date().isoformat()
+            if expected is not None
+            else None
+        )
+        account = next(
+            item
+            for item in api.get("/admin/accounts").json()["accounts"]
+            if item["key"] == KEY
+        )
+        assert account["enrollment"] == row["enrollment"]
+        assert CANVAS_TOKEN not in response.text
+        assert h.store.get(KEY) == before
+
     def test_the_account_list(self, h: Harness, api: Api) -> None:
         seed_people(h)
         sign_in_owner(h)

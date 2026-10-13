@@ -9,6 +9,7 @@ import type { AuditDetailValue, AuditEntry } from '@/api/types'
 import ErrorNotice from '@/components/ErrorNotice'
 import ResponsiveTable, { type Column } from '@/components/ResponsiveTable'
 import TimeText from '@/components/TimeText'
+import PageHeader from '@/components/PageHeader'
 import { useAdminAudit } from '@/query/hooks'
 import { PageSkeleton } from '../StateViews'
 
@@ -146,19 +147,17 @@ export default function AdminAuditView() {
     {
       key: 'detail',
       header: t('admin:audit.columns.detail'),
-      render: (e) => (
+      render: (e) => e.reason ? (
         <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>
           {detailText(e)}
         </Typography>
-      ),
+      ) : <Box component="details"><Typography component="summary" variant="body2" sx={{ cursor: 'pointer' }}>{t('admin:workspace.details')}</Typography><Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere', mt: 1 }}>{detailText(e)}</Typography></Box>,
     },
   ]
 
   return (
     <>
-      <Typography variant="h1" component="h1" sx={{ mb: 2 }}>
-        {t('admin:audit.title')}
-      </Typography>
+      <PageHeader title={t('admin:audit.title')} />
       <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap', mb: 2 }}>
         <TextField
           size="small"

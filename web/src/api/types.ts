@@ -194,7 +194,7 @@ export interface CanvasTokenStatus {
   invalid_since: string | null
   /** True when the token is invalid and the reason is not revoked_by_admin. */
   recheck_allowed: boolean
-  /** The date the person noted when enrolling (YYYY-MM-DD). */
+  /** Calendar date derived automatically from Canvas metadata (YYYY-MM-DD). */
   expires_on: string | null
   expiry_notice: ExpiryNotice
   expiry_source?: 'canvas' | 'unknown'
@@ -465,6 +465,10 @@ export interface AdminEnrollment {
   last_used_at: string | null
   created_at: string | null
   updated_at: string | null
+  expires_on: string | null
+  expires_at: string | null
+  expiry_source: 'canvas' | 'unknown'
+  expiry_notice: ExpiryNotice
 }
 
 /** One sign-in method of an account, as an owner sees it (present with two or more providers). */

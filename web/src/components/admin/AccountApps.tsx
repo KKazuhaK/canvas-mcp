@@ -11,6 +11,7 @@ import { useTranslation } from 'react-i18next'
 import type { AdminAccount, Grant } from '@/api/types'
 import AppIdentity from '@/components/apps/AppIdentity'
 import ErrorNotice from '@/components/ErrorNotice'
+import ConfirmDialog from '@/components/ConfirmDialog'
 import TimeText from '@/components/TimeText'
 import { useAdminGrants, useAdminRevokeGrant } from '@/query/hooks'
 import { useToast } from '@/stores/toast'
@@ -53,19 +54,20 @@ function GrantRow({
 }
 
 /**
- * The owner's view of one account's connected apps, in a dialog opened from the accounts
- * table. The server re-checks the owner (and the 10-minute sign-in rule) on every call and
- * again inside the revoking transaction; the dialog only offers what it will answer.
+ * One selected account's connected apps, inline in its detail view or in a dialog.
+ * Every protected read and revocation is still re-authorized by the server.
  */
-export default function AccountApps({ account }: { account: AdminAccount }) {
+export default function AccountApps({ account, inline = false, active = true }: { account: AdminAccount; inline?: boolean; active?: boolean }) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
-  const grants = useAdminGrants(account.id, open)
+  const grants = useAdminGrants(account.id, open || (inline && active))
   const revoke = useAdminRevokeGrant(account.id)
+  const [target, setTarget] = useState<Grant | null>(null)
 
   async function end(grant: Grant) {
     try {
       const result = await revoke.mutateAsync(grant.id)
+      setTarget(null)
       useToast
         .getState()
         .show(result.changed ? t('admin:apps.revoked') : t('admin:apps.unchanged'), result.changed ? 'success' : 'info')
@@ -74,8 +76,19 @@ export default function AccountApps({ account }: { account: AdminAccount }) {
     }
   }
 
-  return (
-    <>
+  const content = <>
+    {grants.isPending ? <Typography color="text.secondary">{t('common:states.loading')}</Typography> : null}
+    {grants.isError ? <ErrorNotice error={grants.error} onRetry={() => void grants.refetch()} /> : null}
+    {grants.data && grants.data.grants.length === 0 ? <Typography color="text.secondary">{t('admin:apps.empty')}</Typography> : null}
+    {grants.data && grants.data.grants.length > 0 ? <Box component="ul" sx={{ listStyle: 'none', m: 0, p: 0 }}>
+      {grants.data.grants.map((grant) => <GrantRow key={grant.id} grant={grant} busy={revoke.isPending}
+        onRevoke={(next) => { revoke.reset(); setTarget(next) }} />)}
+    </Box> : null}
+    <LoadMore query={grants} />
+  </>
+
+  return <>
+    {inline ? content : <>
       <Button
         size="small"
         variant="text"
@@ -89,7 +102,7 @@ export default function AccountApps({ account }: { account: AdminAccount }) {
       </Button>
       <Dialog
         open={open}
-        onClose={() => setOpen(false)}
+        onClose={() => { if (!revoke.isPending) setOpen(false) }}
         aria-labelledby={`account-apps-${account.id}`}
         fullWidth
         maxWidth="sm"
@@ -98,32 +111,16 @@ export default function AccountApps({ account }: { account: AdminAccount }) {
           {t('admin:apps.title', { name: account.display_name })}
         </DialogTitle>
         <DialogContent>
-          {grants.isPending ? <Typography color="text.secondary">{t('common:states.loading')}</Typography> : null}
-          {grants.isError ? (
-            <ErrorNotice error={grants.error} onRetry={() => void grants.refetch()} />
-          ) : null}
-          {revoke.isError ? <ErrorNotice error={revoke.error} /> : null}
-          {grants.data && grants.data.grants.length === 0 ? (
-            <Typography color="text.secondary">{t('admin:apps.empty')}</Typography>
-          ) : null}
-          {grants.data && grants.data.grants.length > 0 ? (
-            <Box component="ul" sx={{ listStyle: 'none', m: 0, p: 0 }}>
-              {grants.data.grants.map((grant) => (
-                <GrantRow
-                  key={grant.id}
-                  grant={grant}
-                  busy={revoke.isPending}
-                  onRevoke={(g) => void end(g)}
-                />
-              ))}
-            </Box>
-          ) : null}
-          <LoadMore query={grants} />
+          {content}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setOpen(false)}>{t('common:actions.close')}</Button>
+          <Button disabled={revoke.isPending} onClick={() => setOpen(false)}>{t('common:actions.close')}</Button>
         </DialogActions>
       </Dialog>
-    </>
-  )
+    </>}
+    <ConfirmDialog open={target !== null}
+      title={t('admin:apps.revokeTitle', { app: target?.client.label || t('account:apps.unnamed'), name: account.display_name })}
+      body={t('admin:apps.revokeBody')} confirmLabel={t('admin:apps.revoke')} pending={revoke.isPending} error={revoke.error}
+      onClose={() => { setTarget(null); revoke.reset() }} onConfirm={() => { if (target) void end(target) }} />
+  </>
 }

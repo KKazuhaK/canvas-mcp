@@ -289,6 +289,10 @@ function enrollmentOf(
     last_used_at: ago(60 * 3),
     created_at: ago(60 * 24 * 4),
     updated_at: ago(60 * 24 * 4),
+    expires_on: inDays(60),
+    expires_at: ago(-60 * 24 * 60),
+    expiry_source: 'canvas',
+    expiry_notice: 'none',
   }
 }
 
@@ -433,7 +437,7 @@ function buildState(scenario: MockScenario): MockState {
     key: `acct:${SELF_ID}`,
     role: owner ? 'owner' : 'user',
     is_self: true,
-    enrollment: canvas.state === 'none' ? null : enrollmentOf('Ada Example', '1234567', null),
+    enrollment: canvas.state === 'none' ? null : { ...enrollmentOf('Ada Example', '1234567', null), expires_on: canvas.expires_on, expires_at: canvas.expires_at ?? null, expiry_source: canvas.expiry_source ?? 'unknown', expiry_notice: canvas.expiry_notice },
   })
   const accounts = [
     selfRow,

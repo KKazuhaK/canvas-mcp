@@ -7,7 +7,7 @@ import { renderApp } from '@/test/renderWithProviders'
 describe('Token expiry email opt-in', () => {
   it('defaults off and saves only the signed-in account preference with CSRF', async () => {
     const user = userEvent.setup()
-    await renderApp('/', 'enrolled')
+    await renderApp('/token', 'enrolled')
     const toggle = await screen.findByRole('switch', { name: 'Email me token expiry reminders' })
     expect(toggle).not.toBeChecked()
     const seen = recordRequests()

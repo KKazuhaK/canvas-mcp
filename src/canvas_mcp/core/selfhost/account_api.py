@@ -963,6 +963,33 @@ class ApiApp:
             return {"host": host, "name": _clean(host), "offered": False}
         return None
 
+    def _expiry_metadata(self, info: EnrollmentInfo | None) -> dict[str, Any]:
+        """The same Canvas-only expiry interpretation for personal and owner views."""
+        source = (
+            "canvas"
+            if info is not None and info.expiry_source == "canvas"
+            else "unknown"
+        )
+        expiry = (
+            info.access_expires_at if info is not None and source == "canvas" else None
+        )
+        notice = "none"
+        if info is not None and info.status != STATUS_INVALID and expiry is not None:
+            now = self.app.clock()
+            days = int(
+                (CURRENT_CONFIG.get() or self.app.snapshots.current).settings[
+                    "notifications.token_reminder_days"
+                ]
+            )
+            if expiry - now <= days * 86400:
+                notice = "soon" if now < expiry else "passed"
+        return {
+            "expires_on": web._fmt_utc_date(expiry) if expiry is not None else None,
+            "expires_at": _ts(expiry),
+            "expiry_source": source,
+            "expiry_notice": notice,
+        }
+
     def _canvas_status(self, info: EnrollmentInfo | None) -> dict[str, Any]:
         custody_status = {
             "notice_version": custody.CUSTODY_NOTICE_VERSION,
@@ -981,10 +1008,7 @@ class ApiApp:
                 "invalid_reason": None,
                 "invalid_since": None,
                 "recheck_allowed": False,
-                "expires_on": None,
-                "expiry_notice": "none",
-                "expiry_source": "unknown",
-                "expires_at": None,
+                **self._expiry_metadata(None),
                 "settings_url": None,
                 "enrolled_at": None,
                 "updated_at": None,
@@ -993,20 +1017,6 @@ class ApiApp:
             }
         invalid = info.status == STATUS_INVALID
         reason = info.invalid_reason if info.invalid_reason in INVALID_REASONS else None
-        hint = info.access_expires_at if info.expiry_source == "canvas" else None
-        notice = "none"
-        if not invalid and hint is not None:
-            now = self.app.clock()
-            if (
-                hint - now
-                <= int(
-                    (CURRENT_CONFIG.get() or self.app.snapshots.current).settings[
-                        "notifications.token_reminder_days"
-                    ]
-                )
-                * 86400
-            ):
-                notice = "soon" if now < hint else "passed"
         return {
             "custody": custody_status,
             "state": "invalid" if invalid else "active",
@@ -1017,12 +1027,7 @@ class ApiApp:
             "invalid_since": _ts(info.invalid_since) if invalid else None,
             "recheck_allowed": not invalid
             or info.invalid_reason != REASON_REVOKED_BY_ADMIN,
-            "expires_on": web._fmt_utc_date(hint) if hint is not None else None,
-            "expiry_notice": notice,
-            "expiry_source": "canvas" if info.expiry_source == "canvas" else "unknown",
-            "expires_at": _ts(info.access_expires_at)
-            if info.expiry_source == "canvas"
-            else None,
+            **self._expiry_metadata(info),
             "settings_url": self.app.settings_url(info),
             "enrolled_at": _ts(info.created_at),
             "updated_at": _ts(info.updated_at),
@@ -2165,6 +2170,7 @@ class ApiApp:
             "last_used_at": _ts(row.last_used_at),
             "created_at": _ts(row.created_at),
             "updated_at": _ts(row.updated_at),
+            **self._expiry_metadata(row),
         }
 
     @staticmethod

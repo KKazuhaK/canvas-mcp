@@ -6,6 +6,8 @@ import { useLanguage } from '@/stores/language'
 import { errorBody, meFixture, recordRequests, scriptAdapter } from '@/test/fixtures'
 import { renderApp } from '@/test/renderWithProviders'
 import { hardNavigate } from '@/utils/navigate'
+import { keys } from '@/query/keys'
+import type { MeResponse } from '@/api/types'
 
 vi.mock('@/utils/navigate', () => ({ hardNavigate: vi.fn() }))
 
@@ -95,17 +97,32 @@ describe('Sign-in methods', () => {
     expect([...nav.querySelectorAll('a')].map((a) => a.getAttribute('href'))).toContain('/sign-in-methods')
   })
 
-  it('is not a page for a server with one provider', async () => {
+  it('keeps security navigation when identity linking is disabled without calling the identity API', async () => {
     await renderApp('/sign-in-methods', 'enrolled')
-    expect(await screen.findByText('Page not found')).toBeInTheDocument()
+    const seen = recordRequests()
+    expect(await screen.findByText(/Linking external sign-in methods is not available/)).toBeInTheDocument()
     const nav = screen.getByRole('navigation', { name: 'Main navigation' })
-    expect(nav.querySelector('a[href="/sign-in-methods"]')).toBeNull()
+    expect(nav.querySelector('a[href="/sign-in-methods"]')).not.toBeNull()
+    expect(seen.some((request) => request.url === '/me/identities')).toBe(false)
+    expect(screen.queryByRole('button', { name: /^Link / })).toBeNull()
   })
 
   it('is not a page for an account that waits for approval', async () => {
     await renderApp('/sign-in-methods', 'pending')
     expect(await screen.findByText('Waiting for approval')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Sign-in methods' })).toBeNull()
+  })
+
+  it('hides cached identity controls when the server turns linking off', async () => {
+    const { client } = await renderApp('/sign-in-methods', 'multi')
+    await screen.findByText('ada-example')
+    const previous = client.getQueryData<MeResponse>(keys.me)!
+    const seen = recordRequests()
+    act(() => { client.setQueryData(keys.me, { ...previous, features: { ...previous.features, identities: false } }) })
+    await waitFor(() => expect(screen.queryByRole('button', { name: /^Link / })).toBeNull())
+    expect(screen.queryByRole('button', { name: /^Unlink:/ })).toBeNull()
+    expect(screen.queryByText('ada-example')).toBeNull()
+    expect(seen.some((request) => request.url === '/me/identities')).toBe(false)
   })
 
   it('starts a link with the CSRF header and goes to the provider the server named', async () => {

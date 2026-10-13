@@ -1,4 +1,16 @@
 {
+  "overview": {
+    "appsPreview": "A preview of your connected apps. Open the full list to review or revoke access.",
+    "noApps": "No apps are connected yet. Copy the MCP address below to connect your client.",
+    "manageApps": "Manage connected apps",
+    "addToken": "Connect your Canvas account to make its tools available to your apps.",
+    "connect": "Connect Canvas",
+    "manageToken": "Manage Canvas connection",
+    "reviewNotice": "Review updated token notice",
+    "shortcuts": "Account & security",
+    "securityHelp": "Manage how you sign in, review connected apps and choose token reminders.",
+    "linkingUnavailable": "Linking external sign-in methods is not available on this server. Local password management remains available when enabled."
+  },
   "home": {
     "title": "My account",
     "signedInAs": "Signed in as {{name}}"
@@ -197,6 +209,13 @@
     "unknownTool": "Tool without a description in this version of the app."
   },
   "activity": {
+    "filterResult": "Sign-in result",
+    "filterTime": "Time range",
+    "all": "All",
+    "lastDay": "Last day",
+    "lastDays": "Last {{days}} days",
+    "loadedScope": "Filters apply to loaded records only. Load more to include older records.",
+    "noMatches": "No loaded records match these filters.",
     "title": "Recent sign-ins",
     "intro": "Your last 20 sign-ins.",
     "columns": {

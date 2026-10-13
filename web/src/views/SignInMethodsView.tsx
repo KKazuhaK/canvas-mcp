@@ -17,10 +17,11 @@ import ConfirmDialog from '@/components/ConfirmDialog'
 import ErrorNotice from '@/components/ErrorNotice'
 import PageHeader from '@/components/PageHeader'
 import ProviderIcon from '@/components/ProviderIcon'
+import LocalPasswordSettings from '@/components/LocalPasswordSettings'
 import ReauthNotice from '@/components/ReauthNotice'
 import ResponsiveTable, { type Column } from '@/components/ResponsiveTable'
 import TimeText from '@/components/TimeText'
-import { useIdentities, useProviders, useStartLink, useUnlinkIdentity } from '@/query/hooks'
+import { useIdentities, useMe, useProviders, useStartLink, useUnlinkIdentity } from '@/query/hooks'
 import { useToast } from '@/stores/toast'
 import { codeText } from '@/utils/errorText'
 import { hardNavigate } from '@/utils/navigate'
@@ -38,7 +39,9 @@ export default function SignInMethodsView() {
   const { t } = useTranslation()
   const client = useQueryClient()
   const [params] = useSearchParams()
-  const identities = useIdentities()
+  const me = useMe()
+  const linkingAllowed = me.data?.features.identities === true
+  const identities = useIdentities(linkingAllowed)
   const providers = useProviders()
   const startLink = useStartLink()
   const unlink = useUnlinkIdentity()
@@ -48,7 +51,7 @@ export default function SignInMethodsView() {
   const names = new Map((providers.data?.providers ?? []).map((p) => [p.id, p]))
   const nameOf = (id: string) => names.get(id)?.name ?? id
   const iconOf = (id: string) => names.get(id)?.icon ?? 'key'
-  const data = identities.data
+  const data = linkingAllowed ? identities.data : undefined
   const fresh = data?.fresh === true
   const linked = params.get('linked') === '1'
   const errorParam = params.get('error')
@@ -158,20 +161,20 @@ export default function SignInMethodsView() {
     <>
       <PageHeader title={t('account:methods.title')} subtitle={t('account:methods.intro')} />
       <Box sx={{ display: 'grid', gap: 2 }}>
-        {linked ? (
+        {linked && linkingAllowed ? (
           <Alert severity="success" role="status">
             {t('account:methods.linkedDone')}
           </Alert>
         ) : null}
-        {errorParam !== null ? (
+        {errorParam !== null && linkingAllowed ? (
           <Alert severity="error" role="alert">
             <AlertTitle>{t('account:methods.linkFailed')}</AlertTitle>
             {codeText(t, errorParam)}
           </Alert>
         ) : null}
 
-        {identities.isPending ? <PageSkeleton /> : null}
-        {identities.isError ? (
+        {linkingAllowed && identities.isPending ? <PageSkeleton /> : null}
+        {linkingAllowed && identities.isError ? (
           <ErrorNotice error={identities.error} onRetry={() => void identities.refetch()} />
         ) : null}
 
@@ -223,9 +226,14 @@ export default function SignInMethodsView() {
           </Card>
         ) : null}
 
-        <Typography variant="body2" color="text.secondary">
+        {linkingAllowed && <Typography variant="body2" color="text.secondary">
           {t('account:methods.effects')}
-        </Typography>
+        </Typography>}
+        {me.data && ((me.data.account.has_local_password || me.data.account.provider_id === 'local')
+          ? <LocalPasswordSettings />
+          : !me.data.account.upn_required && providers.data?.providers.some((provider) => provider.id === 'local')
+            ? <LocalPasswordSettings creating /> : null)}
+        {!linkingAllowed && <Alert severity="info">{t('account:overview.linkingUnavailable')}</Alert>}
       </Box>
 
       <ConfirmDialog

@@ -1,4 +1,16 @@
 {
+  "overview": {
+    "appsPreview": "已连接应用的简要预览。打开完整列表可查看详情或撤销访问。",
+    "noApps": "尚未连接应用。复制下方 MCP 地址，即可在客户端中添加连接。",
+    "manageApps": "管理已连接的应用",
+    "addToken": "连接你的 Canvas 账户，让已授权的应用可以使用 Canvas 工具。",
+    "connect": "连接 Canvas",
+    "manageToken": "管理 Canvas 连接",
+    "reviewNotice": "查看更新后的令牌告知",
+    "shortcuts": "账户与安全",
+    "securityHelp": "管理登录方式、查看已连接的应用，以及设置令牌提醒。",
+    "linkingUnavailable": "此服务器未开放外部登录方式关联。启用本地登录时，仍可管理本地密码。"
+  },
   "home": {
     "title": "我的账户",
     "signedInAs": "当前登录：{{name}}"
@@ -197,6 +209,13 @@
     "unknownTool": "此版本的应用没有这个工具的说明。"
   },
   "activity": {
+    "filterResult": "登录结果",
+    "filterTime": "时间范围",
+    "all": "全部",
+    "lastDay": "最近一天",
+    "lastDays": "最近 {{days}} 天",
+    "loadedScope": "筛选仅作用于已加载的记录。点击加载更多可纳入较早的记录。",
+    "noMatches": "已加载记录中没有符合筛选条件的结果。",
     "title": "最近登录",
     "intro": "你最近 20 次登录。",
     "columns": {

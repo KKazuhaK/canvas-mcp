@@ -1,4 +1,29 @@
 {
+  "accountDetail": {
+    "manage": "管理",
+    "manageLabel": "管理 {{name}}",
+    "topics": "账户详情分类",
+    "profile": "账户",
+    "signIn": "登录与访问",
+    "canvas": "Canvas",
+    "apps": "已连接的应用",
+    "appsInactive": "此账户尚未启用，已连接的应用无法使用它。",
+    "missingUpn": "为此账户启用本地登录前，请先设置账户 UPN。"
+  },
+  "workspace": {
+    "intro": "选择要配置的类别。切换类别时，尚未保存的编辑会保留。",
+    "topics": "设置类别",
+    "unsaved": "尚有未保存的修改",
+    "saved": "修改已保存。",
+    "details": "详情",
+    "staleDraft": "设置已在其他位置变更。你的编辑已保留，请先重新载入已保存的值。",
+    "discardDraft": "放弃这份编辑并载入已保存的值",
+    "site": { "title": "站点", "help": "管理公开地址，以及地址变更对登录和已连接应用的影响。" },
+    "providers": { "title": "登录服务商", "help": "配置登录服务商、显示样式和可用的登录方式。" },
+    "access": { "title": "账户与访问", "help": "配置账户关联规则和登录有效期。本地账户请在账户管理中创建。" },
+    "schools": { "title": "学校", "help": "管理提供的 Canvas 学校和学校目录搜索。" },
+    "mail": { "title": "邮件提醒", "help": "配置邮件发送和自动令牌到期提醒。" }
+  },
   "site": {
     "title": "站点地址",
     "address": "公网 HTTPS 地址",
@@ -106,6 +131,8 @@
     }
   },
   "enrollments": {
+    "expired": "已到期",
+    "expiring": "即将到期",
     "title": "Canvas 令牌绑定",
     "filter": "显示",
     "filterAll": "全部账户和令牌",
@@ -267,6 +294,8 @@
     }
   },
   "apps": {
+    "revokeTitle": "解除 {{app}} 对 {{name}} 的授权？",
+    "revokeBody": "此应用从下一次 MCP 请求起将无法访问该账户。账户持有人需要重新授权后才能恢复连接。",
     "button": "已连接的应用",
     "buttonLabel": "已连接的应用：{{name}}",
     "title": "{{name}} 已连接的应用",
@@ -283,12 +312,12 @@
     "icon": "上传登录图标",
     "resetIcon": "恢复默认图标",
     "iconHelp": "PNG 格式，最多 64 KB、512 × 512 像素，保存在数据库中。",
-    "title": "登录提供方配置",
+    "title": "登录服务商配置",
     "reload": "重新加载登录配置",
     "edit": "编辑 {{provider}}",
-    "type": "提供方类型",
+    "type": "服务商类型",
     "slug": "OIDC 标识",
-    "add": "添加登录提供方",
+    "add": "添加登录服务商",
     "callback": "回调地址",
     "callbackHelp": "在登录服务商处注册这个准确的 Web 回调地址。",
     "tenant": "目录（租户）ID",
@@ -310,6 +339,9 @@
     "autoLinkEmail": "相同邮箱自动关联并进入原账户"
   },
   "settings": {
+    "displayName": "显示名称",
+    "saveName": "保存显示名称",
+    "defaultName": "默认名称：{{name}}。留空即使用默认名称。",
     "title": "设置",
     "providers": "登录名称",
     "reset": "重置名称",
@@ -343,10 +375,11 @@
     "only": "仅使用本地账户",
     "owner": "本地管理员",
     "create": "创建本地账户",
+    "new": "新建本地账户",
     "help": "创建已启用的账户，需先启用本地登录。不开放公众注册。默认是普通用户，勾选管理员后才授予管理权限。",
     "ownerHelp": "该账户可以独立于 SSO，通过 UPN 和密码管理服务器。请妥善保管密码。",
     "ready": "本地管理员入口可用，最后一位可用本地管理员受到保护。",
-    "missing": "目前没有可用的本地管理员入口。请启用本地登录，并在下方创建本地管理员，避免 SSO 故障时无法进入后台。",
+    "missing": "目前没有可用的本地管理员入口。请在登录服务商中启用本地登录，再到账户管理中创建本地管理员，避免 SSO 故障时无法进入后台。",
     "created": "本地账户已创建。"
   },
   "loginPolicy": {

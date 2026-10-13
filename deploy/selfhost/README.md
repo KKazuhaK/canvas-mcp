@@ -16,7 +16,7 @@ instructions are kept separately in [the migration package](../../src/canvas_mcp
 ## Prepare an external sign-in provider
 
 This step is optional. First installation creates a local administrator;
-additional local accounts can be created in Settings without an external provider.
+additional local accounts can be created in Admin > Accounts without an external provider.
 
 For the owner's deployment sequence, follow [OPERATOR.md](OPERATOR.md).
 

@@ -57,16 +57,7 @@ export const routes: RouteObject[] = [
             element: <ConnectedAppsView />,
             handle: { titleKey: 'common:nav.connectedApps' },
           },
-          {
-            element: <RequireFeature feature="identities" />,
-            children: [
-              {
-                path: 'sign-in-methods',
-                element: <SignInMethodsView />,
-                handle: { titleKey: 'common:nav.signInMethods' },
-              },
-            ],
-          },
+          { path: 'sign-in-methods', element: <SignInMethodsView />, handle: { titleKey: 'common:nav.signInMethods' } },
           { path: 'activity', element: <ActivityView />, handle: { titleKey: 'common:nav.activity' } },
           {
             element: <RequireOwner />,

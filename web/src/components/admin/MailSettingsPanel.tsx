@@ -15,15 +15,19 @@ import { getMailSettings, saveMailSettings, testMailSettings } from '@/api/endpo
 import type { MailSettingsResponse } from '@/api/types'
 import ErrorNotice from '@/components/ErrorNotice'
 import { keys } from '@/query/keys'
+import DraftStatus from './DraftStatus'
+import { useSettingsDraft } from './useSettingsDraft'
 
 function Editor({ data }: { data: MailSettingsResponse }) {
   const { t } = useTranslation()
   const cache = useQueryClient()
-  const [config, setConfig] = useState(data.config)
-  const probe = useMutation({ mutationFn: testMailSettings })
   const [password, setPassword] = useState('')
-  const save = useMutation({ mutationFn: () => saveMailSettings({ revision: data.revision, config, password: password || null }),
+  const draft = useSettingsDraft(data.revision, data.config, password !== '')
+  const { value: config, setValue: setConfig } = draft
+  const probe = useMutation({ mutationFn: testMailSettings })
+  const save = useMutation({ mutationFn: () => saveMailSettings({ revision: draft.revision, config, password: password || null }),
     onSuccess: (fresh) => {
+      draft.accept(fresh.revision, fresh.config)
       cache.setQueryData(['mailSettings'], fresh)
       void cache.invalidateQueries({ queryKey: keys.adminSettings })
       void cache.invalidateQueries({ queryKey: keys.adminAudit })
@@ -32,6 +36,7 @@ function Editor({ data }: { data: MailSettingsResponse }) {
   return <Stack spacing={2}>
     <Typography component="h2" variant="h6">{t('admin:mail.title')}</Typography>
     <Typography>{t('admin:mail.help')}</Typography>
+    <DraftStatus dirty={draft.dirty || password !== ''} stale={draft.stale} reset={() => { draft.reset(); setPassword('') }} />
     <FormControlLabel label={t('admin:mail.enabled')} control={<Switch checked={config.enabled} disabled={save.isPending} onChange={(_, value) => setConfig({ ...config, enabled: value })} />} />
     {(['host', 'username', 'from_email'] as const).map((key) => <TextField key={key} label={t(`admin:mail.${key}`)} value={config[key]} disabled={save.isPending} onChange={(event) => setConfig({ ...config, [key]: event.target.value })} slotProps={{ htmlInput: { maxLength: 254 } }} />)}
     <TextField label={t('admin:mail.port')} type="number" value={config.port} disabled={save.isPending} onChange={(event) => setConfig({ ...config, port: Number(event.target.value) })} slotProps={{ htmlInput: { min: 1, max: 65535 } }} />
@@ -43,7 +48,7 @@ function Editor({ data }: { data: MailSettingsResponse }) {
     <Button disabled={probe.isPending || save.isPending || !data.config.enabled} onClick={() => probe.mutate()}>{t('admin:mail.test')}</Button>
     {save.isError && <ErrorNotice error={save.error} />}
     {save.isSuccess && <Alert severity="success">{t('admin:mail.saved')}</Alert>}
-    <Button disabled={save.isPending || !Number.isInteger(config.port) || !Number.isInteger(config.reminder_days) || config.reminder_days < 1 || config.reminder_days > 90 || (config.enabled && (!config.host || !config.from_email))} onClick={() => save.mutate()}>{t('admin:mail.save')}</Button>
+    <Button variant="contained" disabled={save.isPending || draft.stale || (!draft.dirty && !password) || !Number.isInteger(config.port) || !Number.isInteger(config.reminder_days) || config.reminder_days < 1 || config.reminder_days > 90 || (config.enabled && (!config.host || !config.from_email))} onClick={() => save.mutate()}>{t('admin:mail.save')}</Button>
   </Stack>
 }
 
@@ -51,5 +56,5 @@ export default function MailSettingsPanel() {
   const query = useQuery({ queryKey: ['mailSettings'], queryFn: getMailSettings })
   if (query.isPending) return null
   if (query.isError) return <ErrorNotice error={query.error} onRetry={() => void query.refetch()} />
-  return <Card><CardContent><Editor key={query.data.revision} data={query.data} /></CardContent></Card>
+  return <Card><CardContent><Editor data={query.data} /></CardContent></Card>
 }

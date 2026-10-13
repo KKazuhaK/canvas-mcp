@@ -8,12 +8,11 @@ import { useTranslation } from 'react-i18next'
 import { isUnauthenticated } from '@/api/errors'
 import type { MeResponse } from '@/api/types'
 import ErrorNotice from '@/components/ErrorNotice'
-import LocalPasswordSettings from '@/components/LocalPasswordSettings'
-import NotificationSettings from '@/components/NotificationSettings'
 import AccountUpnSettings from '@/components/AccountUpnSettings'
 import McpUrlCard from '@/components/McpUrlCard'
 import PageHeader from '@/components/PageHeader'
-import TokenSection from '@/components/token/TokenSection'
+import CanvasConnectionSummary from '@/components/token/CanvasConnectionSummary'
+import ConnectedAppsSummary from '@/components/apps/ConnectedAppsSummary'
 import AccountShell from '@/layouts/AccountShell'
 import PublicLayout from '@/layouts/PublicLayout'
 import { useMe, useProviders } from '@/query/hooks'
@@ -43,7 +42,6 @@ function SignedOutHome() {
 
 function AccountHome({ me }: { me: MeResponse }) {
   const { t } = useTranslation()
-  const providers = useProviders()
   return (
     <>
       <PageHeader
@@ -54,10 +52,19 @@ function AccountHome({ me }: { me: MeResponse }) {
       />
       <Box sx={{ display: 'grid', gap: 2 }}>
         <AccountUpnSettings account={me.account} />
-        {me.canvas ? <TokenSection canvas={me.canvas} /> : null}
-        <NotificationSettings />
+        {me.canvas ? <CanvasConnectionSummary canvas={me.canvas} /> : null}
+        {me.account.status === 'active' ? <ConnectedAppsSummary /> : null}
+        <Card><CardContent sx={{ display: 'grid', gap: 2 }}>
+          <Typography variant="h2" component="h2">{t('account:overview.shortcuts')}</Typography>
+          <Typography color="text.secondary">{t('account:overview.securityHelp')}</Typography>
+          <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+            <Button component={RouterLink} to="/sign-in-methods">{t('common:nav.signInMethods')}</Button>
+            <Button component={RouterLink} to="/connected-apps">{t('common:nav.connectedApps')}</Button>
+            <Button component={RouterLink} to="/token#reminders">{t('account:notifications.title')}</Button>
+            <Button component={RouterLink} to="/activity">{t('common:nav.activity')}</Button>
+          </Box>
+        </CardContent></Card>
         <McpUrlCard />
-        {(me.account.has_local_password || me.account.provider_id === 'local') ? <LocalPasswordSettings /> : !me.account.upn_required && providers.data?.providers.some((provider) => provider.id === 'local') ? <LocalPasswordSettings creating /> : null}
       </Box>
     </>
   )

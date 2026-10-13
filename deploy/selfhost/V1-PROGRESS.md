@@ -1276,5 +1276,36 @@ with the outstanding live checks. Retain the current major areas and use PSP as 
 reference. The current settings page stacks unrelated forms in one long view;
 account rows combine several management actions; the home view repeats token
 editing, mail settings and account-security forms. The implementation scope and
-acceptance criteria are in [UI-REDESIGN.md](UI-REDESIGN.md). This is pending work,
-not a claim that the frontend or live HANDOFF gates are complete.
+acceptance criteria are in [UI-REDESIGN.md](UI-REDESIGN.md). The implementation
+candidate now includes topic navigation and retained drafts, focused token/reminder/
+security pages, home connection/client summaries, local-account creation in account
+management, selected-account/enrollment detail drawers, per-provider appearance/
+configuration grouping, loaded-history filters and audit details on demand.
+
+The API adds automatic expiry metadata to owner enrollment DTOs using the same
+Canvas-only interpretation as the personal view. This does not initialize or alter
+the database, replace stored credentials, or revive historical manual expiry hints.
+All 8,236 Python tests passed locally, with 74 environment-dependent skips; the
+API/contract/parity subset passed 279 checks. Ruff, Linux-target mypy (176 files),
+TypeScript, UI lint and the production distribution checks passed. Existing list
+action tests now use the selected-account workflow while retaining their original
+request, CSRF, confirmation, refusal and reauthentication assertions.
+
+An earlier full Windows UI run passed 522 checks. Later runs covering the expanded
+525 checks encountered native worker exits, including a single-worker run; this is
+not recorded as a full pass. Focused regression results and the final complete CI
+matrix are required before merge. The project retains normal test isolation and
+its two-worker CI command.
+
+English/Chinese mock previews were inspected at desktop and 390-pixel mobile widths.
+Provider-name saving retained an edited configuration across topic switches; a
+selected-account policy retained its draft across detail tabs and saved with the
+session-invalidation message; a synthetic token replacement cleared the input and
+kept unknown expiry explicit; individual mock app revocation updated the list.
+Home and account detail mobile widths matched their document scroll widths. Two
+rendered issues were repaired: screen-reader-only table dimensions caused desktop
+overflow, and the fixed app bar covered the detail drawer's mobile close button.
+Saved account policies now stop displaying an obsolete unsaved marker.
+
+These are local candidate checks, not new live HANDOFF evidence. Publication and
+owner-deployed page acceptance remain outstanding at this checkpoint.
