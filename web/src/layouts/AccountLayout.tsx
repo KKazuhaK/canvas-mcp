@@ -28,6 +28,7 @@ import { useTranslation } from 'react-i18next'
 import type { Features, MeResponse } from '@/api/types'
 import LanguageToggle from '@/components/LanguageToggle'
 import ThemeToggle from '@/components/ThemeToggle'
+import BuildFooter from '@/components/BuildFooter'
 import { useLogout } from '@/query/hooks'
 import { useToast } from '@/stores/toast'
 import { errorText } from '@/utils/errorText'
@@ -223,6 +224,7 @@ export default function AccountLayout({ me, children }: { me: MeResponse; childr
           {children ?? <Outlet />}
         </Container>
       </Box>
+      <BuildFooter />
     </Box>
   )
 }

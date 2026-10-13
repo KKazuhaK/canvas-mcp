@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Selfhost build identity and Canvas metadata compatibility
+
+- Embed the release version, full source commit and UTC build timestamp in the
+  installed image. Show the running server's identity on account and sign-in
+  pages, in startup logs and at the public `/api/v1/version` endpoint. Release
+  builds use one timestamp across architectures and matching OCI labels; no
+  operator environment or database settings are required.
+- Accept Canvas's exact `visible_token` mask as well as the documented
+  `token_hint` when reading expiration. Both still require the verified Canvas
+  user; missing, malformed or conflicting identifiers remain unknown.
+
 ### Selfhost account sessions and token reminders (unreleased)
 
 - Default browser sign-in duration to 7 days and allow administrators to configure

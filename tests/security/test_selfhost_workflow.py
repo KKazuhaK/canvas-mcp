@@ -366,14 +366,28 @@ def test_actual_version_script_classifies_stable_and_prerelease_tags(
         assert not output.exists()
         return
     assert result.returncode == 0, result.stderr
-    assert dict(
+    values = dict(
         line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines()
-    ) == {
+    )
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", values.pop("built_at"))
+    assert values == {
         "version": version,
         "label_version": label,
         "stable": stable,
         "is_tag": is_tag,
     }
+
+
+def test_smoke_and_push_share_one_stamp_for_both_architectures(workflow):
+    inputs = [
+        step["with"]["build-args"]
+        for step in _steps(workflow["jobs"]["build"])
+        if str(step.get("uses", "")).startswith("docker/build-push-action@")
+    ]
+    assert len(inputs) == 2 and inputs[0] == inputs[1]
+    assert "BUILD_COMMIT=${{ github.sha }}" in inputs[0]
+    assert "BUILD_VERSION=${{ needs.meta.outputs.label_version }}" in inputs[0]
+    assert "BUILD_TIME=${{ needs.meta.outputs.built_at }}" in inputs[0]
 
 
 def test_every_job_only_runs_for_the_branch_or_release_tags_it_publishes(workflow):

@@ -1,5 +1,6 @@
 {
   "brand": "Canvas MCP",
+  "build": { "label": "Server build", "version": "Version", "built": "Built (UTC)" },
   "pageTitle": "Canvas MCP",
   "actions": {
     "retry": "Try again",

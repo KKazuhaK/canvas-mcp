@@ -254,6 +254,20 @@ def audit_rows(h: Harness) -> list[tuple[str, str | None, str | None]]:
 # -- providers and the shape of every answer ----------------------------------------------
 
 
+def test_build_identity_is_public_closed_and_not_cached(api: Api, monkeypatch):
+    expected = {
+        "version": "1.14.0-beta.11",
+        "commit": "a" * 40,
+        "built_at": "2026-10-13T08:00:00Z",
+    }
+    monkeypatch.setattr(account_api, "build_info", lambda: expected)
+    response = api.get("/version")
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert_api_headers(response)
+    error_of(api.post("/version", csrf=False), 405, "method_not_allowed")
+
+
 class TestProviders:
     def test_it_needs_no_session_and_names_only_microsoft(
         self, h: Harness, api: Api

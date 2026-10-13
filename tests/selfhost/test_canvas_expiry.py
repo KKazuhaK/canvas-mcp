@@ -10,17 +10,25 @@ TOKEN = "123~abcDE" + "x" * 59
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "identifier",
+    [
+        {"token_hint": "abcDE"},
+        {"visible_token": "abcDE..."},
+        {"token_hint": "abcDE", "visible_token": "abcDE..."},
+    ],
+)
+@pytest.mark.parametrize(
     "expiry,expected", [("2030-02-03T04:05:06Z", 1896321906), (None, None)]
 )
 async def test_exact_token_lookup_preserves_real_timestamp_or_no_expiry(
-    expiry, expected
+    expiry, expected, identifier
 ):
     requests = []
 
     def respond(request):
         requests.append(request)
         return httpx.Response(
-            200, json={"token_hint": "abcDE", "user_id": 42, "expires_at": expiry}
+            200, json={**identifier, "user_id": 42, "expires_at": expiry}
         )
 
     result = await fetch_expiry(
@@ -52,6 +60,30 @@ async def test_exact_token_lookup_preserves_real_timestamp_or_no_expiry(
         (200, {"user_id": 42, "token_hint": "abcDE"}),
         (200, {"user_id": 42, "token_hint": "abcDE", "expires_at": "2030-02-03"}),
         (200, {"user_id": 42, "token_hint": "abcDE", "expires_at": False}),
+        (200, {"user_id": 99, "visible_token": "abcDE...", "expires_at": None}),
+        (200, {"user_id": 42, "visible_token": "other...", "expires_at": None}),
+        (200, {"user_id": 42, "visible_token": "abcDE", "expires_at": None}),
+        (200, {"user_id": 42, "visible_token": "abcDE...suffix", "expires_at": None}),
+        (200, {"user_id": 42, "visible_token": TOKEN, "expires_at": None}),
+        (200, {"user_id": 42, "visible_token": None, "expires_at": None}),
+        (
+            200,
+            {
+                "user_id": 42,
+                "token_hint": "other",
+                "visible_token": "abcDE...",
+                "expires_at": None,
+            },
+        ),
+        (
+            200,
+            {
+                "user_id": 42,
+                "token_hint": "abcDE",
+                "visible_token": "other...",
+                "expires_at": None,
+            },
+        ),
     ],
 )
 async def test_unsupported_or_unbound_metadata_is_unknown(status, body):
@@ -102,7 +134,7 @@ def test_binding_reads_real_expiry_without_a_manual_date(tmp_path):
             200,
             json={
                 "user_id": 42,
-                "token_hint": "abcDE",
+                "visible_token": "abcDE...",
                 "expires_at": "2030-02-03T04:05:06Z",
             },
         )

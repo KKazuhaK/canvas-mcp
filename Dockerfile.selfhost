@@ -57,6 +57,12 @@ COPY pyproject.toml uv.lock README.md LICENSE ./
 RUN uv sync --frozen --no-dev --extra documents --extra selfhost --extra postgres --no-install-project
 
 COPY src ./src
+ARG BUILD_VERSION=dev
+ARG BUILD_COMMIT=none
+ARG BUILD_TIME=unknown
+RUN python src/canvas_mcp/core/selfhost/build_info.py \
+    --version "$BUILD_VERSION" --commit "$BUILD_COMMIT" --built-at "$BUILD_TIME" \
+    --output src/canvas_mcp/core/selfhost/_build_info.json
 RUN uv sync --frozen --no-dev --extra documents --extra selfhost --extra postgres --no-editable
 
 
@@ -74,6 +80,13 @@ RUN groupadd --gid 10001 mcp \
     && chmod 0700 /data
 
 COPY --from=build /opt/venv /opt/venv
+
+ARG BUILD_VERSION=dev
+ARG BUILD_COMMIT=none
+ARG BUILD_TIME=unknown
+LABEL org.opencontainers.image.version=$BUILD_VERSION \
+    org.opencontainers.image.revision=$BUILD_COMMIT \
+    org.opencontainers.image.created=$BUILD_TIME
 
 # The mandatory React account UI: static files, root-owned and
 # read-only to the service user. See web/README.md.

@@ -123,6 +123,17 @@ status 200 /account/token
 grep -q 'id="root"' "$WORKDIR/body" || fail "React build missing"
 status 200 /account/consent?txn=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 grep -q 'id="root"' "$WORKDIR/body" || fail "React consent route missing"
+status 200 /api/v1/version
+docker image inspect "$IMAGE" --format '{{json .Config.Labels}}' > "$WORKDIR/image-labels"
+python3 - "$WORKDIR/body" "$WORKDIR/image-labels" <<'PY' || fail "embedded build identity"
+import json, sys
+stamp = json.load(open(sys.argv[1]))
+labels = json.load(open(sys.argv[2]))
+assert set(stamp) == {'version', 'commit', 'built_at'}
+for field, label in [('version', 'version'), ('commit', 'revision'), ('built_at', 'created')]:
+    assert stamp[field] == labels['org.opencontainers.image.' + label]
+PY
+ok "installed build metadata matches image labels"
 status 200 /api/v1/providers
 python3 - "$WORKDIR/body" <<'PY' || fail "provider routes"
 import json, sys

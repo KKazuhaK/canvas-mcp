@@ -725,6 +725,8 @@ route('GET /providers', 'public', (_c, s) =>
   }),
 )
 
+route('GET /version', 'public', () => ok({ version: 'dev', commit: 'none', built_at: 'unknown' }))
+
 route('POST /login/local', 'public', (c, s) => {
   if (c.body.username !== 'admin' || c.body.password !== 'a long private local password') return fail('local_login_failed')
   s.signedIn = true

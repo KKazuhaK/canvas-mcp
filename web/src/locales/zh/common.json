@@ -1,5 +1,6 @@
 {
   "brand": "Canvas MCP",
+  "build": { "label": "服务器构建信息", "version": "版本", "built": "构建时间（UTC）" },
   "pageTitle": "Canvas MCP",
   "actions": {
     "retry": "重试",

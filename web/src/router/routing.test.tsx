@@ -246,8 +246,9 @@ describe('sign out and session loss', () => {
     expect(post?.headers['x-csrf-token']).toBe('mock-csrf-token-not-a-secret')
     expect(post?.data).toBeUndefined()
     expect(post?.params).toBeUndefined()
-    // No stale account data survives.
-    expect(client.getQueryCache().getAll()).toHaveLength(0)
+    // No stale account data survives. The mounted public build footer can
+    // fetch again while the test's mocked hard navigation keeps this page open.
+    expect(client.getQueryCache().getAll().filter(q => q.queryKey[0] !== 'server-build')).toHaveLength(0)
   })
 
   it('has no "sign out of all devices" (the server does not offer it)', async () => {

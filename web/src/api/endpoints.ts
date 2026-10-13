@@ -24,6 +24,7 @@ import type {
 // server does not have.
 
 const enc = encodeURIComponent
+export const getVersion = () => call('GET /version')
 
 export const getLoginPolicy = () => call('GET /admin/settings/login-policy')
 export const saveLoginPolicy = (body: BodyOf<'PUT /admin/settings/login-policy'>) => call('PUT /admin/settings/login-policy', { body })
