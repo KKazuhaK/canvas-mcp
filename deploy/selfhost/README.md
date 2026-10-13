@@ -282,7 +282,7 @@ Fill in versions, date, tester and a secret-free evidence reference during stagi
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | claude.ai web | - | - | - | - | Not tested | - | Requires deployed HTTPS and live consent/refresh |
 | Claude Desktop | - | - | - | - | Not tested | - | Record platform and build |
-| Claude Code | - | - | - | - | Not tested | - | Record version and transport |
+| Claude Code | 2.1.285, Windows, HTTP | beta.8 reported; runtime labels pending | 2026-10-12 | Owner/local client check | Partial | [Live checkpoint](V1-PROGRESS.md#deployable-staging-image) | MCP OAuth authenticated and connection established; actual Canvas tool call and refresh pending. Model-account session expired during the tool-call attempt. |
 | Claude mobile | - | - | - | - | Not tested | - | Support is not claimed |
 
 ### Staging acceptance

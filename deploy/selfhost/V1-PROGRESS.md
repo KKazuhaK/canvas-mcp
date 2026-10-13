@@ -121,13 +121,28 @@ linux/amd64 and linux/arm64 index/config labels confirm the source and version.
 - Stable latest remains
   `sha256:9eeeaea8365ecad39ea02704b867f2dfae03521c229938ce78e8937fcbf1cdfb`.
 
-The owner reports successful Entra tenant-member login on staging. B2B guests,
-exact client/version/image evidence, real Claude connectivity and consecutive-day
-refresh still require live acceptance. October 12 public probes returned 200 for
-/healthz and /api/v1/providers, with Entra and local login offered, but nginx HTML
-404 for both OAuth discovery paths under /.well-known/. Those paths must reach
-the application before client acceptance. No real-client compatibility row is
-marked passed. Later documentation checkpoints do not change the release source.
+The owner reports successful Entra tenant-member login and updating staging to
+beta.8. After the owner's aaPanel proxy adjustment, October 12 live probes
+confirmed 200 JSON at both OAuth discovery paths. Authorization metadata, MCP
+resource and the unauthenticated POST /mcp 401 challenge agree on the HTTPS
+origin and Canvas.Access scope. Health, provider discovery and the account UI
+also return 200; Entra and local sign-in are offered.
+
+Real Windows Claude Code 2.1.285 completed browser OAuth sign-in. Its
+`claude mcp login` reported authenticated, and `claude mcp get` reported
+Connected over HTTP. The connection is restricted to a temporary local project,
+not the user's global MCP list. Actual get_my_profile execution is still
+unverified: the attempted model request stopped with authentication_failed
+because Claude Code's own model-account OAuth session had expired. This is
+separate from the successful MCP OAuth ceremony. No Canvas write was attempted.
+The tested-client row is Partial, not a compatibility claim.
+
+Deployment revision/version labels and the on-server operator check await
+owner output. B2B guests, other real Claude surfaces, actual Canvas tool results,
+revocation and consecutive-day refresh still require live acceptance. No
+real-client compatibility row is marked Passed. Later documentation checkpoints
+do not change the release source. Complete follow-up CI at 6f19941 and the
+documentation checkpoint at 9b4e20d both passed; the beta.8 image is unchanged.
 
 ## Historical beta.7 staging image
 
