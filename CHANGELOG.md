@@ -206,6 +206,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Selfhost configuration snapshots recognize and validate the structured account
+  login policy instead of warning that it is an unknown setting. Malformed
+  policies fail closed; newer unknown keys remain ignored without logging their
+  names or values. Connected-app text now describes revocation at the next MCP
+  request rather than the removed 30-second cache delay.
+
 - **Per-caller isolation of process-global caches.** The course-code cache, course
   policy cache, anonymization map and discussion routing hints are now keyed by the
   caller (a keyed hash of the `X-Canvas-Token` in legacy HTTP mode, `local` on stdio),

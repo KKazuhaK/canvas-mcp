@@ -280,9 +280,9 @@ Fill in versions, date, tester and a secret-free evidence reference during stagi
 
 | Client/surface | Client version | Server version/image digest | Date | Tester | Result | Evidence | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| claude.ai web | - | - | - | - | Not tested | - | Requires deployed HTTPS and live consent/refresh |
+| claude.ai web | Web; build not exposed | 1.14.0-beta.8, revision 85ffeca7 (operator output) | 2026-10-12 | Owner/live web check | Partial | [Live checkpoint](V1-PROGRESS.md#deployable-staging-image) | Real CIMD/OAuth, 48 read-only tools, missing-token refusal and successful get_my_profile after enrollment. Consecutive-day refresh and broader acceptance pending. |
 | Claude Desktop | - | - | - | - | Not tested | - | Record platform and build |
-| Claude Code | 2.1.285, Windows, HTTP | beta.8 reported; runtime labels pending | 2026-10-12 | Owner/local client check | Partial | [Live checkpoint](V1-PROGRESS.md#deployable-staging-image) | MCP OAuth authenticated and connection established; actual Canvas tool call and refresh pending. Model-account session expired during the tool-call attempt. |
+| Claude Code | 2.1.285, Windows, HTTP | 1.14.0-beta.8, revision 85ffeca7 (operator output) | 2026-10-12 | Owner/local client check | Partial | [Live checkpoint](V1-PROGRESS.md#deployable-staging-image) | OAuth/connection and next-request grant revocation observed. Actual Canvas tool call/refresh pending; model-account session expired. Temporary test configuration removed. |
 | Claude mobile | - | - | - | - | Not tested | - | Support is not claimed |
 
 ### Staging acceptance

@@ -137,12 +137,38 @@ because Claude Code's own model-account OAuth session had expired. This is
 separate from the successful MCP OAuth ceremony. No Canvas write was attempted.
 The tested-client row is Partial, not a compatibility claim.
 
-Deployment revision/version labels and the on-server operator check await
-owner output. B2B guests, other real Claude surfaces, actual Canvas tool results,
-revocation and consecutive-day refresh still require live acceptance. No
-real-client compatibility row is marked Passed. Later documentation checkpoints
-do not change the release source. Complete follow-up CI at 6f19941 and the
-documentation checkpoint at 9b4e20d both passed; the beta.8 image is unchanged.
+On October 12 the owner supplied successful on-server inspect/check output:
+revision 85ffeca785885efdfce83121c5004ef22df6c858, version 1.14.0-beta.8,
+two active accounts, one observed owner, Entra/local providers, settings revision
+8, and one connected app before the web-client test. Zero credentials/school
+bindings at that point were expected fresh enrollment state, not data loss.
+The check also reported an unknown-setting warning; a local regression identifies
+that ConfigSnapshots treated the known login.account_policy row as unknown.
+The follow-up validates that structured policy, rejects malformed values and
+preserves redacted warnings for genuinely newer keys; no schema/data rewrite.
+
+The owner then approved adding the claude.ai web connector and personally
+completed consent. Claude's cloud discovery selected its published CIMD identity,
+and the connected client exposed 48 read-only tools. A real get_my_profile call
+without enrollment returned the expected missing-Canvas-token error. After the
+owner saved a school/token and acknowledged custody, the live account UI confirmed
+enrollment and a second real get_my_profile call succeeded. No Canvas write was
+made; the chat response withheld personal profile fields. Web app build is not
+exposed, so record surface/date rather than inventing a version.
+
+The temporary Claude Code grant was then revoked through the account panel.
+Its first subsequent CLI connection check changed from Connected to Needs
+authentication; the panel retained the claude.ai grant. Its local test-project
+MCP entry was removed afterward. Revocation UI wording in this follow-up uses
+the next-request contract rather than the obsolete 30-second cache language.
+
+Both real-client rows remain Partial: these results establish web consent/CIMD,
+tool discovery, missing-credential refusal, successful Canvas reading and Code
+grant revocation, but not the remaining B2B, other Claude surfaces, account
+disable/key rotation/proxy failure and consecutive-day refresh gates. No full
+compatibility claim is made. Later checkpoints do not change the beta.8 source.
+Complete follow-up CI at 6f19941 and the documentation checkpoint at 9b4e20d
+both passed; the beta.8 image is unchanged.
 
 ## Historical beta.7 staging image
 
