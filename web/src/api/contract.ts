@@ -7,6 +7,9 @@ import type {
   PageQuery,
   AdminAccountsResponse,
   AdminSettingsResponse,
+  MailSettingsResponse,
+  MailConfig,
+  NotificationPreferences,
   FeaturedSchoolsRequest,
   SchoolCheckResponse,
   AdminActionResponse,
@@ -55,6 +58,11 @@ export interface Contract {
   'POST /setup': { body: SetupRequest; response: { redirect_to: string } }
   'GET /admin/login-providers': { response: LoginProviderSettings }
   'PUT /admin/login-providers/{id}': { body: LoginProviderSave; response: LoginProviderSettings }
+  'GET /notifications': { response: NotificationPreferences }
+  'PUT /notifications': { body: Pick<NotificationPreferences, 'enabled' | 'email' | 'locale'>; response: NotificationPreferences }
+  'POST /admin/settings/mail/test': { response: { reachable: boolean } }
+  'GET /admin/settings/mail': { response: MailSettingsResponse }
+  'PUT /admin/settings/mail': { body: { revision: number; config: MailConfig; password: string | null }; response: MailSettingsResponse }
   'GET /admin/settings': { response: AdminSettingsResponse }
   'PUT /admin/settings/site': { body: { revision: number; public_base_url: string; confirm: boolean }; response: SiteAddressResponse }
   'GET /admin/settings/login-policy': { response: { revision: number; policy: Record<string, boolean> } }
@@ -65,6 +73,7 @@ export interface Contract {
   'PUT /admin/settings/sign-in-methods': { body: { revision: number; names: Record<string, string | null> }; response: AdminSettingsResponse }
   'PUT /admin/settings/schools': { body: FeaturedSchoolsRequest; response: AdminSettingsResponse }
   'POST /admin/settings/schools/check': { body: { host: string }; response: SchoolCheckResponse }
+  'PUT /admin/settings/browser-session': { body: { revision: number; ttl_seconds: number }; response: AdminSettingsResponse }
   'PUT /admin/settings/directory-search': { body: { revision: number; enabled: boolean }; response: AdminSettingsResponse }
 
   'GET /providers': { response: ProvidersResponse }

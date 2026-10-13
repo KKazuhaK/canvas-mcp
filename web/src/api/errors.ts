@@ -34,6 +34,7 @@ const CODE_SET: Record<ApiErrorCode, true> = {
   rate_limited: true,
   token_store_unavailable: true,
   internal_error: true,
+  mail_unavailable: true,
   token_invalid_format: true,
   token_rejected: true,
   token_unreadable: true,

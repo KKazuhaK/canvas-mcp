@@ -1013,3 +1013,25 @@ and the first v1 tag remain outstanding.
   5 backend/network skips. Docs/English/closing/migration/SQL compilation:
   120 passed. Ruff, changed-source formatting and Linux-target mypy for all
   150 source files passed. A new complete exact-head matrix is required.
+
+
+### Account sessions and expiry reminders — implementation pending publication
+
+- Browser duration is SQL-owned, defaults to 7 days, and keeps sensitive-operation
+  reauthentication separate. Expiry redirects handle the production basename and
+  reject duplicated-basename return targets, including old links.
+- Token verification reads supported Canvas metadata; account-home notices link
+  directly to replacement. Existing active tokens can explicitly re-check expiry
+  without replacing their PAT or revoking their connected apps.
+- SQL-owned SMTP settings and opt-in recipient preferences use independent hourly
+  work, durable claims, bounded retries and redacted failures. SMTP secrets join
+  the existing verified rotation registry. All adoption/upgrade code is isolated
+  under migrations; floor 3 prevents older key tooling from handling this database.
+- The final complete local suite passed 8,204 tests with 74 skips; the account UI
+  passed all 498 tests. Ruff, Linux-target mypy, UI lint/typecheck, production build
+  and distribution checks passed. Exact-head PostgreSQL, locked-dependency and
+  native Docker CI remain required before publication; deployed beta.8 is unchanged.
+- On October 12, the original claude.ai connection made another successful, read-only
+  `get_my_profile` call more than one hour after its first successful call, without
+  interactive reauthentication or Canvas writes. This is an elapsed-time observation;
+  refresh HTTP traffic was not captured. Consecutive-day validation is still pending.

@@ -38,6 +38,8 @@ describe('sanitizeReturnTo', () => {
     ['double-encoded slash', '/account/%252F%252Fevil.example'],
     ['bad percent encoding', '/account/%zz'],
     ['relative', 'account/token'],
+    ['duplicated app basename', '/account/account/'],
+    ['encoded duplicated app basename', '/account/%61ccount/token'],
     ['outside the app', '/'],
     ['outside the app (other path)', '/admin'],
     ['look-alike prefix', '/account-evil/token'],
@@ -74,6 +76,17 @@ describe('safeHttpsUrl', () => {
 })
 
 describe('loginPathFor', () => {
+  it('does not duplicate the basename from a data-router location after expiry', () => {
+    expect(loginPathFor('/account/activity?limit=20')).toBe('/sign-in?return_to=%2Faccount%2Factivity%3Flimit%3D20')
+    expect(loginPathFor('/account/admin/settings')).toBe('/sign-in?return_to=%2Faccount%2Fadmin%2Fsettings')
+    expect(loginPathFor('/account')).toBe('/sign-in')
+    expect(loginPathFor('/account/')).toBe('/sign-in')
+  })
+
+  it('does not nest sign-in return paths when a stale request fails on sign-in', () => {
+    expect(loginPathFor('/account/sign-in?return_to=%2Faccount%2Factivity')).toBe('/sign-in')
+  })
+
   it('keeps the current page as a validated return_to on the app sign-in page', () => {
     expect(loginPathFor('/token')).toBe('/sign-in?return_to=%2Faccount%2Ftoken')
     expect(loginPathFor('/admin?x=1')).toBe('/sign-in?return_to=%2Faccount%2Fadmin%3Fx%3D1')

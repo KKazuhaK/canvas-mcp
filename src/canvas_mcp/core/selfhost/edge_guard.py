@@ -27,9 +27,11 @@ with a body as a full request).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Any
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -76,8 +78,10 @@ class SelfhostEdgeGuard:
         maintenance: Maintenance | None = None,
         maintenance_interval: float = MAINTENANCE_INTERVAL_SECONDS,
         rate_limiters: RateLimiters | None = None,
+        reminders: Any = None,
     ) -> None:
         self.app = app
+        self.reminders = reminders
         self._clock = clock
         make = (rate_limiters or build_rate_limiters("memory")).token_bucket
         per_second = PUBLIC_REQUESTS_PER_MINUTE / 60.0
@@ -121,6 +125,9 @@ class SelfhostEdgeGuard:
 
     async def _dispatch(self, scope: Scope, receive: Receive, send: Send) -> None:
         scope_type = scope["type"]
+        if scope_type == "lifespan" and self.reminders is not None:
+            await self._lifespan(scope, receive, send)
+            return
         if scope_type not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
@@ -165,6 +172,30 @@ class SelfhostEdgeGuard:
                 await self._capped_oauth_form(scope, receive, send)
                 return
         await self.app(scope, receive, send)
+
+    async def _lifespan(self, scope: Scope, receive: Receive, send: Send) -> None:
+        task: asyncio.Task[None] | None = None
+
+        async def lifecycle_send(message: Message) -> None:
+            nonlocal task
+            if message["type"] == "lifespan.startup.complete":
+                try:
+                    enabled = await self.reminders.enabled()
+                except Exception:  # noqa: BLE001 - unavailable mail must not prevent startup
+                    from ..logging import log_warning
+
+                    log_warning("Canvas expiry reminder startup check failed")
+                    enabled = False
+                task = asyncio.create_task(self.reminders.loop(immediately=enabled))
+            await send(message)
+
+        try:
+            await self.app(scope, receive, lifecycle_send)
+        finally:
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
 
     async def _capped_oauth_form(
         self, scope: Scope, receive: Receive, send: Send

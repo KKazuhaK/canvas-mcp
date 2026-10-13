@@ -193,7 +193,10 @@
       "account_sso_locked": "锁定首次 SSO 登录方式",
       "account_sso_unlocked": "解除 SSO 锁定",
       "account_login_policy_changed": "修改账户登录策略",
-      "login_policy_changed": "修改站点登录策略"
+      "login_policy_changed": "修改站点登录策略",
+      "mail_settings_saved": "修改邮件配置",
+      "notification_preferences_saved": "修改邮件提醒偏好",
+      "token_expiry_checked": "验证令牌并检查到期日期"
     },
     "operator": "服务器运维",
     "system": "系统",
@@ -362,5 +365,37 @@
     "allow": "允许",
     "forbid": "禁止",
     "restrict": "仅允许此账户使用选定的登录方式"
+  },
+  "browserSession": {
+    "title": "网页登录有效期",
+    "help": "默认 7 天。缩短有效期也会限制已有登录会话。敏感管理员操作仍要求最近 10 分钟内重新登录。",
+    "minutes": "有效期（分钟，1–43200）",
+    "save": "保存登录有效期",
+    "saved": "已保存。延长有效期后，重新登录即可生效。",
+    "presets": {
+      "15": "15 分钟",
+      "60": "1 小时",
+      "1440": "1 天",
+      "10080": "7 天",
+      "43200": "30 天"
+    }
+  },
+  "mail": {
+    "title": "令牌到期邮件提醒",
+    "help": "SMTP 配置保存在数据库。用户可选择是否接收提醒及收件地址。服务在启动时和每小时检查一次。",
+    "enabled": "启用提醒邮件",
+    "host": "SMTP 主机",
+    "port": "SMTP 端口",
+    "security": "连接安全方式",
+    "username": "SMTP 用户名",
+    "from_email": "发件邮箱",
+    "password": "SMTP 密码",
+    "secretSaved": "已保存密码。留空可保留原密码。",
+    "secretEmpty": "邮件中继无需认证时可留空。",
+    "days": "提前提醒天数（1–90）",
+    "save": "保存邮件配置",
+    "saved": "邮件配置已保存。",
+    "test": "测试已保存的 SMTP 连接",
+    "testSuccess": "SMTP 连接及认证成功。此测试未发送邮件。"
   }
 }

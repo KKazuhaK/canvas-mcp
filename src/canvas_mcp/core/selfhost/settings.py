@@ -54,7 +54,7 @@ DEFAULT_REDIRECT_URIS: tuple[str, ...] = (
     "http://localhost/callback",
     "http://127.0.0.1/callback",
 )
-DEFAULT_SESSION_TTL_SECONDS = 900
+DEFAULT_SESSION_TTL_SECONDS = 7 * 86400
 DEFAULT_DATA_DIR = "/data"
 
 AUTO_MIGRATE_ENV = "DATABASE_AUTO_MIGRATE"
@@ -96,7 +96,7 @@ _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 MIN_SESSION_SECRET_BYTES = 32
 MIN_SESSION_TTL_SECONDS = 60
-MAX_SESSION_TTL_SECONDS = 3600
+MAX_SESSION_TTL_SECONDS = 30 * 86400
 
 
 class SelfhostConfigError(Exception):

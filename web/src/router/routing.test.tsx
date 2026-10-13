@@ -276,6 +276,25 @@ describe('sign out and session loss', () => {
     expect(hardNavigate).not.toHaveBeenCalled()
   })
 
+  it('recovers an expired session with the production basename and no nested return path', async () => {
+    let meCalls = 0
+    const { router } = await renderApp('/account/activity', 'enrolled', () => {
+      scriptAdapter((r) => {
+        if (r.url === '/me') {
+          meCalls += 1
+          return meCalls === 1
+            ? { status: 200, data: meFixture() }
+            : { status: 401, data: errorBody('not_authenticated') }
+        }
+        return { status: 401, data: errorBody('not_authenticated') }
+      })
+    }, '/account')
+    await waitFor(() => expect(router.state.location.pathname).toBe('/account/sign-in'))
+    expect(new URLSearchParams(router.state.location.search).get('return_to')).toBe('/account/activity')
+    expect(await screen.findByRole('heading', { name: 'Canvas MCP' })).toBeInTheDocument()
+    expect(screen.queryByText('Page not found')).toBeNull()
+  })
+
   it('a pending screen can sign out too', async () => {
     const user = userEvent.setup()
     await renderApp('/', 'pending')

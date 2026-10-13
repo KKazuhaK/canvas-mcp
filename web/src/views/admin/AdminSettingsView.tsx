@@ -1,4 +1,6 @@
 import Alert from '@mui/material/Alert'
+import BrowserSessionSettings from '@/components/admin/BrowserSessionSettings'
+import MailSettingsPanel from '@/components/admin/MailSettingsPanel'
 import LoginPolicySettings from '@/components/admin/LoginPolicySettings'
 import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
@@ -61,6 +63,8 @@ function Editor({ data, reload }: { data: AdminSettingsResponse; reload: () => v
   }
   return <Stack spacing={3}>
     <SiteAddressSettings data={data} />
+    <BrowserSessionSettings data={data} />
+    <MailSettingsPanel />
     <LoginPolicySettings />
     {data.schools.warnings.includes('no_schools_offered') && <Alert severity="warning">{t('admin:settings.noSchools')}</Alert>}
     {save.isError && <ErrorNotice error={save.error} />}

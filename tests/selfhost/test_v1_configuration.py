@@ -84,7 +84,9 @@ def test_known_login_policy_is_validated_without_unknown_setting_warning(
         )
     if malformed:
         with pytest.raises(StoreUnavailable):
-            ConfigSnapshots(snapshots.database, snapshots.providers, resolve_host=public)
+            ConfigSnapshots(
+                snapshots.database, snapshots.providers, resolve_host=public
+            )
         assert "private-invalid-value" not in caplog.text
     else:
         current = ConfigSnapshots(
@@ -367,8 +369,16 @@ def test_session_uses_one_authoritative_query_and_leaves_no_context(stack, brows
     assert response.status_code == 200
     assert response.json()["selected"] is None
     assert sum("FROM accounts a CROSS JOIN server_state" in sql for sql in seen) == 1
-    assert len(seen) == 3  # provider generation + session snapshot + primary credential display
-    assert sum("FROM accounts" in statement and "session_epoch" in statement for statement in seen) == 1
+    assert (
+        len(seen) == 3
+    )  # provider generation + session snapshot + primary credential display
+    assert (
+        sum(
+            "FROM accounts" in statement and "session_epoch" in statement
+            for statement in seen
+        )
+        == 1
+    )
     assert CURRENT_CONFIG.get() is None
 
 
@@ -779,3 +789,73 @@ def test_pilot_cli_refuses_enabling_search_reset_and_second_school(
         assert token_admin.main(arguments) == token_admin.EXIT_CONFIG
         assert snapshots.revision() == revision
         assert "SELFHOST_PROFILE" in capsys.readouterr().err
+
+
+def test_browser_duration_is_database_owned_and_keeps_admin_reauthentication(
+    stack, browser
+):
+    browser.sign_in(OWNER)
+    csrf = browser.csrf_token()
+    before = browser.api("GET", "/admin/settings").json()
+    assert before["browser_session"]["ttl_seconds"] == 7 * 86400
+    response = browser.api(
+        "PUT",
+        "/admin/settings/browser-session",
+        body={
+            "revision": before["revision"],
+            "ttl_seconds": 7 * 86400,
+        },
+        csrf=csrf,
+    )
+    assert response.status_code == 200, response.text
+    browser.sign_in(OWNER)
+    stack.clock.advance(901)
+    assert browser.api("GET", "/me").status_code == 200
+    assert (
+        browser.api("GET", "/admin/settings").json()["error"]["code"]
+        == "reauth_required"
+    )
+
+
+def test_browser_duration_shortening_from_another_worker_expires_next_request(
+    stack, browser
+):
+    browser.sign_in(ALICE)
+    snapshots = ConfigSnapshots(stack.store.database, None, resolve_host=public)
+    ConfigStore(snapshots).setting(
+        "auth.browser_session_ttl_seconds",
+        60,
+        revision=snapshots.revision(),
+        actor=None,
+        now=int(stack.clock()),
+    )
+    stack.clock.advance(61)
+    assert browser.api("GET", "/me").status_code == 401
+
+
+@pytest.mark.parametrize("value", [True, 59, 2592001, "604800", None])
+def test_browser_duration_refuses_invalid_values_without_changing_revision(
+    stack, browser, value
+):
+    browser.sign_in(OWNER)
+    before = browser.api("GET", "/admin/settings").json()["revision"]
+    response = browser.api(
+        "PUT",
+        "/admin/settings/browser-session",
+        body={
+            "revision": before,
+            "ttl_seconds": value,
+        },
+        csrf=browser.csrf_token(),
+    )
+    assert response.status_code == 422
+    assert stack.runtime.snapshots.revision() == before
+
+
+def test_seven_day_session_cookie_and_expiry_boundary(stack, browser):
+    response = browser.sign_in(ALICE)
+    assert "Max-Age=604800" in response.headers["set-cookie"]
+    stack.clock.advance(7 * 86400 - 2)
+    assert browser.api("GET", "/me").status_code == 200
+    stack.clock.advance(3)
+    assert browser.api("GET", "/me").status_code == 401

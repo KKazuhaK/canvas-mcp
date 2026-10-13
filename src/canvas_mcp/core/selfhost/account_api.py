@@ -121,6 +121,7 @@ ERROR_STATUS: Mapping[str, int] = {
     "rate_limited": 429,
     "token_store_unavailable": 503,
     "internal_error": 500,
+    "mail_unavailable": 503,
     # Canvas token
     "token_invalid_format": 422,
     "token_rejected": 422,
@@ -384,6 +385,13 @@ class ApiApp:
     def __init__(self, app: web.AccountCore) -> None:
         self.app = app
         self.config_store = ConfigStore(app.snapshots)
+        from .mail import MailStore
+
+        self.mail = (
+            MailStore(app.store.database, app.provider_store.keys)
+            if app.provider_store
+            else None
+        )
 
     # -- routing ------------------------------------------------------------
 
@@ -530,6 +538,47 @@ class ApiApp:
                 {
                     "POST": e(
                         self.check_school,
+                        access="owner",
+                        mutating=True,
+                        body="json",
+                        max_body=8192,
+                    )
+                },
+            ),
+            (
+                f"{API_PREFIX}/notifications",
+                {
+                    "GET": e(self.notification_preferences),
+                    "PUT": e(
+                        self.save_notifications,
+                        mutating=True,
+                        body="json",
+                        max_body=4096,
+                    ),
+                },
+            ),
+            (
+                f"{API_PREFIX}/admin/settings/mail",
+                {
+                    "GET": e(self.mail_settings, access="owner"),
+                    "PUT": e(
+                        self.save_mail_settings,
+                        access="owner",
+                        mutating=True,
+                        body="json",
+                        max_body=8192,
+                    ),
+                },
+            ),
+            (
+                f"{API_PREFIX}/admin/settings/mail/test",
+                {"POST": e(self.test_mail_settings, access="owner", mutating=True)},
+            ),
+            (
+                f"{API_PREFIX}/admin/settings/browser-session",
+                {
+                    "PUT": e(
+                        self.save_browser_session,
                         access="owner",
                         mutating=True,
                         body="json",
@@ -932,6 +981,8 @@ class ApiApp:
                 "recheck_allowed": False,
                 "expires_on": None,
                 "expiry_notice": "none",
+                "expiry_source": "unknown",
+                "expires_at": None,
                 "settings_url": None,
                 "enrolled_at": None,
                 "updated_at": None,
@@ -940,12 +991,28 @@ class ApiApp:
             }
         invalid = info.status == STATUS_INVALID
         reason = info.invalid_reason if info.invalid_reason in INVALID_REASONS else None
-        hint = info.expires_hint_at
+        hint = (
+            info.access_expires_at
+            if info.expiry_source == "canvas"
+            else info.expires_hint_at
+        )
         notice = "none"
         if not invalid and hint is not None:
             now = self.app.clock()
-            if hint - now <= web._EXPIRY_REMINDER_DAYS * 86400:
-                notice = "soon" if now < hint + 86400 else "passed"
+            if (
+                hint - now
+                <= int(
+                    (CURRENT_CONFIG.get() or self.app.snapshots.current).settings[
+                        "notifications.token_reminder_days"
+                    ]
+                )
+                * 86400
+            ):
+                notice = (
+                    "soon"
+                    if now < hint + (0 if info.expiry_source == "canvas" else 86400)
+                    else "passed"
+                )
         return {
             "custody": custody_status,
             "state": "invalid" if invalid else "active",
@@ -954,10 +1021,16 @@ class ApiApp:
             "school": self._school_of(info.canvas_host),
             "invalid_reason": reason if invalid else None,
             "invalid_since": _ts(info.invalid_since) if invalid else None,
-            "recheck_allowed": invalid
-            and info.invalid_reason != REASON_REVOKED_BY_ADMIN,
+            "recheck_allowed": not invalid
+            or info.invalid_reason != REASON_REVOKED_BY_ADMIN,
             "expires_on": web._fmt_utc_date(hint) if hint is not None else None,
             "expiry_notice": notice,
+            "expiry_source": info.expiry_source
+            if info.expiry_source == "canvas" or hint is not None
+            else "unknown",
+            "expires_at": _ts(info.access_expires_at)
+            if info.expiry_source == "canvas"
+            else None,
             "settings_url": self.app.settings_url(info),
             "enrolled_at": _ts(info.created_at),
             "updated_at": _ts(info.updated_at),
@@ -1528,7 +1601,7 @@ class ApiApp:
         outcome = SignIn(
             status, ext, status.role == "owner" and status.role_source != "rules", False
         )
-        completed = self.app._complete_sign_in(
+        completed = await self.app._complete_sign_in(
             outcome,
             now=self.app.clock(),
             waiting=waiting,
@@ -1700,9 +1773,7 @@ class ApiApp:
                 now=int(self.app.clock()),
             )
         )
-        response = self._ok(
-            {"revision": revision + 1, "account_id": target}
-        )
+        response = self._ok({"revision": revision + 1, "account_id": target})
         if reauthenticate and target == session.acct:
             self.app.clear_cookie(response, web.SESSION_COOKIE)
         return response
@@ -1807,6 +1878,9 @@ class ApiApp:
                 ],
                 "warnings": list(snapshot.warnings),
             },
+            "browser_session": {
+                "ttl_seconds": snapshot.settings["auth.browser_session_ttl_seconds"],
+            },
             "retention": {
                 "auth_events_days": snapshot.settings["retention.auth_events_days"],
                 "audit_days": snapshot.settings["retention.audit_days"],
@@ -1872,6 +1946,90 @@ class ApiApp:
         await self._save_config(
             lambda: self.config_store.names(
                 body["names"],
+                revision=revision,
+                actor=actor,
+                now=int(self.app.clock()),
+            )
+        )
+        return self._ok(await self._settings_view())
+
+    async def notification_preferences(self, ctx: _Ctx) -> Response:
+        if self.mail is None:
+            raise _Fail("not_found")
+        assert ctx.session is not None
+        return self._ok(await run_store(self.mail.preferences, ctx.session.acct))
+
+    async def save_notifications(self, ctx: _Ctx) -> Response:
+        if self.mail is None:
+            raise _Fail("not_found")
+        assert ctx.session is not None
+        body = ctx.body or {}
+        _closed(body, required=("enabled", "email", "locale"))
+        mail, session = self.mail, ctx.session
+        try:
+            await run_store(
+                lambda: mail.save_preferences(
+                    session.acct,
+                    enabled=body["enabled"],
+                    email=body["email"],
+                    locale=body["locale"],
+                    epoch=session.ep,
+                    now=int(self.app.clock()),
+                )
+            )
+        except ValueError:
+            raise _invalid("notifications") from None
+        except SettingsAccessDenied:
+            raise _Fail("forbidden") from None
+        return await self.notification_preferences(ctx)
+
+    async def mail_settings(self, ctx: _Ctx) -> Response:
+        if self.mail is None:
+            raise _Fail("not_found")
+        return self._ok(await run_store(self.mail.public))
+
+    async def test_mail_settings(self, ctx: _Ctx) -> Response:
+        import anyio
+
+        from .mail import probe_smtp
+
+        if self.mail is None:
+            raise _Fail("not_found")
+        assert ctx.session is not None
+        if not self.app.recheck_limiter.allow(("smtp", ctx.session.acct)):
+            raise _Fail("rate_limited", {"retry_after_s": 60})
+        try:
+            settings = await run_store(self.mail.load)
+            await anyio.to_thread.run_sync(lambda: probe_smtp(settings))
+        except Exception:  # noqa: BLE001 - never return SMTP exceptions or secrets
+            raise _Fail("mail_unavailable") from None
+        return self._ok({"reachable": True})
+
+    async def save_mail_settings(self, ctx: _Ctx) -> Response:
+        if self.mail is None:
+            raise _Fail("not_found")
+        body, revision = self._settings_body(ctx, {"revision", "config", "password"})
+        assert ctx.session is not None
+        mail, actor = self.mail, ctx.session.acct
+        await self._save_config(
+            lambda: mail.save(
+                body["config"],
+                password=body["password"],
+                revision=revision,
+                actor=actor,
+                now=int(self.app.clock()),
+            )
+        )
+        return await self.mail_settings(ctx)
+
+    async def save_browser_session(self, ctx: _Ctx) -> Response:
+        body, revision = self._settings_body(ctx, {"revision", "ttl_seconds"})
+        assert ctx.session is not None
+        actor = ctx.session.acct
+        await self._save_config(
+            lambda: self.config_store.setting(
+                "auth.browser_session_ttl_seconds",
+                body["ttl_seconds"],
                 revision=revision,
                 actor=actor,
                 now=int(self.app.clock()),

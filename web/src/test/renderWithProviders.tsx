@@ -61,13 +61,14 @@ export async function renderApp(
   path: string,
   scenario: MockScenario = 'enrolled',
   beforeRender?: () => void,
+  basename?: string,
 ): Promise<RenderedApp> {
   await setupI18n('en')
   clearCsrfToken()
   installMockServer(http, { scenario, latency: [0, 0] })
   beforeRender?.()
   const client = makeTestQueryClient()
-  const router = createTestRouter([path])
+  const router = createTestRouter([path], basename)
   wireSession(client, router)
   render(
     <ThemeProvider theme={buildTheme('light')}>

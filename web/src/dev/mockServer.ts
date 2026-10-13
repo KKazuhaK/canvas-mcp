@@ -26,6 +26,8 @@ import { splitRoute } from '@/api/contract'
 import type {
   AdminAccount,
   AdminSettingsResponse,
+  MailSettingsResponse,
+  NotificationPreferences,
   LoginProviderConfiguration,
   AdminAction,
   AdminActionResponse,
@@ -146,7 +148,7 @@ function activeCanvas(): CanvasTokenStatus {
     school: SCHOOL,
     invalid_reason: null,
     invalid_since: null,
-    recheck_allowed: false,
+    recheck_allowed: true,
     expires_on: inDays(60),
     expiry_notice: 'none',
     settings_url: `https://${SCHOOL.host}/profile/settings`,
@@ -202,6 +204,8 @@ interface MockState {
   tools: MockTool[]
   hasCatalog: boolean
   settings: AdminSettingsResponse
+  mail: MailSettingsResponse
+  notifications: NotificationPreferences
   setupInitialized: boolean
   providerConfigurations: LoginProviderConfiguration[]
   schools: SchoolsResponse
@@ -471,12 +475,15 @@ function buildState(scenario: MockScenario): MockState {
     tools,
     hasCatalog: scenario !== 'no-write-tools',
     schools,
+    notifications: { enabled: false, email: '', locale: 'en', mail_available: false, reminder_days: 7 },
+    mail: { revision: 1, config: { enabled: false, host: '', port: 587, security: 'starttls', username: '', from_email: '', reminder_days: 7 }, secret_present: false },
     settings: {
       local_admin: { ready: false },
       site: { public_base_url: 'https://canvas.example.test', active_base_url: 'https://canvas.example.test', restart_required: false },
       revision: 1,
       sign_in_methods: (multi ? MULTI_PROVIDERS : [MULTI_PROVIDERS[0]]).map((p) => ({ id: p.id, protocol: p.id.startsWith('oidc:') ? 'oidc' : p.id, icon: p.icon, configured: true, default_name: p.name, display_name: null, effective_name: p.name })),
       schools: { directory_search: picker, featured: !picker ? [{ host: SCHOOL.host, display_name: SCHOOL.name, rank: 1, enrollments: 1, allow_private: false }] : [], warnings: [] },
+      browser_session: { ttl_seconds: 604800 },
       retention: { auth_events_days: 90, audit_days: 0 },
     },
     history: [
@@ -831,6 +838,32 @@ route('PUT /admin/settings/sign-in-methods', 'owner', (c, s) => {
   s.settings.revision++
   return ok(s.settings)
 })
+route('GET /notifications', 'active', (_, s) => ok({ ...s.notifications, mail_available: s.mail.config.enabled, reminder_days: s.mail.config.reminder_days }))
+route('PUT /notifications', 'active', (c, s) => {
+  if (typeof c.body.enabled !== 'boolean' || typeof c.body.email !== 'string' || !['en', 'zh'].includes(c.body.locale as string) || (c.body.enabled && !/^[^\s@]+@[^\s@]+$/.test(c.body.email))) return fail('validation_failed')
+  s.notifications = { ...s.notifications, enabled: c.body.enabled, email: c.body.email, locale: c.body.locale as 'en' | 'zh' }
+  return ok({ ...s.notifications, mail_available: s.mail.config.enabled, reminder_days: s.mail.config.reminder_days })
+})
+route('POST /admin/settings/mail/test', 'owner', (_, s) => s.mail.config.enabled ? ok({ reachable: true }) : fail('mail_unavailable'))
+route('GET /admin/settings/mail', 'owner', (_, s) => ok({ ...s.mail, revision: s.settings.revision }))
+route('PUT /admin/settings/mail', 'owner', (c, s) => {
+  const conflict = settingsConflict(c, s)
+  if (conflict) return conflict
+  const value = c.body.config as MailSettingsResponse['config'] | undefined
+  if (!value || typeof value.enabled !== 'boolean' || !Number.isInteger(value.port) || value.port < 1 || value.port > 65535 || !['tls', 'starttls'].includes(value.security) || !Number.isInteger(value.reminder_days) || value.reminder_days < 1 || value.reminder_days > 90 || (value.enabled && (!value.host || !/^[^\s@]+@[^\s@]+$/.test(value.from_email)))) return fail('validation_failed')
+  s.settings.revision++
+  s.mail = { revision: s.settings.revision, config: value, secret_present: c.body.password === null ? s.mail.secret_present : Boolean(c.body.password) }
+  return ok(s.mail)
+})
+route('PUT /admin/settings/browser-session', 'owner', (c, s) => {
+  const conflict = settingsConflict(c, s)
+  if (conflict) return conflict
+  const ttl = c.body.ttl_seconds
+  if (typeof ttl !== 'number' || !Number.isInteger(ttl) || ttl < 60 || ttl > 2592000) return fail('validation_failed')
+  s.settings.browser_session.ttl_seconds = ttl
+  s.settings.revision++
+  return ok(s.settings)
+})
 route('PUT /admin/settings/directory-search', 'owner', (c, s) => {
   const conflict = settingsConflict(c, s)
   if (conflict) return conflict
@@ -943,7 +976,7 @@ route('PUT /me/canvas-token', 'active', (c, s) => {
     school,
     invalid_reason: null,
     invalid_since: null,
-    recheck_allowed: false,
+    recheck_allowed: true,
     expires_on: typeof expires === 'string' && expires !== '' ? expires : null,
     expiry_notice: 'none',
     settings_url: `https://${school.host}/profile/settings`,
@@ -977,10 +1010,11 @@ route('POST /me/canvas-token/recheck', 'active', (_c, s) => {
   if (s.canvas.state === 'none') return fail('not_found')
   if (s.canvas.invalid_reason === 'revoked_by_admin') return fail('recheck_not_allowed')
   if (s.canvas.state === 'invalid') {
-    s.canvas = { ...s.canvas, state: 'active', invalid_reason: null, invalid_since: null, recheck_allowed: false, last_verified_at: ago(0) }
+    s.canvas = { ...s.canvas, state: 'active', invalid_reason: null, invalid_since: null, recheck_allowed: true, last_verified_at: ago(0) }
     syncSelf(s)
     return ok({ result: 'restored', canvas: s.canvas })
   }
+  s.canvas = { ...s.canvas, last_verified_at: ago(0) }
   return ok({ result: 'unchanged', canvas: s.canvas })
 })
 

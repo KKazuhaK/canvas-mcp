@@ -79,6 +79,27 @@ def populate_sealed(store, ring):
                 updated_at=NOW,
             )
         )
+    mail = next(value for value in SEALED if value.table is s.mail_settings)
+    kid, nonce, ciphertext = ring.encrypt(
+        b"smtp-secret", mail.aad({"id": "smtp", "key_id": ring.active_key_id})
+    )
+    from canvas_mcp.core.selfhost.mail import DEFAULTS
+
+    with store.database.write() as conn:
+        conn.execute(
+            insert(s.mail_settings).values(
+                id="smtp",
+                config={
+                    key: value
+                    for key, value in DEFAULTS.items()
+                    if key != "reminder_days"
+                },
+                key_id=kid,
+                nonce=nonce,
+                ciphertext=ciphertext,
+                updated_at=NOW,
+            )
+        )
     return account, info
 
 
@@ -102,7 +123,7 @@ def test_registry_covers_every_ciphertext_column_and_uses_one_layout():
         for column in table.c
         if column.name.endswith("ciphertext")
     }
-    assert actual == expected and len(actual) == 3
+    assert actual == expected and len(actual) == 4
     credential = next(entry for entry in SEALED if entry.table is s.canvas_credentials)
     assert credential.fields == ("account_id", "canvas_host", "kind", "key_id")
 
@@ -115,11 +136,14 @@ def test_rotation_covers_reserved_secrets_and_preserves_all_other_fields(sealed_
             for entry in SEALED
         }
     store._keyring = keyring("k2", both=True)
-    assert store.rotate() == 3 and store.rotate() == 0
+    assert store.rotate() == 4 and store.rotate() == 0
     assert store.get(account).api_token == "pat-secret"
+    from canvas_mcp.core.selfhost.mail import MailStore
+
+    assert MailStore(store.database, keyring("k2")).load().password == "smtp-secret"
     assert store.info(account).credential_generation == info.credential_generation
     with store.database.read() as conn:
-        assert verify(conn, keyring("k2"), all_values=True) == 3
+        assert verify(conn, keyring("k2"), all_values=True) == 4
         for entry in SEALED:
             row = dict(conn.execute(select(entry.table)).mappings().one())
             assert row[entry.key_id] == "k2"
@@ -129,7 +153,9 @@ def test_rotation_covers_reserved_secrets_and_preserves_all_other_fields(sealed_
             assert row == before[entry.table.name]
 
 
-@pytest.mark.parametrize("table", ["login_providers", "canvas_oauth_apps"])
+@pytest.mark.parametrize(
+    "table", ["login_providers", "canvas_oauth_apps", "mail_settings"]
+)
 @pytest.mark.parametrize("failure", ["missing", "wrong"])
 def test_startup_probes_reserved_secrets(sealed_store, table, failure):
     store, ring, _, _ = sealed_store

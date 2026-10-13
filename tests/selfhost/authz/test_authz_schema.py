@@ -62,9 +62,9 @@ class TestSchema:
         with token_store.database.read() as conn:
             assert migrate.compare_schema(conn) == []
             status = migrate.read_status(conn)
-        assert status.alembic_revision == "0004_onboarding_and_icons"
+        assert status.alembic_revision == "0006_token_email_reminders"
         assert status.state == migrate.STATE_CURRENT
-        assert status.compat_floor == 2 and status.database_id is not None
+        assert status.compat_floor == 3 and status.database_id is not None
         assert set(AUTHZ_TABLES) <= set(schema.metadata.tables)
 
     def test_a_pre_v1_marker_refuses_without_changing_account_rows(

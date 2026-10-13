@@ -193,7 +193,10 @@
       "account_sso_locked": "Locked first SSO method",
       "account_sso_unlocked": "Unlocked SSO method",
       "account_login_policy_changed": "Changed account sign-in policy",
-      "login_policy_changed": "Changed installation sign-in policy"
+      "login_policy_changed": "Changed installation sign-in policy",
+      "mail_settings_saved": "Changed mail settings",
+      "notification_preferences_saved": "Changed email reminder preferences",
+      "token_expiry_checked": "Verified token and checked expiry"
     },
     "operator": "Server operator",
     "system": "System",
@@ -362,5 +365,37 @@
     "allow": "Allow",
     "forbid": "Forbid",
     "restrict": "Restrict this account to selected sign-in methods"
+  },
+  "browserSession": {
+    "title": "Browser sign-in duration",
+    "help": "Default: 7 days. Changing to a shorter duration also limits existing sessions. Sensitive administrator actions still require a sign-in within the last 10 minutes.",
+    "minutes": "Duration (minutes, 1–43200)",
+    "save": "Save sign-in duration",
+    "saved": "Sign-in duration saved. Longer durations apply after signing in again.",
+    "presets": {
+      "15": "15 minutes",
+      "60": "1 hour",
+      "1440": "1 day",
+      "10080": "7 days",
+      "43200": "30 days"
+    }
+  },
+  "mail": {
+    "title": "Token expiry email reminders",
+    "help": "SMTP configuration is stored in the database. Users choose whether to receive reminders and their recipient address. Reminders are checked hourly and at startup.",
+    "enabled": "Enable reminder emails",
+    "host": "SMTP host",
+    "port": "SMTP port",
+    "security": "Connection security",
+    "username": "SMTP username",
+    "from_email": "Sender email",
+    "password": "SMTP password",
+    "secretSaved": "A password is saved. Leave blank to keep it.",
+    "secretEmpty": "Leave blank if your mail relay does not require authentication.",
+    "days": "Remind before expiry (days, 1–90)",
+    "save": "Save email settings",
+    "saved": "Email settings saved.",
+    "test": "Test saved SMTP connection",
+    "testSuccess": "SMTP connection and authentication succeeded. No email was sent."
   }
 }

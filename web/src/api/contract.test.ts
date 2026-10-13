@@ -14,12 +14,21 @@ const KEYS = [...contract.matchAll(/^\s*'((?:GET|POST|PUT|PATCH|DELETE) \/[^']*)
 
 describe('api/contract.ts', () => {
   it('lists the JSON routes and leaves external sign-in redirects to the server', () => {
-    expect(KEYS).toHaveLength(54)
+    expect(KEYS).toHaveLength(60)
     expect(new Set(KEYS).size).toBe(KEYS.length)
     for (const key of KEYS) {
       if (key.includes('/login/')) expect(key).toBe('POST /login/local')
     }
   })
+  it('includes browser duration and token expiry notifications', () => {
+    expect(KEYS).toEqual(expect.arrayContaining([
+      'PUT /admin/settings/browser-session',
+      'GET /notifications', 'PUT /notifications',
+      'GET /admin/settings/mail', 'PUT /admin/settings/mail',
+      'POST /admin/settings/mail/test',
+    ]))
+  })
+
   it('includes installation and database login administration', () => {
     expect(KEYS).toEqual(expect.arrayContaining([
       'GET /setup', 'POST /setup', 'GET /admin/login-providers', 'PUT /admin/login-providers/{id}',

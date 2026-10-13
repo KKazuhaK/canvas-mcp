@@ -84,6 +84,7 @@ class CredentialRow:
     last_verified_at: int | None
     expires_hint_at: int | None
     access_expires_at: int | None
+    expiry_source: str
     scopes: str | None
     custody_notice_version: int
     custody_ack_at: int

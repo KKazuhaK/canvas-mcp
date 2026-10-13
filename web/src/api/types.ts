@@ -25,6 +25,7 @@ export type ApiOnlyErrorCode =
   | 'rate_limited' // 429, params: { retry_after_s }
   | 'token_store_unavailable' // 503 (also a sign-in error)
   | 'internal_error' // 500
+  | 'mail_unavailable' // 503
   // Canvas token
   | 'token_invalid_format' // 422
   | 'token_rejected' // 422
@@ -191,6 +192,8 @@ export interface CanvasTokenStatus {
   /** The date the person noted when enrolling (YYYY-MM-DD). */
   expires_on: string | null
   expiry_notice: ExpiryNotice
+  expiry_source?: 'canvas' | 'manual' | 'unknown'
+  expires_at?: string | null
   /** https link to the school's own Canvas settings page, or null. */
   settings_url: string | null
   enrolled_at: string | null
@@ -539,6 +542,7 @@ export interface AdminSchool {
 export interface AdminSettingsResponse {
   revision: number
   local_admin: { ready: boolean }
+  browser_session: { ttl_seconds: number }
   site: SiteAddress
   sign_in_methods: {
     id: string; protocol: string; icon: ProviderIcon; configured: boolean
@@ -564,4 +568,27 @@ export interface FeaturedSchoolsRequest {
 }
 export interface SchoolCheckResponse {
   valid: boolean; reason?: ApiErrorCode; suggested_name: string | null; in_directory: boolean | null
+}
+
+
+export interface MailConfig {
+  enabled: boolean
+  host: string
+  port: number
+  security: 'starttls' | 'tls'
+  username: string
+  from_email: string
+  reminder_days: number
+}
+export interface MailSettingsResponse {
+  revision: number
+  config: MailConfig
+  secret_present: boolean
+}
+export interface NotificationPreferences {
+  enabled: boolean
+  email: string
+  locale: UiLocale
+  mail_available: boolean
+  reminder_days: number
 }

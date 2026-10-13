@@ -85,7 +85,7 @@ class TestCurrent:
         capsys.readouterr()
         assert token_admin.main(["db", "current"]) == 0
         out = capsys.readouterr().out
-        assert "state: current" in out and "compatibility floor: 2" in out
+        assert "state: current" in out and "compatibility floor: 3" in out
         assert "database id: (none)" not in out
         assert "schema version marker" not in out
 

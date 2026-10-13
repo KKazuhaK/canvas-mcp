@@ -39,7 +39,7 @@ from .connections import (
 )
 from .policy import CompatibilityFloorGuard, RevisionPolicy, pending
 
-SCHEMA_EPOCH = 2
+SCHEMA_EPOCH = 3
 MIGRATION_LOCK_WAIT_SECONDS = 30.0
 PG_MIGRATION_LOCK_TIMEOUT = "30s"
 PG_MIGRATION_STATEMENT_TIMEOUT = "120s"

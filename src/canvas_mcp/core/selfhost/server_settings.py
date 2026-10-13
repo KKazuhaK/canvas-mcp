@@ -46,8 +46,18 @@ class SettingSpec:
 
 SETTINGS: Mapping[str, SettingSpec] = MappingProxyType(
     {
+        "notifications.token_reminder_days": SettingSpec(
+            int, 7, minimum=1, maximum=90, editable_in_panel=True
+        ),
         "site.public_base_url": SettingSpec(str, "", editable_in_panel=True),
         "schools.directory_search": SettingSpec(bool, True, editable_in_panel=True),
+        "auth.browser_session_ttl_seconds": SettingSpec(
+            int,
+            7 * 86400,
+            minimum=60,
+            maximum=30 * 86400,
+            editable_in_panel=True,
+        ),
         "retention.auth_events_days": SettingSpec(int, 90, minimum=7, maximum=3650),
         "retention.audit_days": SettingSpec(int, 0, minimum=0, maximum=3650),
     }

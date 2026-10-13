@@ -133,6 +133,7 @@ AUDIT_TOKEN_ENROLLED = "token_enrolled"
 AUDIT_TOKEN_REPLACED = "token_replaced"
 AUDIT_TOKEN_DELETED = "token_deleted"
 AUDIT_TOKEN_MARKED_INVALID = "token_marked_invalid"
+AUDIT_TOKEN_EXPIRY_CHECKED = "token_expiry_checked"
 AUDIT_WRITE_TOOLS_CHANGED = "write_tools_changed"
 AUDIT_SCHEMA_MIGRATED = "schema_migrated"
 AUDIT_PENDING_PURGED = "pending_purged"
@@ -163,6 +164,7 @@ AUDIT_ACTIONS = frozenset(
         AUDIT_TOKEN_REPLACED,
         AUDIT_TOKEN_DELETED,
         AUDIT_TOKEN_MARKED_INVALID,
+        AUDIT_TOKEN_EXPIRY_CHECKED,
         AUDIT_WRITE_TOOLS_CHANGED,
         AUDIT_SCHEMA_MIGRATED,
         AUDIT_PENDING_PURGED,
@@ -276,6 +278,8 @@ class StoredToken:
     invalid_since: int | None = None
     last_verified_at: int | None = None
     expires_hint_at: int | None = None
+    expiry_source: str = "manual"
+    access_expires_at: int | None = None
     # Raised every time this principal's credential lifecycle changes (token
     # saved or replaced, removed, found dead, restored, principal disabled or
     # enabled). Read in the same statement as the row, so it describes this token.
@@ -304,6 +308,8 @@ class EnrollmentInfo:
     invalid_since: int | None = None
     last_verified_at: int | None = None
     expires_hint_at: int | None = None
+    expiry_source: str = "manual"
+    access_expires_at: int | None = None
     credential_generation: int = 0
     credential_id: str = ""
     kind: str = "pat"
@@ -782,6 +788,8 @@ def _enrollment(row: CredentialRow) -> EnrollmentInfo:
         invalid_since=row.invalid_since,
         last_verified_at=row.last_verified_at,
         expires_hint_at=row.expires_hint_at,
+        expiry_source=row.expiry_source,
+        access_expires_at=row.access_expires_at,
         credential_generation=row.generation,
         credential_id=row.id,
         kind=row.kind,
@@ -932,6 +940,8 @@ class TokenStore:
             invalid_since=row.invalid_since,
             last_verified_at=row.last_verified_at,
             expires_hint_at=row.expires_hint_at,
+            expiry_source=row.expiry_source,
+            access_expires_at=row.access_expires_at,
             credential_generation=row.generation,
             credential_id=row.id,
             kind=row.kind,
@@ -1022,6 +1032,8 @@ class TokenStore:
         canvas_host: str,
         custody: CustodyAcknowledgement,
         expires_hint_at: int | None | Literal[_Unset.UNSET] = KEEP_EXPIRY_HINT,
+        expiry_source: str = "manual",
+        access_expires_at: int | None = None,
     ) -> EnrollmentInfo:
         """Save one acknowledged PAT under an active account in a governance transaction."""
         key = _require_account_key(principal_key)
@@ -1034,6 +1046,14 @@ class TokenStore:
         custody.validate(now=now)
         if not isinstance(api_token, str) or not api_token:
             raise ValueError("api_token must be a non-empty string")
+        if expiry_source not in {"manual", "canvas"} or (
+            access_expires_at is not None
+            and (
+                type(access_expires_at) is not int
+                or not 0 < access_expires_at <= _MAX_EXPIRES_HINT
+            )
+        ):
+            raise ValueError("invalid expiry metadata")
         hint = None if isinstance(expires_hint_at, _Unset) else expires_hint_at
         if hint is not None and (
             type(hint) is not int or not 0 < hint <= _MAX_EXPIRES_HINT
@@ -1077,6 +1097,8 @@ class TokenStore:
                 canvas_user_name=str(canvas_user_name)[:_MAX_CANVAS_NAME],
                 now=now,
                 expires_hint_at=hint,
+                expiry_source=expiry_source,
+                access_expires_at=access_expires_at,
                 custody_notice_version=custody.notice_version,
                 custody_ack_at=custody.acked_at,
             )
@@ -1259,12 +1281,23 @@ class TokenStore:
         *,
         expected_updated_at: int | None = None,
         expected_generation: int | None = None,
+        expiry_known: bool = False,
+        access_expires_at: int | None = None,
     ) -> bool:
         """Mark an invalid row active again after a successful check; True if changed.
 
         The stored token is untouched. ``expected_updated_at`` and
         ``expected_generation`` work as in :meth:`mark_invalid`.
         """
+        if (
+            expiry_known
+            and access_expires_at is not None
+            and (
+                type(access_expires_at) is not int
+                or not 0 < access_expires_at <= _MAX_EXPIRES_HINT
+            )
+        ):
+            raise ValueError("invalid Canvas expiry metadata")
         key = _validate_principal_key(principal_key)
         now = self._now()
         generation: int | None = None
@@ -1277,6 +1310,8 @@ class TokenStore:
                 now=now,
                 expected_updated_at=expected_updated_at,
                 expected_generation=expected_generation,
+                expiry_known=expiry_known,
+                access_expires_at=access_expires_at,
             )
             self._pause("after_conditional_update")
             if changed:
@@ -1286,6 +1321,54 @@ class TokenStore:
         if generation is not None:
             self._publish_generation(key, generation)
         return changed
+
+    def record_user_check(
+        self,
+        principal_key: str,
+        *,
+        expected_generation: int,
+        expected_epoch: int,
+        expiry_known: bool,
+        access_expires_at: int | None,
+    ) -> bool:
+        """Record an explicit read-only check without replacing or revoking the PAT."""
+        if (
+            expiry_known
+            and access_expires_at is not None
+            and (
+                type(access_expires_at) is not int
+                or not 0 < access_expires_at <= _MAX_EXPIRES_HINT
+            )
+        ):
+            raise ValueError("invalid Canvas expiry metadata")
+        key = _require_account_key(principal_key)
+        now = self._now()
+        with self._db.row_write() as conn:
+            account = self._repos.accounts.get(conn, key, for_update=True)
+            if (
+                account is None
+                or account.status != STATUS_ACTIVE
+                or account.session_epoch != expected_epoch
+            ):
+                return False
+            changed = self._repos.credentials.record_user_check(
+                conn,
+                key,
+                expected_generation=expected_generation,
+                now=now,
+                expiry_known=expiry_known,
+                access_expires_at=access_expires_at,
+            )
+            if changed:
+                self._audit(
+                    conn,
+                    key,
+                    AUDIT_TOKEN_EXPIRY_CHECKED,
+                    target=key,
+                    detail={"metadata_available": expiry_known},
+                    now=now,
+                )
+            return changed
 
     def mark_verified(
         self,
