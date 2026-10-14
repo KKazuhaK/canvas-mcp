@@ -156,6 +156,7 @@ export default function AccountLayout({ me, children }: { me: MeResponse; childr
             <Button
               component={RouterLink}
               to="/admin"
+              variant="text"
               color="inherit"
               size="small"
               sx={{ display: { xs: 'none', sm: 'inline-flex' } }}
@@ -166,6 +167,7 @@ export default function AccountLayout({ me, children }: { me: MeResponse; childr
           <LanguageToggle />
           <ThemeToggle />
           <Button
+            variant="text"
             color="inherit"
             size="small"
             onClick={signOut}

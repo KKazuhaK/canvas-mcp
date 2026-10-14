@@ -175,3 +175,10 @@ actions share a footer and a secondary Back to providers action is available at
 the top. Display-name saving remains independent and retains the configuration
 draft; Enter in that field cannot submit the credential form. No database,
 authentication-policy or deployment-configuration change is involved.
+
+Shared secondary actions use outlined buttons with consistent sizing and keyboard
+focus rings. Reauthentication has a filled icon-labelled button beneath its
+explanation, rather than a text link at the alert's far edge. Token invalidation
+and removal retain their confirmations and use warning/error outlined actions.
+Drawer surfaces use the application's normal dark background and a visible Close
+button. Navigation utilities retain their compact header presentation.

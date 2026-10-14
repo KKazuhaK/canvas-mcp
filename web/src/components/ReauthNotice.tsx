@@ -1,6 +1,8 @@
 import Alert from '@mui/material/Alert'
 import AlertTitle from '@mui/material/AlertTitle'
 import Button from '@mui/material/Button'
+import Stack from '@mui/material/Stack'
+import LoginRounded from '@mui/icons-material/LoginRounded'
 import { useTranslation } from 'react-i18next'
 import { useLocation } from 'react-router'
 import { LOGIN_PATH, signInUrl } from '@/api/endpoints'
@@ -29,14 +31,14 @@ export default function ReauthNotice() {
     <Alert
       severity="warning"
       role="alert"
-      action={
-        <Button color="inherit" size="small" onClick={() => hardNavigate(signInUrl(LOGIN_PATH, { returnTo, reauth }))}>
-          {t('common:actions.signInAgain')}
-        </Button>
-      }
     >
       <AlertTitle>{t('errors:reauth_required_title')}</AlertTitle>
-      {t('errors:reauth_required')}
+      <Stack spacing={2} sx={{ alignItems: 'flex-start' }}>
+        <span>{t('errors:reauth_required')}</span>
+        <Button variant="contained" startIcon={<LoginRounded />} onClick={() => hardNavigate(signInUrl(LOGIN_PATH, { returnTo, reauth }))}>
+          {t('common:actions.signInAgain')}
+        </Button>
+      </Stack>
     </Alert>
   )
 }

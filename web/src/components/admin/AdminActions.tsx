@@ -1,5 +1,7 @@
 import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
+import DeleteOutlineRounded from '@mui/icons-material/DeleteOutlineRounded'
+import ReportProblemOutlined from '@mui/icons-material/ReportProblemOutlined'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { AdminAction, AdminAccount, AdminActionResponse } from '@/api/types'
@@ -81,13 +83,14 @@ export default function AdminActions({ account, only }: { account: AdminAccount;
 
   return (
     <Box sx={{ display: 'grid', gap: 1 }}>
-      <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+      <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
         {account.actions.filter((action) => !only || only.includes(action)).map((action) => (
           <Button
             key={action}
             size="small"
-            variant={PRIMARY.has(action) ? 'contained' : 'text'}
-            color={DESTRUCTIVE.has(action) ? 'error' : 'primary'}
+            variant={PRIMARY.has(action) ? 'contained' : 'outlined'}
+            color={DESTRUCTIVE.has(action) ? 'error' : action === 'mark_invalid' ? 'warning' : 'primary'}
+            startIcon={action === 'remove_enrollment' ? <DeleteOutlineRounded /> : action === 'mark_invalid' ? <ReportProblemOutlined /> : undefined}
             disabled={busy}
             aria-label={`${t(`admin:actions.${action}`)}: ${name}`}
             onClick={() => choose(action)}
