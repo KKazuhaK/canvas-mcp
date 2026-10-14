@@ -14,7 +14,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { createLocalAccount, getLoginProviderSettings } from '@/api/endpoints'
 import ErrorNotice from '@/components/ErrorNotice'
 
-export default function LocalAccountCreate() {
+export default function LocalAccountCreate({ onBusyChange }: { onBusyChange?: (busy: boolean) => void }) {
   const { t } = useTranslation()
   const cache = useQueryClient()
   const [username, setUsername] = useState('')
@@ -26,14 +26,14 @@ export default function LocalAccountCreate() {
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (busy) return
-    setBusy(true); setError(null); setDone(false)
+    setBusy(true); onBusyChange?.(true); setError(null); setDone(false)
     try {
       const settings = await getLoginProviderSettings()
       await createLocalAccount({ revision: settings.revision, username, password, owner })
       setUsername(''); setPassword(''); setOwner(false); setDone(true)
       await cache.invalidateQueries({ queryKey: ['admin'] })
     } catch (reason) { setError(reason) }
-    finally { setBusy(false) }
+    finally { setBusy(false); onBusyChange?.(false) }
   }
   return <Card><CardContent><Box component="form" onSubmit={(event) => { void submit(event) }}><Stack spacing={2}>
     <Typography component="h2" variant="h6">{t('admin:localAccount.create')}</Typography>

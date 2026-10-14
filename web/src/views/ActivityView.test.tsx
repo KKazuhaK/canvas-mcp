@@ -1,4 +1,5 @@
 import { screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { renderApp } from '@/test/renderWithProviders'
 import { errorBody, meFixture, scriptAdapter } from '@/test/fixtures'
@@ -6,6 +7,28 @@ import { errorBody, meFixture, scriptAdapter } from '@/test/fixtures'
 vi.mock('@/utils/navigate', () => ({ hardNavigate: vi.fn() }))
 
 describe('Recent sign-ins', () => {
+  it('filters loaded results and times while retaining unknown reasons as plain text', async () => {
+    const user = userEvent.setup()
+    await renderApp('/activity', 'enrolled', () => {
+      scriptAdapter((r) => r.url === '/me' ? { status: 200, data: meFixture() }
+        : r.url === '/providers' ? { status: 200, data: { providers: [], mcp_url: 'https://x.test/mcp' } }
+        : { status: 200, data: { next_cursor: 'older', events: [
+          { id: 1, at: new Date().toISOString(), provider_id: 'recent-provider', outcome: 'refused', reason: 'new_refusal_code' },
+          { id: 2, at: '2020-01-01T00:00:00Z', provider_id: 'old-provider', outcome: 'success', reason: null },
+        ] } })
+    })
+    expect(await screen.findByText('new_refusal_code')).toBeInTheDocument()
+    expect(screen.getByText(/Filters apply to loaded records only/)).toBeInTheDocument()
+    await user.click(screen.getByRole('combobox', { name: 'Time range' }))
+    await user.click(screen.getByRole('option', { name: 'Last day' }))
+    expect(screen.queryByText('old-provider')).toBeNull()
+    expect(screen.getByText('recent-provider')).toBeInTheDocument()
+    await user.click(screen.getByRole('combobox', { name: 'Sign-in result' }))
+    await user.click(screen.getByRole('option', { name: 'Signed in' }))
+    expect(screen.getByText('No loaded records match these filters.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Load more/ })).toBeInTheDocument()
+  })
+
   it('shows outcome and a localized reason, and never an address or a device', async () => {
     await renderApp('/activity')
     expect(await screen.findByText('Signed in')).toBeInTheDocument()

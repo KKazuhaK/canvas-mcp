@@ -11,6 +11,7 @@ import CardContent from '@mui/material/CardContent'
 import Typography from '@mui/material/Typography'
 import { useState, type ReactNode } from 'react'
 import { Trans, useTranslation } from 'react-i18next'
+import { useSearchParams } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { acknowledgeCanvasToken } from '@/api/endpoints'
 import type { CanvasTokenStatus } from '@/api/types'
@@ -204,7 +205,7 @@ function ReplaceDisclosure({ expanded, setExpanded }: { expanded: boolean; setEx
   )
 }
 
-function InvalidBanner({ canvas }: { canvas: CanvasTokenStatus }) {
+export function InvalidBanner({ canvas }: { canvas: CanvasTokenStatus }) {
   const { t } = useTranslation()
   const lang = useLanguage((s) => s.lang)
   const zone = useDisplayZone((s) => s.zone)
@@ -219,7 +220,7 @@ function InvalidBanner({ canvas }: { canvas: CanvasTokenStatus }) {
   )
 }
 
-function ExpiryBanner({ canvas, onReplace }: { canvas: CanvasTokenStatus; onReplace: () => void }) {
+export function ExpiryBanner({ canvas, onReplace }: { canvas: CanvasTokenStatus; onReplace: () => void }) {
   const { t } = useTranslation()
   const lang = useLanguage((s) => s.lang)
   if (canvas.expiry_source !== 'canvas') {
@@ -269,7 +270,8 @@ function AcknowledgeCard({ version }: { version: number }) {
 }
 
 export default function TokenSection({ canvas }: { canvas: CanvasTokenStatus }) {
-  const [expanded, setExpanded] = useState(canvas.state === 'invalid')
+  const [params] = useSearchParams()
+  const [expanded, setExpanded] = useState(canvas.state === 'invalid' || params.get('replace') === '1')
   if (canvas.state === 'none') return <EnrollCard />
 
   return (

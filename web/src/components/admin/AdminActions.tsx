@@ -27,7 +27,7 @@ const DESTRUCTIVE: ReadonlySet<AdminAction> = new Set(['deny', 'disable', 'remov
  * server-side), each with its confirmation where one is due. The UI offers exactly
  * the server's list and the server re-checks the owner in the store transaction.
  */
-export default function AdminActions({ account }: { account: AdminAccount }) {
+export default function AdminActions({ account, only }: { account: AdminAccount; only?: readonly AdminAction[] }) {
   const { t } = useTranslation()
   const access = useAdminAccessAction()
   const mark = useAdminMarkInvalid()
@@ -82,7 +82,7 @@ export default function AdminActions({ account }: { account: AdminAccount }) {
   return (
     <Box sx={{ display: 'grid', gap: 1 }}>
       <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
-        {account.actions.map((action) => (
+        {account.actions.filter((action) => !only || only.includes(action)).map((action) => (
           <Button
             key={action}
             size="small"

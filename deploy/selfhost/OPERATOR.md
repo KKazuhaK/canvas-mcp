@@ -104,18 +104,19 @@ acceptance report.
 
 ## Browser sessions and Canvas token reminders
 
-In **Admin → Settings**, browser sign-in duration is database-owned and defaults
+In **Admin → Settings → Accounts & access**, browser sign-in duration is database-owned and defaults
 on first installation to 7 days. The legacy environment override is adopted only
 once. Changes need no restart: shortening also limits existing sessions; a longer
 duration takes effect at the next sign-in. Sensitive administrator actions still
 require a sign-in within the last 10 minutes.
 
-The same page configures SMTP with verified STARTTLS or TLS and a reminder window
+**Admin → Settings → Email reminders** configures SMTP with verified STARTTLS or TLS and a reminder window
 of 1–90 days (default 7). The password is encrypted in the database and included
 in normal key verification, rotation and database transfer. Save the settings,
 then use **Test saved SMTP connection** to check connection, certificates and
 authentication; this test does not send an email. Users opt in and save a reminder
-recipient on their account home page. No additional deployment environment values
+recipient on the **Canvas token** page. The account home page links directly to
+these preferences. No additional deployment environment values
 are required.
 
 When verifying a Canvas token, the service attempts the documented read-only token

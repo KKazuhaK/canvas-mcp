@@ -4,6 +4,8 @@ import Chip from '@mui/material/Chip'
 import MenuItem from '@mui/material/MenuItem'
 import TextField from '@mui/material/TextField'
 import Typography from '@mui/material/Typography'
+import Button from '@mui/material/Button'
+import Stack from '@mui/material/Stack'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { AdminAccount, AdminEnrollmentFilter } from '@/api/types'
@@ -12,6 +14,9 @@ import ErrorNotice from '@/components/ErrorNotice'
 import ResponsiveTable, { type Column } from '@/components/ResponsiveTable'
 import { AccountStatusChip, DisabledSince, TokenStateChip } from '@/components/StatusChips'
 import TimeText from '@/components/TimeText'
+import DetailDrawer from '@/components/admin/DetailDrawer'
+import PageHeader from '@/components/PageHeader'
+import EnrollmentExpiry from '@/components/admin/EnrollmentExpiry'
 import { useAdminEnrollments } from '@/query/hooks'
 import { PageSkeleton } from '../StateViews'
 
@@ -77,6 +82,8 @@ export default function AdminEnrollmentsView() {
   const query = useAdminEnrollments(filter)
   const rows = query.data?.rows ?? []
   const counts = query.data?.counts
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const selected = rows.find((account) => account.id === selectedId)
 
   const columns: Column<AdminAccount>[] = [
     {
@@ -142,12 +149,16 @@ export default function AdminEnrollmentsView() {
       ),
     },
     {
+      key: 'expiry',
+      header: t('account:enrolled.expires'),
+      render: (account) => <EnrollmentExpiry enrollment={account.enrollment} />,
+    },
+    {
       key: 'lastUsed',
       header: t('admin:enrollments.columns.lastUsed'),
       render: (a) => (
         <Box>
           <TimeText iso={a.enrollment?.last_used_at} />
-          <EnrollmentDetails account={a} />
         </Box>
       ),
     },
@@ -155,15 +166,13 @@ export default function AdminEnrollmentsView() {
       key: 'actions',
       header: t('admin:enrollments.columns.actions'),
       actions: true,
-      render: (a) => <AdminActions account={a} />,
+      render: (a) => <Button size="small" variant="outlined" onClick={() => setSelectedId(a.id)} aria-label={t('admin:accountDetail.manageLabel', { name: a.display_name })}>{t('admin:accountDetail.manage')}</Button>,
     },
   ]
 
   return (
     <>
-      <Typography variant="h1" component="h1" sx={{ mb: 2 }}>
-        {t('admin:enrollments.title')}
-      </Typography>
+      <PageHeader title={t('admin:enrollments.title')} />
       {counts ? (
         <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 2 }} aria-label={t('admin:enrollments.counts')} role="group">
           <Chip
@@ -216,6 +225,18 @@ export default function AdminEnrollmentsView() {
         />
       ) : null}
       <LoadMore query={query} />
+      <DetailDrawer open={selected !== undefined} title={selected?.display_name ?? ''} onClose={() => setSelectedId(null)}>
+        {selected && <Stack spacing={2} key={selected.id}>
+          <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}><AccountStatusChip status={selected.status} /><TokenStateChip state={selected.enrollment?.state ?? 'none'} /></Stack>
+          <Typography sx={{ overflowWrap: 'anywhere' }}>{selected.enrollment?.canvas_user_name ?? t('admin:enrollments.notEnrolled')}</Typography>
+          <Typography sx={{ overflowWrap: 'anywhere' }}>{selected.enrollment?.school?.name ?? '–'}</Typography>
+          <Typography color="text.secondary">{t('account:enrolled.expires')}</Typography><EnrollmentExpiry enrollment={selected.enrollment} />
+          <Typography variant="body2" color="text.secondary">{t('account:expiry.source')}: {t(selected.enrollment?.expiry_source === 'canvas' ? 'account:expiry.sources.canvas' : 'account:expiry.sources.unknown')}</Typography>
+          {selected.enrollment?.invalid_reason && <Typography color="warning.main">{t(`admin:enrollments.reason.${selected.enrollment.invalid_reason}`)}</Typography>}
+          <Typography color="text.secondary">{t('admin:enrollments.lastVerified')}: <TimeText iso={selected.enrollment?.last_verified_at} /></Typography>
+          <AdminActions account={selected} /><EnrollmentDetails account={selected} />
+        </Stack>}
+      </DetailDrawer>
     </>
   )
 }

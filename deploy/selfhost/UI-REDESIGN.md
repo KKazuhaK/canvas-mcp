@@ -1,6 +1,8 @@
 # Selfhost frontend usability follow-up
 
-Authorized by the owner after completing HANDOFF. Keep the existing major
+Originally ordered after HANDOFF; on October 13 the owner authorized frontend
+implementation in parallel with the remaining live checks. Those checks remain
+open and must not be represented as completed by frontend work. Keep the existing major
 account/admin areas, with English and Chinese interfaces, mobile layouts and
 the existing governed API. The aim is to make common tasks easy to find and
 understand, not merely restyle the same long forms.
@@ -42,11 +44,11 @@ separately. SMTP connection settings and reminder behavior belong together.
 
 ## Source inventory and preservation map
 
-The following is the implementation starting inventory at beta.11. Expand it to
-individual controls while changing each view; do not remove a control merely
-because it is absent from a compact summary. Source paths are under `web/src`.
+The following records the beta.11 control inventory and its preserved location in
+the implementation candidate. No control is removed merely because it is absent
+from a compact summary. Source paths are under `web/src`.
 
-| Existing controls/source | Planned location and behavior to preserve |
+| Existing controls/source | Candidate location and preserved behavior |
 | --- | --- |
 | `HomeView`, `AccountUpnSettings` | Home shows read-only identity/UPN. Only the administrator editor can change UPN; required-UPN notices must remain visible without offering personal editing. |
 | `TokenView`, `token/TokenSection`, token form/status components | Token page retains school selection/search, required custody notice, enrollment, replacement, recheck, removal, offered-school warning, automatic expiry/source and verification times. Home keeps actionable health summaries and direct links. |
@@ -99,3 +101,40 @@ desktop and mobile widths, including a normal Canvas enrollment/replacement,
 provider edit, account policy change and connected-app revocation. Record live
 deployment observations separately from local mocks. This follow-up is complete
 only when the reorganized workflows are implemented, released and verified.
+
+## Candidate implementation checkpoint — October 13
+
+`SettingsTopics` provides the five URL-addressed categories. `useSettingsDraft`
+keeps edits in memory across topic switches and unrelated revisions; concurrent
+changes to the same section require explicit draft disposal/reload. Provider
+display-name saving and configuration saving retain separate revision-protected
+requests without remounting an edited secret/configuration. New provider creation
+offers its display-name editor only after the provider record exists.
+
+`CanvasConnectionSummary` and `ConnectedAppsSummary` provide the home summaries.
+The client preview preserves verified-domain/unverified-name labels and makes no
+claim to a total across unloaded pages. Password creation/change is on Sign-in
+methods even when external linking is unavailable; disabled linking hides cached
+identities and does not request the identity API. Token editing, school search,
+custody acknowledgement and notification preferences remain on Canvas token.
+
+`DetailDrawer` contains selected-account/profile/sign-in/Canvas/app sections and
+selected-enrollment details. Protected reads are deferred until their section is
+active. The account list retains immediate pending approval and otherwise offers
+Manage. Individual app revocation names the account/client, confirms the next-
+request effect and requires renewed consent. Local-account creation is in Accounts.
+The drawer sits above the fixed navigation while nested confirmation dialogs keep
+their normal modal layer. Technical identifiers and successful audit detail are
+secondary; failure reasons remain visible.
+
+Recent-login result/time filters explicitly cover loaded records and retain load-
+more. Unknown reason codes render as escaped plain text. Owner expiry metadata is
+an additive governed DTO change, with no database migration or credential write.
+
+Local rendered evidence includes English provider edits/name saves, English mobile
+account details, English/Chinese desktop account management, Chinese mobile home/
+token replacement and English mock client revocation. At 390 pixels, inspected
+home/details have no document-level horizontal overflow. These mock observations
+exercise the interface without modifying live identities, credentials or grants.
+Final CI, release and deployed-page acceptance are still required; remaining live
+HANDOFF checks are unchanged.

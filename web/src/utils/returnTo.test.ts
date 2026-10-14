@@ -79,6 +79,7 @@ describe('loginPathFor', () => {
   it('does not duplicate the basename from a data-router location after expiry', () => {
     expect(loginPathFor('/account/activity?limit=20')).toBe('/sign-in?return_to=%2Faccount%2Factivity%3Flimit%3D20')
     expect(loginPathFor('/account/admin/settings')).toBe('/sign-in?return_to=%2Faccount%2Fadmin%2Fsettings')
+    expect(loginPathFor('/account/admin/settings?topic=mail')).toBe('/sign-in?return_to=%2Faccount%2Fadmin%2Fsettings%3Ftopic%3Dmail')
     expect(loginPathFor('/account')).toBe('/sign-in')
     expect(loginPathFor('/account/')).toBe('/sign-in')
   })

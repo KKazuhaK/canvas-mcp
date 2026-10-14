@@ -23,7 +23,7 @@ import Toolbar from '@mui/material/Toolbar'
 import Tooltip from '@mui/material/Tooltip'
 import Typography from '@mui/material/Typography'
 import { useState, type ElementType, type ReactNode } from 'react'
-import { NavLink, Link as RouterLink, Outlet } from 'react-router'
+import { NavLink, Link as RouterLink, Outlet, useLocation } from 'react-router'
 import { useTranslation } from 'react-i18next'
 import type { Features, MeResponse } from '@/api/types'
 import LanguageToggle from '@/components/LanguageToggle'
@@ -51,9 +51,7 @@ function navFor(features: Features): NavItem[] {
       ? [{ to: '/write-tools', labelKey: 'common:nav.writeTools', Icon: TuneIcon }]
       : []),
     { to: '/connected-apps', labelKey: 'common:nav.connectedApps', Icon: AppsIcon },
-    ...(features.identities
-      ? [{ to: '/sign-in-methods', labelKey: 'common:nav.signInMethods', Icon: LoginIcon }]
-      : []),
+    { to: '/sign-in-methods', labelKey: 'common:nav.signInMethods', Icon: LoginIcon },
     { to: '/activity', labelKey: 'common:nav.activity', Icon: HistoryIcon },
     ...(features.admin
       ? [{ to: '/admin', labelKey: 'common:nav.admin', Icon: AdminPanelSettingsIcon }]
@@ -71,6 +69,8 @@ export default function AccountLayout({ me, children }: { me: MeResponse; childr
   const logout = useLogout()
   const isOwner = me.features.admin
   const active = me.account.status === 'active'
+  const { pathname } = useLocation()
+  const adminPage = pathname === '/admin' || pathname.startsWith('/admin/')
 
   function signOut() {
     logout.mutate(undefined, {
@@ -217,7 +217,7 @@ export default function AccountLayout({ me, children }: { me: MeResponse; childr
         <Container
           component="main"
           id="main"
-          maxWidth="md"
+          maxWidth={adminPage ? 'xl' : 'md'}
           sx={{ flex: 1, minWidth: 0, py: 3, px: 2 }}
         >
           {me.custody_ack_required ? <Alert severity="warning" sx={{ mb: 2 }}>{t('account:custody.banner')} <Button component={RouterLink} to="/token">{t('account:custody.open')}</Button></Alert> : null}

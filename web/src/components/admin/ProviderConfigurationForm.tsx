@@ -32,12 +32,13 @@ export interface ProviderSave {
   icon_data?: string | null
 }
 
-export default function ProviderConfigurationForm({ provider, callbackUri, onSave, installation = false, disabled = false }: {
+export default function ProviderConfigurationForm({ provider, callbackUri, onSave, installation = false, disabled = false, onBusyChange }: {
   provider: EditableProvider
   callbackUri: string
   onSave: (values: ProviderSave) => Promise<void>
   installation?: boolean
   disabled?: boolean
+  onBusyChange?: (busy: boolean) => void
 }) {
   const { t } = useTranslation()
   const [config, setConfig] = useState(provider.config)
@@ -51,6 +52,8 @@ export default function ProviderConfigurationForm({ provider, callbackUri, onSav
   const [iconReading, setIconReading] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
+  const dirty = secret.length > 0 || iconChanged || enabled !== provider.enabled || rank !== provider.rank
+    || autoLinkEmail !== (provider.auto_link_email ?? false) || JSON.stringify(config) !== JSON.stringify(provider.config)
   function text(key: string, fallback = '') {
     const value = config[key]
     return typeof value === 'string' ? value : fallback
@@ -60,9 +63,9 @@ export default function ProviderConfigurationForm({ provider, callbackUri, onSav
   }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (iconReading) return
-    if (busy) return
+    if (disabled || iconReading || busy) return
     setBusy(true)
+    onBusyChange?.(true)
     setError(null)
     const values: ProviderSave = { config, enabled, rank }
     if (!installation && provider.protocol !== 'local') values.auto_link_email = autoLinkEmail
@@ -75,11 +78,13 @@ export default function ProviderConfigurationForm({ provider, callbackUri, onSav
       setError(reason)
     } finally {
       setBusy(false)
+      onBusyChange?.(false)
     }
   }
   return <Box component="form" onSubmit={(event) => { void submit(event) }}>
     <Stack spacing={2}>
       {error !== null && <ErrorNotice error={error} />}
+      {!installation && dirty ? <Typography role="status" color="text.secondary">{t('admin:workspace.unsaved')}</Typography> : null}
       {provider.protocol !== 'local' && <>
       <TextField label={t('admin:providerConfig.callback')} value={callbackUri} slotProps={{ input: { readOnly: true } }} helperText={t('admin:providerConfig.callbackHelp')} />
       {provider.protocol === 'entra' && <TextField required label={t('admin:providerConfig.tenant')} value={text('tenant_id')} disabled={busy} onChange={(event) => change('tenant_id', event.target.value)} />}

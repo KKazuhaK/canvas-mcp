@@ -23,7 +23,7 @@ not complete HANDOFF or authorize a stable release.
 | 6.3 schools and directory | Implemented; automated validation passed | Database-owned school policy, settings/API/CLI checks, address protection and current full CI. Exact live directory egress remains a 6.12 check. |
 | 6.4 custody acknowledgement | Implemented; real enrollment exercised | Custody/API/MCP regressions and owner-performed real enrollment. No unattended enrollment of others is claimed. |
 | 6.5 fork framing | Implemented | Neutral examples, independent-fork notices and documentation checks. |
-| 6.6 pilot/client documentation | Pilot restriction implemented; client acceptance partial | Pilot-mode regressions and tested-client table. Web and Code have successful live reads; Desktop has not been tested and mobile support is not claimed. |
+| 6.6 pilot/client documentation | Pilot restriction implemented; client acceptance partial | Pilot-mode regressions and tested-client table. Web and Code have successful live reads. The owner accepts the shared web/Desktop remote-service path without a duplicate Desktop call; Desktop UI/build and mobile support are not separately verified. |
 | 6.7 small upstream PRs | Submitted and updated; maintainer decision remains external | October 13 GitHub inspection: 490 is open/review required; 491 and 494 are open/approved. Their updates were not merged into `selfhost`. |
 | 6.8 proposal records | Implemented | Three historical proposal records plus their index; old claims retain their dates and UNVERIFIED marks. |
 | 6.9 issue 484 reply | No reply, as instructed | Historical proposal banners record the independent-fork decision; no new upstream pilot is claimed. |
@@ -32,7 +32,7 @@ not complete HANDOFF or authorize a stable release.
 | 6.12 live verification | Incomplete | Detailed live boundary below; partial client observations must not be promoted to broad compatibility. |
 | 6.13 residuals | Source fixes implemented | Bilingual audit enum labels and identity actions, consistent rate-limit wording, native per-request authorization, accepted limitations in README. The manual expiry input was removed by the later automatic-only requirement. |
 
-Remaining live evidence is specific: Desktop; a B2B guest (the owner currently
+Remaining live evidence is specific: a B2B guest (the owner currently
 has no test guest); consecutive-day refresh including rotation/absolute TTL and
 grace behavior; whole-account disable followed by Entra removal/role aging;
 proxy limits, failure behavior and actual log redaction; live signing/encryption
@@ -43,6 +43,18 @@ unconfigured Google/GitHub/custom OIDC and mobile are not live-support claims.
 New owner-requested expiry and mail features additionally need this school's
 sanitized metadata diagnosis and actual delivery evidence. SMTP authentication
 alone proves neither email receipt nor reminder scheduling.
+
+### Shared remote connector acceptance
+
+On October 13, the owner clarified that Desktop and claude.ai use the same
+remote connector and accepted their shared remote-service path without a
+duplicate Desktop tool call. This supersedes the separate Desktop-call gate
+in earlier checkpoints. Existing web OAuth, discovery and successful read
+evidence remains the basis of this acceptance; no new Desktop interaction is
+claimed. Its UI and application build were not separately tested. Claude Code
+has separate real HTTP-client observations, and mobile remains unverified.
+
+### Implementation inventory
 
 The native runtime, required React UI, database-owned configuration, custody,
 maintenance, pagination, reserved contracts, operator/Docker guides, historical
@@ -1216,6 +1228,15 @@ and the first v1 tag remain outstanding.
   retained for subsequent elapsed-time/refresh checks,
   without changing the global MCP list. Earlier beta.8 grant revocation remains
   separate evidence. This client row is Partial until remaining live gates pass.
+- A further check completed on October 13 at 18:23:14 UTC, approximately eight
+  hours after the first successful call. The existing grant again allowed exactly
+  one `get_my_profile` call: process exit 0, one matching non-error result, expected
+  Canvas user matched locally, no permission denials and `PROFILE_READ_OK`.
+  The public version endpoint still confirmed beta.11 and source `af65c436bda3`.
+  Raw profile output and client stderr were replaced with a sanitized local proof.
+  This extends the observed session duration; no refresh HTTP trace was captured,
+  so rotation, absolute expiry, grace handling and consecutive-day operation remain
+  unverified. The existing connection remains available for later checks.
 
 ### Beta.11 release and live acceptance
 
@@ -1247,12 +1268,44 @@ and the first v1 tag remain outstanding.
   Desktop, B2B guest, consecutive-day refresh, proxy failure/log redaction and
   the remaining account-disable/key-rotation gates also remain outstanding.
 
-### Frontend follow-up authorized after HANDOFF
+### Frontend follow-up authorized in parallel
 
-The owner requested a full usability reorganization after the remaining HANDOFF
-tasks, retaining the current major areas and using PSP as an interaction
+The owner originally requested a full usability reorganization after the remaining
+HANDOFF tasks, then on October 13 explicitly allowed implementation in parallel
+with the outstanding live checks. Retain the current major areas and use PSP as an interaction
 reference. The current settings page stacks unrelated forms in one long view;
 account rows combine several management actions; the home view repeats token
 editing, mail settings and account-security forms. The implementation scope and
-acceptance criteria are in [UI-REDESIGN.md](UI-REDESIGN.md). This is pending work,
-not a claim that the frontend or live HANDOFF gates are complete.
+acceptance criteria are in [UI-REDESIGN.md](UI-REDESIGN.md). The implementation
+candidate now includes topic navigation and retained drafts, focused token/reminder/
+security pages, home connection/client summaries, local-account creation in account
+management, selected-account/enrollment detail drawers, per-provider appearance/
+configuration grouping, loaded-history filters and audit details on demand.
+
+The API adds automatic expiry metadata to owner enrollment DTOs using the same
+Canvas-only interpretation as the personal view. This does not initialize or alter
+the database, replace stored credentials, or revive historical manual expiry hints.
+All 8,236 Python tests passed locally, with 74 environment-dependent skips; the
+API/contract/parity subset passed 279 checks. Ruff, Linux-target mypy (176 files),
+TypeScript, UI lint and the production distribution checks passed. Existing list
+action tests now use the selected-account workflow while retaining their original
+request, CSRF, confirmation, refusal and reauthentication assertions.
+
+An earlier full Windows UI run passed 522 checks. Later runs covering the expanded
+525 checks encountered native worker exits, including a single-worker run; this is
+not recorded as a full pass. Focused regression results and the final complete CI
+matrix are required before merge. The project retains normal test isolation and
+its two-worker CI command.
+
+English/Chinese mock previews were inspected at desktop and 390-pixel mobile widths.
+Provider-name saving retained an edited configuration across topic switches; a
+selected-account policy retained its draft across detail tabs and saved with the
+session-invalidation message; a synthetic token replacement cleared the input and
+kept unknown expiry explicit; individual mock app revocation updated the list.
+Home and account detail mobile widths matched their document scroll widths. Two
+rendered issues were repaired: screen-reader-only table dimensions caused desktop
+overflow, and the fixed app bar covered the detail drawer's mobile close button.
+Saved account policies now stop displaying an obsolete unsaved marker.
+
+These are local candidate checks, not new live HANDOFF evidence. Publication and
+owner-deployed page acceptance remain outstanding at this checkpoint.

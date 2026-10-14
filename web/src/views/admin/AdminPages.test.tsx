@@ -8,6 +8,7 @@ import { resources } from '@/i18n/options'
 import { useLanguage } from '@/stores/language'
 import { renderApp } from '@/test/renderWithProviders'
 import { errorBody, meFixture, recordRequests, scriptAdapter } from '@/test/fixtures'
+import { openManagedAccount } from '@/test/accountManagement'
 
 vi.mock('@/utils/navigate', () => ({ hardNavigate: vi.fn() }))
 
@@ -41,6 +42,7 @@ const auditCursor = (id: number) => btoa(JSON.stringify([1, 'audit/None', id])).
 
 describe('Admin accounts', () => {
   it('lists the accounts with counts, status, token state and the actions the server offers', async () => {
+    const user = userEvent.setup()
     await renderApp('/admin', 'owner')
     expect(await screen.findByRole('heading', { name: 'Accounts' })).toBeInTheDocument()
     await screen.findByText('Bob Example')
@@ -53,27 +55,37 @@ describe('Admin accounts', () => {
     const bob = rowOf('Bob Example')
     expect(within(bob).getByText('Pending')).toBeInTheDocument()
     expect(within(bob).getByRole('button', { name: 'Approve: Bob Example' })).toBeInTheDocument()
-    expect(within(bob).getByRole('button', { name: 'Deny: Bob Example' })).toBeInTheDocument()
+    expect(within(bob).getByRole('button', { name: 'Manage Bob Example' })).toBeInTheDocument()
     expect(within(bob).queryByRole('button', { name: /^Disable/ })).toBeNull()
 
     const cleo = rowOf('Cleo Example')
     expect(within(cleo).getByText('Needs a new token')).toBeInTheDocument()
-    expect(within(cleo).getByRole('button', { name: 'Disable: Cleo Example' })).toBeInTheDocument()
-    expect(within(cleo).getByRole('button', { name: 'Remove token: Cleo Example' })).toBeInTheDocument()
-    // Her token is already invalid, so it cannot be marked invalid again.
-    expect(within(cleo).queryByRole('button', { name: /Mark token invalid/ })).toBeNull()
+    expect(within(cleo).getByRole('button', { name: 'Manage Cleo Example' })).toBeInTheDocument()
 
     const dev = rowOf('Dev Example')
     expect(within(dev).getByText('Disabled by an owner')).toBeInTheDocument()
     expect(within(dev).getByText(/Disabled since/)).toBeInTheDocument()
-    expect(within(dev).getByRole('button', { name: 'Enable: Dev Example' })).toBeInTheDocument()
+    expect(within(dev).getByRole('button', { name: 'Manage Dev Example' })).toBeInTheDocument()
 
     // The owner's own row can mark its token invalid but cannot disable itself.
     const self = rowOf('You').closest('li, tr') as HTMLElement
     expect(within(self).queryByRole('button', { name: /^Disable/ })).toBeNull()
+    let drawer = await openManagedAccount('Bob Example')
+    expect(within(drawer).getByRole('button', { name: 'Deny: Bob Example' })).toBeInTheDocument()
+    expect(within(drawer).queryByRole('button', { name: /^Disable/ })).toBeNull()
+    drawer = await openManagedAccount('Cleo Example')
+    expect(within(drawer).getByRole('button', { name: 'Disable: Cleo Example' })).toBeInTheDocument()
+    await user.click(within(drawer).getByRole('tab', { name: 'Canvas' }))
+    expect(within(drawer).getByRole('button', { name: 'Remove token: Cleo Example' })).toBeInTheDocument()
+    expect(within(drawer).queryByRole('button', { name: /Mark token invalid/ })).toBeNull()
+    drawer = await openManagedAccount('Dev Example')
+    expect(within(drawer).getByRole('button', { name: 'Enable: Dev Example' })).toBeInTheDocument()
+    drawer = await openManagedAccount('Ada Example', 'Canvas')
+    expect(within(drawer).queryByRole('button', { name: /^Disable/ })).toBeNull()
+    expect(within(drawer).getByRole('button', { name: 'Mark token invalid: Ada Example' })).toBeInTheDocument()
   })
 
-  it('offers no role changes, unlinking or app revocation (not built yet)', async () => {
+  it('keeps operator-only role changes unavailable and sensitive account actions out of the list', async () => {
     await renderApp('/admin', 'owner')
     await screen.findByText('Bob Example')
     for (const label of [/make owner/i, /make user/i, /unlink/i, /revoke/i]) {
@@ -103,16 +115,18 @@ describe('Admin accounts', () => {
     await screen.findByText('Bob Example')
     const seen = recordRequests()
 
+    await openManagedAccount('Bob Example')
     await user.click(screen.getByRole('button', { name: 'Deny: Bob Example' }))
-    let dialog = await screen.findByRole('dialog')
+    let dialog = await screen.findByRole('dialog', { name: 'Deny Bob Example?' })
     expect(within(dialog).getByText('Deny Bob Example?')).toBeInTheDocument()
     expect(seen.some((r) => r.method === 'POST')).toBe(false)
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Deny Bob Example?' })).toBeNull())
     expect(seen.some((r) => r.method === 'POST')).toBe(false)
 
+    await openManagedAccount('Cleo Example')
     await user.click(screen.getByRole('button', { name: 'Disable: Cleo Example' }))
-    dialog = await screen.findByRole('dialog')
+    dialog = await screen.findByRole('dialog', { name: 'Disable Cleo Example?' })
     await user.click(within(dialog).getByRole('button', { name: 'Disable' }))
     expect(await screen.findByText('Account disabled.')).toBeInTheDocument()
     expect(seen.find((r) => r.method === 'POST')?.url).toBe(`/admin/accounts/${CLEO}/disable`)
@@ -123,6 +137,7 @@ describe('Admin accounts', () => {
     await renderApp('/admin', 'owner')
     await screen.findByText('Dev Example')
     const seen = recordRequests()
+    await openManagedAccount('Dev Example')
     await user.click(screen.getByRole('button', { name: 'Enable: Dev Example' }))
     expect(await screen.findByText('Account enabled.')).toBeInTheDocument()
     expect(seen.find((r) => r.method === 'POST')?.url).toBe(`/admin/accounts/${DEV}/enable`)
@@ -177,8 +192,9 @@ describe('Admin accounts', () => {
         }
       })
     })
-    await user.click(await screen.findByRole('button', { name: 'Disable: Cleo Example' }))
-    const dialog = await screen.findByRole('dialog')
+    await openManagedAccount('Cleo Example')
+    await user.click(screen.getByRole('button', { name: 'Disable: Cleo Example' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Disable Cleo Example?' })
     await user.click(within(dialog).getByRole('button', { name: 'Disable' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('without a usable owner')
   })
@@ -216,6 +232,7 @@ describe('Admin accounts', () => {
       })
     })
     await screen.findByText('Cleo Example')
+    await openManagedAccount('Cleo Example')
     await user.click(screen.getAllByText('Technical details')[0])
     const terms = Array.from(document.querySelectorAll('dt')).map((dt) => dt.textContent)
     expect(terms).toContain('Provider')
@@ -243,9 +260,11 @@ describe('Admin enrollments', () => {
     const cleo = rowOf('Cleo Example')
     expect(within(cleo).getByText('Rejected by Canvas')).toBeInTheDocument()
     expect(within(cleo).getByText('Example University')).toBeInTheDocument()
-    expect(within(cleo).getByRole('button', { name: 'Remove token: Cleo Example' })).toBeInTheDocument()
+    expect(within(cleo).getByRole('button', { name: 'Manage Cleo Example' })).toBeInTheDocument()
     // Pending accounts are managed on the accounts page, not token rows.
     expect(screen.queryByText('Bob Example')).toBeNull()
+    const drawer = await openManagedAccount('Cleo Example')
+    expect(within(drawer).getByRole('button', { name: 'Remove token: Cleo Example' })).toBeInTheDocument()
   })
 
   it('shows last verification and global account/token counts', async () => {
@@ -259,8 +278,8 @@ describe('Admin enrollments', () => {
 
     expect(screen.queryByText('Dev Example')).toBeNull()
 
-    const cleo = rowOf('Cleo Example')
-    expect(within(cleo).getByText('Last verified')).toBeInTheDocument()
+    const drawer = await openManagedAccount('Cleo Example')
+    expect(within(drawer).getByText(/^Last verified:/)).toBeVisible()
   })
 
   it('narrows to the tokens that need replacing through the server', async () => {
@@ -270,7 +289,7 @@ describe('Admin enrollments', () => {
     const seen = recordRequests()
     await user.click(screen.getByRole('combobox', { name: 'Show' }))
     await user.click(await screen.findByRole('option', { name: 'Tokens that need replacing' }))
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Mark token invalid: Ada Example' })).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Manage Ada Example' })).toBeNull())
     expect(seen.find((r) => r.url === '/admin/enrollments')?.params).toEqual({ filter: 'needs_reenroll' })
     expect(screen.getAllByText('Cleo Example').length).toBeGreaterThan(0)
   })
@@ -281,8 +300,9 @@ describe('Admin enrollments', () => {
     await screen.findAllByText('Cleo Example')
     const seen = recordRequests()
 
+    await openManagedAccount('Cleo Example')
     await user.click(screen.getByRole('button', { name: 'Remove token: Cleo Example' }))
-    const dialog = await screen.findByRole('dialog')
+    const dialog = await screen.findByRole('dialog', { name: 'Remove the Canvas token of Cleo Example?' })
     expect(seen.some((r) => r.method === 'DELETE')).toBe(false)
     await user.click(within(dialog).getByRole('button', { name: 'Remove token' }))
     expect(await screen.findByText('Token removed.')).toBeInTheDocument()
@@ -290,8 +310,9 @@ describe('Admin enrollments', () => {
     expect(del?.url).toBe(`/admin/enrollments/${CLEO}`)
     expect(del?.headers['x-csrf-token']).toBe(MOCK_CSRF)
 
-    await user.click(await screen.findByRole('button', { name: 'Mark token invalid: Ada Example' }))
-    const second = await screen.findByRole('dialog')
+    await openManagedAccount('Ada Example')
+    await user.click(screen.getByRole('button', { name: 'Mark token invalid: Ada Example' }))
+    const second = await screen.findByRole('dialog', { name: 'Mark the token of Ada Example invalid?' })
     await user.click(within(second).getByRole('button', { name: 'Mark token invalid' }))
     expect(await screen.findByText('Token marked invalid.')).toBeInTheDocument()
     expect(seen.find((r) => r.url.endsWith('/mark-invalid'))?.method).toBe('POST')

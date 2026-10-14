@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { errorBody, meFixture, recordRequests, scriptAdapter } from '@/test/fixtures'
 import { renderApp } from '@/test/renderWithProviders'
 import { hardNavigate } from '@/utils/navigate'
+import { openManagedAccount } from '@/test/accountManagement'
 
 vi.mock('@/utils/navigate', () => ({ hardNavigate: vi.fn() }))
 
@@ -13,63 +14,49 @@ beforeEach(() => {
   vi.mocked(hardNavigate).mockClear()
 })
 
-function rowOf(name: string): HTMLElement {
-  const row = screen.getAllByText(name)[0].closest('li, tr')
-  if (!(row instanceof HTMLElement)) throw new Error(`no row for ${name}`)
-  return row
-}
-
-/** The technical details of a row are collapsed until asked for. */
-async function expand(name: string): Promise<void> {
-  const user = userEvent.setup()
-  await user.click(within(rowOf(name)).getByText('Technical details'))
-}
-
 describe('Admin accounts: sign-in methods', () => {
   it('lists every sign-in method of an account with its provider, subject and times', async () => {
     await renderApp('/admin', 'multi-owner')
     await screen.findByText('Dev Example')
-    await expand('Dev Example')
-    await expand('Cleo Example')
-    const dev = within(rowOf('Dev Example'))
+    const dev = within(await openManagedAccount('Dev Example', 'Sign-in & access'))
     expect(dev.getByText('Sign-in methods')).toBeInTheDocument()
     expect(dev.getByText('School SSO')).toBeInTheDocument()
     expect(dev.getByText('subject-4-oidc:school')).toBeInTheDocument()
     // An OIDC provider shows its issuer; the others do not.
     expect(dev.getByText('https://idp.example.edu/realms/school')).toBeInTheDocument()
-    const cleo = within(rowOf('Cleo Example'))
+    const cleo = within(await openManagedAccount('Cleo Example', 'Sign-in & access'))
     expect(cleo.queryByText(/Issuer/)).toBeNull()
   })
 
   it('offers Unlink only where the account keeps another method', async () => {
     await renderApp('/admin', 'multi-owner')
     await screen.findByText('Dev Example')
-    await expand('Dev Example')
-    await expand('Cleo Example')
-    expect(within(rowOf('Dev Example')).getAllByRole('button', { name: /^Unlink / })).toHaveLength(2)
-    expect(within(rowOf('Cleo Example')).queryByRole('button', { name: /^Unlink / })).toBeNull()
+    let drawer = await openManagedAccount('Dev Example', 'Sign-in & access')
+    expect(within(drawer).getAllByRole('button', { name: /^Unlink / })).toHaveLength(2)
+    drawer = await openManagedAccount('Cleo Example', 'Sign-in & access')
+    expect(within(drawer).queryByRole('button', { name: /^Unlink / })).toBeNull()
   })
 
   it('asks first, then unlinks with the CSRF header and updates the row', async () => {
     const user = userEvent.setup()
     await renderApp('/admin', 'multi-owner')
     await screen.findByText('Dev Example')
-    await expand('Dev Example')
+    const drawer = await openManagedAccount('Dev Example', 'Sign-in & access')
     const seen = recordRequests()
     await user.click(screen.getByRole('button', { name: 'Unlink School SSO from Dev Example' }))
-    const dialog = await screen.findByRole('dialog')
+    const dialog = await screen.findByRole('dialog', { name: 'Unlink School SSO from Dev Example?' })
     expect(within(dialog).getByText('Unlink School SSO from Dev Example?')).toBeInTheDocument()
     expect(within(dialog).getByText(/Connected apps stay connected/)).toBeInTheDocument()
     expect(seen.find((request) => request.method === 'DELETE')).toBeUndefined()
 
     await user.click(within(dialog).getByRole('button', { name: 'Unlink' }))
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Unlink School SSO from Dev Example?' })).toBeNull())
     const call = seen.find((request) => request.method === 'DELETE')
     expect(call?.url).toBe('/admin/identities/41')
     expect(call?.headers['x-csrf-token']).toBe(CSRF)
     expect(await screen.findByText('Sign-in method unlinked.')).toBeInTheDocument()
     await waitFor(() =>
-      expect(within(rowOf('Dev Example')).queryByRole('button', { name: /^Unlink / })).toBeNull(),
+      expect(within(drawer).queryByRole('button', { name: /^Unlink / })).toBeNull(),
     )
   })
 
@@ -100,6 +87,12 @@ describe('Admin accounts: sign-in methods', () => {
         }
         if (request.method === 'DELETE') {
           return { status: 403, data: errorBody('reauth_required', { max_age_s: 600 }) }
+        }
+        if (request.url === '/admin/login-providers') {
+          return { status: 200, data: { revision: 1, public_base_url: 'https://mcp.example.test', providers: ['entra', 'github'].map((id) => ({ id, protocol: id, enabled: true, rank: 0, config: {}, secret_present: true, callback_uri: '' })) } }
+        }
+        if (request.url.endsWith('/login-policy')) {
+          return { status: 200, data: { revision: 1, policy: { allow_multiple: null, allowed_providers: null, sso_lock_provider: null } } }
         }
         return {
           status: 200,
@@ -132,16 +125,17 @@ describe('Admin accounts: sign-in methods', () => {
         }
       })
     })
-    await user.click(await screen.findByText('Technical details'))
+    await openManagedAccount('Pat Example', 'Sign-in & access')
     await user.click(await screen.findByRole('button', { name: 'Unlink GitHub from Pat Example' }))
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Unlink' }))
-    const dialog = await screen.findByRole('dialog')
+    const dialog = await screen.findByRole('dialog', { name: 'Unlink GitHub from Pat Example?' })
+    await user.click(within(dialog).getByRole('button', { name: 'Unlink' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('Sign in again to continue')
   })
 
   it('shows no sign-in method block when Entra is the only provider', async () => {
     await renderApp('/admin', 'owner')
     await screen.findByText('Dev Example')
-    expect(screen.queryByText('Sign-in methods')).toBeNull()
+    const drawer = await openManagedAccount('Dev Example', 'Sign-in & access')
+    expect(within(drawer).queryByText('Sign-in methods')).toBeNull()
   })
 })

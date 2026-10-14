@@ -1,4 +1,29 @@
 {
+  "accountDetail": {
+    "manage": "Manage",
+    "manageLabel": "Manage {{name}}",
+    "topics": "Account detail sections",
+    "profile": "Account",
+    "signIn": "Sign-in & access",
+    "canvas": "Canvas",
+    "apps": "Connected apps",
+    "appsInactive": "This account is not active. Connected apps cannot use it.",
+    "missingUpn": "Assign an account UPN before enabling local sign-in for this account."
+  },
+  "workspace": {
+    "intro": "Choose a topic to configure. Your edits stay here when you switch topics.",
+    "topics": "Settings topics",
+    "unsaved": "Unsaved changes",
+    "saved": "Changes saved.",
+    "details": "Details",
+    "staleDraft": "Settings changed elsewhere. Your draft is preserved; reload saved values before continuing.",
+    "discardDraft": "Discard this draft and load saved values",
+    "site": { "title": "Site", "help": "Manage the public address and its impact on sign-in and connected apps." },
+    "providers": { "title": "Sign-in providers", "help": "Configure providers, their appearance and the ways people can sign in." },
+    "access": { "title": "Accounts & access", "help": "Set account-linking rules and sign-in duration. Create local accounts from Accounts." },
+    "schools": { "title": "Schools", "help": "Choose offered Canvas schools and control directory search." },
+    "mail": { "title": "Email reminders", "help": "Configure email delivery and automatic token-expiry reminders." }
+  },
   "site": {
     "title": "Site address",
     "address": "Public HTTPS address",
@@ -106,6 +131,8 @@
     }
   },
   "enrollments": {
+    "expired": "Expired",
+    "expiring": "Expiring soon",
     "title": "Canvas enrollments",
     "filter": "Show",
     "filterAll": "All accounts and tokens",
@@ -267,6 +294,8 @@
     }
   },
   "apps": {
+    "revokeTitle": "Disconnect {{app}} from {{name}}?",
+    "revokeBody": "This app loses access to this account on its next MCP request. The account owner must authorize it again.",
     "button": "Connected apps",
     "buttonLabel": "Connected apps: {{name}}",
     "title": "Connected apps of {{name}}",
@@ -310,6 +339,9 @@
     "autoLinkEmail": "Automatically link matching email to an existing account"
   },
   "settings": {
+    "displayName": "Display name",
+    "saveName": "Save display name",
+    "defaultName": "Default: {{name}}. Leave blank to use the default.",
     "title": "Settings",
     "providers": "Sign-in names",
     "reset": "Reset name",
@@ -343,10 +375,11 @@
     "only": "Local account only",
     "owner": "Local administrator",
     "create": "Create local account",
+    "new": "New local account",
     "help": "Creates an active account. Local sign-in must be enabled. Public registration is closed. Accounts are regular users unless you select administrator.",
     "ownerHelp": "This account can administer the server with its UPN and password independently of SSO. Keep its password private.",
     "ready": "A local administrator entry point is available. The last usable local administrator is protected.",
-    "missing": "No local administrator entry point is available. Enable local sign-in and create a local administrator below so SSO failure cannot lock you out.",
+    "missing": "No local administrator entry point is available. Enable local sign-in in Sign-in providers, then create a local administrator in Accounts so SSO failure cannot lock you out.",
     "created": "Local account created."
   },
   "loginPolicy": {

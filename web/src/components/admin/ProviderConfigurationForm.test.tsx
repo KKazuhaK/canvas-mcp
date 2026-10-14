@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderWithQuery, setupI18n } from '@/test/renderWithProviders'
@@ -14,6 +14,14 @@ const callback = 'https://mcp.example.com/auth/callback/entra'
 beforeEach(async () => { await setupI18n('en') })
 
 describe('Write-only sign-in provider credentials', () => {
+  it('refuses a stale or otherwise disabled editor even when the form is submitted directly', async () => {
+    const save = vi.fn(async () => {})
+    renderWithQuery(<ProviderConfigurationForm provider={provider} callbackUri={callback} onSave={save} disabled />)
+    const button = screen.getByRole('button', { name: 'Save sign-in configuration' })
+    expect(button).toBeDisabled()
+    fireEvent.submit(button.closest('form')!)
+    expect(save).not.toHaveBeenCalled()
+  })
   it('uploads an embedded PNG and explicitly restores the default icon', async () => {
     const user = userEvent.setup()
     const save = vi.fn(async () => {})

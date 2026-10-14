@@ -9,7 +9,7 @@ import { recordRequests } from '@/test/fixtures'
 describe('Local administrator creation', () => {
   it('defaults to a regular user and only sends administrator authority after explicit selection', async () => {
     const user = userEvent.setup()
-    await renderApp('/admin/settings', 'owner', () => {
+    await renderApp('/admin', 'owner', () => {
       const inner = http.defaults.adapter as (config: InternalAxiosRequestConfig) => Promise<AxiosResponse>
       http.defaults.adapter = async (config) => {
         const response = await inner(config)
@@ -17,6 +17,7 @@ describe('Local administrator creation', () => {
         return response
       }
     })
+    await user.click(await screen.findByRole('button', { name: 'New local account' }))
     const checkbox = await screen.findByRole('checkbox', { name: 'Local administrator' })
     expect(checkbox).not.toBeChecked()
     const seen = recordRequests()

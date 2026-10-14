@@ -42,6 +42,7 @@ TRANSLATION_FILES = {
 
 # (5) Tests that assert the Chinese rendering of the translations above.
 ZH_RENDERING_TESTS = {
+    "web/src/components/admin/EnrollmentExpiry.test.tsx": "asserts the Chinese automatic expiry date and state translations",
     "web/src/components/CustodyNotice.test.tsx": "asserts the Chinese custody notice translation",
     "web/src/i18n/i18n.test.ts": "asserts the Chinese strings the i18n setup loads",
     "web/src/router/documentTitle.test.tsx": "asserts the Chinese document title",

@@ -73,6 +73,7 @@ describe('routing and the session gate', () => {
       '/token',
       '/write-tools',
       '/connected-apps',
+      '/sign-in-methods',
       '/activity',
     ])
 
@@ -211,9 +212,13 @@ describe('owner pages', () => {
 })
 
 describe('home page states', () => {
-  it('shows the how-to and the form to a person with no token yet', async () => {
+  it('guides a person with no token to the dedicated connection form', async () => {
+    const user = userEvent.setup()
     await renderApp('/', 'fresh')
     expect(await screen.findByText('Add your Canvas token')).toBeInTheDocument()
+    expect(screen.queryByLabelText(/Canvas access token/)).toBeNull()
+    await user.click(screen.getByRole('link', { name: 'Connect Canvas' }))
+    await screen.findByRole('heading', { name: 'Canvas token' })
     expect(screen.getByLabelText(/Canvas access token/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Verify and save' })).toBeInTheDocument()
   })

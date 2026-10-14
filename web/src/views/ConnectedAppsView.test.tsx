@@ -51,6 +51,7 @@ describe('Connected apps', () => {
       '/token',
       '/write-tools',
       '/connected-apps',
+      '/sign-in-methods',
       '/activity',
     ])
   })

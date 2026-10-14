@@ -9,7 +9,7 @@ import { renderApp } from '@/test/renderWithProviders'
 describe('Database-managed settings', () => {
   it('saves SMTP configuration without showing or retaining its password', async () => {
     const user = userEvent.setup()
-    await renderApp('/admin/settings', 'owner')
+    await renderApp('/admin/settings?topic=mail', 'owner')
     const seen = recordRequests()
     await user.click(await screen.findByRole('switch', { name: 'Enable reminder emails' }))
     await user.type(screen.getByLabelText('SMTP host'), 'smtp.example.test')
@@ -28,7 +28,7 @@ describe('Database-managed settings', () => {
 
   it('saves browser duration independently of the sensitive-operation window', async () => {
     const user = userEvent.setup()
-    await renderApp('/admin/settings', 'owner')
+    await renderApp('/admin/settings?topic=access', 'owner')
     const input = await screen.findByLabelText('Duration (minutes, 1–43200)')
     expect(input).toHaveValue(10080)
     const seen = recordRequests()
@@ -43,21 +43,22 @@ describe('Database-managed settings', () => {
 
   it('saves sign-in names with the revision and CSRF header', async () => {
     const user = userEvent.setup()
-    await renderApp('/admin/settings', 'owner')
+    await renderApp('/admin/settings?topic=providers', 'owner')
+    await user.click(await screen.findByRole('button', { name: 'Edit entra' }))
     const seen = recordRequests()
-    const name = await screen.findByLabelText('Microsoft')
+    const name = await screen.findByRole('textbox', { name: 'Display name' })
     await user.type(name, 'Campus SSO')
-    await user.click(screen.getByRole('button', { name: 'Save names' }))
+    await user.click(screen.getByRole('button', { name: 'Save display name' }))
     await waitFor(() => expect(seen.some((r) => r.url === '/admin/settings/sign-in-methods')).toBe(true))
     const saved = seen.find((r) => r.url === '/admin/settings/sign-in-methods')!
     expect(JSON.parse(saved.data as string)).toEqual({ revision: 1, names: { entra: 'Campus SSO' } })
     expect(saved.headers['x-csrf-token']).toBe('mock-csrf-token-not-a-secret')
-    await waitFor(() => expect(screen.getByLabelText('Microsoft')).toHaveValue('Campus SSO'))
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Display name' })).toHaveValue('Campus SSO'))
   })
 
   it('starts with no featured school, saves search off, and shows the empty-school warning', async () => {
     const user = userEvent.setup()
-    await renderApp('/admin/settings', 'owner')
+    await renderApp('/admin/settings?topic=schools', 'owner')
     await screen.findByRole('heading', { name: 'Featured schools' })
     expect(screen.queryByRole('button', { name: /Remove canvas/ })).toBeNull()
     await user.click(screen.getByRole('switch', { name: 'School directory search' }))
@@ -68,7 +69,7 @@ describe('Database-managed settings', () => {
 
   it('confirms the affected bindings before removing an offered school', async () => {
     const user = userEvent.setup()
-    await renderApp('/admin/settings', 'featured')
+    await renderApp('/admin/settings?topic=schools', 'featured')
     const seen = recordRequests()
     await user.click(await screen.findByRole('button', { name: 'Remove canvas.example.edu' }))
     await user.click(screen.getByRole('button', { name: 'Save schools' }))
@@ -85,12 +86,12 @@ describe('Database-managed settings', () => {
   it('shows a recent-sign-in prompt when the owner session is old', async () => {
     await renderApp('/admin/settings', 'stale-owner')
     expect(await screen.findByRole('button', { name: 'Sign in again' })).toBeInTheDocument()
-    expect(screen.queryByLabelText('Microsoft')).toBeNull()
+    expect(screen.queryByRole('textbox', { name: 'Display name' })).toBeNull()
   })
 
   it('reloads a conflicting revision instead of overwriting another saved name', async () => {
     const user = userEvent.setup()
-    await renderApp('/admin/settings', 'owner', () => {
+    await renderApp('/admin/settings?topic=providers', 'owner', () => {
       const inner = http.defaults.adapter as (config: InternalAxiosRequestConfig) => Promise<AxiosResponse>
       let changed = false
       http.defaults.adapter = async (config) => {
@@ -101,12 +102,13 @@ describe('Database-managed settings', () => {
         return inner(config)
       }
     })
-    await user.type(await screen.findByLabelText('Microsoft'), 'Stale editor name')
-    await user.click(screen.getByRole('button', { name: 'Save names' }))
+    await user.click(await screen.findByRole('button', { name: 'Edit entra' }))
+    await user.type(await screen.findByRole('textbox', { name: 'Display name' }), 'Stale editor name')
+    await user.click(screen.getByRole('button', { name: 'Save display name' }))
     expect(await screen.findByText('Settings changed elsewhere. Reload before saving.')).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Save names' })).toBeDisabled()
-    await user.click(screen.getByRole('button', { name: 'Reload settings' }))
-    await waitFor(() => expect(screen.getByLabelText('Microsoft')).toHaveValue('Externally saved name'))
-    expect(screen.queryByRole('button', { name: 'Reload settings' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Save display name' })).toBeDisabled()
+    await user.click(await screen.findByRole('button', { name: 'Discard this draft and load saved values' }))
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Display name' })).toHaveValue('Externally saved name'))
+    expect(screen.queryByRole('button', { name: 'Discard this draft and load saved values' })).toBeNull()
   })
 })
