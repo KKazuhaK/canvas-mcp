@@ -7,7 +7,7 @@ import TextField from '@mui/material/TextField'
 import Typography from '@mui/material/Typography'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import { saveBrowserSession } from '@/api/endpoints'
+import { getAdminSettings, saveBrowserSession } from '@/api/endpoints'
 import { ApiError } from '@/api/errors'
 import type { AdminSettingsResponse } from '@/api/types'
 import ErrorNotice from '@/components/ErrorNotice'
@@ -31,6 +31,8 @@ export default function BrowserSessionSettings({ data }: { data: AdminSettingsRe
     },
   })
   const conflict = save.error instanceof ApiError && save.error.code === 'settings_conflict'
+  const reload = useMutation({ mutationFn: () => cache.fetchQuery({ queryKey: keys.adminSettings, queryFn: getAdminSettings, staleTime: 0 }),
+    onSuccess: (fresh) => { draft.accept(fresh.revision, String(fresh.browser_session.ttl_seconds / 60)); save.reset() } })
   return <Card><CardContent><Stack spacing={2}>
     <Typography component="h2" variant="h6">{t('admin:browserSession.title')}</Typography>
     <Typography>{t('admin:browserSession.help')}</Typography>
@@ -41,8 +43,9 @@ export default function BrowserSessionSettings({ data }: { data: AdminSettingsRe
       {[15, 60, 1440, 10080, 43200].map((value) => <Button key={value} disabled={save.isPending} onClick={() => setMinutes(String(value))}>{t(`admin:browserSession.presets.${value}`)}</Button>)}
     </Stack>
     {save.isError && <ErrorNotice error={save.error} />}
-    {conflict && <Button onClick={() => void cache.invalidateQueries({ queryKey: keys.adminSettings })}>{t('admin:settings.reload')}</Button>}
-    {save.isSuccess && <Alert severity="success">{t('admin:browserSession.saved')}</Alert>}
+    {reload.isError && <ErrorNotice error={reload.error} />}
+    {conflict && <Button disabled={reload.isPending} onClick={() => reload.mutate()}>{t('admin:workspace.discardDraft')}</Button>}
+    {save.isSuccess && !draft.dirty && <Alert severity="success">{t('admin:browserSession.saved')}</Alert>}
     <Button variant="contained" disabled={!valid || save.isPending || conflict || draft.stale || !draft.dirty} onClick={() => save.mutate()}>{t('admin:browserSession.save')}</Button>
   </Stack></CardContent></Card>
 }

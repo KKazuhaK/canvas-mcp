@@ -14,6 +14,7 @@ import { useTranslation } from 'react-i18next'
 import { getMailSettings, saveMailSettings, testMailSettings } from '@/api/endpoints'
 import type { MailSettingsResponse } from '@/api/types'
 import ErrorNotice from '@/components/ErrorNotice'
+import { ApiError } from '@/api/errors'
 import { keys } from '@/query/keys'
 import DraftStatus from './DraftStatus'
 import { useSettingsDraft } from './useSettingsDraft'
@@ -33,6 +34,9 @@ function Editor({ data }: { data: MailSettingsResponse }) {
       void cache.invalidateQueries({ queryKey: keys.adminAudit })
       void cache.invalidateQueries({ queryKey: ['notifications'] })
     }, onSettled: () => setPassword('') })
+  const conflict = save.error instanceof ApiError && save.error.code === 'settings_conflict'
+  const reload = useMutation({ mutationFn: () => cache.fetchQuery({ queryKey: ['mailSettings'], queryFn: getMailSettings, staleTime: 0 }),
+    onSuccess: (fresh) => { draft.accept(fresh.revision, fresh.config); setPassword(''); save.reset() } })
   return <Stack spacing={2}>
     <Typography component="h2" variant="h6">{t('admin:mail.title')}</Typography>
     <Typography>{t('admin:mail.help')}</Typography>
@@ -47,8 +51,10 @@ function Editor({ data }: { data: MailSettingsResponse }) {
     {probe.isSuccess && <Alert severity="success">{t('admin:mail.testSuccess')}</Alert>}
     <Button disabled={probe.isPending || save.isPending || !data.config.enabled} onClick={() => probe.mutate()}>{t('admin:mail.test')}</Button>
     {save.isError && <ErrorNotice error={save.error} />}
-    {save.isSuccess && <Alert severity="success">{t('admin:mail.saved')}</Alert>}
-    <Button variant="contained" disabled={save.isPending || draft.stale || (!draft.dirty && !password) || !Number.isInteger(config.port) || !Number.isInteger(config.reminder_days) || config.reminder_days < 1 || config.reminder_days > 90 || (config.enabled && (!config.host || !config.from_email))} onClick={() => save.mutate()}>{t('admin:mail.save')}</Button>
+    {reload.isError && <ErrorNotice error={reload.error} />}
+    {conflict && <Button disabled={reload.isPending} onClick={() => reload.mutate()}>{t('admin:workspace.discardDraft')}</Button>}
+    {save.isSuccess && !draft.dirty && <Alert severity="success">{t('admin:mail.saved')}</Alert>}
+    <Button variant="contained" disabled={save.isPending || conflict || draft.stale || (!draft.dirty && !password) || !Number.isInteger(config.port) || !Number.isInteger(config.reminder_days) || config.reminder_days < 1 || config.reminder_days > 90 || (config.enabled && (!config.host || !config.from_email))} onClick={() => save.mutate()}>{t('admin:mail.save')}</Button>
   </Stack>
 }
 

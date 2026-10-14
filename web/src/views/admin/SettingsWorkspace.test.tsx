@@ -4,8 +4,43 @@ import { describe, expect, it } from 'vitest'
 import { keys } from '@/query/keys'
 import type { AdminSettingsResponse } from '@/api/types'
 import { renderApp } from '@/test/renderWithProviders'
+import { http } from '@/api/client'
+import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 
 describe('Settings workspace navigation and drafts', () => {
+  it.each([
+    { topic: 'access', field: 'Duration (minutes, 1–43200)', value: '60', savedValue: '10080', save: 'Save sign-in duration', endpoint: '/admin/settings/browser-session' },
+    { topic: 'mail', field: 'SMTP host', value: 'draft.smtp.test', savedValue: '', save: 'Save email settings', endpoint: '/admin/settings/mail' },
+  ])('recovers the $topic editor from a rejected shared revision without silently discarding its draft', async ({ topic, field, value, savedValue, save, endpoint }) => {
+    const user = userEvent.setup()
+    await renderApp(`/admin/settings?topic=${topic}`, 'owner', () => {
+      const inner = http.defaults.adapter as (config: InternalAxiosRequestConfig) => Promise<AxiosResponse>
+      let changed = false
+      http.defaults.adapter = async (config) => {
+        if (!changed && config.method?.toUpperCase() === 'PUT' && config.url === endpoint) {
+          changed = true
+          await inner({ ...config, url: '/admin/settings/sign-in-methods', data: JSON.stringify({ revision: 1, names: { entra: 'External name' } }) })
+        }
+        return inner(config)
+      }
+    })
+    const input = await screen.findByLabelText(field)
+    await user.clear(input)
+    await user.type(input, value)
+    await user.click(screen.getByRole('button', { name: save }))
+    expect(await screen.findByText('Settings changed elsewhere. Reload before saving.')).toBeVisible()
+    expect(input).toHaveValue(topic === 'access' ? 60 : value)
+    expect(screen.getByRole('button', { name: save })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Discard this draft and load saved values' }))
+    await waitFor(() => expect(input).toHaveValue(topic === 'access' ? 10080 : savedValue))
+    await waitFor(() => expect(screen.queryByText('Settings changed elsewhere. Reload before saving.')).toBeNull())
+    await user.clear(input)
+    await user.type(input, value)
+    expect(screen.getByRole('button', { name: save })).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: save }))
+    expect(await screen.findByText(topic === 'access' ? 'Sign-in duration saved. Longer durations apply after signing in again.' : 'Email settings saved.')).toBeVisible()
+  })
+
   it('keeps an unsaved name across topic switches and browser Back without putting it in the URL', async () => {
     const user = userEvent.setup()
     const { router } = await renderApp('/admin/settings?topic=providers', 'owner')
