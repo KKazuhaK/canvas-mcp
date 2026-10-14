@@ -15,10 +15,10 @@ sections, concise list rows, details on demand, and visible save feedback.
 Inspect its current source again when implementing; do not transplant its
 product-specific infrastructure or subscription flows into Canvas MCP.
 
-The current Canvas settings page puts provider setup, local-account creation,
+Before beta.12, the Canvas settings page put provider setup, local-account creation,
 site address, browser duration, SMTP, login policy, provider names and schools
-into one long view. The home page repeats full token editing and unrelated
-settings. Account rows embed identity details and several controls, obscuring
+into one long view. The home page repeated full token editing and unrelated
+settings. Account rows embedded identity details and several controls, obscuring
 the primary actions. Each existing feature must remain reachable after cleanup.
 
 ## Target organization
@@ -136,5 +136,26 @@ account details, English/Chinese desktop account management, Chinese mobile home
 token replacement and English mock client revocation. At 390 pixels, inspected
 home/details have no document-level horizontal overflow. These mock observations
 exercise the interface without modifying live identities, credentials or grants.
-Final CI, release and deployed-page acceptance are still required; remaining live
-HANDOFF checks are unchanged.
+This checkpoint describes local mock observations. The release evidence below
+supersedes its CI/publication gate; deployed-page acceptance is still required.
+Remaining live HANDOFF checks are unchanged.
+
+## Merged and published checkpoint — October 14 UTC
+
+[PR #17](https://github.com/KKazuhaK/canvas-mcp/pull/17) merged as
+`12e28987049615bb3a632b8819642ebb9cb15e33`, with the same file tree as reviewed
+candidate `c6fca41752c92536fc1b88020d5585a1660c3ebc`. The
+[complete candidate matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38487993088)
+and [complete post-merge matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38490456467)
+passed, including all 527 UI tests and required API, Python, PostgreSQL, formal
+confirmation and native image checks. The final SMTP/session-duration conflict
+regressions prove explicit reload discards the stale draft and permits a new
+edit/save; failed reloads stay in the normal visible error flow.
+
+[Beta.12](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.12)
+is published and its amd64/arm64 version, source and build-time stamps were
+verified. Downloaded Compose/env assets are unchanged from beta.11. This is a
+released implementation with automated and rendered mock evidence. The latest
+observed deployment is beta.11; actual beta.12 account/admin page acceptance is
+pending the operator's update. Do not mark this follow-up fully verified before
+that deployed workflow evidence is recorded.
