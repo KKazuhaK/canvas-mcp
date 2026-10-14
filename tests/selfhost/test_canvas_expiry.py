@@ -51,6 +51,31 @@ async def test_exact_token_lookup_preserves_real_timestamp_or_no_expiry(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "expiry,expected", [("2030-02-03T04:05:06Z", 1896321906), (None, None)]
+)
+async def test_canvas_sharded_mask_is_bound_to_the_submitted_token(expiry, expected):
+    result = await fetch_expiry(
+        TOKEN,
+        "https://canvas.example.edu/api/v1",
+        "42",
+        client_factory=lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    json={
+                        "user_id": 42,
+                        "visible_token": "123~abcDE...",
+                        "expires_at": expiry,
+                    },
+                )
+            )
+        ),
+    )
+    assert result.known and result.expires_at == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "status,body",
     [
         (403, {}),
@@ -64,6 +89,13 @@ async def test_exact_token_lookup_preserves_real_timestamp_or_no_expiry(
         (200, {"user_id": 42, "visible_token": "other...", "expires_at": None}),
         (200, {"user_id": 42, "visible_token": "abcDE", "expires_at": None}),
         (200, {"user_id": 42, "visible_token": "abcDE...suffix", "expires_at": None}),
+        (200, {"user_id": 42, "visible_token": "999~abcDE...", "expires_at": None}),
+        (200, {"user_id": 42, "visible_token": "123~other...", "expires_at": None}),
+        (
+            200,
+            {"user_id": 42, "visible_token": "123~abcDE...suffix", "expires_at": None},
+        ),
+        (200, {"user_id": 99, "visible_token": "123~abcDE...", "expires_at": None}),
         (200, {"user_id": 42, "visible_token": TOKEN, "expires_at": None}),
         (200, {"user_id": 42, "visible_token": None, "expires_at": None}),
         (
@@ -72,6 +104,15 @@ async def test_exact_token_lookup_preserves_real_timestamp_or_no_expiry(
                 "user_id": 42,
                 "token_hint": "other",
                 "visible_token": "abcDE...",
+                "expires_at": None,
+            },
+        ),
+        (
+            200,
+            {
+                "user_id": 42,
+                "token_hint": "other",
+                "visible_token": "123~abcDE...",
                 "expires_at": None,
             },
         ),
@@ -117,7 +158,8 @@ async def test_redirect_is_not_followed_with_credentials():
     assert not result.known and len(requests) == 1
 
 
-def test_binding_reads_real_expiry_without_a_manual_date(tmp_path):
+@pytest.mark.parametrize("visible", ["abcDE...", "123~abcDE..."])
+def test_binding_reads_real_expiry_without_a_manual_date(tmp_path, visible):
     from .account_fixture import build_harness, sign_in
     from .test_account_api import ACKNOWLEDGED, Api
 
@@ -134,7 +176,7 @@ def test_binding_reads_real_expiry_without_a_manual_date(tmp_path):
             200,
             json={
                 "user_id": 42,
-                "visible_token": "abcDE...",
+                "visible_token": visible,
                 "expires_at": "2030-02-03T04:05:06Z",
             },
         )

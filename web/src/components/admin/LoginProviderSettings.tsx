@@ -36,6 +36,9 @@ export default function LoginProviderSettings({ names = {} }: { names?: Record<s
   const [saved, setSaved] = useState(false)
   const [kind, setKind] = useState<LoginProviderConfiguration['protocol']>('google')
   const [slug, setSlug] = useState('')
+  const typeName = (protocol: LoginProviderConfiguration['protocol']) => t(`admin:providerConfig.protocols.${protocol}`)
+  const displayName = (provider: EditableProvider) => names[provider.id] || (provider.protocol === 'oidc'
+    ? `${typeName(provider.protocol)} · ${provider.id.slice('oidc:'.length)}` : typeName(provider.protocol))
   if (query.isError) return <ErrorNotice error={query.error} onRetry={() => void query.refetch()} />
   if (!query.data) return null
   const identifier = kind === 'oidc' ? `oidc:${slug}` : kind
@@ -50,7 +53,7 @@ export default function LoginProviderSettings({ names = {} }: { names?: Record<s
   }
   return <Card><CardContent sx={{ p: { xs: 2, sm: 3 } }}><Stack spacing={3}>
     <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between' }}>
-      <Typography component="h2" variant="h6" sx={{ overflowWrap: 'anywhere' }}>{selected === null ? t('admin:providerConfig.title') : t('admin:providerConfig.edit', { provider: names[selected.id] || selected.id })}</Typography>
+      <Typography component="h2" variant="h6" sx={{ overflowWrap: 'anywhere' }}>{selected === null ? t('admin:providerConfig.title') : t('admin:providerConfig.edit', { provider: displayName(selected) })}</Typography>
       {selected === null && <Button variant="outlined" size="small" startIcon={<RefreshRounded />} aria-label={t('admin:providerConfig.reload')} onClick={() => { void query.refetch() }} sx={{ alignSelf: { xs: 'flex-start', sm: 'auto' }, flexShrink: 0 }}>{t('admin:providerConfig.refresh')}</Button>}
       {selected !== null && <Button variant="outlined" size="small" color="inherit" startIcon={<ArrowBackRounded />} disabled={busy} onClick={() => setSelected(null)} sx={{ alignSelf: { xs: 'flex-start', sm: 'auto' }, flexShrink: 0 }}>{t('admin:providerConfig.back')}</Button>}
     </Stack>
@@ -58,17 +61,18 @@ export default function LoginProviderSettings({ names = {} }: { names?: Record<s
     {selected === null && <Stack spacing={1.5}>{query.data.providers.map((provider) => <Box key={provider.id} sx={{ border: 1, borderColor: 'divider', borderRadius: 2, p: 2 }}>
       <Stack direction="row" spacing={2} sx={{ alignItems: 'center' }}>
       <ProviderIcon icon={provider.protocol === 'entra' ? 'microsoft' : provider.protocol === 'google' ? 'google' : provider.protocol === 'github' ? 'github' : 'key'} data={provider.icon_data} />
-      <Stack spacing={0.5} sx={{ minWidth: 0, flex: 1 }}><Typography sx={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{names[provider.id] || provider.id}</Typography><Typography variant="caption" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>{provider.id}</Typography>
+      <Stack spacing={0.5} sx={{ minWidth: 0, flex: 1 }}><Typography sx={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{displayName(provider)}</Typography>
+        {displayName(provider) !== typeName(provider.protocol) && <Typography variant="caption" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>{typeName(provider.protocol)}</Typography>}
         <Chip size="small" variant="outlined" color={provider.enabled ? 'success' : 'default'} label={t(provider.enabled ? 'admin:providerConfig.active' : 'admin:providerConfig.inactive')} sx={{ alignSelf: 'flex-start' }} />
       </Stack>
-      <Button variant="outlined" startIcon={<EditOutlined />} aria-label={t('admin:providerConfig.edit', { provider: provider.id })} onClick={() => select(provider)} sx={{ flexShrink: 0 }}>{t('admin:providerConfig.editAction')}</Button>
+      <Button variant="outlined" startIcon={<EditOutlined />} aria-label={t('admin:providerConfig.edit', { provider: displayName(provider) })} onClick={() => select(provider)} sx={{ flexShrink: 0 }}>{t('admin:providerConfig.editAction')}</Button>
       </Stack>
     </Box>)}</Stack>}
     {selected === null && <Box sx={{ borderTop: 1, borderColor: 'divider', pt: 3 }}><Stack spacing={2}>
       <Typography component="h3" variant="subtitle1" sx={{ fontWeight: 600 }}>{t('admin:providerConfig.add')}</Typography>
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ alignItems: { sm: 'flex-start' } }}>
       <TextField select size="small" sx={{ minWidth: { sm: 200 } }} label={t('admin:providerConfig.type')} value={kind} onChange={(event) => setKind(event.target.value as LoginProviderConfiguration['protocol'])}>
-        {(['local', 'entra', 'google', 'github', 'oidc'] as const).map((value) => <MenuItem key={value} value={value}>{value === 'local' ? t('admin:localAccount.name') : value === 'entra' ? 'Microsoft Entra' : value === 'oidc' ? 'OIDC' : value === 'github' ? 'GitHub' : 'Google'}</MenuItem>)}
+        {(['local', 'entra', 'google', 'github', 'oidc'] as const).map((value) => <MenuItem key={value} value={value}>{typeName(value)}</MenuItem>)}
       </TextField>
       {kind === 'oidc' && <TextField size="small" label={t('admin:providerConfig.slug')} value={slug} onChange={(event) => setSlug(event.target.value)} />}
       <Button variant="contained" startIcon={<AddRounded />} disabled={!validId || exists || query.data.providers.length >= 8} onClick={() => select({ id: identifier, protocol: kind, enabled: true, rank: query.data.providers.length, config: {}, secret_present: false })} sx={{ minHeight: 40, flexShrink: 0 }}>{t('admin:providerConfig.add')}</Button>

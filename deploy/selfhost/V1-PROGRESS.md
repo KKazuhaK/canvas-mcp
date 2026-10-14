@@ -5,13 +5,16 @@ This is a working checkpoint, not a deployment or release approval. Follow
 
 ## Current status
 
-The current published prerelease is beta.12; the latest observed deployment is
-beta.11, awaiting the operator's update. Start with the completion audit and
+The current published prerelease and latest observed deployment are beta.13.
+The provider/action refinement and its test-clock correction are merged in PRs 19
+and 20, released and inspected on the deployed site. A subsequent provider-label
+and sharded-expiry correction is under validation; it is not deployed yet.
+Start with the completion audit and
 current image record below; later dated checkpoints preserve implementation history.
 
 ### HANDOFF completion audit
 
-Checked on October 14 UTC (October 13 local) against the current source, published release, CI records
+Checked on October 14 UTC against the current source, published release, CI records
 and available live evidence. Automated checks prove their covered behavior;
 they do not replace the live checks in DEVELOPMENT 6.12. A beta deployment does
 not complete HANDOFF or authorize a stable release.
@@ -28,7 +31,7 @@ not complete HANDOFF or authorize a stable release.
 | 6.7 small upstream PRs | Submitted and updated; maintainer decision remains external | October 13 GitHub inspection: 490 is open/review required; 491 and 494 are open/approved. Their updates were not merged into `selfhost`. |
 | 6.8 proposal records | Implemented | Three historical proposal records plus their index; old claims retain their dates and UNVERIFIED marks. |
 | 6.9 issue 484 reply | No reply, as instructed | Historical proposal banners record the independent-fork decision; no new upstream pilot is claimed. |
-| 6.10 beta release | Published through beta.12 | Exact reviewed/post-merge matrices and native release smoke passed. Owner-authorized early betas supersede the original first-tag timing gate; stable publication is not authorized. |
+| 6.10 beta release | Published through beta.13 | Exact reviewed/post-merge matrices and native release smoke passed. Owner-authorized early betas supersede the original first-tag timing gate; stable publication is not authorized. |
 | 6.11 operator deployment | Implemented and deployed | Compose plus complete env template, unchanged assets, owner update confirmation, health/version/OAuth checks. |
 | 6.12 live verification | Incomplete | Detailed live boundary below; partial client observations must not be promoted to broad compatibility. |
 | 6.13 residuals | Source fixes implemented | Bilingual audit enum labels and identity actions, consistent rate-limit wording, native per-request authorization, accepted limitations in README. The manual expiry input was removed by the later automatic-only requirement. |
@@ -48,7 +51,10 @@ alone proves neither email receipt nor reminder scheduling.
 The frontend reorganization is merged and published in beta.12 through
 [PR #17](https://github.com/KKazuhaK/canvas-mcp/pull/17). Its complete CI and local
 rendered mock evidence are recorded below and in [UI-REDESIGN.md](UI-REDESIGN.md).
-Deployed beta.12 page acceptance remains pending. The owner has authorized one
+Deployed beta.12 home/token/admin pages, the local-owner safeguard and existing
+Code/web client reads were inspected after the operator's update. The provider
+list/editor and action-button usability feedback led to the PR 19 refinement.
+The owner has authorized one
 test message to a privately supplied recipient; no submission or receipt is
 claimed. A one-message command using the saved server SMTP configuration is
 prepared for the operator because direct server execution is unavailable.
@@ -127,15 +133,15 @@ and inventory checks remain in the removable migration package.
 ## Deployable staging image
 
 The current prerelease is
-[v1.14.0-beta.12](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.12),
-source `12e28987049615bb3a632b8819642ebb9cb15e33`, built at
-`2026-10-14T01:02:03Z`. Both `:beta` and `:1.14.0-beta.12` resolve to:
+[v1.14.0-beta.13](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.13),
+source `272b114b803b51fb860f328c04669f43826cda92`, built at
+`2026-10-14T10:06:36Z`. Both `:beta` and `:1.14.0-beta.13` resolve to:
 
-`ghcr.io/kkazuhak/canvas-mcp@sha256:e0b7e7f7931d4f7666b728ce08ed1563a3ff428f42ac6c9441e9dd2f3641c09e`
+`ghcr.io/kkazuhak/canvas-mcp@sha256:1ed4ef8c1f550c2e6b47cb8f7b2e9a09a6ac9f1c699dbf6b6c9ff51da517d994`
 
-The [reviewed-head matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38487993088),
-[complete post-merge matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38490456467)
-and [native release publication](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38493480057)
+The [reviewed-head matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38540596076),
+[complete post-merge matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38544069245)
+and [native release publication](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38547234225)
 passed. Anonymous registry inspection confirmed the index annotations and both
 amd64/arm64 labels match the source, version and build time. Stable `:latest`
 was unchanged. The downloaded release assets match the source bytes and beta.11:
@@ -145,25 +151,52 @@ was unchanged. The downloaded release assets match the source bytes and beta.11:
 
 No schema migration, credential rewrite, new system environment variable or extra
 deployment file is required. This image is ready for the operator's upgrade;
-deployment and reorganized-page acceptance are not yet claimed.
+the operator confirmed deployment and beta.13 page/client observations are below.
 
-## Last observed deployed image: beta.11
+## Last observed deployed image: beta.13
 
-The latest public version observation still identifies
-[v1.14.0-beta.11](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.11),
-source `af65c436bda3b9390c1923a877d4c340151cff48`, built at
-`2026-10-13T10:08:47Z`. Its immutable image is:
+The operator confirmed the update. The public version endpoint and account footer
+identify `1.14.0-beta.13`, source `272b114b803b51fb860f328c04669f43826cda92`, built
+at `2026-10-14T10:06:36Z`; health returned 200. The expired administrator recent-login
+check displayed the filled 40-pixel login-icon button. Clicking it entered the
+normal sign-in flow and, after the owner completed organization verification,
+returned to the original providers topic. Provider Edit controls, separated
+appearance/connection/rules sections and saved-secret placeholder were inspected.
+Own-account token actions have warning/error outlines and icons; Close dismissed
+the drawer. No provider configuration, token or access policy was changed.
 
-`ghcr.io/kkazuhak/canvas-mcp@sha256:7bd4ada1c0ba542b2ed97faaf9d78124b216b88a324e93be5dbfffa461e94f2b`
+The existing Claude Code grant completed exactly one read-only profile call at
+`2026-10-14T10:21:04Z`, 87,110 seconds after the first successful call, without
+renewed consent. The expected Canvas account matched. This crosses one day;
+several-day refresh rotation, absolute TTL and grace traces remain unproven.
 
-The [reviewed-head matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38374966678),
-[post-merge matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38378233262)
-and [native image publication](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38381338817)
-passed. The operator confirmed the upgrade; the public version endpoint and
-account footer match that source, version and build time. See the beta.11 live
-checkpoint below for the separate acceptance limits. Compose and env asset
-hashes remain the same as beta.9/10 below; no new system environment variables
-or deployment files are required. Stable `:latest` remains unchanged.
+The owner's bounded read-only server diagnosis returned 200, matching user and a
+parseable expiry. Its visible mask exactly matched the submitted shard prefix
+plus hint, but not the unsharded mask expected by beta.13. No token or identifiers
+were disclosed. This establishes an expiry compatibility defect, not missing
+school metadata. The correction below must be released and rechecked before
+claiming that automatic expiry is working on this deployment. Mail delivery and
+the remaining 6.12 gates are still outstanding.
+
+### Earlier beta.12 observation
+
+The latest public version observation identifies
+[v1.14.0-beta.12](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.12),
+source `12e28987049615bb3a632b8819642ebb9cb15e33`, built at
+`2026-10-14T01:02:03Z`. Its immutable image is:
+
+`ghcr.io/kkazuhak/canvas-mcp@sha256:e0b7e7f7931d4f7666b728ce08ed1563a3ff428f42ac6c9441e9dd2f3641c09e`
+
+The operator confirmed the upgrade; the public version endpoint and account
+footer match that source, version and build time. Health and both OAuth discovery
+paths returned 200. Home/token pages retain automatic-only expiry and the existing
+valid token with unknown expiry. Admin pages show Entra/local providers and the
+protected local-owner entry point. Existing Claude Code and claude.ai connections
+each completed one read-only profile call after the upgrade, without renewed
+consent. The Code observation at `2026-10-14T07:41:50Z` was 77,556 seconds after
+the first successful read; it does not prove several days, refresh rotation,
+absolute TTL or grace behavior. SMTP delivery, unavailable B2B guest and the other
+6.12 gates remain unverified. Compose/env asset hashes are unchanged.
 
 ## Historical beta.9 staging image
 
@@ -1362,6 +1395,64 @@ checkpoint supersedes the publication gate; deployed-page acceptance remains ope
 - Beta.12 was published at `2026-10-14T01:06:08Z` after release workflow
   `38493480057` passed. The registry stamp and downloaded two-file assets were
   verified as recorded above. No stable release was published.
-- The latest observed public deployment remains beta.11. The operator received
-  the existing two Compose update commands. Deployed beta.12 UI/client acceptance,
-  actual SMTP delivery and remaining live HANDOFF checks are still outstanding.
+- At publication, the latest observed public deployment was beta.11. The operator received
+  the existing two Compose update commands. This historical publication checkpoint
+  predates the later deployed beta.12 observations recorded above. Actual SMTP
+  delivery and remaining live HANDOFF checks are still outstanding.
+
+### Provider/action refinement checkpoint
+
+PR 19 merged as `e5ea38ab67882cec2c69bfad07d064466740ab0c`, with the same file
+tree as reviewed candidate `82975c86b4b08bf9823cfbd4f2716b3758aab47e`.
+The complete candidate matrix `38535054974` passed 529 UI tests, 8,246 Python
+tests per Linux version and 4,426 checks per PostgreSQL dependency variant,
+including native amd64/arm64 image verification and confirmation guards.
+The first post-merge matrix `38538075000` failed one Python 3.14 assertion in the
+start-limit test; its dependent aggregate consequently failed. The test's clock
+followed real time, so a scheduling delay could refill a token between draining
+the bucket and the HTTP refusal check. A 250 ms delay reproduced the failure;
+the corrected test passed ten rounds with the same delay and 26 related checks.
+PR 20 merged the controlled-clock correction as
+`272b114b803b51fb860f328c04669f43826cda92`, with the identical file tree to reviewed
+candidate `aec85e5fb3021a31d9c18d1a40d1f26d02f24f8a`. Its complete candidate matrix
+`38540596076` passed, including Python 3.14, 529 UI checks and both PostgreSQL
+dependency variants. No assertion was removed or runtime limit altered. The
+corrected post-merge matrix `38544069245` passed, including all 529 UI checks,
+8,246 tests per Linux Python version, 8,240 Windows checks and 4,426 checks in
+each PostgreSQL dependency set. Both native image checks passed too. Beta.13 was
+published at `2026-10-14T10:12:23Z` from that reviewed/verified commit after native
+release workflow `38547234225` passed. Anonymous registry inspection verified the
+index and both architecture stamps; downloaded Compose/env bytes are unchanged.
+Post-merge edge image workflow `38538075015` passed; both architectures carry
+source `e5ea38ab67882cec2c69bfad07d064466740ab0c` and build time
+`2026-10-14T08:51:13Z`. An edge build is not a published beta.13 release.
+
+The refinement separates the provider list from the selected editor, groups
+appearance/connection/sign-in settings and makes account actions recognizable
+as buttons. Reauthentication has a filled icon-labelled button; secondary and
+token-management actions have visible outlines. Confirmation, revision, secret
+handling and local-owner guards remain in place. Synthetic desktop/mobile
+English/Chinese dark/light previews exercised these controls. No live provider,
+account policy, credential or grant was modified for those previews. The operator
+updated to beta.13 and the deployed observations are recorded above.
+
+### Sharded expiry and provider labels follow-up
+
+The live diagnostic isolated an exact shard-prefixed visible mask mismatch.
+Two timestamp/no-expiry regressions reproduced the rejection before the fix.
+Discovery now accepts either the exact unsharded mask or the exact submitted
+shard-prefixed mask. Other shards, other users, extra suffixes and conflicting
+identifiers remain unknown. No credential generation, grant, schema or stored
+manual date is changed. API enrollment is covered for both mask formats.
+
+Provider lists show translated protocol names rather than lowercase internal IDs,
+while retaining configured display names. Unnamed custom OIDC entries retain a
+readable slug to distinguish multiple instances. Installation and provider-type
+choices use the same labels. IDs, persistence and callback paths remain unchanged.
+This follow-up is under validation and is not yet a published release.
+Local full Python regression passed 8,244 checks with 74 environment-dependent
+skips. Final expiry coverage passed all 36 checks. The full UI run passed 530
+checks; subsequent narrow-layout/provider changes passed the 19 focused settings
+checks, production TypeScript build, lint and distribution validation. English
+and Chinese previews retain readable labels; the settled 390-pixel view has no
+document-level horizontal overflow. Complete candidate CI is still required.

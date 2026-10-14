@@ -44,7 +44,7 @@ describe('Settings workspace navigation and drafts', () => {
   it('keeps an unsaved name across topic switches and browser Back without putting it in the URL', async () => {
     const user = userEvent.setup()
     const { router } = await renderApp('/admin/settings?topic=providers', 'owner')
-    await user.click(await screen.findByRole('button', { name: 'Edit entra' }))
+    await user.click(await screen.findByRole('button', { name: 'Edit Microsoft' }))
     const field = await screen.findByRole('textbox', { name: 'Display name' })
     await user.type(field, 'Private draft')
     await user.click(screen.getByRole('tab', { name: 'Email reminders' }))

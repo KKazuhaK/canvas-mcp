@@ -182,3 +182,21 @@ explanation, rather than a text link at the alert's far edge. Token invalidation
 and removal retain their confirmations and use warning/error outlined actions.
 Drawer surfaces use the application's normal dark background and a visible Close
 button. Navigation utilities retain their compact header presentation.
+
+## Beta.13 deployed observation and follow-up
+
+The operator's update was confirmed by the public version endpoint and footer:
+`1.14.0-beta.13`, source `272b114b803b51fb860f328c04669f43826cda92`, built UTC
+`2026-10-14T10:06:36Z`. The real expired recent-login notice has a filled icon
+button; completing organization verification returned to the providers topic.
+The deployed editor has appearance, connection and rules sections. Own-account
+token controls have warning/error outlines and icons, and the drawer closes.
+These checks did not save live configuration or invalidate/remove a token.
+
+Further feedback identified lowercase internal IDs in provider cards. The
+candidate shows localized protocol names, keeps configured display names and
+distinguishes unnamed custom OIDC instances by slug. It uses the same type labels
+in installation and creation choices. Stable provider IDs and callback URLs are
+retained. This candidate remains under validation until separately released.
+At narrow widths, the missing-local-administrator action sits below its warning
+and the header language label stays on one line.

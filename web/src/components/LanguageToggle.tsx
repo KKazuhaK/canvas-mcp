@@ -30,6 +30,7 @@ export default function LanguageToggle() {
       variant="text"
       color="inherit"
       size="small"
+      sx={{ flexShrink: 0, whiteSpace: 'nowrap' }}
       startIcon={<LanguageIcon fontSize="small" />}
       aria-label={t('common:language.switchTo', { name })}
       lang={next}
