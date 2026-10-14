@@ -344,7 +344,14 @@
     "appearance": "Appearance",
     "connection": "Connection settings",
     "rules": "Sign-in rules",
-    "back": "Back to providers"
+    "back": "Back to providers",
+    "protocols": {
+      "local": "Local account",
+      "entra": "Microsoft Entra ID",
+      "google": "Google",
+      "github": "GitHub",
+      "oidc": "OpenID Connect (OIDC)"
+    }
   },
   "settings": {
     "displayName": "Display name",

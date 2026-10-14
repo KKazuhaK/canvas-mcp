@@ -141,7 +141,10 @@ export default function AdminSettingsView() {
   if (query.isError) return <ErrorNotice error={query.error} onRetry={() => void query.refetch()} />
   return <Stack spacing={3} sx={{ maxWidth: 1000 }}>
     <PageHeader title={t('admin:settings.title')} subtitle={t('admin:workspace.intro')} />
-    <Alert role="status" severity={query.data.local_admin.ready ? 'success' : 'warning'} action={!query.data.local_admin.ready ? <Button component={RouterLink} to="/admin" color="inherit">{t('admin:accounts.title')}</Button> : undefined}>{t(query.data.local_admin.ready ? 'admin:localAccount.ready' : 'admin:localAccount.missing')}</Alert>
+    <Alert role="status" severity={query.data.local_admin.ready ? 'success' : 'warning'}><Stack spacing={2} sx={{ alignItems: 'flex-start' }}>
+      <span>{t(query.data.local_admin.ready ? 'admin:localAccount.ready' : 'admin:localAccount.missing')}</span>
+      {!query.data.local_admin.ready && <Button component={RouterLink} to="/admin" color="inherit">{t('admin:accounts.title')}</Button>}
+    </Stack></Alert>
     <SettingsTopics />
     <TopicPanel topic="site"><SiteAddressSettings data={query.data} /></TopicPanel>
     <TopicPanel topic="access"><LoginPolicySettings /><BrowserSessionSettings data={query.data} /></TopicPanel>

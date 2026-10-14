@@ -57,7 +57,7 @@ export default function SetupView() {
     <TextField required label={t('auth:local.confirm')} type="password" autoComplete="new-password" value={confirm} disabled={busy} error={confirm.length > 0 && password !== confirm} onChange={(event) => setConfirm(event.target.value)} />
     <TextField select label={t('admin:installation.method')} value={kind} disabled={busy} onChange={(event) => setKind(event.target.value as typeof kind)}>
       <MenuItem value="local">{t('admin:localAccount.only')}</MenuItem>
-      <MenuItem value="entra">Microsoft Entra</MenuItem><MenuItem value="google">Google</MenuItem><MenuItem value="github">GitHub</MenuItem><MenuItem value="oidc">OpenID Connect</MenuItem>
+      {(['entra', 'google', 'github', 'oidc'] as const).map((protocol) => <MenuItem key={protocol} value={protocol}>{t(`admin:providerConfig.protocols.${protocol}`)}</MenuItem>)}
     </TextField>
     {kind === 'oidc' && <TextField required label={t('admin:providerConfig.slug')} value={slug} onChange={(event) => setSlug(event.target.value)} />}
     {kind === 'local' ? <Button variant="contained" disabled={!valid || busy} onClick={() => { void save() }}>{t('admin:providerConfig.initialize')}</Button> : <Box>

@@ -344,7 +344,14 @@
     "appearance": "显示样式",
     "connection": "连接配置",
     "rules": "登录规则",
-    "back": "返回服务商列表"
+    "back": "返回服务商列表",
+    "protocols": {
+      "local": "本地账户",
+      "entra": "Microsoft Entra ID",
+      "google": "Google",
+      "github": "GitHub",
+      "oidc": "OpenID Connect（OIDC）"
+    }
   },
   "settings": {
     "displayName": "显示名称",

@@ -44,7 +44,7 @@ describe('Database-managed settings', () => {
   it('saves sign-in names with the revision and CSRF header', async () => {
     const user = userEvent.setup()
     await renderApp('/admin/settings?topic=providers', 'owner')
-    await user.click(await screen.findByRole('button', { name: 'Edit entra' }))
+    await user.click(await screen.findByRole('button', { name: 'Edit Microsoft' }))
     const seen = recordRequests()
     const name = await screen.findByRole('textbox', { name: 'Display name' })
     await user.type(name, 'Campus SSO')
@@ -102,7 +102,7 @@ describe('Database-managed settings', () => {
         return inner(config)
       }
     })
-    await user.click(await screen.findByRole('button', { name: 'Edit entra' }))
+    await user.click(await screen.findByRole('button', { name: 'Edit Microsoft' }))
     await user.type(await screen.findByRole('textbox', { name: 'Display name' }), 'Stale editor name')
     await user.click(screen.getByRole('button', { name: 'Save display name' }))
     expect(await screen.findByText('Settings changed elsewhere. Reload before saving.')).toBeVisible()

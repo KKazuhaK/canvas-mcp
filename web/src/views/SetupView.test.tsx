@@ -13,7 +13,7 @@ describe('Database login installation', () => {
     expect(await screen.findByRole('heading', { name: 'Local administrator' })).toBeInTheDocument()
     expect(screen.queryByLabelText(/^Client ID/)).not.toBeInTheDocument()
     await user.click(screen.getByRole('combobox', { name: 'External sign-in (optional)' }))
-    for (const name of ['Local account only', 'Microsoft Entra', 'Google', 'GitHub', 'OpenID Connect']) {
+    for (const name of ['Local account only', 'Microsoft Entra ID', 'Google', 'GitHub', 'OpenID Connect (OIDC)']) {
       expect(screen.getByRole('option', { name })).toBeInTheDocument()
     }
     await user.click(screen.getByRole('option', { name: 'Local account only' }))
@@ -53,7 +53,7 @@ describe('Database login installation', () => {
     await user.click(screen.getByLabelText(/^Password/)); await user.paste('a long private local password')
     await user.click(screen.getByLabelText(/^Confirm password/)); await user.paste('a long private local password')
     await user.click(screen.getByRole('combobox', { name: 'External sign-in (optional)' }))
-    await user.click(screen.getByRole('option', { name: 'Microsoft Entra' }))
+    await user.click(screen.getByRole('option', { name: 'Microsoft Entra ID' }))
     await user.click(screen.getByLabelText(/^Directory/)); await user.paste('11111111-2222-3333-4444-555555555555')
     await user.click(screen.getByLabelText(/^Client ID/)); await user.paste('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
     await user.click(screen.getByLabelText(/^Client secret/)); await user.paste('new-client-secret-0123456789')
