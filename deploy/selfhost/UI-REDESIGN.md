@@ -197,6 +197,15 @@ Further feedback identified lowercase internal IDs in provider cards. The
 candidate shows localized protocol names, keeps configured display names and
 distinguishes unnamed custom OIDC instances by slug. It uses the same type labels
 in installation and creation choices. Stable provider IDs and callback URLs are
-retained. This candidate remains under validation until separately released.
+retained. The refinement was merged in PR 21 and published in beta.14; its
+complete candidate/post-merge matrices and tagged native images passed. Deployed
+beta.14 version/health and automatic expiry acceptance passed after the operator's
+update: token recheck displays a Canvas-sourced date, removes the unknown notice
+and updates the home summary without replacing the token. After recent
+administrator sign-in, deployed English/Chinese provider labels, visible edit
+buttons and the Entra editor/callback passed inspection. A 390-pixel browser
+viewport retained usable labels/actions without document-level horizontal
+overflow; this does not claim mobile MCP-client compatibility. Language and
+viewport were restored, with no provider configuration saved.
 At narrow widths, the missing-local-administrator action sits below its warning
 and the header language label stays on one line.
