@@ -199,6 +199,9 @@ distinguishes unnamed custom OIDC instances by slug. It uses the same type label
 in installation and creation choices. Stable provider IDs and callback URLs are
 retained. The refinement was merged in PR 21 and published in beta.14; its
 complete candidate/post-merge matrices and tagged native images passed. Deployed
-beta.14 label and expiry acceptance still requires the operator's update.
+beta.14 version/health and automatic expiry acceptance passed after the operator's
+update: token recheck displays a Canvas-sourced date, removes the unknown notice
+and updates the home summary without replacing the token. The provider-label
+page still needs a recent administrator sign-in for deployed inspection.
 At narrow widths, the missing-local-administrator action sits below its warning
 and the header language label stays on one line.

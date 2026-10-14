@@ -5,12 +5,11 @@ This is a working checkpoint, not a deployment or release approval. Follow
 
 ## Current status
 
-The current published prerelease is beta.14; the latest observed deployment is
-still beta.13 until the operator's next update is confirmed.
+The current published prerelease and latest observed deployment are beta.14.
 The provider/action refinement and its test-clock correction are merged in PRs 19
 and 20, released and inspected on the deployed site. The provider-label and
-sharded-expiry correction merged in PR 21 and is published in beta.14; its live
-expiry acceptance still requires the operator's update and token recheck.
+sharded-expiry correction merged in PR 21 and is published in beta.14. Its live
+token recheck now supplies the actual expiry in the token page and home summary.
 Start with the completion audit and
 current image record below; later dated checkpoints preserve implementation history.
 
@@ -46,8 +45,8 @@ key rotation; and directory query egress. Enabled Entra tenant-member sign-in,
 custody enrollment, deployed-host CIMD fetch, web/Code read-only calls, operator
 store check and health are exercised. Only Entra and local are configured;
 unconfigured Google/GitHub/custom OIDC and mobile are not live-support claims.
-The school's sanitized expiry diagnosis is complete; the sharded-mask correction
-still needs deployed recheck acceptance. Mail needs actual delivery evidence. SMTP authentication
+The school's sanitized expiry diagnosis and deployed automatic recheck are
+complete. Mail needs actual delivery evidence. SMTP authentication
 alone proves neither email receipt nor reminder scheduling.
 
 The frontend reorganization is merged and published in beta.12 through
@@ -152,10 +151,27 @@ was unchanged. The downloaded release assets match the source bytes and beta.11:
 - Env template SHA-256: `4f0e1ff437d4d6b26943e0a6e8c2e2ef044f1fb9a5a2b2a5a6ed2af634f25075`.
 
 No schema migration, credential rewrite, new system environment variable or extra
-deployment file is required. This image is ready for the operator's upgrade;
-the earlier beta.13 page/client observations remain the latest live evidence.
+deployment file is required. The operator confirmed the upgrade; beta.14
+version, health, automatic expiry and existing Code grant were verified below.
 
-## Last observed deployed image: beta.13
+## Last observed deployed image: beta.14
+
+The operator confirmed deployment. Public version and account footer identify
+`1.14.0-beta.14`, source `967011723af64f00f0287ea4760f61e1a71b85bb`, built UTC
+`2026-10-14T19:57:43Z`; health returned 200. A normal recheck of the existing
+token completed without replacement, showing a calendar date and timestamp with
+Canvas as the source. The unknown-expiry notice disappeared. The home summary
+also displays the date; the manual date input remains absent. Reminder opt-in
+is still off and the recipient blank, unchanged by this acceptance.
+
+The existing Claude Code grant completed one read-only profile call at
+`2026-10-14T21:33:13Z`, 127,439 seconds after the first successful read, with the
+expected Canvas account and no renewed consent. No HTTP refresh trace was
+captured; rotation, absolute TTL, grace and several days remain unproven.
+The provider-name page still needs a recent administrator sign-in for its final
+deployed inspection. Actual mail delivery and other HANDOFF gates remain open.
+
+### Earlier beta.13 observation
 
 The operator confirmed the update. The public version endpoint and account footer
 identify `1.14.0-beta.13`, source `272b114b803b51fb860f328c04669f43826cda92`, built
