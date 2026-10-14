@@ -27,6 +27,7 @@ export default function LanguageToggle() {
 
   return (
     <Button
+      variant="text"
       color="inherit"
       size="small"
       startIcon={<LanguageIcon fontSize="small" />}

@@ -336,7 +336,15 @@
     "enabled": "Offer this sign-in method",
     "save": "Save sign-in configuration",
     "initialize": "Initialize sign-in",
-    "autoLinkEmail": "Automatically link matching email to an existing account"
+    "autoLinkEmail": "Automatically link matching email to an existing account",
+    "editAction": "Edit",
+    "refresh": "Refresh",
+    "active": "Enabled",
+    "inactive": "Disabled",
+    "appearance": "Appearance",
+    "connection": "Connection settings",
+    "rules": "Sign-in rules",
+    "back": "Back to providers"
   },
   "settings": {
     "displayName": "Display name",

@@ -34,7 +34,19 @@ export function buildTheme(mode: ResolvedTheme): Theme {
       button: { textTransform: 'none', fontWeight: 600 },
     },
     components: {
-      MuiButton: { defaultProps: { disableElevation: true } },
+      MuiButton: {
+        defaultProps: { disableElevation: true, variant: 'outlined' },
+        styleOverrides: {
+          root: ({ theme }) => ({
+            borderRadius: 999,
+            minHeight: 40,
+            paddingInline: 18,
+            '&.Mui-focusVisible': { outline: `2px solid ${theme.palette.primary.main}`, outlineOffset: 3 },
+          }),
+          sizeSmall: { minHeight: 34, paddingInline: 12 },
+        },
+      },
+      MuiDrawer: { styleOverrides: { paper: { backgroundImage: 'none' } } },
       MuiCard: { defaultProps: { variant: 'outlined' } },
       MuiPaper: { defaultProps: { elevation: 0 } },
     },

@@ -91,7 +91,7 @@ export default function AccountApps({ account, inline = false, active = true }: 
     {inline ? content : <>
       <Button
         size="small"
-        variant="text"
+        variant="outlined"
         aria-label={t('admin:apps.buttonLabel', { name: account.display_name })}
         onClick={() => {
           revoke.reset()

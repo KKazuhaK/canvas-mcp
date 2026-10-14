@@ -6,6 +6,29 @@ import { renderApp } from '@/test/renderWithProviders'
 import type { LoginProviderSettings } from '@/api/types'
 
 describe('Login provider administration', () => {
+  it('returns to the provider list on cancel without saving an edited connection', async () => {
+    const user = userEvent.setup()
+    await renderApp('/admin/settings?topic=providers', 'owner')
+    await user.click(await screen.findByRole('button', { name: 'Edit entra' }))
+    expect(screen.queryByRole('button', { name: 'Edit entra' })).toBeNull()
+    await user.type(screen.getByLabelText(/^Client secret/), 'cancelled-provider-secret')
+    const seen = recordRequests()
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(await screen.findByRole('button', { name: 'Edit entra' })).toBeEnabled()
+    expect(seen.some((request) => request.method === 'PUT')).toBe(false)
+    await user.click(screen.getByRole('button', { name: 'Edit entra' }))
+    expect(screen.getByLabelText(/^Client secret/)).toHaveValue('')
+  })
+
+  it('does not submit connection settings when Enter is pressed in the independent display-name editor', async () => {
+    const user = userEvent.setup()
+    await renderApp('/admin/settings?topic=providers', 'owner')
+    await user.click(await screen.findByRole('button', { name: 'Edit entra' }))
+    const seen = recordRequests()
+    await user.type(screen.getByRole('textbox', { name: 'Display name' }), 'Campus SSO{Enter}')
+    expect(seen.some((request) => request.method === 'PUT')).toBe(false)
+    expect(screen.getByRole('button', { name: 'Save display name' })).toBeEnabled()
+  })
   it('saves a provider name without discarding a configuration draft or its write-only secret', async () => {
     const user = userEvent.setup()
     await renderApp('/admin/settings?topic=providers', 'owner')
