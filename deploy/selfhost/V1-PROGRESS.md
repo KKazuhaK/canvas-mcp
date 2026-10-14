@@ -168,8 +168,15 @@ The existing Claude Code grant completed one read-only profile call at
 `2026-10-14T21:33:13Z`, 127,439 seconds after the first successful read, with the
 expected Canvas account and no renewed consent. No HTTP refresh trace was
 captured; rotation, absolute TTL, grace and several days remain unproven.
-The provider-name page still needs a recent administrator sign-in for its final
-deployed inspection. Actual mail delivery and other HANDOFF gates remain open.
+After a recent administrator sign-in, the deployed provider list and Entra
+editor were inspected in English and Chinese. Microsoft Entra ID and Local
+account/localized type labels replace the lowercase internal captions; the
+configured display names remain unchanged. Edit opens the intended provider and
+the Entra callback remains unchanged. At a 390-pixel browser viewport, labels and
+edit buttons remain usable without document-level horizontal overflow. The
+original language and viewport were restored; no provider configuration was saved.
+This responsive-browser inspection is not a mobile MCP-client support claim.
+Actual mail delivery and other HANDOFF gates remain open.
 
 ### Earlier beta.13 observation
 
