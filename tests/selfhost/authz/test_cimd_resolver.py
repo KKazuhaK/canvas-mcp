@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from canvas_mcp.core.selfhost.authz import clients
 from canvas_mcp.core.selfhost.authz import fastmcp_compat as compat
 from canvas_mcp.core.selfhost.authz.clients import (
     CIMD_BUDGET,
@@ -216,16 +217,43 @@ class TestSingleFlightAndTime:
         assert all(r is not None for r in results) and cimd.calls == [URL]
 
     @pytest.mark.parametrize("purpose", ["authorize", "token"])
-    async def test_a_hanging_fetch_gives_up_within_the_timeout(self, env: Env, purpose: str) -> None:
+    async def test_a_hanging_fetch_gives_up_within_the_timeout(
+        self, env: Env, purpose: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         cimd = FakeCimd()
         cimd.serve(URL, doc())
-        resolver = build(env, cimd, cimd_fetch_timeout_s=1)
+        cancelled = asyncio.Event()
+        fetch_timeouts: list[float] = []
+
+        async def fetch(url: str, timeout_s: float) -> compat.FetchedDocument:
+            fetch_timeouts.append(timeout_s)
+            try:
+                return await cimd(url, timeout_s)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        resolver = build(env, fetch, cimd_fetch_timeout_s=1)
         await resolver.get(URL)  # a good copy first (token purpose may fall back to it)
         env.clock.advance(400)
         cimd.delay = 10
+        requested_budgets: list[float] = []
+        real_fail_after = clients.anyio.fail_after
+
+        def short_watchdog(delay: float):
+            requested_budgets.append(delay)
+            # Check the production budget separately from database/scheduler wall time.
+            # Exercise real cancellation with a short test wait, not a fake TimeoutError.
+            return real_fail_after(0.01)
+
+        monkeypatch.setattr(clients.anyio, "fail_after", short_watchdog)
         started = time.monotonic()
-        result = await resolver.get(URL, purpose)
+        result = await asyncio.wait_for(resolver.get(URL, purpose), timeout=2.0)
         assert time.monotonic() - started < 2.0
+        assert requested_budgets == [1.5]  # configured 1s plus the existing 0.5s grace
+        assert fetch_timeouts == [1.0, 1.0]
+        assert cancelled.is_set()
+        assert env.authz.cimd_snapshot(URL).last_error == compat.FETCH_TIMEOUT
         assert (result is None) == (purpose == "authorize")
 
     async def test_the_real_fetcher_refuses_internal_addresses_without_connecting(self, env: Env) -> None:

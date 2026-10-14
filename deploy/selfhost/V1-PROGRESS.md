@@ -79,6 +79,14 @@ mock, English custom-name saving and Chinese blank-name reset succeeded; the
 synthetic local observations, not an additional outbound mail or deployment.
 The complete local selfhost suite also passed 4,347 tests with 54 platform or
 database-dependent skips; PostgreSQL coverage still requires the CI matrix.
+The initial `31e1e00` candidate matrix failed one existing Python 3.13 CIMD
+wall-time assertion (2.002 seconds against a strict 2-second bound), while its
+fetch timeout and stale fallback occurred. The test correction retains that
+bound and a 2-second outer watchdog, asserts the exact 1-second fetch budget and
+1.5-second cancellation budget, and verifies real cancellation and stored error
+state using a short real test wait. Production CIMD budgets are unchanged.
+All 66 resolver tests passed locally; wrong-budget and disabled-watchdog probes
+failed both purposes as expected, while an added store-latency probe passed.
 
 ### Shared remote connector acceptance
 
