@@ -197,6 +197,8 @@ Further feedback identified lowercase internal IDs in provider cards. The
 candidate shows localized protocol names, keeps configured display names and
 distinguishes unnamed custom OIDC instances by slug. It uses the same type labels
 in installation and creation choices. Stable provider IDs and callback URLs are
-retained. This candidate remains under validation until separately released.
+retained. The refinement was merged in PR 21 and published in beta.14; its
+complete candidate/post-merge matrices and tagged native images passed. Deployed
+beta.14 label and expiry acceptance still requires the operator's update.
 At narrow widths, the missing-local-administrator action sits below its warning
 and the header language label stays on one line.
