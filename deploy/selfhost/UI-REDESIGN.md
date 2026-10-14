@@ -155,7 +155,23 @@ edit/save; failed reloads stay in the normal visible error flow.
 [Beta.12](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.12)
 is published and its amd64/arm64 version, source and build-time stamps were
 verified. Downloaded Compose/env assets are unchanged from beta.11. This is a
-released implementation with automated and rendered mock evidence. The latest
-observed deployment is beta.11; actual beta.12 account/admin page acceptance is
-pending the operator's update. Do not mark this follow-up fully verified before
-that deployed workflow evidence is recorded.
+released implementation with automated and rendered mock evidence. The operator
+updated to beta.12; the public version endpoint confirmed the release commit and
+build timestamp. Deployed home/token/provider/account pages and the local-owner
+safeguard were inspected. Existing Claude Code and claude.ai grants each completed
+one read-only profile call after the upgrade without renewed consent. These calls
+do not prove refresh rotation or several days of operation. Remaining live HANDOFF
+checks, including mail delivery and the unavailable B2B guest, remain open.
+
+## Provider editor refinement
+
+Provider rows now align the icon, display name, identifier, enabled status and
+outlined Edit action. Refresh lives beside the list heading; provider creation has
+a separate footer with a primary Add action. Selecting a provider replaces the
+list with its editor instead of leaving disabled Edit links above a long form.
+The editor groups appearance, connection settings and sign-in rules, with related
+connection fields paired on desktop and stacked on narrow screens. Save/cancel
+actions share a footer and a secondary Back to providers action is available at
+the top. Display-name saving remains independent and retains the configuration
+draft; Enter in that field cannot submit the credential form. No database,
+authentication-policy or deployment-configuration change is involved.

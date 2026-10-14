@@ -336,7 +336,15 @@
     "enabled": "启用此登录方式",
     "save": "保存登录配置",
     "initialize": "初始化登录",
-    "autoLinkEmail": "相同邮箱自动关联并进入原账户"
+    "autoLinkEmail": "相同邮箱自动关联并进入原账户",
+    "editAction": "编辑",
+    "refresh": "刷新",
+    "active": "已启用",
+    "inactive": "已停用",
+    "appearance": "显示样式",
+    "connection": "连接配置",
+    "rules": "登录规则",
+    "back": "返回服务商列表"
   },
   "settings": {
     "displayName": "显示名称",
