@@ -15,15 +15,29 @@ describe('Database-managed settings', () => {
     await user.type(screen.getByLabelText('SMTP host'), 'smtp.example.test')
     await user.type(screen.getByLabelText('SMTP username'), 'mailer')
     await user.type(screen.getByLabelText('Sender email'), 'canvas@example.test')
+    expect(screen.getByLabelText('Sender name')).toHaveValue('Canvas MCP')
+    await user.clear(screen.getByLabelText('Sender name'))
+    await user.type(screen.getByLabelText('Sender name'), 'Campus mail')
     const password = screen.getByLabelText('SMTP password')
     await user.type(password, 'test-mail-secret')
     await user.click(screen.getByRole('button', { name: 'Save email settings' }))
     await waitFor(() => expect(seen.some((r) => r.url === '/admin/settings/mail' && r.method === 'PUT')).toBe(true))
     const saved = seen.find((r) => r.url === '/admin/settings/mail' && r.method === 'PUT')!
-    expect(JSON.parse(saved.data as string)).toMatchObject({ revision: 1, password: 'test-mail-secret', config: { enabled: true, security: 'starttls', reminder_days: 7 } })
+    expect(JSON.parse(saved.data as string)).toMatchObject({ revision: 1, password: 'test-mail-secret', config: { enabled: true, security: 'starttls', reminder_days: 7, from_name: 'Campus mail' } })
     expect(saved.headers['x-csrf-token']).toBe('mock-csrf-token-not-a-secret')
     await waitFor(() => expect(screen.getByLabelText('SMTP password')).toHaveValue(''))
     expect(screen.queryByText('test-mail-secret')).toBeNull()
+    expect(screen.getByLabelText('Sender name')).toHaveValue('Campus mail')
+  })
+
+  it('resets a blank sender name to Canvas MCP after saving', async () => {
+    const user = userEvent.setup()
+    await renderApp('/admin/settings?topic=mail', 'owner')
+    const name = await screen.findByLabelText('Sender name')
+    await user.clear(name)
+    await user.click(screen.getByRole('button', { name: 'Save email settings' }))
+    expect(await screen.findByText('Email settings saved.')).toBeVisible()
+    expect(name).toHaveValue('Canvas MCP')
   })
 
   it('saves browser duration independently of the sensitive-operation window', async () => {

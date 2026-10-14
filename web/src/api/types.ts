@@ -585,6 +585,7 @@ export interface MailConfig {
   port: number
   security: 'starttls' | 'tls'
   username: string
+  from_name: string
   from_email: string
   reminder_days: number
 }

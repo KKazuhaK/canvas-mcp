@@ -482,7 +482,7 @@ function buildState(scenario: MockScenario): MockState {
     hasCatalog: scenario !== 'no-write-tools',
     schools,
     notifications: { enabled: false, email: '', locale: 'en', mail_available: false, reminder_days: 7 },
-    mail: { revision: 1, config: { enabled: false, host: '', port: 587, security: 'starttls', username: '', from_email: '', reminder_days: 7 }, secret_present: false },
+    mail: { revision: 1, config: { enabled: false, host: '', port: 587, security: 'starttls', username: '', from_name: 'Canvas MCP', from_email: '', reminder_days: 7 }, secret_present: false },
     settings: {
       local_admin: { ready: false },
       site: { public_base_url: 'https://canvas.example.test', active_base_url: 'https://canvas.example.test', restart_required: false },
@@ -858,9 +858,10 @@ route('PUT /admin/settings/mail', 'owner', (c, s) => {
   const conflict = settingsConflict(c, s)
   if (conflict) return conflict
   const value = c.body.config as MailSettingsResponse['config'] | undefined
+  if (!value || typeof value.from_name !== 'string' || value.from_name.length > 120 || /[\p{C}\p{Zl}\p{Zp}]/u.test(value.from_name)) return fail('validation_failed')
   if (!value || typeof value.enabled !== 'boolean' || !Number.isInteger(value.port) || value.port < 1 || value.port > 65535 || !['tls', 'starttls'].includes(value.security) || !Number.isInteger(value.reminder_days) || value.reminder_days < 1 || value.reminder_days > 90 || (value.enabled && (!value.host || !/^[^\s@]+@[^\s@]+$/.test(value.from_email)))) return fail('validation_failed')
   s.settings.revision++
-  s.mail = { revision: s.settings.revision, config: value, secret_present: c.body.password === null ? s.mail.secret_present : Boolean(c.body.password) }
+  s.mail = { revision: s.settings.revision, config: { ...value, from_name: value.from_name.normalize('NFC').trim().replace(/\s+/gu, ' ') || 'Canvas MCP' }, secret_present: c.body.password === null ? s.mail.secret_present : Boolean(c.body.password) }
   return ok(s.mail)
 })
 route('PUT /admin/settings/browser-session', 'owner', (c, s) => {

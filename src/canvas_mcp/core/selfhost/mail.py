@@ -13,6 +13,7 @@ import ssl
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from email.headerregistry import Address
 from email.message import EmailMessage
 from typing import Any
 
@@ -23,6 +24,7 @@ from .db import schema as s
 from .db.engine import Database
 from .db.sealed import SEALED, SealKeys
 from .db.settings_repo import SettingsAccessDenied, read_settings
+from .server_settings import DEFAULT_MAIL_SENDER_NAME, validate_setting
 
 DEFAULTS: dict[str, Any] = {
     "enabled": False,
@@ -30,6 +32,7 @@ DEFAULTS: dict[str, Any] = {
     "port": 587,
     "security": "starttls",
     "username": "",
+    "from_name": DEFAULT_MAIL_SENDER_NAME,
     "from_email": "",
     "reminder_days": 7,
 }
@@ -64,6 +67,9 @@ def validate_config(value: object) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != set(DEFAULTS):
         raise ValueError("invalid mail settings")
     config = dict(value)
+    config["from_name"] = validate_setting(
+        "notifications.sender_name", config["from_name"]
+    )
     if (
         type(config["enabled"]) is not bool
         or type(config["port"]) is not int
@@ -117,21 +123,20 @@ class MailStore:
                 select(s.server_state.c.settings_revision)
             ).scalar_one()
             row = conn.execute(select(s.mail_settings)).mappings().first()
+            settings = read_settings(conn)
             config = (
                 validate_config(
                     {
                         **dict(row["config"]),
-                        "reminder_days": read_settings(conn)[
-                            "notifications.token_reminder_days"
-                        ],
+                        "from_name": settings["notifications.sender_name"],
+                        "reminder_days": settings["notifications.token_reminder_days"],
                     }
                 )
                 if row
                 else {
                     **DEFAULTS,
-                    "reminder_days": read_settings(conn)[
-                        "notifications.token_reminder_days"
-                    ],
+                    "from_name": settings["notifications.sender_name"],
+                    "reminder_days": settings["notifications.token_reminder_days"],
                 }
             )
             return {
@@ -146,9 +151,14 @@ class MailStore:
                 conn.execute(select(s.server_state.c.settings_revision)).scalar_one()
             )
             row = conn.execute(select(s.mail_settings)).mappings().first()
-            days = read_settings(conn)["notifications.token_reminder_days"]
+            settings = read_settings(conn)
+            days = settings["notifications.token_reminder_days"]
+            name = settings["notifications.sender_name"]
         if row is None:
-            return SmtpSettings({**DEFAULTS, "reminder_days": days}, revision=revision)
+            return SmtpSettings(
+                {**DEFAULTS, "from_name": name, "reminder_days": days},
+                revision=revision,
+            )
         password = None
         if row["ciphertext"] is not None:
             password = self.keys.decrypt(
@@ -158,7 +168,9 @@ class MailStore:
                 SEALED_MAIL.aad(row),
             ).decode("utf-8")
         return SmtpSettings(
-            validate_config({**dict(row["config"]), "reminder_days": days}),
+            validate_config(
+                {**dict(row["config"]), "from_name": name, "reminder_days": days}
+            ),
             password,
             revision,
         )
@@ -187,7 +199,7 @@ class MailStore:
                 "config": {
                     key: value
                     for key, value in validated.items()
-                    if key != "reminder_days"
+                    if key not in {"reminder_days", "from_name"}
                 },
                 "updated_at": now,
                 "key_id": None,
@@ -210,19 +222,19 @@ class MailStore:
                 and values["ciphertext"] is None
             ):
                 raise ValueError("SMTP password required")
-            conn.execute(
-                delete(s.settings).where(
-                    s.settings.c.key == "notifications.token_reminder_days"
+            for key, value in (
+                ("notifications.token_reminder_days", validated["reminder_days"]),
+                ("notifications.sender_name", validated["from_name"]),
+            ):
+                conn.execute(delete(s.settings).where(s.settings.c.key == key))
+                conn.execute(
+                    insert(s.settings).values(
+                        key=key,
+                        value=value,
+                        updated_at=now,
+                        updated_by=actor,
+                    )
                 )
-            )
-            conn.execute(
-                insert(s.settings).values(
-                    key="notifications.token_reminder_days",
-                    value=validated["reminder_days"],
-                    updated_at=now,
-                    updated_by=actor,
-                )
-            )
             if old:
                 conn.execute(
                     update(s.mail_settings)
@@ -332,7 +344,9 @@ def send_message(
         raise ValueError("mail disabled")
     recipient = email_address(recipient)
     message = EmailMessage()
-    message["From"] = config["from_email"]
+    message["From"] = Address(
+        display_name=config["from_name"], addr_spec=config["from_email"]
+    )
     message["To"] = recipient
     message["Subject"] = subject
     message["Message-ID"] = f"<{message_id}@canvas-mcp.local>"

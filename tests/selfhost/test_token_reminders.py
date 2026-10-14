@@ -1,10 +1,15 @@
 """Real SQL opt-in, durable duplicate control and sealed SMTP configuration."""
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import delete, select, update
 
 from canvas_mcp.core.selfhost.db import schema as s
-from canvas_mcp.core.selfhost.mail import DEFAULTS, MailStore, email_address
+from canvas_mcp.core.selfhost.mail import (
+    DEFAULTS,
+    MailStore,
+    email_address,
+    validate_config,
+)
 from canvas_mcp.core.selfhost.token_reminders import ReminderRunner
 
 from .authz.stack import ALICE, OWNER, Browser, local_stack
@@ -51,6 +56,84 @@ def test_mail_config_is_sealed_redacted_and_preserved_without_password(running):
     )
     assert mail.load().password == "mail-secret-not-a-token"
     assert mail.load().password == "mail-secret-not-a-token"
+
+
+def test_sender_name_defaults_on_existing_rows_and_saves_without_rewriting_secret(
+    running,
+):
+    mail = configure(running)
+    with running.store.database.write() as conn:
+        conn.execute(
+            delete(s.settings).where(s.settings.c.key == "notifications.sender_name")
+        )
+        before = dict(conn.execute(select(s.mail_settings)).mappings().one())
+    assert "from_name" not in before["config"]
+    assert mail.public()["config"]["from_name"] == "Canvas MCP"
+    assert mail.load().config["from_name"] == "Canvas MCP"
+    public = mail.public()
+    config = {**public["config"], "from_name": '  \u6821\u56ed, "Canvas"  '}
+    mail.save(
+        config,
+        password=None,
+        revision=public["revision"],
+        actor=None,
+        now=int(running.clock()),
+    )
+    fresh = MailStore(running.store.database, running.runtime.provider_store.keys)
+    assert fresh.public()["config"]["from_name"] == '\u6821\u56ed, "Canvas"'
+    assert fresh.load().config["from_name"] == '\u6821\u56ed, "Canvas"'
+    with running.store.database.read() as conn:
+        after = dict(conn.execute(select(s.mail_settings)).mappings().one())
+        assert (
+            conn.execute(
+                select(s.settings.c.value).where(
+                    s.settings.c.key == "notifications.sender_name"
+                )
+            ).scalar_one()
+            == '\u6821\u56ed, "Canvas"'
+        )
+    for key in ("config", "key_id", "nonce", "ciphertext"):
+        assert after[key] == before[key]
+
+
+@pytest.mark.parametrize(
+    "name", ["\r\nBcc: other@example.test", "A\x00B", "A\u202eB", "A" * 121, None]
+)
+def test_sender_name_refuses_injected_hidden_and_oversize_values(name):
+    with pytest.raises(ValueError):
+        validate_config({**DEFAULTS, "from_name": name})
+
+
+def test_sender_name_blank_resets_to_default():
+    assert (
+        validate_config({**DEFAULTS, "from_name": "   "})["from_name"] == "Canvas MCP"
+    )
+
+
+def test_sender_name_is_saved_by_governed_owner_api(running):
+    browser = Browser(running)
+    browser.sign_in(OWNER)
+    public = browser.api("GET", "/admin/settings/mail").json()
+    assert public["config"]["from_name"] == "Canvas MCP"
+    body = {
+        "revision": public["revision"],
+        "config": {**public["config"], "from_name": "Campus mail"},
+        "password": None,
+    }
+    assert browser.api("PUT", "/admin/settings/mail", body=body).status_code == 403
+    saved = browser.api(
+        "PUT", "/admin/settings/mail", body=body, csrf=browser.csrf_token()
+    )
+    assert saved.status_code == 200
+    assert saved.json()["config"]["from_name"] == "Campus mail"
+    conflict = browser.api(
+        "PUT", "/admin/settings/mail", body=body, csrf=browser.csrf_token()
+    )
+    assert conflict.status_code == 409
+    assert (
+        browser.api("GET", "/admin/settings/mail").json()["config"]["from_name"]
+        == "Campus mail"
+    )
 
 
 @pytest.mark.asyncio
@@ -166,7 +249,8 @@ def test_real_api_requires_fresh_owner_for_smtp_and_csrf_for_user_opt_in(running
     )
 
 
-def test_smtp_uses_verified_starttls_and_auth_before_sending(monkeypatch):
+@pytest.mark.parametrize("sender_name", ["Canvas MCP", '\u6821\u56ed, "Canvas"', ""])
+def test_smtp_uses_verified_starttls_and_auth_before_sending(monkeypatch, sender_name):
     from canvas_mcp.core.selfhost import mail as module
     from canvas_mcp.core.selfhost.mail import SmtpSettings, send_message
 
@@ -196,6 +280,15 @@ def test_smtp_uses_verified_starttls_and_auth_before_sending(monkeypatch):
             calls.append(("login", user))
 
         def send_message(self, message):
+            from email import policy
+            from email.parser import BytesParser
+
+            parsed = BytesParser(policy=policy.default).parsebytes(message.as_bytes())
+            assert len(parsed["From"].addresses) == 1
+            sender = parsed["From"].addresses[0]
+            assert sender.display_name == (sender_name or "Canvas MCP")
+            assert sender.addr_spec == "canvas@example.test"
+            assert parsed["Bcc"] is None
             calls.append(
                 ("message", message["To"], message["Message-ID"], message.get_content())
             )
@@ -207,6 +300,7 @@ def test_smtp_uses_verified_starttls_and_auth_before_sending(monkeypatch):
             "enabled": True,
             "host": "smtp.example.test",
             "username": "user",
+            "from_name": sender_name,
             "from_email": "canvas@example.test",
         },
         "secret",

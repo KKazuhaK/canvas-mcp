@@ -437,6 +437,8 @@
     "security": "连接安全方式",
     "username": "SMTP 用户名",
     "from_email": "发件邮箱",
+    "from_name": "发件人名称",
+    "fromNameHelp": "在邮件客户端中显示。留空时使用 Canvas MCP。",
     "password": "SMTP 密码",
     "secretSaved": "已保存密码。留空可保留原密码。",
     "secretEmpty": "邮件中继无需认证时可留空。",

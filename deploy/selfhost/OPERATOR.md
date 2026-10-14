@@ -112,7 +112,9 @@ require a sign-in within the last 10 minutes.
 
 **Admin → Settings → Email reminders** configures SMTP with verified STARTTLS or TLS and a reminder window
 of 1–90 days (default 7). The password is encrypted in the database and included
-in normal key verification, rotation and database transfer. Save the settings,
+in normal key verification, rotation and database transfer. **Sender name**
+defaults to **Canvas MCP** and can be customized, including Chinese names;
+leave it blank to restore the default. Save the settings,
 then use **Test saved SMTP connection** to check connection, certificates and
 authentication; this test does not send an email. Users opt in and save a reminder
 recipient on the **Canvas token** page. The account home page links directly to
