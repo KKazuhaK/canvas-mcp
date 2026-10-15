@@ -368,6 +368,7 @@ def prepare_selfhost(settings: SelfhostSettings) -> SelfhostRuntime:
             store.database,
             keyring,
             validate=partial(settings_from_database, settings),
+            icon_directory=settings.data_dir / "provider-icons",
         )
         if settings.login_providers.order:
             import_provider_settings(settings, provider_store)

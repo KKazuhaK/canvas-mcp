@@ -4,6 +4,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderWithQuery, setupI18n } from '@/test/renderWithProviders'
 import zhAdmin from '@/locales/zh/admin.json'
 import ProviderConfigurationForm, { type EditableProvider } from './ProviderConfigurationForm'
+import { compressProviderIcon } from '@/lib/providerIcon'
+
+vi.mock('@/lib/providerIcon', () => ({ compressProviderIcon: vi.fn() }))
 
 const provider: EditableProvider = {
   id: 'entra', protocol: 'entra', enabled: true, rank: 0, secret_present: true,
@@ -11,7 +14,10 @@ const provider: EditableProvider = {
 }
 const callback = 'https://mcp.example.com/auth/callback/entra'
 
-beforeEach(async () => { await setupI18n('en') })
+beforeEach(async () => {
+  vi.mocked(compressProviderIcon).mockResolvedValue('data:image/png;base64,iVBORw==')
+  await setupI18n('en')
+})
 
 describe('Write-only sign-in provider credentials', () => {
   it('refuses a stale or otherwise disabled editor even when the form is submitted directly', async () => {
@@ -22,18 +28,32 @@ describe('Write-only sign-in provider credentials', () => {
     fireEvent.submit(button.closest('form')!)
     expect(save).not.toHaveBeenCalled()
   })
-  it('uploads an embedded PNG and explicitly restores the default icon', async () => {
+  it('previews the compressed upload and explicitly restores the default icon', async () => {
     const user = userEvent.setup()
     const save = vi.fn(async () => {})
     renderWithQuery(<ProviderConfigurationForm provider={provider} callbackUri={callback} onSave={save} />)
     const file = new File([new Uint8Array([137, 80, 78, 71])], 'icon.png', { type: 'image/png' })
     await user.upload(screen.getByLabelText('Upload sign-in icon'), file)
     await waitFor(() => expect(document.querySelector('img')?.getAttribute('src')).toBe('data:image/png;base64,iVBORw=='))
+    expect(compressProviderIcon).toHaveBeenCalledWith(file)
     await user.click(screen.getByRole('button', { name: 'Save sign-in configuration' }))
     await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ icon_data: 'data:image/png;base64,iVBORw==' })))
     await user.click(screen.getByRole('button', { name: 'Restore default icon' }))
     await user.click(screen.getByRole('button', { name: 'Save sign-in configuration' }))
     await waitFor(() => expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ icon_data: null })))
+  })
+  it('retains the saved file reference when an image cannot be decoded', async () => {
+    vi.mocked(compressProviderIcon).mockRejectedValue(new Error('invalid_icon'))
+    const user = userEvent.setup()
+    const save = vi.fn(async () => {})
+    const icon = '/account/provider-icons/' + 'a'.repeat(64) + '.png'
+    renderWithQuery(<ProviderConfigurationForm provider={{ ...provider, icon_data: icon }} callbackUri={callback} onSave={save} />)
+    await user.upload(screen.getByLabelText('Upload sign-in icon'), new File(['bad'], 'bad.jpg', { type: 'image/jpeg' }))
+    await screen.findByRole('alert')
+    expect(document.querySelector('img')).toHaveAttribute('src', icon)
+    await user.click(screen.getByRole('button', { name: 'Save sign-in configuration' }))
+    await waitFor(() => expect(save).toHaveBeenCalled())
+    expect(save).not.toHaveBeenCalledWith(expect.objectContaining({ icon_data: expect.anything() }))
   })
   it('enables automatic email association on the edited instance without a second verification step', async () => {
     const user = userEvent.setup()

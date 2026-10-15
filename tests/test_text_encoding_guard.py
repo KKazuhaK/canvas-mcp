@@ -127,7 +127,8 @@ def scan_source(source: str, filename: str) -> list[TextIOSite]:
             owner = node.func.value.id
             qualified = f"{imports.get(owner, owner)}.{node.func.attr}"
 
-        if qualified == "os.open":
+        # Pillow's open() decodes binary image data; its mode is not a text-I/O mode.
+        if qualified in {"os.open", "PIL.Image.open"}:
             continue
         if qualified in {"io.open", "builtins.open", "gzip.open", "bz2.open", "lzma.open"}:
             compressed = qualified.split(".")[0] in {"gzip", "bz2", "lzma"}
@@ -267,6 +268,17 @@ gzip.open("blob.gz", "r")
     assert [s.call for s in scan_source(source, "sample.py")] == [
         "open('w')", "open('wt')",
     ]
+
+
+def test_guard_distinguishes_binary_image_decoders_from_text_files() -> None:
+    source = '''
+from PIL import Image as RasterImage
+from PIL.Image import open as decode_image
+RasterImage.open(image_bytes)
+decode_image(image_bytes)
+path.open()
+'''
+    assert [s.call for s in scan_source(source, "sample.py")] == ["open('r')"]
 
 
 def test_guard_resolves_imported_text_io_aliases() -> None:

@@ -311,7 +311,7 @@
   "providerConfig": {
     "icon": "上传登录图标",
     "resetIcon": "恢复默认图标",
-    "iconHelp": "PNG 格式，最多 64 KB、512 × 512 像素，保存在数据库中。",
+    "iconHelp": "支持 PNG、JPEG 或 WebP，最多 5 MB、1600 万像素。自动缩放并压缩为小 PNG，保存在持久化数据卷中。",
     "title": "登录服务商配置",
     "reload": "重新加载登录配置",
     "edit": "编辑 {{provider}}",

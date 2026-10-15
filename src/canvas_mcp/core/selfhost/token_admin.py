@@ -793,6 +793,7 @@ def _run_login_providers(args: argparse.Namespace) -> int:
                 store.database,
                 Keyring.parse(settings.canvas_token_keys_raw),
                 validate=lambda snapshot: settings_from_database(settings, snapshot),
+                icon_directory=settings.data_dir / "provider-icons",
             )
             if args.import_env:
                 from .db.migrations.provider_environment import (
@@ -944,7 +945,9 @@ def main(argv: list[str] | None = None) -> int:
                 settings = load_selfhost_settings()
                 authority = InstallationAuthority(
                     ProviderConfigStore(
-                        store.database, Keyring.parse(settings.canvas_token_keys_raw)
+                        store.database,
+                        Keyring.parse(settings.canvas_token_keys_raw),
+                        icon_directory=settings.data_dir / "provider-icons",
                     ),
                     settings.data_dir,
                 )

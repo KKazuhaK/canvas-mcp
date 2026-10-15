@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import Connection, exists, select, update
@@ -20,6 +21,7 @@ from .provider_config import (
     ProviderConfigurationError,
     validate_provider,
 )
+from .provider_icon import ProviderIconFiles
 
 _SEALED = next(entry for entry in SEALED if entry.table is s.login_providers)
 _UNCHANGED = object()
@@ -39,11 +41,13 @@ class ProviderConfigStore:
         keys: SealKeys,
         *,
         validate: Callable[[ProviderSnapshot], object] | None = None,
+        icon_directory: Path | None = None,
     ) -> None:
         self.database = database
         self.keys = keys
         self.repos = Repositories(database.kind)
         self.validate = validate
+        self.icons = ProviderIconFiles(icon_directory) if icon_directory else None
 
     @staticmethod
     def _public(row: Any) -> dict[str, Any]:
@@ -317,7 +321,15 @@ class ProviderConfigStore:
             if auto_link_email is not None:
                 updates["auto_link_email"] = auto_link_email
             if icon_data is not _UNCHANGED:
-                updates["icon_data"] = parsed_icon
+                if parsed_icon is not None and self.icons is None:
+                    raise ProviderConfigurationError(
+                        "provider_configuration_unavailable"
+                    )
+                updates["icon_data"] = (
+                    self.icons.save(parsed_icon)
+                    if parsed_icon is not None and self.icons is not None
+                    else None
+                )
             conn.execute(
                 update(s.login_providers)
                 .where(s.login_providers.c.id == identifier)

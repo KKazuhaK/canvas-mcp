@@ -12,6 +12,7 @@ from canvas_mcp.core.selfhost.account_api import build_api_routes
 from canvas_mcp.core.selfhost.account_core import AccountConfig, build_account_app
 from canvas_mcp.core.selfhost.app import prepare_selfhost
 from canvas_mcp.core.selfhost.db import schema
+from canvas_mcp.core.selfhost.login.provider_icon import build_icon_routes
 from canvas_mcp.core.selfhost.login.registry import build_login_runtime
 from canvas_mcp.core.selfhost.login.routes import build_login_routes
 from canvas_mcp.core.selfhost.settings import load_selfhost_settings
@@ -51,7 +52,11 @@ def installation(tmp_path):
     code = runtime.installation.issue()
     try:
         with TestClient(
-            Starlette(routes=build_login_routes(core) + build_api_routes(core)),
+            Starlette(
+                routes=build_login_routes(core)
+                + build_api_routes(core)
+                + build_icon_routes(runtime.provider_store.icons)
+            ),
             base_url=BASE,
             follow_redirects=False,
         ) as client:

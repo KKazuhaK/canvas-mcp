@@ -14,6 +14,7 @@ import ProviderIcon from '@/components/ProviderIcon'
 import SaveOutlined from '@mui/icons-material/SaveOutlined'
 import UploadOutlined from '@mui/icons-material/UploadOutlined'
 import RestartAlt from '@mui/icons-material/RestartAlt'
+import { compressProviderIcon } from '@/lib/providerIcon'
 
 function FormSection({ title, children }: { title: string; children: ReactNode }) {
   return <Box component="section" sx={{ border: 1, borderColor: 'divider', borderRadius: 2, p: { xs: 2, sm: 3 } }}>
@@ -104,17 +105,14 @@ export default function ProviderConfigurationForm({ provider, callbackUri, onSav
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ alignItems: { xs: 'flex-start', sm: 'center' } }}>
           <ProviderIcon icon={provider.protocol === 'entra' ? 'microsoft' : provider.protocol} data={iconData} />
           <Button component="label" variant="outlined" startIcon={<UploadOutlined />} disabled={busy || iconReading}>{t('admin:providerConfig.icon')}
-            <input type="file" accept="image/png" hidden disabled={busy || iconReading} aria-label={t('admin:providerConfig.icon')} onChange={(event) => {
+            <input type="file" accept="image/png,image/jpeg,image/webp" hidden disabled={busy || iconReading} aria-label={t('admin:providerConfig.icon')} onChange={(event) => {
               const file = event.target.files?.[0]
               event.target.value = ''
               if (!file) return
-              if (file.type !== 'image/png' || file.size > 65536) { setIconError(true); return }
               setIconReading(true)
-              const reader = new FileReader()
-              reader.onload = () => { if (typeof reader.result === 'string') { setIconData(reader.result); setIconChanged(true); setIconError(false) } }
-              reader.onerror = () => setIconError(true)
-              reader.onloadend = () => setIconReading(false)
-              reader.readAsDataURL(file)
+              void compressProviderIcon(file).then((result) => {
+                setIconData(result); setIconChanged(true); setIconError(false)
+              }).catch(() => setIconError(true)).finally(() => setIconReading(false))
             }} />
           </Button>
           <Button variant="outlined" color="inherit" startIcon={<RestartAlt />} disabled={busy || iconReading} onClick={() => { setIconData(null); setIconChanged(true); setIconError(false) }}>{t('admin:providerConfig.resetIcon')}</Button>

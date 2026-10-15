@@ -1,8 +1,20 @@
-import { render } from '@testing-library/react'
+import { fireEvent, render } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import ProviderIcon from './ProviderIcon'
 
 describe('ProviderIcon', () => {
+  it('loads only constrained local file references and falls back after a missing image', () => {
+    const data = '/account/provider-icons/' + 'a'.repeat(64) + '.png'
+    const { container, rerender } = render(<ProviderIcon icon="microsoft" data={data} />)
+    expect(container.querySelector('img')).toHaveAttribute('src', data)
+    fireEvent.error(container.querySelector('img')!)
+    expect(container.querySelector('img')).toBeNull()
+    expect(container.querySelector('svg')).not.toBeNull()
+    rerender(<ProviderIcon icon="microsoft" data={'/account/provider-icons/' + 'b'.repeat(64) + '.png'} />)
+    expect(container.querySelector('img')).not.toBeNull()
+    rerender(<ProviderIcon icon="microsoft" data="/account/provider-icons/../secrets" />)
+    expect(container.querySelector('img')).toBeNull()
+  })
   it('uses an embedded custom PNG and keeps external URLs on the default icon', () => {
     const data = 'data:image/png;base64,aWNvbg=='
     const custom = render(<ProviderIcon icon="key" data={data} />).container

@@ -20,7 +20,7 @@ from .db.errors import StoreUnavailable
 from .db.settings_repo import TypedSettings
 from .login.account_policy import POLICY_KEY, parse_policy
 from .login.config import LoginProvidersConfig
-from .login.provider_icon import validate_icon
+from .login.provider_icon import validate_icon_reference
 from .routes import auth_login
 from .schools import (
     MAX_FEATURED,
@@ -304,7 +304,7 @@ class ConfigSnapshots:
                     name,
                     effective,
                     row["sort_rank"],
-                    validate_icon(row["icon_data"]),
+                    validate_icon_reference(row["icon_data"]),
                 )
             )
         if (
