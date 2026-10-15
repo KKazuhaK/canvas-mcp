@@ -49,3 +49,18 @@ For the next update, fetch upstream main and inspect the diff from the reviewed
 main above. Check every relevant MCP/API change against this port and current
 fork behavior. Record each included, already-equivalent or excluded change and
 advance this checkpoint only after the corresponding tests and review pass.
+
+## Publication checkpoint
+
+PR 24 merged the core port as `b574eff52f8f6d2d4c557cf671a029290be5c498`.
+Complete candidate CI `38668726987` and post-merge CI `38694340307` passed.
+The imported regressions failed before the port; the final focused set passed
+282 checks and the merged primary suite passed 8,343 with 74 environment skips.
+The final upstream inspection also checked `992bb2c3396635daa3e6af1dfa09b349f79d00f8`:
+its three additional commits only update `internal/issue-triage/2026-10-15.md`,
+so they were excluded. Use that inspection as context, while retaining
+`230a993` as the core port checkpoint above.
+
+The port is published in beta.16 with the independently developed scrolling and
+icon-storage changes, as recorded in [V1-PROGRESS.md](V1-PROGRESS.md).
+Publication does not establish deployed acceptance or complete the live HANDOFF.

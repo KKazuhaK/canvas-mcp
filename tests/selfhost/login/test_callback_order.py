@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pathlib
 import threading
+import time
 from typing import Any
 
 import httpx
@@ -13,6 +14,7 @@ from sqlalchemy import text
 
 from ..authz.stack import Browser, query_of
 from .stack_providers import ProviderStack, provider_stack
+from .test_start_limit import FrozenClock
 
 PROVIDERS = ["google", "github", "school"]
 COOKIE = "__Host-cmcp_flow"
@@ -21,7 +23,7 @@ WAIT = 20
 
 @pytest.fixture
 def ps(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
-    with provider_stack(tmp_path, monkeypatch) as stack:
+    with provider_stack(tmp_path, monkeypatch, clock=FrozenClock()) as stack:
         yield stack
 
 
@@ -374,8 +376,9 @@ class TestStartRoute:
         response = ps.stack.client.head("/auth/login/google")
         assert response.status_code == 405 and flow_rows(ps) == rows
 
+    @pytest.mark.parametrize("request_delay", [0, 0.25], ids=["immediate", "scheduler-delay"])
     def test_the_rate_bucket_limits_starts_per_provider(
-        self, ps: ProviderStack
+        self, ps: ProviderStack, request_delay: float
     ) -> None:
         from .test_entra_only_golden import account_app
 
@@ -383,6 +386,8 @@ class TestStartRoute:
         bucket = account_app(ps.stack).logins.start_buckets["github"]
         while bucket.take() == 0:
             pass
+        # Real scheduler delays must not advance the test's refill clock.
+        time.sleep(request_delay)
         assert failure_text(client.get("/auth/login/github")) == "rate_limited"
         assert (
             client.get("/auth/login/google").status_code == 302

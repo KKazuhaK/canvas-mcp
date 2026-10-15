@@ -255,3 +255,25 @@ production build/distribution checks passed. The first full test attempt had a
 Windows Node worker access violation; its 8-case file passed independently and
 the complete repeated run passed. These are local mock observations; deployed
 acceptance still requires the next image update.
+
+## Beta.16 publication
+
+PR 25 merged independent scrolling as `4a5845d18dd75c898485602cc55e7f7e70602ce5`;
+complete candidate CI `38696327355` and post-merge CI `38700002879` passed.
+PR 26 merged icon compression/file storage as
+`b63484c0a4bed0ca4b78d42560fbd967b441e00b`. Complete candidate CI `38701247261`,
+post-merge CI `38703983586` and tagged native images `38707211391` passed.
+The final combined tree passed 540 frontend checks and the merged primary tree
+passed 8,353 Python checks with 74 platform/database skips.
+
+The combined in-app-browser inspection confirmed PNG/JPEG/WebP upload previews,
+mock save/reset and a desktop main scrollTop of 1019.33 while the header stayed
+at y=0, navigation at y=64.67 and the document at scrollTop=0. At 390 pixels,
+navigation to Connected apps closed the drawer and reset the main region to 0,
+without horizontal overflow. Temporary viewport overrides were reset. No live
+provider, account or credential was changed by these local checks.
+
+Both changes are published in
+[beta.16](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.16).
+The public deployment still reports beta.15. These release/local results do not
+complete beta.16 deployed acceptance or the remaining live HANDOFF gates.

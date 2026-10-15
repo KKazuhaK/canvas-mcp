@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+import time
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -11,6 +12,7 @@ from ..authz.stack import ALICE, Browser
 from ..spa_fixture import make_dist
 from .fake_idp import GitHubUser
 from .stack_providers import ProviderStack, provider_stack
+from .test_start_limit import FrozenClock
 
 CALLBACK_PATHS = {"/auth/callback/google", "/auth/callback/github", "/auth/callback/oidc/school"}
 
@@ -18,7 +20,7 @@ CALLBACK_PATHS = {"/auth/callback/google", "/auth/callback/github", "/auth/callb
 @pytest.fixture
 def ps(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
     env = { "ACCOUNT_WEB_DIST": str(make_dist(tmp_path / "dist"))}
-    with provider_stack(tmp_path / "app", monkeypatch, env=env) as stack:
+    with provider_stack(tmp_path / "app", monkeypatch, env=env, clock=FrozenClock()) as stack:
         yield stack
 
 
@@ -94,7 +96,8 @@ def test_failures_are_closed_codes_on_the_sign_in_page(ps: ProviderStack, provid
     assert response.status_code == 303 and response.headers["location"] == f"/account/sign-in?error={code}"
 
 
-def test_every_failure_kind_has_a_code_the_page_knows(ps: ProviderStack) -> None:
+@pytest.mark.parametrize("request_delay", [0, 0.25], ids=["immediate", "scheduler-delay"])
+def test_every_failure_kind_has_a_code_the_page_knows(ps: ProviderStack, request_delay: float) -> None:
     from canvas_mcp.core.selfhost.account_core import SIGN_IN_ERROR_CODES
 
     person = ps.person()
@@ -113,6 +116,8 @@ def test_every_failure_kind_has_a_code_the_page_knows(ps: ProviderStack) -> None
     bucket = account_app(ps.stack).logins.start_buckets["github"]
     while bucket.take() == 0:
         pass
+    # Real scheduler delays must not advance the test's refill clock.
+    time.sleep(request_delay)
     last = client.get("/auth/login/github")
     seen.add(urlsplit(last.headers["location"]).query)
     assert seen == {"error=state_invalid", "error=sign_in_incomplete", "error=rate_limited"}
