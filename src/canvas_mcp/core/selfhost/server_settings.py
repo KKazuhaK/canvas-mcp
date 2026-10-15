@@ -9,11 +9,25 @@ from __future__ import annotations
 
 import json
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
 MAX_SETTING_BYTES = 8192
+DEFAULT_MAIL_SENDER_NAME = "Canvas MCP"
+
+
+def mail_sender_name(value: str) -> str:
+    value = unicodedata.normalize("NFC", value)
+    if any(
+        unicodedata.category(char) in {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"}
+        for char in value
+    ):
+        raise ValueError("sender name contains a forbidden character")
+    value = " ".join(value.split()) or DEFAULT_MAIL_SENDER_NAME
+    if len(value) > 120 or len(value.encode("utf-8")) > 480:
+        raise ValueError("sender name is too long")
+    return value
 
 
 @dataclass(frozen=True)
@@ -24,12 +38,15 @@ class SettingSpec:
     maximum: int | None = None
     sensitive: bool = False
     editable_in_panel: bool = False
+    string_validator: Callable[[str], str] | None = None
 
     def validate(self, value: object) -> bool | int | str:
         # bool is an int subclass, but a retention value cannot be a checkbox.
         if type(value) is not self.value_type:
             raise ValueError("setting has the wrong type")
         if isinstance(value, str):
+            if self.string_validator is not None:
+                return self.string_validator(value)
             from .site_url import validate_site_url
 
             return validate_site_url(value)
@@ -46,6 +63,12 @@ class SettingSpec:
 
 SETTINGS: Mapping[str, SettingSpec] = MappingProxyType(
     {
+        "notifications.sender_name": SettingSpec(
+            str,
+            DEFAULT_MAIL_SENDER_NAME,
+            editable_in_panel=True,
+            string_validator=mail_sender_name,
+        ),
         "notifications.token_reminder_days": SettingSpec(
             int, 7, minimum=1, maximum=90, editable_in_panel=True
         ),

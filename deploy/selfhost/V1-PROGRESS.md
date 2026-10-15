@@ -46,8 +46,10 @@ custody enrollment, deployed-host CIMD fetch, web/Code read-only calls, operator
 store check and health are exercised. Only Entra and local are configured;
 unconfigured Google/GitHub/custom OIDC and mobile are not live-support claims.
 The school's sanitized expiry diagnosis and deployed automatic recheck are
-complete. Mail needs actual delivery evidence. SMTP authentication
-alone proves neither email receipt nor reminder scheduling.
+complete. The owner confirmed successful execution and receipt of the authorized
+single test message on October 14 UTC. This is operator-observed delivery;
+no SMTP response log was supplied. Scheduled expiry-reminder delivery remains
+unverified, and SMTP authentication alone does not prove that scheduling.
 
 The frontend reorganization is merged and published in beta.12 through
 [PR #17](https://github.com/KKazuhaK/canvas-mcp/pull/17). Its complete CI and local
@@ -55,10 +57,36 @@ rendered mock evidence are recorded below and in [UI-REDESIGN.md](UI-REDESIGN.md
 Deployed beta.12 home/token/admin pages, the local-owner safeguard and existing
 Code/web client reads were inspected after the operator's update. The provider
 list/editor and action-button usability feedback led to the PR 19 refinement.
-The owner has authorized one
-test message to a privately supplied recipient; no submission or receipt is
-claimed. A one-message command using the saved server SMTP configuration is
-prepared for the operator because direct server execution is unavailable.
+The owner authorized one test message to a privately supplied recipient and
+confirmed command success and receipt. No second message is authorized or sent.
+Direct server execution remains unavailable.
+
+### Sender-name follow-up
+
+The owner requested a customizable email sender name after the delivered test
+message showed only the address. The implementation candidate adds **Sender name**
+to the database-owned mail settings, defaults to **Canvas MCP**, and restores
+that default when saved blank. Unicode names use a structured From header;
+control/hidden characters and oversize names are refused. The setting is stored
+once in `settings` as `notifications.sender_name`; the existing SMTP JSON and
+sealed password remain unchanged. Existing rows obtain the normal setting
+default without a data backfill or schema migration. Compose/env are unchanged.
+This candidate is not yet merged, released or inspected on the deployed site.
+Local validation passed 100 focused mail/settings/boundary tests, 531 frontend
+tests, type checking, lint and production asset checks. In the rendered local
+mock, English custom-name saving and Chinese blank-name reset succeeded; the
+390-pixel Chinese form has no document-level horizontal overflow. These are
+synthetic local observations, not an additional outbound mail or deployment.
+The complete local selfhost suite also passed 4,347 tests with 54 platform or
+database-dependent skips; PostgreSQL coverage still requires the CI matrix.
+The initial `31e1e00` candidate matrix failed one existing Python 3.13 CIMD
+wall-time assertion (2.002 seconds against a strict 2-second bound), while its
+fetch timeout and stale fallback occurred. The test correction retains that
+bound and a 2-second outer watchdog, asserts the exact 1-second fetch budget and
+1.5-second cancellation budget, and verifies real cancellation and stored error
+state using a short real test wait. Production CIMD budgets are unchanged.
+All 66 resolver tests passed locally; wrong-budget and disabled-watchdog probes
+failed both purposes as expected, while an added store-latency probe passed.
 
 ### Shared remote connector acceptance
 

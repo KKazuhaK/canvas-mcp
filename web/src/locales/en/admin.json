@@ -437,6 +437,8 @@
     "security": "Connection security",
     "username": "SMTP username",
     "from_email": "Sender email",
+    "from_name": "Sender name",
+    "fromNameHelp": "Shown in email clients. Leave blank to use Canvas MCP.",
     "password": "SMTP password",
     "secretSaved": "A password is saved. Leave blank to keep it.",
     "secretEmpty": "Leave blank if your mail relay does not require authentication.",
