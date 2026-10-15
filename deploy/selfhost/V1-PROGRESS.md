@@ -5,7 +5,7 @@ This is a working checkpoint, not a deployment or release approval. Follow
 
 ## Current status
 
-The current published prerelease and latest observed deployment are beta.14.
+The current published prerelease and latest observed deployment are beta.15.
 The provider/action refinement and its test-clock correction are merged in PRs 19
 and 20, released and inspected on the deployed site. The provider-label and
 sharded-expiry correction merged in PR 21 and is published in beta.14. Its live
@@ -22,17 +22,17 @@ not complete HANDOFF or authorize a stable release.
 
 | Original item | Current result | Evidence and remaining boundary |
 |---|---|---|
-| 6.1 B0/P7 | Published, independently reviewed, repaired and merged | [B0 review](B0-REVIEW.md), fork PR 4 and its post-merge CI. The historical sync happened before the owner's later independent-selfhost decision; no further sync is permitted. |
+| 6.1 B0/P7 | Published, independently reviewed, repaired and merged | [B0 review](B0-REVIEW.md), fork PR 4 and its post-merge CI. The owner now permits selective MCP/Canvas API core ports while the selfhost stack remains independent; see [UPSTREAM-SYNC.md](UPSTREAM-SYNC.md). |
 | 6.1a v1 consolidation | Implemented and merged | Fork PR 5, current complete CI and native images. Later owner-requested account/session/notification work is recorded separately below. |
 | 6.2 provider naming | Implemented; automated validation passed | Governed provider configuration, React views, bilingual messages and current full CI. Later icon customization is implemented too. |
 | 6.3 schools and directory | Implemented; automated validation passed | Database-owned school policy, settings/API/CLI checks, address protection and current full CI. Exact live directory egress remains a 6.12 check. |
 | 6.4 custody acknowledgement | Implemented; real enrollment exercised | Custody/API/MCP regressions and owner-performed real enrollment. No unattended enrollment of others is claimed. |
 | 6.5 fork framing | Implemented | Neutral examples, independent-fork notices and documentation checks. |
 | 6.6 pilot/client documentation | Pilot restriction implemented; client acceptance partial | Pilot-mode regressions and tested-client table. Web and Code have successful live reads. The owner accepts the shared web/Desktop remote-service path without a duplicate Desktop call; Desktop UI/build and mobile support are not separately verified. |
-| 6.7 small upstream PRs | Submitted and updated; maintainer decision remains external | October 13 GitHub inspection: 490 is open/review required; 491 and 494 are open/approved. Their updates were not merged into `selfhost`. |
+| 6.7 small upstream PRs | Merged upstream | October 14 GitHub inspection: 490, 491 and 494 are merged into upstream main. The selective core port is recorded in [UPSTREAM-SYNC.md](UPSTREAM-SYNC.md). |
 | 6.8 proposal records | Implemented | Three historical proposal records plus their index; old claims retain their dates and UNVERIFIED marks. |
 | 6.9 issue 484 reply | No reply, as instructed | Historical proposal banners record the independent-fork decision; no new upstream pilot is claimed. |
-| 6.10 beta release | Published through beta.14 | Exact reviewed/post-merge matrices and native release smoke passed. Owner-authorized early betas supersede the original first-tag timing gate; stable publication is not authorized. |
+| 6.10 beta release | Published through beta.15 | Exact reviewed/post-merge matrices and native release smoke passed. Owner-authorized early betas supersede the original first-tag timing gate; stable publication is not authorized. |
 | 6.11 operator deployment | Implemented and deployed | Compose plus complete env template, unchanged assets, owner update confirmation, health/version/OAuth checks. |
 | 6.12 live verification | Incomplete | Detailed live boundary below; partial client observations must not be promoted to broad compatibility. |
 | 6.13 residuals | Source fixes implemented | Bilingual audit enum labels and identity actions, consistent rate-limit wording, native per-request authorization, accepted limitations in README. The manual expiry input was removed by the later automatic-only requirement. |
@@ -71,7 +71,14 @@ control/hidden characters and oversize names are refused. The setting is stored
 once in `settings` as `notifications.sender_name`; the existing SMTP JSON and
 sealed password remain unchanged. Existing rows obtain the normal setting
 default without a data backfill or schema migration. Compose/env are unchanged.
-This candidate is not yet merged, released or inspected on the deployed site.
+The change merged in PR 23 as `65d738c9ec740a0746134ea0a81054d1405dfcb5`
+and is published and deployed in beta.15. Complete candidate CI `38656041884`,
+post-merge CI `38658483207` and tagged native images `38660933208` passed.
+Live English/Chinese settings, Unicode-name save/reload and blank-name reset/reload
+passed. The saved SMTP connection/authentication probe succeeded without sending
+mail. The default name, original locale and viewport were restored; the narrow
+form had no document-level horizontal overflow. Actual receipt with the new
+sender name and scheduled reminder delivery remain separate unverified gates.
 Local validation passed 100 focused mail/settings/boundary tests, 531 frontend
 tests, type checking, lint and production asset checks. In the rendered local
 mock, English custom-name saving and Chinese blank-name reset succeeded; the

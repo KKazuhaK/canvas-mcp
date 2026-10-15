@@ -15,8 +15,12 @@ branch is now `selfhost`; `main` remains the upstream mirror. New release tags
 use `vX.Y.Z-beta.N` (or an unsuffixed stable version), with no school suffix.
 Branch labels in the original inventory below are normalized to the current
 name; historical commit IDs and previously published tags remain unchanged.
-The owner's later decision supersedes the upstream-sync steps below: maintain
-`selfhost` independently; do not merge upstream updates into it. Existing small
+The owner's current decision supersedes the full upstream-sync steps below:
+maintain `selfhost` independently while selectively porting upstream MCP tools
+and Canvas API core functionality, fixes and their regression tests. Do not
+merge upstream main wholesale or replace the selfhost account, login, database,
+frontend, deployment or release stack. See [UPSTREAM-SYNC.md](UPSTREAM-SYNC.md)
+for the reviewed upstream checkpoint and porting boundaries. Existing small
 upstream PRs remain separate work, with merge decisions left to the maintainer.
 All schema upgrades, backups and
 database transfer tooling are isolated under
