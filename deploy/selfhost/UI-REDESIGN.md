@@ -324,7 +324,34 @@ The change is published in
 [beta.17](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.17),
 built `2026-10-15T11:14:04Z`, published `2026-10-15T11:17:26Z`. Fixed and beta
 tags, both platform stamps and downloaded unchanged Compose/env assets were
-verified; stable latest is unchanged. The latest observed deployment remains
-beta.16. The operator requested final combined deployment/real-instance
+verified; stable latest is unchanged. At publication, the latest observed
+deployment was beta.16. The operator requested final combined deployment/real-instance
 acceptance rather than per-feature installation and personal authentication.
 This source/release record does not mark deferred live checks as passed.
+
+## Beta.17 combined deployed UI acceptance
+
+On October 15, the signed-in owner footer confirmed beta.17, source
+`15a296618f26bca5fd8cf591eda96572d87fae14` and build `2026-10-15T11:14:04Z`.
+One organization password/MFA renewal permitted the combined administrator
+inspection. Site, provider, account/access and mail topics, the provider editor,
+all own-account detail sections and token reminder preferences were inspected
+without saving policies, credentials or preferences. Seven-day browser duration,
+the local administrator safeguard, readable provider types, structured editor,
+write-only saved secrets and `Canvas MCP` sender name were present.
+
+Actual web logout and the anonymous landing/login views showed no build footer;
+the anonymous version endpoint returned 401. A 390-pixel Chinese login view
+exposed both configured providers without horizontal overflow. The restored
+owner session displayed the footer and sensitive admin controls after renewal.
+English/default viewport were restored and the owner providers page remained
+open. A distinct ordinary-user session was unavailable; member/demotion/cache
+behavior retains its automated coverage rather than a new live claim.
+
+The automatic expiry, two existing MCP clients and local/Entra identities remain
+intact. One Claude Code profile read before and one after actual web logout
+succeeded using its existing grant. Remaining controlled HANDOFF scenarios,
+including actual refresh protocol traces and eligible scheduled mail delivery,
+remain open; production account moderation, linking or revocation was not
+performed merely to complete a UI checklist. Full combined observations are in
+[V1-PROGRESS.md](V1-PROGRESS.md#beta17-combined-deployed-acceptance--october-15-utc).
