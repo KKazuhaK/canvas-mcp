@@ -137,6 +137,8 @@ describe('http client', () => {
 
     await http.get('/me/login-history').catch(() => undefined)
     expect(onUnauthorized).toHaveBeenCalledTimes(1)
+    await http.get('/version').catch(() => undefined)
+    expect(onUnauthorized).toHaveBeenCalledTimes(2)
   })
 
   it('asks for one /me refetch on csrf_invalid and still surfaces the error', async () => {

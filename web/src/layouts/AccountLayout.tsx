@@ -235,7 +235,7 @@ export default function AccountLayout({ me, children }: { me: MeResponse; childr
             {me.custody_ack_required ? <Alert severity="warning" sx={{ mb: 2 }}>{t('account:custody.banner')} <Button component={RouterLink} to="/token">{t('account:custody.open')}</Button></Alert> : null}
             {children ?? <Outlet />}
           </Container>
-          <BuildFooter />
+          <BuildFooter isAdmin={isOwner && active} />
         </Box>
       </Box>
     </Box>

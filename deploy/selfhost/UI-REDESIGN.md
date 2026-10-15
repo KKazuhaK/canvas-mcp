@@ -275,5 +275,36 @@ provider, account or credential was changed by these local checks.
 
 Both changes are published in
 [beta.16](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.16).
-The public deployment still reports beta.15. These release/local results do not
-complete beta.16 deployed acceptance or the remaining live HANDOFF gates.
+The deployment reported beta.15 at publication. Deployed beta.16 acceptance was
+subsequently completed as recorded below; other live HANDOFF gates remain open.
+
+## Beta.16 deployed UI acceptance
+
+After the operator confirmed the update, the site reported beta.16 at
+`b63484c0a4bed0ca4b78d42560fbd967b441e00b`, built `2026-10-15T08:39:23Z`.
+Health and both OAuth discovery routes returned 200. Signed-in administrator
+acceptance used the in-app browser on the deployed site:
+
+- A synthetic 1024-by-512 PNG (1,575,608 bytes) was compressed, saved and read
+  again after page reload as a 192-by-96 PNG (54,869 bytes) through a hashed
+  local file URL. Anonymous retrieval confirmed PNG, immutable caching and
+  nosniff. The Local account icon was restored to its original built-in icon
+  and saved; a subsequent reload confirmed the default. Entra was not edited.
+- Desktop main scrolling left the header, sidebar and document stationary.
+  In a short viewport the sidebar's own scroll container moved from 52.67 to
+  104.67 without moving main content. At 390 pixels Chinese mobile navigation
+  changed routes, closed the drawer and reset main scroll to zero without
+  horizontal overflow. Temporary viewport overrides and language were restored.
+
+This proves deployed save/reload/file reads, not a post-upload container
+recreation. No email, credential, access policy or grant was changed.
+
+## Administrator-only build identity
+
+Version, source commit and build time belong in active administrators' account
+footers. Public layouts and other account roles do not fetch or display them,
+including after cached administrator data exists. `/api/v1/version` applies
+current session and owner authorization and returns no-store responses. This
+read does not demand a fresh ten-minute login; sensitive administration retains
+its existing recent-login checks. Image labels and startup provenance remain
+available to operators. Compose and env configuration are unchanged.

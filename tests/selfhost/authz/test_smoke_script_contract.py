@@ -60,6 +60,12 @@ class TestSectionM:
         assert response.status_code == 401
         assert f'resource_metadata="{PUBLIC}/.well-known/oauth-protected-resource/mcp"' in response.headers["www-authenticate"]
 
+    def test_build_identity_is_not_public(self, local) -> None:
+        response = local.client.get(f"{BASE}/api/v1/version")
+        assert response.status_code == 401
+        assert response.json() == {"error": {"code": "not_authenticated"}}
+        assert response.headers["cache-control"] == "no-store"
+
     def test_registration(self, local) -> None:
         evil = local.client.post(f"{BASE}/register", json={**REGISTRATION, "redirect_uris": ["https://evil.example/cb"]})
         assert evil.status_code == 400 and "invalid_redirect_uri" in evil.text

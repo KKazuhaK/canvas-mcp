@@ -194,6 +194,20 @@ describe('account status gate', () => {
 })
 
 describe('owner pages', () => {
+  it.each(['owner', 'stale-owner'] as const)('shows the build stamp to a %s without reauthentication', async (scenario) => {
+    await renderApp('/', scenario)
+    expect(await screen.findByRole('contentinfo')).toHaveTextContent('dev')
+  })
+
+  it.each(['signed-out', 'enrolled', 'pending'] as const)('never requests or shows a build stamp for %s', async (scenario) => {
+    let seen: ReturnType<typeof recordRequests> = []
+    await renderApp('/', scenario, () => { seen = recordRequests() })
+    if (scenario === 'pending') await screen.findByText('Waiting for approval')
+    else await screen.findByRole('textbox', { name: scenario === 'signed-out' ? 'MCP connector URL' : 'Account UPN' })
+    expect(screen.queryByRole('contentinfo')).not.toBeInTheDocument()
+    expect(seen.some((r) => r.url === '/version')).toBe(false)
+  })
+
   it('lists Admin in the navigation for an owner only', async () => {
     await renderApp('/', 'owner')
     await screen.findByText('Canvas token enrolled')
@@ -239,10 +253,11 @@ describe('home page states', () => {
 })
 
 describe('sign out and session loss', () => {
-  it('posts the logout with the CSRF header, then hard-navigates to the landing page', async () => {
+  it.each(['enrolled', 'owner'] as const)('clears %s data on logout, then hard-navigates to the landing page', async (scenario) => {
     const user = userEvent.setup()
-    const { client } = await renderApp('/', 'enrolled')
+    const { client } = await renderApp('/', scenario)
     await screen.findByText('Canvas token enrolled')
+    if (scenario === 'owner') await screen.findByRole('contentinfo')
     const seen = recordRequests()
     await user.click(screen.getByRole('button', { name: 'Sign out' }))
     await waitFor(() => expect(hardNavigate).toHaveBeenCalledWith('/account/'))
@@ -251,9 +266,13 @@ describe('sign out and session loss', () => {
     expect(post?.headers['x-csrf-token']).toBe('mock-csrf-token-not-a-secret')
     expect(post?.data).toBeUndefined()
     expect(post?.params).toBeUndefined()
-    // No stale account data survives. The mounted public build footer can
-    // fetch again while the test's mocked hard navigation keeps this page open.
-    expect(client.getQueryCache().getAll().filter(q => q.queryKey[0] !== 'server-build')).toHaveLength(0)
+    // The mocked hard navigation leaves React mounted, so public probes may
+    // run again. No private response or footer may survive the ended session.
+    await waitFor(() => {
+      expect(client.getQueryData(['server-build'])).toBeUndefined()
+      expect(screen.queryByRole('contentinfo')).not.toBeInTheDocument()
+      expect(client.getQueryCache().getAll().filter(q => q.queryKey[0] !== 'providers' && q.state.data != null)).toHaveLength(0)
+    })
   })
 
   it('has no "sign out of all devices" (the server does not offer it)', async () => {

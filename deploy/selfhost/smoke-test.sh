@@ -123,9 +123,14 @@ status 200 /account/token
 grep -q 'id="root"' "$WORKDIR/body" || fail "React build missing"
 status 200 /account/consent?txn=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 grep -q 'id="root"' "$WORKDIR/body" || fail "React consent route missing"
-status 200 /api/v1/version
+status 401 /api/v1/version
+python3 - "$WORKDIR/body" <<'PY' || fail "build identity requires authentication"
+import json, sys
+assert json.load(open(sys.argv[1]))['error']['code'] == 'not_authenticated'
+PY
+docker exec "$MAIN" python -c 'import json; from canvas_mcp.core.selfhost.build_info import build_info; print(json.dumps(build_info()))' > "$WORKDIR/build-info"
 docker image inspect "$IMAGE" --format '{{json .Config.Labels}}' > "$WORKDIR/image-labels"
-python3 - "$WORKDIR/body" "$WORKDIR/image-labels" <<'PY' || fail "embedded build identity"
+python3 - "$WORKDIR/build-info" "$WORKDIR/image-labels" <<'PY' || fail "embedded build identity"
 import json, sys
 stamp = json.load(open(sys.argv[1]))
 labels = json.load(open(sys.argv[2]))
