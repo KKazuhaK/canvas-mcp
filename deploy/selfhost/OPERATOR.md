@@ -37,6 +37,12 @@ The reviewed multi-architecture staging image and its immutable digest are in
    `/api/v1/version` endpoint returns the same immutable image identity; these
    fields need no `.env` entries. An operator's update confirmation is sufficient
    to resume acceptance, without repeatedly requesting Docker label output.
+   Custom sign-in icons are automatically resized/compressed and stored under
+   `/data/provider-icons/`; SQL stores only their local file references. The same
+   data volume already persists this directory, including with PostgreSQL.
+   Preserve it with the runtime keys when backing up or moving the installation.
+   Restoring a default icon removes the reference; immutable files remain for
+   database restore safety. No migration of earlier embedded icons is provided.
 4. Start the container using the chosen Compose files. Confirm the local
    `/healthz` response, inspect the startup log, and run:
 

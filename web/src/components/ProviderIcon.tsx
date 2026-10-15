@@ -1,6 +1,7 @@
 import SvgIcon, { type SvgIconProps } from '@mui/material/SvgIcon'
+import { useState } from 'react'
 
-// Embedded PNG or inline SVG: no remote icons or icon fonts. The Google "G" follows Google's sign-in
+// Local PNG files, upload previews or inline SVG: no remote icons or icon fonts. The Google "G" follows Google's sign-in
 // branding guidelines; the GitHub mark is Primer Octicons "mark-github" (MIT); the key is
 // drawn here. A provider the app does not know yet gets the generic key icon.
 export default function ProviderIcon({
@@ -8,7 +9,8 @@ export default function ProviderIcon({
   data,
   ...props
 }: { icon: string; data?: string | null } & SvgIconProps) {
-  if (data?.startsWith('data:image/png;base64,')) return <img src={data} alt="" aria-hidden width={24} height={24} style={{ objectFit: 'contain' }} />
+  const [failed, setFailed] = useState<string | null>(null)
+  if (data && data !== failed && (data.startsWith('data:image/png;base64,') || /^\/account\/provider-icons\/[a-f0-9]{64}\.png$/.test(data))) return <img src={data} onError={() => setFailed(data)} alt="" aria-hidden width={24} height={24} style={{ objectFit: 'contain' }} />
   switch (icon) {
     case 'microsoft':
       return (

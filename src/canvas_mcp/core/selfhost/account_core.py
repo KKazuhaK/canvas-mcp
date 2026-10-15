@@ -1522,10 +1522,16 @@ def build_account_routes(
 ) -> list[Route]:
     from .account_api import build_api_routes
     from .account_spa import build_spa_routes
+    from .login.provider_icon import build_icon_routes
     from .login.routes import build_login_routes
 
     app = build_account_app(cfg, store, identity, authz=authz, logins=logins, **options)
-    return build_login_routes(app) + build_api_routes(app) + build_spa_routes(spa)
+    return (
+        build_login_routes(app)
+        + build_api_routes(app)
+        + build_icon_routes(app.provider_store.icons if app.provider_store else None)
+        + build_spa_routes(spa)
+    )
 
 
 def register_account_routes(

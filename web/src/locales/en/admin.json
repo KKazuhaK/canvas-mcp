@@ -311,7 +311,7 @@
   "providerConfig": {
     "icon": "Upload sign-in icon",
     "resetIcon": "Restore default icon",
-    "iconHelp": "PNG, up to 64 KB and 512 × 512 pixels. Saved in the database.",
+    "iconHelp": "PNG, JPEG or WebP, up to 5 MB and 16 megapixels. Automatically resized and compressed to a small PNG in the persistent data volume.",
     "title": "Login provider configuration",
     "reload": "Reload login configuration",
     "edit": "Edit {{provider}}",

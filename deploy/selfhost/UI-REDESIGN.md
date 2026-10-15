@@ -210,6 +210,29 @@ viewport were restored, with no provider configuration saved.
 At narrow widths, the missing-local-administrator action sits below its warning
 and the header language label stays on one line.
 
+## File-backed sign-in icons
+
+New uploads accept PNG, JPEG and WebP sources up to 5 MB and 16 megapixels.
+The browser preserves aspect ratio, rasterizes to at most 256 pixels per side
+and reduces dimensions further when needed to stay below 64 KB. The server
+independently decodes and normalizes the bounded PNG, discarding image metadata.
+Only a content-addressed local URL is stored in SQL; image bytes live in the
+existing persistent data volume under `provider-icons/`. No embedded-icon
+migration is included because this installation has not used custom icons.
+
+The anonymous login page can read only hashed PNG filenames, with immutable
+caching and MIME-sniffing protection. Missing/corrupt files fall back to the
+built-in provider mark. Owner/recent-login/CSRF and revision checks still govern
+updates; disk failure rolls back SQL, and reset clears the reference. Immutable
+files remain available for restoring older database backups.
+
+Local in-app-browser inspection used synthetic 1024-by-512 PNG/JPEG/WebP files.
+All three compressed to 192-by-96 PNG previews below 64 KB, saved successfully
+in the development mock and could be reset to the built-in mark. Backend checks
+separately cover the actual file/SQL/public-route contract, restart reads,
+malformed input and write-failure rollback. This is local acceptance; deployed
+acceptance remains pending until the operator updates the image.
+
 ## Independent navigation and content scrolling
 
 The signed-in layout uses a viewport-height frame. Its top bar stays outside the

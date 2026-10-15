@@ -81,6 +81,7 @@ export interface LoginProviderConfiguration {
   protocol: 'entra' | 'google' | 'github' | 'oidc' | 'local'
   enabled: boolean
   auto_link_email?: boolean
+  /** Local, content-addressed PNG URL; image bytes are stored in the data volume. */
   icon_data?: string | null
   rank: number
   config: Record<string, string | string[] | boolean>
@@ -92,6 +93,7 @@ export interface LoginProviderSave {
   config: LoginProviderConfiguration['config']
   enabled: boolean
   auto_link_email?: boolean
+  /** Compressed PNG data URI on upload, null to restore the built-in icon, omitted to retain. */
   icon_data?: string | null
   rank: number
   client_secret?: string
@@ -155,6 +157,7 @@ export interface Provider {
   kind: 'oidc' | 'oauth2' | 'local'
   name: string
   icon: ProviderIcon
+  /** Public local PNG URL for a configured sign-in icon. */
   icon_data?: string | null
   /** The server-side redirect that starts the sign-in (a full-page navigation). */
   start_url: string

@@ -173,6 +173,7 @@ class TestRouteTables:
             "/account/assets": (),
             "/account/assets/{name:path}": (),
             "/account/favicon.svg": (),
+            "/account/provider-icons/{filename}": ("GET", "HEAD"),
             "/api/v1": (),
             "/api/v1/{rest:path}": (),
         }
