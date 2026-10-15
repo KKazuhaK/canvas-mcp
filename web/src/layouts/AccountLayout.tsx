@@ -22,7 +22,7 @@ import ListItemText from '@mui/material/ListItemText'
 import Toolbar from '@mui/material/Toolbar'
 import Tooltip from '@mui/material/Tooltip'
 import Typography from '@mui/material/Typography'
-import { useState, type ElementType, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ElementType, type ReactNode } from 'react'
 import { NavLink, Link as RouterLink, Outlet, useLocation } from 'react-router'
 import { useTranslation } from 'react-i18next'
 import type { Features, MeResponse } from '@/api/types'
@@ -71,6 +71,11 @@ export default function AccountLayout({ me, children }: { me: MeResponse; childr
   const active = me.account.status === 'active'
   const { pathname } = useLocation()
   const adminPage = pathname === '/admin' || pathname.startsWith('/admin/')
+  const mainRef = useRef<HTMLElement>(null)
+
+  useEffect(() => {
+    if (mainRef.current) mainRef.current.scrollTop = 0
+  }, [pathname])
 
   function signOut() {
     logout.mutate(undefined, {
@@ -105,7 +110,7 @@ export default function AccountLayout({ me, children }: { me: MeResponse; childr
   const displayName = me.account.display_name
 
   return (
-    <Box sx={{ minHeight: '100dvh', display: 'flex', flexDirection: 'column' }}>
+    <Box sx={{ height: '100dvh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
       <Box
         component="a"
         href="#main"
@@ -118,10 +123,10 @@ export default function AccountLayout({ me, children }: { me: MeResponse; childr
         {t('common:chrome.skipToContent')}
       </Box>
       <AppBar
-        position="sticky"
+        position="static"
         color="inherit"
         elevation={0}
-        sx={{ borderBottom: 1, borderColor: 'divider', zIndex: (theme) => theme.zIndex.drawer + 1 }}
+        sx={{ flexShrink: 0, borderBottom: 1, borderColor: 'divider', zIndex: (theme) => theme.zIndex.drawer + 1 }}
       >
         <Toolbar sx={{ gap: 1, px: { xs: 1, sm: 2 } }}>
           {active ? (
@@ -183,7 +188,7 @@ export default function AccountLayout({ me, children }: { me: MeResponse; childr
         </Toolbar>
       </AppBar>
 
-      <Box sx={{ display: 'flex', flex: 1, minWidth: 0 }}>
+      <Box sx={{ display: 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
         {active ? (
           <>
             <Drawer
@@ -207,7 +212,10 @@ export default function AccountLayout({ me, children }: { me: MeResponse; childr
               sx={{
                 display: { xs: 'none', md: 'block' },
                 width: DRAWER_WIDTH,
+                height: '100%',
                 flexShrink: 0,
+                overflowY: 'auto',
+                overscrollBehaviorY: 'contain',
                 borderRight: 1,
                 borderColor: 'divider',
               }}
@@ -216,17 +224,20 @@ export default function AccountLayout({ me, children }: { me: MeResponse; childr
             </Box>
           </>
         ) : null}
-        <Container
+        <Box
           component="main"
           id="main"
-          maxWidth={adminPage ? 'xl' : 'md'}
-          sx={{ flex: 1, minWidth: 0, py: 3, px: 2 }}
+          ref={mainRef}
+          tabIndex={-1}
+          sx={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}
         >
-          {me.custody_ack_required ? <Alert severity="warning" sx={{ mb: 2 }}>{t('account:custody.banner')} <Button component={RouterLink} to="/token">{t('account:custody.open')}</Button></Alert> : null}
-          {children ?? <Outlet />}
-        </Container>
+          <Container maxWidth={adminPage ? 'xl' : 'md'} sx={{ flex: 1, minWidth: 0, py: 3, px: 2 }}>
+            {me.custody_ack_required ? <Alert severity="warning" sx={{ mb: 2 }}>{t('account:custody.banner')} <Button component={RouterLink} to="/token">{t('account:custody.open')}</Button></Alert> : null}
+            {children ?? <Outlet />}
+          </Container>
+          <BuildFooter />
+        </Box>
       </Box>
-      <BuildFooter />
     </Box>
   )
 }
