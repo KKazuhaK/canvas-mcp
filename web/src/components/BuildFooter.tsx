@@ -4,8 +4,12 @@ import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { getVersion } from '@/api/endpoints'
 
-/** Reports the running server's immutable image stamp, also before sign-in. */
-export default function BuildFooter() {
+/** Only active administrators may request or display the image stamp. */
+export default function BuildFooter({ isAdmin }: { isAdmin: boolean }) {
+  return isAdmin ? <AdminBuildFooter /> : null
+}
+
+function AdminBuildFooter() {
   const { t } = useTranslation()
   const { data } = useQuery({ queryKey: ['server-build'], queryFn: getVersion, staleTime: 60_000, retry: false })
   if (!data || typeof data.version !== 'string' || typeof data.commit !== 'string' || typeof data.built_at !== 'string') return null

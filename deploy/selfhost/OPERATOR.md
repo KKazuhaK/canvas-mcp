@@ -32,9 +32,10 @@ The reviewed multi-architecture staging image and its immutable digest are in
    the data volume and `.env` when recreating the container. Explicit keys from
    an existing deployment remain supported and must be retained. Optional source
    builds and PostgreSQL are covered by the repository's advanced reference.
-   Release images display their version, source commit and UTC build time at the
-   bottom of the account/sign-in pages and in startup logs. The public
-   `/api/v1/version` endpoint returns the same immutable image identity; these
+   Release images display their version, source commit and UTC build time in
+   administrators' account footers and in startup logs. Signed-out and ordinary
+   user pages omit this information. The `/api/v1/version` endpoint requires an
+   active administrator session and returns the same immutable image identity; these
    fields need no `.env` entries. An operator's update confirmation is sufficient
    to resume acceptance, without repeatedly requesting Docker label output.
    Custom sign-in icons are automatically resized/compressed and stored under

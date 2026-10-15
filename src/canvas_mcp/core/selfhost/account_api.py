@@ -599,7 +599,7 @@ class ApiApp:
                     )
                 },
             ),
-            (f"{API_PREFIX}/version", {"GET": e(self.version, access="public")}),
+            (f"{API_PREFIX}/version", {"GET": e(self.version, access="active")}),
             (f"{API_PREFIX}/providers", {"GET": e(self.providers, access="public")}),
             (f"{API_PREFIX}/me", {"GET": e(self.me, access="session")}),
             (
@@ -1085,9 +1085,14 @@ class ApiApp:
             logger.error("account api write tools read failed: %s", type(exc).__name__)
             raise _Fail("write_tools_unavailable") from None
 
-    # -- public ------------------------------------------------------------------------------
+    # -- build identity and public discovery -------------------------------------------------
 
     async def version(self, ctx: _Ctx) -> Response:
+        # Build identity is an owner-only read, without the recent-login gate
+        # used for sensitive administration. Session resolution checks current access.
+        assert ctx.session is not None
+        if not ctx.session.owner:
+            raise _Fail("forbidden")
         return self._ok(build_info())
 
     async def providers(self, ctx: _Ctx) -> Response:

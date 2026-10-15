@@ -255,18 +255,42 @@ def audit_rows(h: Harness) -> list[tuple[str, str | None, str | None]]:
 # -- providers and the shape of every answer ----------------------------------------------
 
 
-def test_build_identity_is_public_closed_and_not_cached(api: Api, monkeypatch):
+def test_build_identity_is_owner_only_closed_and_not_cached(
+    h: Harness, api: Api, monkeypatch
+):
     expected = {
         "version": "1.14.0-beta.11",
         "commit": "a" * 40,
         "built_at": "2026-10-13T08:00:00Z",
     }
     monkeypatch.setattr(account_api, "build_info", lambda: expected)
+    error_of(api.get("/version"), 401, "not_authenticated")
+    sign_in(h)
+    error_of(api.get("/version"), 403, "forbidden")
+    h.client.cookies.clear()
+    sign_in_owner(h)
     response = api.get("/version")
     assert response.status_code == 200
     assert response.json() == expected
     assert_api_headers(response)
     error_of(api.post("/version", csrf=False), 405, "method_not_allowed")
+    # Read-only build identity does not prompt for a new sign-in every ten minutes.
+    h.now += 601
+    assert api.get("/version").json() == expected
+    # A cached owner cookie does not outlive a stored role demotion.
+    demote_directly(h, KEY_OWNER)
+    refused = api.get("/version")
+    error_of(refused, 403, "forbidden")
+    assert_api_headers(refused)
+    assert expected["commit"] not in refused.text
+
+
+def test_pending_accounts_cannot_read_build_identity(tmp_path: pathlib.Path):
+    h = make(tmp_path, policy=APPROVAL)
+    sign_in(h, roles=())
+    response = Api(h).get("/version")
+    error_of(response, 403, "pending_approval")
+    assert_api_headers(response)
 
 
 class TestProviders:
