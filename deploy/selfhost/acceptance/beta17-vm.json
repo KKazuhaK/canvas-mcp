@@ -1,0 +1,354 @@
+{
+  "scope": "isolated_HyperV_VM_synthetic_only",
+  "observed_at": "2026-10-15T23:25:19.979959+00:00",
+  "runtime": {
+    "version": "1.14.0-beta.17",
+    "source_commit": "15a296618f26bca5fd8cf591eda96572d87fae14",
+    "image_index_digest": "sha256:a6b624a7f3a109811bd86df75c51b46f82b9bf8d05dc8aba0204ad3c05521aac"
+  },
+  "fixture": {
+    "os": "Debian 13",
+    "hypervisor": "Hyper-V",
+    "static_memory_mb": 3072,
+    "backends": [
+      "SQLite",
+      "PostgreSQL"
+    ],
+    "synthetic_accounts_and_credentials_only": true,
+    "TLS_verification_enabled": true
+  },
+  "recorded_HTTP_observations": 262,
+  "records": {
+    "core-proof": {
+      "scope": "isolated_VM_synthetic_accounts_released_image_real_HTTP",
+      "stage": "core",
+      "backends": {
+        "sqlite": {
+          "anonymous_version_401": true,
+          "owner_version_200": true,
+          "member_version_403": true,
+          "personal_upn_write_absent": true,
+          "administrator_self_disable_refused": true,
+          "oauth_pkce_consent_exchange": true,
+          "refresh_rotates": true,
+          "grace_sibling_issued": true,
+          "outside_grace_replay_revokes_family": true,
+          "disable_refuses_next_mcp_and_refresh": true,
+          "other_account_unaffected": true,
+          "enable_does_not_revive_old_grant": true
+        },
+        "pg": {
+          "anonymous_version_401": true,
+          "owner_version_200": true,
+          "member_version_403": true,
+          "personal_upn_write_absent": true,
+          "administrator_self_disable_refused": true,
+          "oauth_pkce_consent_exchange": true,
+          "refresh_rotates": true,
+          "grace_sibling_issued": true,
+          "outside_grace_replay_revokes_family": true,
+          "disable_refuses_next_mcp_and_refresh": true,
+          "other_account_unaffected": true,
+          "enable_does_not_revive_old_grant": true
+        }
+      }
+    },
+    "operations-proof": {
+      "scope": "isolated_VM_released_image",
+      "backends": {
+        "sqlite": {
+          "reencryption_preserves_pat_and_refresh": true,
+          "old_key_removed_without_data_loss": true,
+          "jwt_epoch_rejects_old_access_but_refresh_recovers": true,
+          "synthetic_aged_absolute_expiry_refuses_refresh_and_access": true,
+          "elapsed_one_hour_or_multiday_test": false
+        },
+        "pg": {
+          "reencryption_preserves_pat_and_refresh": true,
+          "old_key_removed_without_data_loss": true,
+          "jwt_epoch_rejects_old_access_but_refresh_recovers": true,
+          "synthetic_aged_absolute_expiry_refuses_refresh_and_access": true,
+          "elapsed_one_hour_or_multiday_test": false
+        }
+      }
+    },
+    "mail-proof": {
+      "scope": "isolated_VM_released_image_real_TLS_SMTP_sink",
+      "startup_delivery_both_backends": true,
+      "default_and_unicode_sender_names": true,
+      "non_opted_in_accounts_receive_none": true,
+      "restart_deduplication": true,
+      "token_values_absent": true,
+      "external_email_sent": false,
+      "hourly_interval_elapsed_test": false,
+      "synthetic_expiry_metadata_seeded": true,
+      "messages": [
+        {
+          "tls": true,
+          "from_display_name": "Canvas MCP",
+          "recipient_count": 1,
+          "synthetic_recipients_only": true,
+          "token_absent_from_body": true,
+          "contains_account_link": true,
+          "message_id_present": true
+        },
+        {
+          "tls": true,
+          "from_display_name": "Canvas 验收",
+          "recipient_count": 1,
+          "synthetic_recipients_only": true,
+          "token_absent_from_body": true,
+          "contains_account_link": true,
+          "message_id_present": true
+        }
+      ]
+    },
+    "proxy-proof": {
+      "scope": "isolated_VM_nginx_actual_HTTP",
+      "health_metadata_reachable": true,
+      "body_limit_413": true,
+      "upstream_unavailable_502_then_recovers": true,
+      "access_log_query_and_credentials_absent": true,
+      "error_log_contains_synthetic_callback_query": true,
+      "per_ip_rate_limit_tested": false,
+      "caddy_tested": false,
+      "production_proxy_tested": false
+    },
+    "proxy-examples-proof": {
+      "scope": "isolated_VM_repository_proxy_examples",
+      "production_changed": false,
+      "caddy_image": "caddy@sha256:685ae3d7c34d9b5f8caeddc5d14051db7bbd88ff1f5a2fa0c16bd8ca328fb7af",
+      "caddy_version": "v2.11.7 h1:yj0Y4fYZGPkSvibBJ1sTWE33xC0fxztVyXEW5iIdUT4=",
+      "nginx_version": "nginx version: nginx/1.26.3",
+      "adaptations": [
+        "loopback test ports",
+        "synthetic hostname and TLS certificates",
+        "dedicated test logs",
+        "Caddy admin and automatic redirects disabled",
+        "Caddy upstream Host restored to canonical test origin"
+      ],
+      "nginx": {
+        "discovery_200": true,
+        "registration_body_bound_413": true,
+        "upstream_failure_502": true,
+        "recovers_after_backend_restart": true,
+        "per_ip_limits": {
+          "/register": {
+            "requests": 14,
+            "limited_429": 8,
+            "other_statuses": [
+              400
+            ]
+          },
+          "/authorize": {
+            "requests": 3,
+            "limited_429": 3,
+            "other_statuses": []
+          },
+          "/auth/login/not-configured": {
+            "requests": 28,
+            "limited_429": 7,
+            "other_statuses": [
+              404
+            ]
+          },
+          "/token": {
+            "requests": 75,
+            "limited_429": 14,
+            "other_statuses": [
+              401
+            ]
+          },
+          "/revoke": {
+            "requests": 3,
+            "limited_429": 3,
+            "other_statuses": []
+          }
+        },
+        "discovery_not_throttled_by_auth_limits": true,
+        "access_log_sensitive_values_absent": true,
+        "error_log_contains_synthetic_callback_query": true
+      },
+      "caddy": {
+        "discovery_200": true,
+        "registration_body_bound_413": true,
+        "upstream_failure_502": true,
+        "recovers_after_backend_restart": true,
+        "per_ip_limit_tested": false,
+        "rate_limit_boundary": "Standard Caddy example delegates per-IP limiting to an optional module or external edge rule; neither enabled in this fixture.",
+        "access_log_sensitive_values_absent": true,
+        "runtime_log_contains_synthetic_callback_query": false,
+        "request_Authorization_Cookie_fields_removed": true,
+        "real_login_SetCookie_field_removed": true,
+        "real_redirect_Location_field_removed": true
+      }
+    },
+    "additional-boundaries-proof": {
+      "scope": "isolated_VM_synthetic_grants_real_HTTP_and_public_directory",
+      "backends": {
+        "sqlite": {
+          "configured_upstream_max_age_seconds": 1209600,
+          "new_signin_obtains_working_grant": true,
+          "own_grant_revoke_refuses_next_mcp_and_refresh": true,
+          "live_directory_api_200": true,
+          "real_Entra_removal_tested": false,
+          "synthetic_upstream_age_refuses_refresh_then_revokes_access": true
+        },
+        "pg": {
+          "configured_upstream_max_age_seconds": 1209600,
+          "new_signin_obtains_working_grant": true,
+          "own_grant_revoke_refuses_next_mcp_and_refresh": true,
+          "live_directory_api_200": true,
+          "real_Entra_removal_tested": false,
+          "synthetic_upstream_age_refuses_refresh_then_revokes_access": true
+        }
+      },
+      "directory_egress": {
+        "scope": "released_directory_client_real_network_with_request_observer",
+        "request": {
+          "https_destination": "canvas.instructure.com",
+          "path": "/api/v1/accounts/search",
+          "query_fields": [
+            "per_page",
+            "search_term"
+          ],
+          "typed_query_only": true,
+          "authorization_absent": true,
+          "cookie_absent": true,
+          "request_body_empty": true
+        },
+        "response_parsed": true,
+        "result_count": 8,
+        "full_running_service_egress_capture": false
+      }
+    },
+    "two-schools-proof": {
+      "scope": "isolated_VM_released_image_real_HTTP_with_two_synthetic_Canvas_TLS_upstreams",
+      "backends": {
+        "sqlite": {
+          "two_accounts_two_TLS_schools": true,
+          "distinct_credentials_used_for_each_school": true,
+          "normal_HTTP_enrollment_with_custody": true,
+          "same_school_identity_change_requires_explicit_confirmation": true,
+          "token_metadata_queried": true,
+          "get_my_profile_returns_only_correct_synthetic_identity": true,
+          "replacement_works_after_old_mock_PAT_revoked": true,
+          "existing_MCP_grants_and_other_account_keep_working": true,
+          "real_external_Canvas_schools": false
+        },
+        "pg": {
+          "two_accounts_two_TLS_schools": true,
+          "distinct_credentials_used_for_each_school": true,
+          "normal_HTTP_enrollment_with_custody": true,
+          "same_school_identity_change_requires_explicit_confirmation": true,
+          "token_metadata_queried": true,
+          "get_my_profile_returns_only_correct_synthetic_identity": true,
+          "replacement_works_after_old_mock_PAT_revoked": true,
+          "existing_MCP_grants_and_other_account_keep_working": true,
+          "real_external_Canvas_schools": false
+        }
+      },
+      "no_production_tokens_used": true,
+      "private_exceptions_only_for_explicit_fixture_hosts": true
+    },
+    "icon-recreation-proof": {
+      "scope": "isolated_VM_released_image_real_API_and_compose_recreation",
+      "backends": {
+        "sqlite": {
+          "hashed_file_read_after_actual_container_recreation": true,
+          "bytes_unchanged": true,
+          "database_reference_only": true,
+          "anonymous_fetch_and_nosniff": true,
+          "reset_to_builtin_after_test": true
+        },
+        "pg": {
+          "hashed_file_read_after_actual_container_recreation": true,
+          "bytes_unchanged": true,
+          "database_reference_only": true,
+          "anonymous_fetch_and_nosniff": true,
+          "reset_to_builtin_after_test": true
+        }
+      }
+    },
+    "directory-service-egress-proof": {
+      "scope": "isolated_VM_released_package_running_HTTP_API_with_temporary_request_observer",
+      "real_directory_HTTP_API_200": true,
+      "outbound_request": {
+        "destination": "canvas.instructure.com",
+        "path": "/api/v1/accounts/search",
+        "query_fields": [
+          "per_page",
+          "search_term"
+        ],
+        "typed_query_matches": true,
+        "only_normal_client_headers": true,
+        "authorization_absent": true,
+        "cookie_absent": true,
+        "body_empty": true,
+        "observed_in_running_account_service": true
+      },
+      "package_source_unchanged": true,
+      "original_container_command_and_compose_restored": true,
+      "observer_record_contains_no_query_values_or_authentication_material": true,
+      "production_changed": false
+    },
+    "caddy-ratelimit-proof": {
+      "scope": "isolated_VM_Caddy_optional_module_repository_commented_blocks",
+      "module_commit": "5625512f24f6f59d6f64fb3aafe5eecff0b286db",
+      "per_ip_limits": {
+        "/register": {
+          "requests": 14,
+          "limited_429": 4,
+          "other_statuses": [
+            400
+          ]
+        },
+        "/authorize": {
+          "requests": 3,
+          "limited_429": 3,
+          "other_statuses": []
+        },
+        "/auth/login/not-configured": {
+          "requests": 34,
+          "limited_429": 4,
+          "other_statuses": [
+            404
+          ]
+        },
+        "/token": {
+          "requests": 125,
+          "limited_429": 5,
+          "other_statuses": [
+            401
+          ]
+        },
+        "/revoke": {
+          "requests": 3,
+          "limited_429": 3,
+          "other_statuses": []
+        }
+      },
+      "retry_after_present": true,
+      "discovery_remains_200": true,
+      "distinct_loopback_source_has_separate_budget_for_both_proxies": true,
+      "production_changed": false,
+      "template_blocks_activated_without_policy_edits": true
+    }
+  },
+  "source_checks": {
+    "python_passed": 8356,
+    "python_skipped": 75,
+    "focused_docs_image_boundary_passed": 47,
+    "dotenv_disabled_in_test_child": true
+  },
+  "remaining_boundaries": [
+    "Real Entra B2B guest unavailable",
+    "Actual Entra account removal/role-change fixture unavailable",
+    "No multi-day refresh wire trace; approximately 58-hour production continued access is separate evidence",
+    "Two Canvas schools in this guest are synthetic TLS upstreams",
+    "Directory service request observed through temporary entrypoint instrumentation; no general packet capture",
+    "No production proxy or production key-rotation mutation performed"
+  ],
+  "production_changed": false,
+  "external_email_sent_in_VM_round": false
+}

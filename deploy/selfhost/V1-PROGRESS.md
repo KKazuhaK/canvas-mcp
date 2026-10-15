@@ -15,6 +15,11 @@ On October 15 the operator requested one combined deployment and real-instance
 acceptance after implementation and CI, rather than installation and personal
 sign-in after every feature. Keep remaining live gates together; do not repeat
 requests for Docker label output or mark deferred checks as passed.
+The operator-authorized isolated VM checks now cover both persistence backends,
+refresh/revocation boundaries, key rotation, reminder delivery, two synthetic
+Canvas schools and icon-file persistence. See the controlled VM acceptance
+record below for the exact scope; it does not supply a real B2B guest or a
+multi-day refresh protocol trace.
 The provider/action refinement and its test-clock correction are merged in PRs 19
 and 20, released and inspected on the deployed site. The provider-label and
 sharded-expiry correction merged in PR 21 and is published in beta.14. Its live
@@ -46,19 +51,23 @@ not complete HANDOFF or authorize a stable release.
 | 6.12 live verification | Incomplete | Detailed live boundary below; partial client observations must not be promoted to broad compatibility. |
 | 6.13 residuals | Source fixes implemented | Bilingual audit enum labels and identity actions, consistent rate-limit wording, native per-request authorization, accepted limitations in README. The manual expiry input was removed by the later automatic-only requirement. |
 
-Remaining live evidence is specific: a B2B guest (the owner currently
-has no test guest); consecutive-day refresh including rotation/absolute TTL and
-grace behavior; whole-account disable followed by Entra removal/role aging;
-proxy limits, failure behavior and actual log redaction; live signing/encryption
-key rotation; and directory query egress. Enabled Entra tenant-member sign-in,
+Remaining external evidence is specific: a B2B guest (the owner currently
+has no test guest), actual Entra removal/role changes and a multi-day refresh
+protocol trace. The operator explicitly authorized a local VM for controlled
+operational checks. Both databases now pass actual HTTP rotation/grace,
+account/grant revocation, synthetic expiry/age boundaries and signing/encryption
+key rotation there. Proxy and directory evidence is scoped in the VM record
+below, rather than being presented as production traffic capture.
+Enabled Entra tenant-member sign-in,
 custody enrollment, deployed-host CIMD fetch, web/Code read-only calls, operator
 store check and health are exercised. Only Entra and local are configured;
 unconfigured Google/GitHub/custom OIDC and mobile are not live-support claims.
 The school's sanitized expiry diagnosis and deployed automatic recheck are
 complete. The owner confirmed successful execution and receipt of the authorized
 single test message on October 14 UTC. This is operator-observed delivery;
-no SMTP response log was supplied. Scheduled expiry-reminder delivery remains
-unverified, and SMTP authentication alone does not prove that scheduling.
+no SMTP response log was supplied. The released startup reminder pass now has
+actual TLS SMTP-sink delivery and restart-deduplication evidence on both
+databases. An elapsed hourly production reminder cycle remains unobserved.
 
 The frontend reorganization is merged and published in beta.12 through
 [PR #17](https://github.com/KKazuhaK/canvas-mcp/pull/17). Its complete CI and local
@@ -115,6 +124,89 @@ These results complete the available combined acceptance, not all HANDOFF gates.
 The controlled fixtures and operator diagnostics listed above remain necessary.
 There is no new runtime change, image update or request for another personal
 sign-in in this documentation checkpoint.
+
+### Controlled VM acceptance — October 15 UTC
+
+The operator requested an isolated local VM for destructive operational checks.
+The Debian 13 Hyper-V guest ran the published beta.17 image, source
+`15a296618f26bca5fd8cf591eda96572d87fae14`, index
+`sha256:a6b624a7f3a109811bd86df75c51b46f82b9bf8d05dc8aba0204ad3c05521aac`.
+SQLite and PostgreSQL ran on separate volumes with synthetic accounts, keys and
+credentials. Local TLS verification remained enabled. Production configuration,
+tokens and databases were not copied into this guest. The guest lost contact
+during the first mail attempt; it was recovered with its original disk and fixed
+3 GB memory. No cause of that guest failure is claimed.
+
+The retrieved sanitized records contain 262 HTTP API/protocol observations,
+in addition to the proxy-limit request bursts. Their result summaries and scope
+boundaries are retained in [the sanitized result bundle](acceptance/beta17-vm.json),
+without raw credentials, profile data or email addresses. They establish the following:
+
+| Scenario | Observed result on both databases |
+|---|---|
+| Account and build access | Anonymous version read 401, ordinary member 403, owner 200; personal UPN write absent; administrator self-disable refused. |
+| OAuth lifecycle | Real local login, PKCE, consent and code exchange; refresh rotation; sibling issuance inside the four-second grace window; replay outside it returns `invalid_grant` and revokes the family. |
+| Account/grant revocation | Disabling an account refuses its next MCP/refresh request while another account works. Re-enabling does not revive the old grant. A fresh login/consent works; self-revoking its grant refuses subsequent MCP/refresh requests. |
+| Expiry and upstream age | The configured absolute lifetime is 3,600 seconds and remains fixed across rotation. Only a synthetic grant's expiry was aged to exercise refusal. Aging another synthetic grant beyond the configured 14-day upstream limit makes refresh refuse and revoke access. These are controlled boundary tests, not elapsed-hour/day observations or real Entra removal. |
+| Encryption/signing keys | Re-encryption from `k1` to `k2`, removal of `k1` and actual container recreation preserve the decrypted synthetic PAT and refresh operation. Signing-epoch rotation refuses old access; refresh obtains working access. |
+| Reminder delivery | An eligible opted-in account receives one actual TLS SMTP-sink message per database; the non-opted-in account receives none. Default `Canvas MCP` and Chinese sender names, message IDs, account links and token-free bodies were checked. Restart produces no duplicate. The sink never relays externally; this does not claim an elapsed hourly timer cycle. |
+| Two-school isolation | Two synthetic Canvas HTTPS upstreams accept distinct school/account PATs. Normal custody/enrollment APIs, same-school identity-change confirmation and real `get_my_profile` calls return only the expected synthetic identity. Replacing a PAT still works after removing the old PAT from the mock upstream; existing MCP grants and the other account keep working. This is not evidence from two external institutions. |
+| Icon storage | A provider icon is saved through the real API and anonymously fetched by content hash. Forced Compose recreation preserves identical file bytes and the database holds only its reference. Fetch headers include nosniff; the built-in icon was restored after the check. |
+
+School search returned 200 through each running account API. A separate released
+`SchoolDirectory` client made a real HTTPS request to `canvas.instructure.com`;
+a request observer verified the search path, only `search_term` and `per_page`,
+the exact typed term, no Authorization/Cookie headers and an empty body. The
+response parsed successfully. A subsequent SQLite service run temporarily
+observed `httpx.AsyncClient.send` while the actual account API performed the
+search. Its outgoing request had the same query/body properties and only
+normal client headers, without account-specific headers. The observer recorded
+field names and booleans, not query values or authentication material. The
+released package was unchanged; original Compose and container commands were
+restored and health checked afterward. This proves the observed service request,
+not a general packet capture or a production-traffic inspection.
+
+The repository's nginx 1.26.3 and standard Caddy 2.11.7 examples were also run
+with dedicated loopback ports, synthetic hostnames/certificates and test logs.
+Caddy's upstream Host was set to the canonical test origin and its admin API
+and automatic redirect listener were disabled for the fixture. Both discovery
+routes returned 200, oversized registration returned 413, upstream shutdown
+returned 502 and restart recovered. Synthetic callback query values and
+Authorization/Cookie values were absent from both access logs; Caddy replaced
+the configured query fields with `REDACTED`. A real synthetic local login and
+redirect also verified removal of logged Set-Cookie and Location fields.
+nginx's error log did contain the
+synthetic callback query on upstream failure, matching the existing documented
+root-only/short-retention error-log boundary. Its access-log claim does not
+extend to that error log.
+
+nginx returned 429 for the configured registration/authorization, sign-in and
+token/revocation budgets while discovery remained reachable. Standard Caddy's
+per-IP limiter remains an optional module or external-edge responsibility. The
+optional `mholt/caddy-ratelimit` module was built at
+`5625512f24f6f59d6f64fb3aafe5eecff0b286db` with Go 1.26.9 and Caddy 2.11.7.
+Activating the example's commented blocks without policy changes returned 429
+and Retry-After for each configured endpoint class. A different loopback source
+retained its own budget in both proxies, and discovery remained 200. The
+backend's shared token bucket was allowed to refill separately while Caddy's
+per-IP window remained full. The first custom build failed inside the Go 1.27.2
+compiler; only the successful Go 1.26.9 build/runtime result is counted.
+None of these proxy fixtures changed the production reverse proxy.
+
+These results close the available controlled runtime gaps without another
+release or deployment. Real B2B and actual Entra offboarding fixtures remain
+unavailable, and multi-day refresh wire observations are still incomplete.
+The existing approximately 58-hour production-client access is separate
+evidence. Unconfigured external providers and mobile clients retain their
+previous boundaries; no broad compatibility or stable-release approval is
+implied.
+
+The local source regression completed with 8,356 passing checks and 75
+skips, with dotenv disabled in the test child. An earlier
+attempt ended at approximately 70% without a final result and is not counted as
+a pass. Focused documentation, Dockerfile and migration-boundary checks passed
+47 tests. This record changes documentation only; release assets and runtime
+source are unchanged.
 
 ### Sender-name follow-up
 

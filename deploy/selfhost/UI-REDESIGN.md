@@ -355,3 +355,11 @@ including actual refresh protocol traces and eligible scheduled mail delivery,
 remain open; production account moderation, linking or revocation was not
 performed merely to complete a UI checklist. Full combined observations are in
 [V1-PROGRESS.md](V1-PROGRESS.md#beta17-combined-deployed-acceptance--october-15-utc).
+
+The subsequent operator-authorized VM round exercised the released API and
+two synthetic Canvas HTTPS upstreams on SQLite and PostgreSQL. Custody/token
+replacement, explicit same-school identity-change confirmation, account/grant
+revocation and icon-file persistence across actual container recreation passed.
+These are controlled runtime checks, separate from the rendered UI and real
+organization-login evidence above. The detailed scope and remaining external
+fixtures are in the controlled VM acceptance record in V1-PROGRESS.
