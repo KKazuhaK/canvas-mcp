@@ -5,7 +5,9 @@ This is a working checkpoint, not a deployment or release approval. Follow
 
 ## Current status
 
-The current published prerelease and latest observed deployment are beta.15.
+The current published prerelease is beta.16; the latest observed deployment is
+beta.15. The operator has received the existing two Compose update commands;
+beta.16 deployed acceptance remains pending.
 The provider/action refinement and its test-clock correction are merged in PRs 19
 and 20, released and inspected on the deployed site. The provider-label and
 sharded-expiry correction merged in PR 21 and is published in beta.14. Its live
@@ -15,7 +17,7 @@ current image record below; later dated checkpoints preserve implementation hist
 
 ### HANDOFF completion audit
 
-Checked on October 14 UTC against the current source, published release, CI records
+Checked through October 15 UTC against the current source, published release, CI records
 and available live evidence. Automated checks prove their covered behavior;
 they do not replace the live checks in DEVELOPMENT 6.12. A beta deployment does
 not complete HANDOFF or authorize a stable release.
@@ -32,7 +34,7 @@ not complete HANDOFF or authorize a stable release.
 | 6.7 small upstream PRs | Merged upstream | October 14 GitHub inspection: 490, 491 and 494 are merged into upstream main. The selective core port is recorded in [UPSTREAM-SYNC.md](UPSTREAM-SYNC.md). |
 | 6.8 proposal records | Implemented | Three historical proposal records plus their index; old claims retain their dates and UNVERIFIED marks. |
 | 6.9 issue 484 reply | No reply, as instructed | Historical proposal banners record the independent-fork decision; no new upstream pilot is claimed. |
-| 6.10 beta release | Published through beta.15 | Exact reviewed/post-merge matrices and native release smoke passed. Owner-authorized early betas supersede the original first-tag timing gate; stable publication is not authorized. |
+| 6.10 beta release | Published through beta.16 | Exact reviewed/post-merge matrices and native release smoke passed. Owner-authorized early betas supersede the original first-tag timing gate; stable publication is not authorized. |
 | 6.11 operator deployment | Implemented and deployed | Compose plus complete env template, unchanged assets, owner update confirmation, health/version/OAuth checks. |
 | 6.12 live verification | Incomplete | Detailed live boundary below; partial client observations must not be promoted to broad compatibility. |
 | 6.13 residuals | Source fixes implemented | Bilingual audit enum labels and identity actions, consistent rate-limit wording, native per-request authorization, accepted limitations in README. The manual expiry input was removed by the later automatic-only requirement. |
@@ -169,15 +171,15 @@ and inventory checks remain in the removable migration package.
 ## Deployable staging image
 
 The current prerelease is
-[v1.14.0-beta.14](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.14),
-source `967011723af64f00f0287ea4760f61e1a71b85bb`, built at
-`2026-10-14T19:57:43Z`. Both `:beta` and `:1.14.0-beta.14` resolve to:
+[v1.14.0-beta.16](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.16),
+source `b63484c0a4bed0ca4b78d42560fbd967b441e00b`, built at
+`2026-10-15T08:39:23Z`. Both `:beta` and `:1.14.0-beta.16` resolve to:
 
-`ghcr.io/kkazuhak/canvas-mcp@sha256:b01e5c8889d907f4d5bd8eb13c07fe58b6e16e32fae78198eea969b1b32a2c75`
+`ghcr.io/kkazuhak/canvas-mcp@sha256:88c1a462f4893cd454bcb633f50721b7e67dae8d70fb31d7f5b1486e615055c8`
 
-The [reviewed-head matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38552532301),
-[complete post-merge matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38624740657)
-and [native release publication](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38628018415)
+The [reviewed-head matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38701247261),
+[complete post-merge matrix](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38703983586)
+and [native release publication](https://github.com/KKazuhaK/canvas-mcp/actions/runs/38707211391)
 passed. Anonymous registry inspection confirmed the index annotations and both
 amd64/arm64 labels match the source, version and build time. Stable `:latest`
 was unchanged. The downloaded release assets match the source bytes and beta.11:
@@ -186,10 +188,31 @@ was unchanged. The downloaded release assets match the source bytes and beta.11:
 - Env template SHA-256: `4f0e1ff437d4d6b26943e0a6e8c2e2ef044f1fb9a5a2b2a5a6ed2af634f25075`.
 
 No schema migration, credential rewrite, new system environment variable or extra
-deployment file is required. The operator confirmed the upgrade; beta.14
-version, health, automatic expiry and existing Code grant were verified below.
+deployment file is required. Beta.16 was published at `2026-10-15T08:43:17Z`.
+The exact merged primary checkout passed 8,353 Python checks with 74
+platform/database skips; 540 frontend checks, typecheck, lint, production build,
+asset inspection, Ruff and mypy across 176 source files passed. All 15 jobs in
+each final matrix and all four tagged image jobs passed.
 
-## Last observed deployed image: beta.14
+PR 24 selectively ports the reviewed upstream MCP caller-boundary fixes while
+preserving verified selfhost caches. PR 25 adds independent content/navigation
+scrolling. PR 26 compresses uploaded PNG/JPEG/WebP icons and persists PNG files
+under `/data/provider-icons/`, with SQL references only. No embedded-icon
+migration is included, as requested. Preserve that existing data volume with
+SQL backups, including when using PostgreSQL. The in-app browser verified local
+compression, preview, mock save/reset and desktop/mobile navigation; backend
+checks cover actual SQL/file persistence, anonymous serving and restart reads.
+These are release/local-validation records, not deployed beta.16 acceptance.
+
+## Last observed deployed image: beta.15
+
+The public version endpoint still reports `1.14.0-beta.15`, source
+`65d738c9ec740a0746134ea0a81054d1405dfcb5`, built UTC
+`2026-10-15T00:35:51Z`; health returns 200. Its sender-name acceptance is recorded
+above. Beta.16 deployment and live layout/icon acceptance remain pending; no
+additional message, token replacement or provider change was performed.
+
+### Earlier beta.14 observation
 
 The operator confirmed deployment. Public version and account footer identify
 `1.14.0-beta.14`, source `967011723af64f00f0287ea4760f61e1a71b85bb`, built UTC
