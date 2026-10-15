@@ -209,3 +209,26 @@ overflow; this does not claim mobile MCP-client compatibility. Language and
 viewport were restored, with no provider configuration saved.
 At narrow widths, the missing-local-administrator action sits below its warning
 and the header language label stays on one line.
+
+## Independent navigation and content scrolling
+
+The signed-in layout uses a viewport-height frame. Its top bar stays outside the
+scroll regions, the desktop sidebar scrolls independently when its menu exceeds
+the available height, and only the right-hand main region scrolls through page
+content and the build footer. The temporary mobile drawer retains its existing
+navigation and close behavior. Changing routes starts the main region at the
+top; changing a settings topic or language does not discard in-memory edits.
+The main region remains the keyboard-accessible skip-link target.
+
+Local rendered verification scrolled the English mail page to its bottom:
+main scrollTop changed from 0 to 616 while the sidebar stayed at y=64.67,
+the top bar stayed at y=0 and the document stayed at scrollTop=0. In a
+1280-by-320 viewport, the sidebar scrolled independently to 104.67 while the
+main region stayed at 616. Selecting Canvas token returned the main region to
+0. At 390 pixels the Chinese mobile navigation opened, changed routes and
+closed, with no document-level or main-region horizontal overflow. Locale and
+viewport were restored. All 531 frontend tests, type checking, lint and
+production build/distribution checks passed. The first full test attempt had a
+Windows Node worker access violation; its 8-case file passed independently and
+the complete repeated run passed. These are local mock observations; deployed
+acceptance still requires the next image update.
