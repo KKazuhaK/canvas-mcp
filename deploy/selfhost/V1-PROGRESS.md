@@ -5,10 +5,12 @@ This is a working checkpoint, not a deployment or release approval. Follow
 
 ## Current status
 
-The current published prerelease is beta.17; the latest observed deployment is
-beta.16. Its deployed icon compression/save/reload/default restoration and
-independent desktop/mobile scrolling passed. Beta.17 restricts build metadata
-to active administrators; its deployed acceptance remains pending.
+The current published prerelease and observed deployment are beta.17. Its
+administrator footer identifies source `15a296618f26bca5fd8cf591eda96572d87fae14`,
+built `2026-10-15T11:14:04Z`. The combined public, owner and fresh-administrator
+checks passed on October 15; the detailed record below distinguishes those
+observations from the remaining controlled live gates. Beta.16 icon and
+independent-scrolling acceptance remains applicable to the unchanged features.
 On October 15 the operator requested one combined deployment and real-instance
 acceptance after implementation and CI, rather than installation and personal
 sign-in after every feature. Keep remaining live gates together; do not repeat
@@ -67,6 +69,52 @@ list/editor and action-button usability feedback led to the PR 19 refinement.
 The owner authorized one test message to a privately supplied recipient and
 confirmed command success and receipt. No second message is authorized or sent.
 Direct server execution remains unavailable.
+
+### Beta.17 combined deployed acceptance — October 15 UTC
+
+The owner completed organization password/MFA once for this combined round in
+the in-app browser. Read-only inspection after that sign-in confirmed:
+
+- The current owner sees version, full source commit and build time. Before
+  recent-login renewal, the owner's account pages/footer still worked while sensitive
+  administration required renewed sign-in. Actual web logout removed the footer
+  from both the landing page and login chooser; anonymous `/api/v1/version`
+  returned 401 with no-store. Non-owner denial has automated API/UI coverage;
+  a separate ordinary-member live session was not available.
+- Site address remains database-owned. Browser duration is 10,080 minutes
+  (seven days), with the separate ten-minute sensitive-operation requirement.
+  The local administrator recovery indicator and last-local-administrator
+  protection are present. This does not claim seven elapsed days of observation.
+- The Entra and Local providers remain enabled. Friendly provider labels,
+  outlined edit actions and appearance/connection/sign-in-rule sections are
+  visible. Saved provider and SMTP secrets have blank write-only fields with
+  keep-existing hints. Mail remains enabled, with Sender name `Canvas MCP`,
+  STARTTLS and a 15-day reminder window.
+- Account details expose profile, sign-in/access, Canvas and connected-app
+  sections. Personal UPN is read-only; administrator UPN editing and SSO unlock
+  remain explicit actions. The existing local/Entra identities and both client
+  grants are preserved. No policy, identity or credential was changed.
+- The token and administrator detail pages report the Canvas-sourced expiry
+  January 10, 2027; the token page gives its exact local expiry time. Reminder
+  opt-in remains off and the recipient is blank. No date was fabricated, no
+  preference changed and no email sent.
+- Health and both OAuth discovery routes returned 200. Unauthenticated MCP
+  initialization returned 401 with the resource-metadata challenge. The actual
+  anonymous Chinese login view at 390 pixels showed both configured login
+  methods without document-level horizontal overflow. English and the default
+  viewport were restored.
+
+The existing Claude Code grant completed one read-only profile call at
+`2026-10-15T20:17:46Z`, 209,312 seconds (about 58 hours) after its first successful
+call. After explicit web logout, a second single-call probe at
+`2026-10-15T20:21:23Z` also succeeded without new consent. This proves continued
+access and independence from the browser session, not refresh HTTP rotation,
+absolute-TTL or grace-window behavior; no such protocol trace was captured.
+
+These results complete the available combined acceptance, not all HANDOFF gates.
+The controlled fixtures and operator diagnostics listed above remain necessary.
+There is no new runtime change, image update or request for another personal
+sign-in in this documentation checkpoint.
 
 ### Sender-name follow-up
 
