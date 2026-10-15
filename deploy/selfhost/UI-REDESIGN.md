@@ -308,3 +308,23 @@ current session and owner authorization and returns no-store responses. This
 read does not demand a fresh ten-minute login; sensitive administration retains
 its existing recent-login checks. Image labels and startup provenance remain
 available to operators. Compose and env configuration are unchanged.
+
+PR 28 merged this change as `15a296618f26bca5fd8cf591eda96572d87fae14`,
+with the same tree as reviewed candidate
+`dd342edff01e96f62dc18cd50820e468d893e1e6`. Candidate matrix `38719775381`,
+post-merge matrix `38722798250` and tagged native images `38725867487` passed.
+The exact merged primary passed 8,357 Python checks with 74 platform/database
+skips; all 548 frontend checks and production asset checks passed. In-app-browser
+mock inspection showed the owner footer and no footer for ordinary/signed-out
+users. Role changes hide cached metadata; logout/session-loss tests cover cache
+clearance. API tests cover anonymous/member/pending/demoted refusal, current
+owner access, no-store headers and the absence of a repeated recent-login gate.
+
+The change is published in
+[beta.17](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.0-beta.17),
+built `2026-10-15T11:14:04Z`, published `2026-10-15T11:17:26Z`. Fixed and beta
+tags, both platform stamps and downloaded unchanged Compose/env assets were
+verified; stable latest is unchanged. The latest observed deployment remains
+beta.16. The operator requested final combined deployment/real-instance
+acceptance rather than per-feature installation and personal authentication.
+This source/release record does not mark deferred live checks as passed.

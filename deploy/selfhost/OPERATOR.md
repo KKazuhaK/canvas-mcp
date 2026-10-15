@@ -38,6 +38,9 @@ The reviewed multi-architecture staging image and its immutable digest are in
    active administrator session and returns the same immutable image identity; these
    fields need no `.env` entries. An operator's update confirmation is sufficient
    to resume acceptance, without repeatedly requesting Docker label output.
+   The operator requested batched deployment and real-instance acceptance after
+   implementation and CI. Collect pending checks for the final combined update;
+   do not request a new installation or personal sign-in after each feature.
    Custom sign-in icons are automatically resized/compressed and stored under
    `/data/provider-icons/`; SQL stores only their local file references. The same
    data volume already persists this directory, including with PostgreSQL.
