@@ -73,6 +73,19 @@ class TestRequestCredentials:
         with pytest.raises(AttributeError):
             creds.api_token = "other"  # type: ignore[misc]
 
+    def test_repr_and_str_omit_token(self):
+        """The token stays out of diagnostics without changing value semantics."""
+        secret = "synthetic-secret-token-123"
+        creds = RequestCredentials(secret, "https://canvas.example.com/api/v1")
+        for text in (repr(creds), str(creds)):
+            assert secret not in text
+            assert "api_token" not in text
+            assert "https://canvas.example.com/api/v1" in text
+        same = RequestCredentials(secret, "https://canvas.example.com/api/v1")
+        assert creds == same
+        assert hash(creds) == hash(same)
+        assert creds != RequestCredentials("other", "https://canvas.example.com/api/v1")
+
 
 # ---------------------------------------------------------------------------
 # ASGI Middleware tests
@@ -326,6 +339,26 @@ class TestClientPerRequestCredentials:
         clear_request_credentials()
         yield
         clear_request_credentials()
+
+    @pytest.mark.asyncio
+    async def test_token_hidden_from_repr_but_still_sent(self):
+        """Hiding repr must not remove the credential from the outgoing header."""
+        secret = "synthetic-secret-token-456"
+        creds = RequestCredentials(secret, "https://per-request.instructure.com/api/v1")
+        assert secret not in repr(creds)
+        set_request_credentials(creds)
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"id": 1}
+        response.raise_for_status = MagicMock()
+        with patch("canvas_mcp.core.client.httpx.AsyncClient") as MockClient:
+            instance = AsyncMock()
+            instance.get.return_value = response
+            MockClient.return_value = instance
+            from canvas_mcp.core.client import make_canvas_request
+
+            await make_canvas_request("get", "/users/self")
+            assert MockClient.call_args.kwargs["headers"]["Authorization"] == f"Bearer {secret}"
 
     @pytest.mark.asyncio
     async def test_uses_per_request_credentials(self):

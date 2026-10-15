@@ -14,6 +14,8 @@ from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.config import get_config
 from ..core.credentials import (
     current_principal_key,
+    get_request_principal,
+    is_http_request_active,
     register_credential_purge_listener,
     request_local_principal_state,
 )
@@ -415,11 +417,14 @@ def _unservable_store() -> dict[tuple[str, str, str], float]:
 
     The process-wide map, except for a principal whose course state is
     request-local (``SELFHOST_COURSE_STATE``): its hints live in its request.
+    Unverified HTTP callers never reuse or publish hints, even for one token.
     """
     local = request_local_principal_state()
     if local is not None:
         store: dict[tuple[str, str, str], float] = local.setdefault("unservable_topics", {})
         return store
+    if is_http_request_active() and get_request_principal() is None:
+        return {}
     return _unservable_topics
 
 

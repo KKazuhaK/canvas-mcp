@@ -44,6 +44,8 @@ from .client import make_canvas_request
 from .config import get_config
 from .credentials import (
     current_principal_key,
+    get_request_principal,
+    is_http_request_active,
     register_credential_purge_listener,
     request_local_principal_state,
 )
@@ -106,12 +108,15 @@ def _policy_store() -> dict[tuple[str, str], tuple[float, CoursePolicy]]:
 
     The process-wide map, except for a principal whose course state is
     request-local (``SELFHOST_COURSE_STATE``): its decisions live in its request
-    and are gone with it.
+    and are gone with it. Unverified HTTP callers never reuse or publish policy
+    decisions, even for the same token: Canvas access may have changed.
     """
     local = request_local_principal_state()
     if local is not None:
         store: dict[tuple[str, str], tuple[float, CoursePolicy]] = local.setdefault("policies", {})
         return store
+    if is_http_request_active() and get_request_principal() is None:
+        return {}
     return _policy_cache
 
 
