@@ -204,8 +204,10 @@ implied.
 The local source regression completed with 8,356 passing checks and 75
 skips, with dotenv disabled in the test child. An earlier
 attempt ended at approximately 70% without a final result and is not counted as
-a pass. Focused documentation, Dockerfile and migration-boundary checks passed
-47 tests. This record changes documentation only; release assets and runtime
+a pass. The result bundle uses ASCII JSON with lossless Unicode escapes for the
+tested Unicode sender name; its decoded values are unchanged. Final English,
+documentation, Dockerfile and migration-boundary checks passed 58 tests.
+This record changes documentation only; release assets and runtime
 source are unchanged.
 
 ### Sender-name follow-up

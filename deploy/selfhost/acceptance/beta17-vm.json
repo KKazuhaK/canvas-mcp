@@ -94,7 +94,7 @@
         },
         {
           "tls": true,
-          "from_display_name": "Canvas 验收",
+          "from_display_name": "Canvas \u9a8c\u6536",
           "recipient_count": 1,
           "synthetic_recipients_only": true,
           "token_absent_from_body": true,
@@ -339,6 +339,7 @@
     "python_passed": 8356,
     "python_skipped": 75,
     "focused_docs_image_boundary_passed": 47,
+    "english_source_checks_passed": 11,
     "dotenv_disabled_in_test_child": true
   },
   "remaining_boundaries": [
