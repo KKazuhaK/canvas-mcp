@@ -162,9 +162,10 @@ READ_TOOL_CONTENT_POLICIES: dict[str, ReadToolContentPolicy] = {
     "parse_ufixit_violations": _fenced("fence_untrusted_fields"),
     "read_course_file": ReadToolContentPolicy(
         "fenced",
-        guards=("fence_untrusted_inline", "_file_as_text_fallback"),
+        guards=("_FILE_CONTENT_NOTICE", "_file_as_text_fallback"),
         rationale=(
-            "The text line fences the uploader-chosen file name and lock "
+            "The text line explicitly identifies the attached file contents as "
+            "untrusted data, never instructions, and fences the uploader-chosen file name and lock "
             "explanation, prints a type sanitized to a bare MIME token, declares "
             "the blob only with a type from a fixed allowlist (else "
             "application/octet-stream), and builds the resource URI from the "
@@ -193,6 +194,11 @@ RESOURCE_CONTENT_POLICIES: dict[str, ReadToolContentPolicy] = {
     "code-api-file": _safe(
         "Returns bundled local TypeScript/JavaScript source, not Canvas-authored content."
     ),
+}
+
+# Course labels interpolated into prompts need provenance as user-role data.
+PROMPT_CONTENT_POLICIES: dict[str, ReadToolContentPolicy] = {
+    "summarize-course": _fenced("fence_untrusted_inline"),
 }
 
 # The markers deliberately carry their own instruction so every fence is
