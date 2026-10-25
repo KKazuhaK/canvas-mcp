@@ -1117,7 +1117,7 @@
         "Grade all 90 notebook submissions using bulk grading",
         "Send reminders to all students who haven't submitted"
       ],
-      "notes": "Use search_canvas_tools first to discover available imports. Best for 30+ items."
+      "notes": "Use search_canvas_tools first to discover available imports. Best for 30+ items. Local sandbox mode requires Node.js 22.18+ and uses Node permissions to restrict filesystem reads and block writes, child processes, workers and native addons. Use import type; enums/namespaces requiring transpilation are unsupported. Container and sandbox-disabled modes still use tsx. Outbound filtering remains best-effort; code retains the caller's Canvas token and direct-write authority."
     },
     {
       "name": "check_enrollment",
@@ -3457,7 +3457,7 @@
       "examples": [
         "Download the syllabus PDF from the course files"
       ],
-      "notes": "Use list_course_files or list_module_items to find file IDs. Local (stdio) servers only: the file is written to the server's filesystem, so the tool refuses over HTTP transport and directs callers to read_course_file (the file as it is) and read_course_file_text (plain text). Never overwrites an existing destination. Capped at 1 GB by default (DOWNLOAD_FILE_MAX_SIZE_MB raises or lowers it; the refusal names the setting); the Canvas token goes only to the Canvas origin, storage redirects get no credentials and must be HTTPS, and once a hop leaves Canvas no later hop carries the token, even one back to Canvas."
+      "notes": "Use list_course_files or list_module_items to find file IDs. Local (stdio) servers only: the file is written to the server's filesystem, so the tool refuses over HTTP transport and directs callers to read_course_file (the file as it is) and read_course_file_text (plain text). Never overwrites an existing destination. Capped at 1 GB by default (DOWNLOAD_FILE_MAX_SIZE_MB raises or lowers it; the refusal names the setting); the Canvas token goes only to the Canvas origin, storage redirects get no credentials and must be HTTPS, and once a hop leaves Canvas no later hop carries the token, even one back to Canvas. On Windows, owner-only access is not enforced: saved files inherit the destination folder's Windows permissions. Use a private folder or read_course_file without saving a copy."
     },
     {
       "name": "get_conversation_details",
@@ -3999,7 +3999,7 @@
         "Look at the week 5 lecture slides and explain the diagram on slide 12",
         "This handout is a scan; read it and tell me what problem 3 asks"
       ],
-      "notes": "Claude Code saves the blob under tool-results/ and gives its path; open it with Read to view the file like an attachment (a PDF arrives as page images plus text). Read cannot open PPTX/DOCX/XLSX; the hint says so and points to read_course_file_text. At most 11.5 MB is returned as a file because Claude Code disconnects on a JSON-RPC message over 16 MiB; larger files are refused before download. The MIME type comes from the file signature first; the resource URI is canvas://files/<id>.<ext> from a fixed table, never the uploader's file name. The Canvas token is sent only to the Canvas origin. Works for module-linked files when the Files tab is hidden. Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result."
+      "notes": "Claude Code saves the blob under tool-results/ and gives its path; open it with Read to view the file like an attachment (a PDF arrives as page images plus text). Read cannot open PPTX/DOCX/XLSX; the hint says so and points to read_course_file_text. At most 11.5 MB is returned as a file because Claude Code disconnects on a JSON-RPC message over 16 MiB; larger files are refused before download. The MIME type comes from the file signature first; the resource URI is canvas://files/<id>.<ext> from a fixed table, never the uploader's file name. The Canvas token is sent only to the Canvas origin. Works for module-linked files when the Files tab is hidden. Never cut; declares anthropic/maxResultSizeChars=500000 so Claude Code delivers the whole result. Attached file contents are explicitly identified as untrusted Canvas data, not instructions; original blob/image bytes are preserved. Text fallback remains fenced."
     },
     {
       "name": "read_course_file_text",

@@ -2950,14 +2950,15 @@ await bulkGrade({
 **Returns:** Combined stdout and stderr from execution, or error message if failed.
 
 **Platform Support:**
-- **macOS/Linux**: Uses `npx tsx` directly
-- **Windows**: Automatically locates the tsx CLI entry point via `shutil.which` or `%APPDATA%\npm\node_modules\tsx\dist\cli.mjs`, then invokes it via `node` to avoid `.cmd` batch wrapper limitations
+- **Local sandbox (all platforms):** Requires Node.js 22.18 or later. Runs TypeScript directly under Node's permission model, with file reads restricted to the bundled code API and no child processes, workers, native addons or file writes. Missing or older Node versions refuse execution.
+- Use `import type` for type-only imports; enums and namespaces that need transpilation are unsupported in local sandbox mode. Relative imports with `.js`, no extension, or a directory index remain supported.
+- **Container mode and sandbox disabled:** Continue using `tsx`; Windows invokes the tsx CLI through Node to avoid `.cmd` wrappers.
 
 **Security:**
 - Code runs in a temporary file that is deleted after execution
 - Inherits Canvas API credentials from server environment
 - Timeout enforced to prevent runaway processes
-- Local sandbox controls are best-effort, not a complete security boundary; code can access resources allowed to the server process, and strict egress control requires external isolation (see [issue #157](https://github.com/vishalsachdev/canvas-mcp/issues/157))
+- Local sandbox host access is limited by Node permissions. Outbound network filtering is still best-effort and needs external isolation for strict egress control (see [issue #157](https://github.com/vishalsachdev/canvas-mcp/issues/157)). Code retains the caller's Canvas token and can write directly without tool confirmation or anonymization.
 
 **Token Efficiency:**
 - **Traditional approach**: Tool-by-tool processing may return each submission to the model

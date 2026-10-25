@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Core hardening from upstream 1.15–1.16
+
+- Update FastMCP to 4.1.2 for its component-authorization and OAuth-client
+  issuer-binding security fixes, the MCP SDK to 2.2.0, certifi to 2026.10.19,
+  opentelemetry-api to 1.45.1 and development-only black to 26.10.1; raise
+  the FastMCP/MCP dependency floors to 4.1.2/2.2. Update PDF parsing to
+  pypdf 6.21.2 and the optional image dependency to Pillow 13.0.0 for their
+  published parser/decoder fixes. Preserve the self-hosted authorization
+  provider and validate its existing compatibility and flow contracts.
+- Use the upstream bounded, quote-aware HTML tokenizer for full text and
+  accessibility processing, and bound email redaction without losing content.
+  Request page bodies, reject unreadable scan sources, fence copied excerpts
+  and verify accessibility updates by reading them back. Refuse missing or
+  malformed assignment descriptions and unreadable page bodies before writing
+  any collected changes; explicit null or empty bodies remain valid.
+- Refuse ordinary discussions and unproven topic types in announcement deletion,
+  including preview/confirmation and mixed batches.
+- Explain withheld writes in the ordinary HTTP/stdio server instructions, using
+  only registered tools. Preserve self-hosted account-specific write preferences.
+- Load the public server entry point on demand and keep policy-data imports
+  independent of the server framework and its authentication dependencies.
+- Fence course labels interpolated into summary prompts. Missing or cleared HTTP
+  credentials cannot expose or clear the local anonymization history; retain
+  the fork's existing bounded principal-owned cache and credential purging.
+- Identify original file attachments and images as untrusted Canvas content
+  without changing their bytes. Keep the complete fenced text fallback and
+  existing per-hop file-transfer token restrictions. Document Windows download
+  permission limits in the tool and its result.
+- Run the local TypeScript sandbox under Node's permission model (Node.js
+  22.18+), refusing unsupported runtimes. Preserve documented import forms and
+  container execution. CI runs real permission-boundary probes; code execution
+  remains disabled in the self-hosted service.
+
 ### Selfhost build identity and Canvas metadata compatibility
 
 - Embed the release version, full source commit and UTC build timestamp in the

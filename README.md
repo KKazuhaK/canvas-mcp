@@ -614,7 +614,7 @@ await bulkGrade({
 
 | Mode | Config | What It Does |
 |------|--------|-------------|
-| Local sandbox (default) | None needed | Timeout 120s, memory 512MB, filtered environment, best-effort network controls |
+| Local sandbox (default) | Node.js 22.18+ | Node permissions restrict file reads and block file writes/process creation; timeout 120s, memory 512MB; outbound filtering stays best-effort |
 | Container sandbox | `TS_SANDBOX_MODE=container` | Container filesystem isolation via Docker/Podman; egress guarantees depend on deployment configuration |
 | No sandbox | `ENABLE_TS_SANDBOX=false` | Full local access (not recommended) |
 
