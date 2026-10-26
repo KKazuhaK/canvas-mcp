@@ -64,7 +64,7 @@ class ConfigStore:
                 or row._mapping["role"] != "owner"
             ):
                 raise SettingsAccessDenied
-        result = conn.execute(
+        result: int | None = conn.execute(
             update(s.server_state)
             .where(
                 s.server_state.c.id == 1, s.server_state.c.settings_revision == revision
@@ -189,7 +189,7 @@ class ConfigStore:
         new = validate_site_url(value)
         with self.database.write() as conn:
             new_revision = self._authorize(conn, actor, revision, now)
-            old = conn.execute(
+            old: str | None = conn.execute(
                 select(s.settings.c.value).where(s.settings.c.key == SITE_URL_KEY)
             ).scalar_one_or_none()
             if old is None:
@@ -431,7 +431,7 @@ class ConfigStore:
             )
         with self.database.write() as conn:
             new_revision = self._authorize(conn, None, revision, now)
-            old = conn.execute(
+            old: bool | None = conn.execute(
                 select(s.canvas_schools.c.allow_private).where(
                     s.canvas_schools.c.host == host
                 )

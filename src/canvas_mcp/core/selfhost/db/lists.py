@@ -1,6 +1,7 @@
 """Bounded list reads and aggregates on caller-owned connections."""
 
 from collections.abc import Sequence
+from typing import cast
 
 from sqlalchemy import distinct, func, select, true
 from sqlalchemy.engine import Connection
@@ -86,11 +87,12 @@ def account_counts(conn: Connection) -> dict[str, int]:
             s.accounts.c.status, s.accounts.c.role
         )
     ):
-        counts["total"] += total
+        count = cast(int, total)
+        counts["total"] += count
         if status in counts:
-            counts[status] += total
+            counts[status] += count
         if status == "active" and role == "owner":
-            counts["owners"] += total
+            counts["owners"] += count
     return counts
 
 
@@ -132,7 +134,7 @@ def credential_inventory(conn: Connection) -> tuple[int, int, tuple[str, ...]]:
             func.count(), func.count(distinct(s.canvas_credentials.c.canvas_host))
         ).select_from(s.canvas_credentials)
     ).one()
-    kids = tuple(
+    kids: tuple[str, ...] = tuple(
         conn.execute(
             select(s.canvas_credentials.c.key_id)
             .distinct()

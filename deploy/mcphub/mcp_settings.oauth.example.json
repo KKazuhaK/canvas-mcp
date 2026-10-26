@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "canvas-personal": {
+      "type": "streamable-http",
+      "url": "https://canvas.example.com/mcp",
+      "owner": "admin",
+      "visibility": "public",
+      "oauth": {
+        "identityMode": "personal",
+        "scopes": [
+          "Canvas.Access"
+        ]
+      }
+    }
+  }
+}

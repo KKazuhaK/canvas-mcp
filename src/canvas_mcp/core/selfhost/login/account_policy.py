@@ -73,7 +73,7 @@ def account_policy_in(conn: Connection, account_id: str) -> dict:
         .mappings()
         .one_or_none()
     )
-    allowed = list(
+    allowed: list[str] = list(
         conn.execute(
             select(s.account_allowed_login_providers.c.provider_id)
             .where(s.account_allowed_login_providers.c.account_id == account_id)
@@ -107,7 +107,7 @@ def method_allowed(
         else account["allow_multiple"]
     )
     if linking and not multiple:
-        existing = list(
+        existing: list[str] = list(
             conn.execute(
                 select(s.external_identities.c.provider_id).where(
                     s.external_identities.c.account_id == account_id
@@ -121,7 +121,7 @@ def method_allowed(
 
 def association_name(conn: Connection, ext: ExternalClaims) -> str | None:
     """Opt-in provider trust; no second mailbox challenge or pair matrix."""
-    enabled = conn.execute(
+    enabled: bool | None = conn.execute(
         select(s.login_providers.c.auto_link_email).where(
             s.login_providers.c.id == ext.provider_id, s.login_providers.c.configured
         )

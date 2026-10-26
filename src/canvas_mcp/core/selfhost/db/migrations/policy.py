@@ -36,7 +36,7 @@ class CompatibilityFloorGuard:
     ) -> None:
         if not step.is_upgrade or step.is_stamp or ctx.connection is None:
             raise TokenStoreError("only forward schema revisions are supported")
-        after = ctx.connection.execute(
+        after: object = ctx.connection.execute(
             text("SELECT compat_floor FROM server_state WHERE id=1")
         ).scalar_one()
         if type(after) is not int or after < 1 or after > self.epoch:
@@ -87,7 +87,7 @@ def rebuild_sqlite_table(name: str, **kwargs: Any) -> Iterator[BatchOperations]:
         ),
         None,
     )
-    ddl = conn.execute(
+    ddl: str | None = conn.execute(
         text("SELECT sql FROM sqlite_master WHERE type='table' AND name=:name"),
         {"name": name},
     ).scalar_one_or_none()
@@ -101,7 +101,7 @@ def rebuild_sqlite_table(name: str, **kwargs: Any) -> Iterator[BatchOperations]:
         sqlite_with_rowid=not bool(properties["wr"]),
         sqlite_autoincrement=bool(re.search(r"\bAUTOINCREMENT\b", ddl, re.I)),
     )
-    sequence = None
+    sequence: int | None = None
     if table_kwargs["sqlite_autoincrement"]:
         sequence = conn.execute(
             text("SELECT seq FROM sqlite_sequence WHERE name=:name"), {"name": name}

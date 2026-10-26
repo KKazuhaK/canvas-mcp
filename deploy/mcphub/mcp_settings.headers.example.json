@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "canvas-personal": {
+      "type": "streamable-http",
+      "url": "https://canvas-header.example.com/mcp",
+      "owner": "admin",
+      "visibility": "public",
+      "headers": {
+        "X-MCP-Access-Key": "${CANVAS_MCP_ACCESS_KEY}"
+      },
+      "credentialTemplate": [
+        {
+          "target": "headers",
+          "name": "X-Canvas-Token",
+          "label": "Your personal Canvas API token"
+        }
+      ]
+    }
+  }
+}

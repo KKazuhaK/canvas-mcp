@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -70,7 +70,7 @@ def verify(conn: Connection, keys: SealKeys, *, all_values: bool = False) -> int
         table = sealed.table
         kid_column = table.c[sealed.key_id]
         present = table.c[sealed.ciphertext].is_not(None)
-        used = (
+        used: Sequence[str] = (
             conn.execute(select(kid_column).where(present).distinct()).scalars().all()
         )
         missing = sorted(set(used) - set(keys.key_ids))

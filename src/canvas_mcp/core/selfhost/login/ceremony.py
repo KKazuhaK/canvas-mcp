@@ -42,7 +42,7 @@ def _opt_text(value: Any, limit: int) -> str | None:
     return None if value is None else _text(value, limit)
 
 
-def _int(value: Any) -> int:
+def _int(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError("shape")
     return value

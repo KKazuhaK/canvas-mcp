@@ -380,6 +380,14 @@ class _Endpoint:
     max_body: int = MAX_BODY_BYTES
 
 
+_ADMIN_ACCESS_ACTIONS: tuple[Literal["approve", "deny", "disable", "enable"], ...] = (
+    "approve",
+    "deny",
+    "disable",
+    "enable",
+)
+
+
 class ApiApp:
     """The JSON API, over one :class:`~.account_core.AccountCore`."""
 
@@ -667,7 +675,7 @@ class ApiApp:
                         )
                     },
                 )
-                for action in ("approve", "deny", "disable", "enable")
+                for action in _ADMIN_ACCESS_ACTIONS
             ),
             (
                 f"{API_PREFIX}/admin/enrollments/{{id}}/mark-invalid",

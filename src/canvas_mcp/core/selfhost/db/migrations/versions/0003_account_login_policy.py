@@ -1,6 +1,8 @@
 """Canonical account names and provider-neutral identity ownership."""
 
 import re
+from collections.abc import Iterable, Sequence
+from typing import cast
 
 import sqlalchemy as sa
 from alembic import op
@@ -43,13 +45,13 @@ def upgrade() -> None:
         ).all()
     )
     used = set(names.values())
-    accounts = (
+    accounts: Sequence[object] = (
         conn.execute(sa.text("SELECT id FROM accounts ORDER BY id")).scalars().all()
     )
     for account_id in accounts:
         name = names.get(account_id)
         if name is None:
-            emails = conn.execute(
+            emails: Iterable[object] = conn.execute(
                 sa.text(
                     "SELECT email FROM external_identities WHERE account_id=:id AND email_verified=:verified AND provider_id<>'entra' ORDER BY linked_at, id"
                 ),
@@ -143,7 +145,7 @@ def upgrade() -> None:
     for issuer, subject, account_id in conn.execute(
         sa.text("SELECT issuer, subject, account_id FROM external_identities")
     ):
-        key = (issuer, subject)
+        key = (cast(str, issuer), cast(str, subject))
         if key in owners and owners[key] != account_id:
             raise RuntimeError(
                 "canonical external identity belongs to multiple accounts; resolve ownership before upgrading"

@@ -1,0 +1,77 @@
+{
+  "mcpServers": {
+    "canvas-personal": {
+      "type": "stdio",
+      "owner": "admin",
+      "visibility": "public",
+      "idleTimeoutMs": 300000,
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/KKazuhaK/canvas-mcp.git@v1.14.1[documents]",
+        "canvas-mcp-server",
+        "--transport",
+        "stdio",
+        "--role",
+        "student"
+      ],
+      "env": {
+        "PYTHON_DOTENV_DISABLED": "1",
+        "MCP_AUTH_MODE": "legacy",
+        "ALLOWED_WRITE_TOOLS": "none",
+        "EXECUTE_TYPESCRIPT_ENABLED": "false",
+        "ACCESSIBILITY_CHECKERS": "none"
+      },
+      "credentialTemplate": [
+        {
+          "target": "env",
+          "name": "CANVAS_API_URL",
+          "label": "Your Canvas institution URL (https://...)"
+        },
+        {
+          "target": "env",
+          "name": "CANVAS_API_TOKEN",
+          "label": "Your personal Canvas API token"
+        }
+      ]
+    },
+    "anteater-shared": {
+      "type": "stdio",
+      "owner": "admin",
+      "visibility": "public",
+      "idleTimeoutMs": 300000,
+      "command": "npx",
+      "args": [
+        "--yes",
+        "--package=https://codeload.github.com/KKazuhaK/Anteater-MCP/tar.gz/v1.0.0-beta.2",
+        "--package=node@24.21.0",
+        "--",
+        "anteater-mcp"
+      ],
+      "env": {
+        "ANTEATER_API_KEY": "${ANTEATER_SHARED_API_KEY}"
+      }
+    },
+    "anteater-personal": {
+      "type": "stdio",
+      "owner": "admin",
+      "visibility": "public",
+      "idleTimeoutMs": 300000,
+      "command": "npx",
+      "args": [
+        "--yes",
+        "--package=https://codeload.github.com/KKazuhaK/Anteater-MCP/tar.gz/v1.0.0-beta.2",
+        "--package=node@24.21.0",
+        "--",
+        "anteater-mcp"
+      ],
+      "credentialTemplate": [
+        {
+          "target": "env",
+          "name": "ANTEATER_API_KEY",
+          "label": "Your personal Anteater API secret key"
+        }
+      ]
+    }
+  }
+}

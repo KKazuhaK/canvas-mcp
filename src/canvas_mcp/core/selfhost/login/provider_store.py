@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -246,7 +246,7 @@ class ProviderConfigStore:
                 if old is None or old["secret_ciphertext"] is None:
                     raise ProviderConfigurationError("provider_secret_required")
                 self._decode(old)  # Refuse retaining a damaged or unknown-key secret.
-            identities = (
+            identities: Sequence[str] = (
                 conn.execute(
                     select(s.external_identities.c.issuer)
                     .where(s.external_identities.c.provider_id == identifier)
@@ -262,7 +262,7 @@ class ProviderConfigStore:
                 and old["config"].get("client_id") != value.config.get("client_id")
             ):
                 raise ProviderConfigurationError("provider_identity_binding_changed")
-            active = set(
+            active: set[str] = set(
                 conn.execute(
                     select(s.login_providers.c.id).where(s.login_providers.c.configured)
                 ).scalars()

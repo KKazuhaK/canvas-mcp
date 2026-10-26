@@ -5,7 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.14.1] — 2026-10-26
+
+Independent fork release with upstream security ports, self-hosted improvements
+and MCPHub personal-credential deployment templates.
+
+### Follow-ups after upstream 1.16
+
+- Keep script/style bodies hidden when a closing-tag lookalike uses Unicode
+  case folding or non-ASCII whitespace; match browser ASCII tag rules.
+- Decode arbitrarily long decimal HTML entities without hitting Python's
+  integer-string digit limit, including course-policy and group text readers.
+- Report the Canvas application version during MCP discovery and initialization,
+  rather than inheriting the FastMCP framework version.
 
 ### Core hardening from upstream 1.15–1.16
 
@@ -51,7 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `token_hint` when reading expiration. Both still require the verified Canvas
   user; missing, malformed or conflicting identifiers remain unknown.
 
-### Selfhost account sessions and token reminders (unreleased)
+### Selfhost account sessions and token reminders
 
 - Default browser sign-in duration to 7 days and allow administrators to configure
   it in the database; retain the separate sensitive-operation reauthentication

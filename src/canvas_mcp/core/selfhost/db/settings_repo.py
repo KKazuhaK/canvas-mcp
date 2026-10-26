@@ -101,7 +101,7 @@ def save_setting(
         if not spec.editable_in_panel:
             raise ValueError("setting is operator-only")
     old = read_settings(conn)[key]
-    revision = conn.execute(
+    revision: int | None = conn.execute(
         _CAS, {"revision": expected_revision, "now": now}
     ).scalar_one_or_none()
     if revision is None:

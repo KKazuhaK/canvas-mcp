@@ -1679,7 +1679,7 @@ class TokenStore:
         from .db import schema
         from .db.errors import LoginConfigurationChanged
 
-        actual = conn.execute(
+        actual: int = conn.execute(
             select(schema.server_state.c.settings_revision)
         ).scalar_one()
         if actual != expected:

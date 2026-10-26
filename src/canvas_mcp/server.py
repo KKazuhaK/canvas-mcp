@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from fastmcp import FastMCP
 from fastmcp.server.auth import AuthProvider
 
+from . import __version__
 from .core.config import get_config, validate_canvas_url_scheme, validate_config
 from .core.credentials import (
     RequestCredentials,
@@ -447,7 +448,7 @@ def create_server(auth: AuthProvider | None = None) -> FastMCP:
     self-hosted Entra mode; the default None keeps the legacy behaviour.
     """
     config = get_config()
-    return FastMCP(name=config.mcp_server_name, auth=auth)
+    return FastMCP(name=config.mcp_server_name, auth=auth, version=__version__)
 
 
 def register_all_tools(mcp: FastMCP, role: str = "all") -> None:

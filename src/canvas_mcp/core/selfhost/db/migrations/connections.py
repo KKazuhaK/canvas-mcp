@@ -96,7 +96,7 @@ def postgres_upgrade_connection(db: Database) -> Iterator[Connection]:
     if db.kind != "postgresql":
         raise TokenStoreError("PostgreSQL upgrade connection requires PostgreSQL")
     with db.read() as reader:
-        search_path = reader.exec_driver_sql("SHOW search_path").scalar_one()
+        search_path: str = reader.exec_driver_sql("SHOW search_path").scalar_one()
     direct = create_engine(
         db.engine.url,
         poolclass=NullPool,

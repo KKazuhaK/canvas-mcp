@@ -35,7 +35,7 @@ def test_unterminated_author_text_finishes_without_suffix_rescanning(program):
 @pytest.mark.parametrize("text,want", [
     ("Write a.b+tag@example.edu or second@sub.example.org.",
      "Write [EMAIL_REDACTED] or [EMAIL_REDACTED]."),
-    ("Unicode 中 alice@example.edu résumé", "Unicode 中 [EMAIL_REDACTED] résumé"),
+    ("Unicode \u4e2d alice@example.edu résumé", "Unicode \u4e2d [EMAIL_REDACTED] résumé"),
     ("a@b@c.example.edu", "a@[EMAIL_REDACTED]"),
     ("foo@@example.edu", "foo@@example.edu"),
     ("No address in a.a.a.a.", "No address in a.a.a.a."),
@@ -54,6 +54,21 @@ def test_script_and_style_contents_do_not_reappear_in_output():
         "<p>Before</p><style>.hidden{color:red}<style></style>"
         "<script>const x = '<tag>'; '<script>';</script><p>After</p>"
     ) == "Before\nAfter"
+
+
+# A browser ends script and style text only at an end tag whose name matches in ASCII case. Unicode case folding
+# matches U+017F to "s" and U+0130 to "i", and Unicode \s matches U+3000; none of them may end the hidden text early.
+@pytest.mark.parametrize("raw_end", [
+    "</ſcript>", "</scrİpt>", "</scrıpt>", "</script\u3000>", "</ſtyle>",
+])
+def test_non_ascii_lookalike_end_tags_keep_script_and_style_hidden(raw_end):
+    name = "style" if "tyle" in raw_end else "script"
+    assert strip_html_tags(f"<{name}>hidden{raw_end}still hidden</{name}><p>Shown</p>") == "Shown"
+
+
+@pytest.mark.parametrize("raw_end", ["</SCRIPT>", "</Script \t>", "</script\n>"])
+def test_ascii_case_and_whitespace_still_end_script(raw_end):
+    assert strip_html_tags(f"<script>hidden{raw_end}<p>Shown</p>") == "Shown"
 
 
 @pytest.mark.parametrize("markup,want", [
