@@ -7,7 +7,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import and_, delete, exists, false, insert, select, text, tuple_
 from sqlalchemy.exc import IntegrityError
@@ -219,10 +219,13 @@ class MaintenanceRunner:
         with transaction() as conn:
             if (
                 db.kind == "postgresql"
-                and not conn.execute(
-                    text("SELECT pg_try_advisory_xact_lock(:key)"),
-                    {"key": job.lock_key},
-                ).scalar_one()
+                and not cast(
+                    bool,
+                    conn.execute(
+                        text("SELECT pg_try_advisory_xact_lock(:key)"),
+                        {"key": job.lock_key},
+                    ).scalar_one(),
+                )
             ):
                 return Chunk(cursor=cursor)
             table = job.table

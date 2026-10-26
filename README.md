@@ -153,7 +153,16 @@ Canvas MCP provides **up to 127 tools** for interacting with Canvas LMS; the def
 
 The Canvas MCP Server bridges the gap between AI assistants and Canvas Learning Management System, providing role-specific workflows for students, educators, learning designers, and developers. Built on the Model Context Protocol (MCP), it is designed for MCP-compatible clients; setup and supported capabilities vary by client.
 
-## Latest Release: v1.14.0
+## Latest Release: v1.14.1 (independent fork)
+
+**Released:** October 26, 2026 | **[Release notes](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.1)**
+
+This fork release ports upstream security and content-processing fixes, corrects
+the application version reported over MCP, and adds MCPHub deployment templates
+with a separate Canvas URL and token for each user. See the
+[MCPHub setup guide](deploy/mcphub/README.md) and [changelog](CHANGELOG.md).
+
+## Upstream v1.14.0 highlights
 
 **Released:** October 2026 | **[Full Changelog](./CHANGELOG.md)** | **[All Releases](https://github.com/vishalsachdev/canvas-mcp/releases)**
 
@@ -614,7 +623,7 @@ await bulkGrade({
 
 | Mode | Config | What It Does |
 |------|--------|-------------|
-| Local sandbox (default) | None needed | Timeout 120s, memory 512MB, filtered environment, best-effort network controls |
+| Local sandbox (default) | Node.js 22.18+ | Node permissions restrict file reads and block file writes/process creation; timeout 120s, memory 512MB; outbound filtering stays best-effort |
 | Container sandbox | `TS_SANDBOX_MODE=container` | Container filesystem isolation via Docker/Podman; egress guarantees depend on deployment configuration |
 | No sandbox | `ENABLE_TS_SANDBOX=false` | Full local access (not recommended) |
 

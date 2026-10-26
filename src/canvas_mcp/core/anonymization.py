@@ -18,10 +18,13 @@ anonymous in the second.
 import hashlib
 import re
 from collections import OrderedDict
+from itertools import islice
 from typing import Any
 
 from .credentials import (
     current_principal_key,
+    get_request_credentials,
+    is_http_request_active,
     register_credential_purge_listener,
     request_local_principal_state,
 )
@@ -43,6 +46,9 @@ def _principal_cache(*, create: bool) -> dict[tuple[str, str], str] | None:
     gets a map that lives in its request and is gone with it; the process-wide
     maps below are not touched.
     """
+    # A missing or cleared HTTP credential must never select stdio history.
+    if is_http_request_active() and get_request_credentials() is None:
+        return {} if create else None
     local = request_local_principal_state()
     if local is not None:
         return local.setdefault("pseudonyms", {}) if create else local.get("pseudonyms")
@@ -227,7 +233,7 @@ FREE_TEXT_FIELDS = frozenset({
 #: an explicit value *inside* it suppresses duck-typing entirely.
 KNOWN_DATA_TYPES = frozenset({'users', 'discussions', 'submissions', 'assignments'})
 
-_EMAIL_RE = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b')
+_EMAIL_RE = re.compile(r'(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]++@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b')
 _PHONE_RE = re.compile(r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b')
 _SSN_RE = re.compile(r'\b\d{3}-\d{2}-\d{4}\b')
 
@@ -578,7 +584,7 @@ def get_anonymization_stats() -> dict[str, Any]:
         "total_anonymized_ids": len(cache),
         "sample_mappings": {
             f"real_id_{i}": anon_id
-            for i, anon_id in enumerate(list(cache.values())[:3])
+            for i, anon_id in enumerate(islice(cache.values(), 3))
         },
         "privacy_status": "PROTECTED"
     }

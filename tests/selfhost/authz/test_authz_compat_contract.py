@@ -563,8 +563,8 @@ def test_the_public_modules_the_rest_of_the_package_may_use_exist() -> None:
 
 
 @pytest.mark.parametrize(("name", "floor", "below", "ceiling"), [
-    ("fastmcp", "4.0.3", "4.0.0", "5.0.0"),
-    ("mcp", "2.1.1", "2.1.0", "3.0.0"),
+    ("fastmcp", "4.1.2", "4.1.1", "5.0.0"),
+    ("mcp", "2.2.0", "2.1.1", "3.0.0"),
     ("joserfc", "1.7.2", "1.7.1", "2.0.0"),
 ])
 def test_dependency_floors_and_installed_versions(name, floor, below, ceiling):

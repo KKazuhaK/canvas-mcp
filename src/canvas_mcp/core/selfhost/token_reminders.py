@@ -116,7 +116,7 @@ class ReminderRunner:
                 != revision
             ):
                 return None
-            config_row = conn.execute(
+            config_row: dict[str, Any] | None = conn.execute(
                 select(s.mail_settings.c.config)
             ).scalar_one_or_none()
             if config_row is None or not config_row.get("enabled"):

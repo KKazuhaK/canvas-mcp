@@ -35,7 +35,6 @@ untrusted-provenance artifacts all deny.
 
 from __future__ import annotations
 
-import html
 import re
 import time
 from typing import Any, NamedTuple
@@ -49,6 +48,7 @@ from .credentials import (
     register_credential_purge_listener,
     request_local_principal_state,
 )
+from .html import unescape_html
 from .logging import log_warning
 
 _KEY_AGENT_WRITES = "agent_writes"
@@ -136,7 +136,7 @@ def _strip_html(body: str) -> str:
     text = re.sub(r"<\s*br\s*/?\s*>", "\n", body, flags=re.IGNORECASE)
     text = re.sub(r"</\s*(p|div|li|h[1-6])\s*>", "\n", text, flags=re.IGNORECASE)
     text = _TAG_RE.sub("", text)
-    return html.unescape(text)
+    return unescape_html(text)
 
 
 def parse_policy_body(body: str) -> CoursePolicy:

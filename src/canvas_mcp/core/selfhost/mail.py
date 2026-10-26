@@ -119,7 +119,7 @@ class MailStore:
 
     def public(self) -> dict[str, Any]:
         with self.database.read() as conn:
-            revision = conn.execute(
+            revision: int = conn.execute(
                 select(s.server_state.c.settings_revision)
             ).scalar_one()
             row = conn.execute(select(s.mail_settings)).mappings().first()

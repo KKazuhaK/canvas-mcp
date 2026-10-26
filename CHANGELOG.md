@@ -5,7 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.14.1] — 2026-10-26
+
+Independent fork release with upstream security ports, self-hosted improvements
+and MCPHub personal-credential deployment templates.
+
+### Follow-ups after upstream 1.16
+
+- Keep script/style bodies hidden when a closing-tag lookalike uses Unicode
+  case folding or non-ASCII whitespace; match browser ASCII tag rules.
+- Decode arbitrarily long decimal HTML entities without hitting Python's
+  integer-string digit limit, including course-policy and group text readers.
+- Report the Canvas application version during MCP discovery and initialization,
+  rather than inheriting the FastMCP framework version.
+
+### Core hardening from upstream 1.15–1.16
+
+- Update FastMCP to 4.1.2 for its component-authorization and OAuth-client
+  issuer-binding security fixes, the MCP SDK to 2.2.0, certifi to 2026.10.19,
+  opentelemetry-api to 1.45.1 and development-only black to 26.10.1; raise
+  the FastMCP/MCP dependency floors to 4.1.2/2.2. Update PDF parsing to
+  pypdf 6.21.2 and the optional image dependency to Pillow 13.0.0 for their
+  published parser/decoder fixes. Preserve the self-hosted authorization
+  provider and validate its existing compatibility and flow contracts.
+- Use the upstream bounded, quote-aware HTML tokenizer for full text and
+  accessibility processing, and bound email redaction without losing content.
+  Request page bodies, reject unreadable scan sources, fence copied excerpts
+  and verify accessibility updates by reading them back. Refuse missing or
+  malformed assignment descriptions and unreadable page bodies before writing
+  any collected changes; explicit null or empty bodies remain valid.
+- Refuse ordinary discussions and unproven topic types in announcement deletion,
+  including preview/confirmation and mixed batches.
+- Explain withheld writes in the ordinary HTTP/stdio server instructions, using
+  only registered tools. Preserve self-hosted account-specific write preferences.
+- Load the public server entry point on demand and keep policy-data imports
+  independent of the server framework and its authentication dependencies.
+- Fence course labels interpolated into summary prompts. Missing or cleared HTTP
+  credentials cannot expose or clear the local anonymization history; retain
+  the fork's existing bounded principal-owned cache and credential purging.
+- Identify original file attachments and images as untrusted Canvas content
+  without changing their bytes. Keep the complete fenced text fallback and
+  existing per-hop file-transfer token restrictions. Document Windows download
+  permission limits in the tool and its result.
+- Run the local TypeScript sandbox under Node's permission model (Node.js
+  22.18+), refusing unsupported runtimes. Preserve documented import forms and
+  container execution. CI runs real permission-boundary probes; code execution
+  remains disabled in the self-hosted service.
 
 ### Selfhost build identity and Canvas metadata compatibility
 
@@ -18,7 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `token_hint` when reading expiration. Both still require the verified Canvas
   user; missing, malformed or conflicting identifiers remain unknown.
 
-### Selfhost account sessions and token reminders (unreleased)
+### Selfhost account sessions and token reminders
 
 - Default browser sign-in duration to 7 days and allow administrators to configure
   it in the database; retain the separate sensitive-operation reauthentication

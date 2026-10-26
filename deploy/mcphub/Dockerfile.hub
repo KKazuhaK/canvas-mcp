@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1.7
+# Build context: Canvas repository; named context "anteater": Anteater repository.
+ARG NODE_IMAGE=node:24.21.0-bookworm-slim
+ARG MCPHUB_IMAGE=samanhappy/mcphub:latest
+FROM ${NODE_IMAGE} AS node24
+FROM ${MCPHUB_IMAGE}
+
+# Hub currently ships Node 22; retain its runtime and provide Node 24 for Anteater.
+COPY --from=node24 /usr/local/bin/node /opt/mcp/bin/node24
+COPY pyproject.toml uv.lock README.md LICENSE /opt/mcp/canvas-src/
+COPY src/ /opt/mcp/canvas-src/src/
+RUN UV_PROJECT_ENVIRONMENT=/opt/mcp/canvas-venv \
+    uv sync --project /opt/mcp/canvas-src --frozen --no-dev --extra documents
+COPY --from=anteater /anteater-mcp.mjs /opt/mcp/anteater/anteater-mcp.mjs
+COPY --from=anteater /LICENSE /NOTICE /opt/mcp/anteater/
+RUN /opt/mcp/bin/node24 --check /opt/mcp/anteater/anteater-mcp.mjs

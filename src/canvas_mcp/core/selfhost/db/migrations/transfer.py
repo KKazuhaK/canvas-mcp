@@ -5,7 +5,7 @@ from __future__ import annotations
 import pathlib
 import sqlite3
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 
@@ -162,7 +162,7 @@ def _populate(conn: Connection, source: Connection, keys: SealKeys) -> ImportRep
     for table in copied_tables():
         if table.name == "login_providers":
             # Source settings win; keep target-only startup reconciled providers.
-            identifiers = source.execute(select(table.c.id)).scalars().all()
+            identifiers: Sequence[str] = source.execute(select(table.c.id)).scalars().all()
             conn.execute(delete(table).where(table.c.id.in_(identifiers)))
         rows = source.execute(select(table)).mappings()
         count = 0
@@ -193,9 +193,8 @@ def _populate(conn: Connection, source: Connection, keys: SealKeys) -> ImportRep
                     ),
                     {"table_name": table.name, "column_name": column.name},
                 ).one()
-                next_value = (
-                    int(conn.execute(select(func.max(column))).scalar_one() or 0) + 1
-                )
+                maximum: int | None = conn.execute(select(func.max(column))).scalar_one()
+                next_value = int(maximum or 0) + 1
                 quote = conn.dialect.identifier_preparer.quote
                 # RESTART is transactional, unlike setval: a failed import must
                 # also preserve sequences of an already initialized empty target.

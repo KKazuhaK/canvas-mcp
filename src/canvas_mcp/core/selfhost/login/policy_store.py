@@ -19,7 +19,7 @@ class AccountPolicyStore:
 
     def read(self, account_id: str | None = None) -> dict[str, Any]:
         with self.database.read() as conn:
-            revision = conn.execute(
+            revision: int = conn.execute(
                 select(s.server_state.c.settings_revision)
             ).scalar_one()
             return {
@@ -66,7 +66,7 @@ class AccountPolicyStore:
                 raise ValueError("invalid account login policy")
         with self.database.write() as conn:
             new_revision = ConfigStore._authorize(conn, actor, revision, now)
-            active = list(
+            active: list[str] = list(
                 conn.execute(
                     select(s.login_providers.c.id).where(s.login_providers.c.configured)
                 ).scalars()
@@ -135,7 +135,7 @@ class AccountPolicyStore:
                 )
                 if not unlock:
                     allowed = values["allowed_providers"]
-                    known = set(conn.execute(select(s.login_providers.c.id)).scalars())
+                    known: set[str] = set(conn.execute(select(s.login_providers.c.id)).scalars())
                     if allowed is not None and not set(allowed).issubset(known):
                         raise ValueError("unknown provider")
                     conn.execute(

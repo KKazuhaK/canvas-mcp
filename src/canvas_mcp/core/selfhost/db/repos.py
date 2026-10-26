@@ -428,7 +428,7 @@ class SqlIdentityRepo:
                 index_elements=[ownership.c.issuer, ownership.c.subject]
             )
         )
-        owner = conn.execute(
+        owner: str = conn.execute(
             select(ownership.c.account_id).where(
                 ownership.c.issuer == issuer, ownership.c.subject == subject
             )

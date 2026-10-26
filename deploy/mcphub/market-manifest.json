@@ -1,0 +1,68 @@
+{
+  "name": "canvas-mcp-kazuhahub",
+  "display_name": "Canvas MCP (independent fork)",
+  "description": "Personal Canvas LMS course, assignment and grade tools. Independent fork; not endorsed by Canvas or the upstream project. Read-only student profile by default.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KKazuhaK/canvas-mcp"
+  },
+  "homepage": "https://github.com/KKazuhaK/canvas-mcp",
+  "author": {
+    "name": "Kazuha Mo"
+  },
+  "license": "MIT",
+  "categories": [
+    "Productivity",
+    "Knowledge Base"
+  ],
+  "tags": [
+    "canvas",
+    "lms",
+    "education",
+    "grades"
+  ],
+  "installations": {
+    "uvx": {
+      "type": "uvx",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/KKazuhaK/canvas-mcp.git@v1.14.1[documents]",
+        "canvas-mcp-server",
+        "--transport",
+        "stdio",
+        "--role",
+        "student"
+      ],
+      "env": {
+        "CANVAS_API_URL": "${CANVAS_API_URL}",
+        "CANVAS_API_TOKEN": "${CANVAS_API_TOKEN}",
+        "PYTHON_DOTENV_DISABLED": "1",
+        "MCP_AUTH_MODE": "legacy",
+        "ALLOWED_WRITE_TOOLS": "none",
+        "EXECUTE_TYPESCRIPT_ENABLED": "false",
+        "ACCESSIBILITY_CHECKERS": "none"
+      }
+    }
+  },
+  "arguments": {
+    "CANVAS_API_URL": {
+      "description": "Your Canvas institution HTTPS URL.",
+      "required": true,
+      "example": "https://your-school.instructure.com"
+    },
+    "CANVAS_API_TOKEN": {
+      "description": "Your personal Canvas API token. Bind per user when sharing a Hub server.",
+      "required": true,
+      "example": ""
+    }
+  },
+  "examples": [
+    {
+      "title": "Upcoming work",
+      "description": "Read upcoming assignments from your own courses.",
+      "prompt": "Show my assignments due this week."
+    }
+  ],
+  "is_official": false
+}

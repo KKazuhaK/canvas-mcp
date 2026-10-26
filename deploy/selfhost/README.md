@@ -164,6 +164,9 @@ interactive challenges on client protocol routes. Use TLS between proxy layers.
 Any exemption for shared client egress addresses in the example must be reviewed
 for your deployment; an address list is not an authentication boundary.
 
+For MCPHub connections with each user's own Canvas identity, see the
+[MCPHub configuration guide](../mcphub/README.md).
+
 ## Enroll and connect a client
 
 1. Open `https://mcp.example.com/account`, sign in as an admitted owner and

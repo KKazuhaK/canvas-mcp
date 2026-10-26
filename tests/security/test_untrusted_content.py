@@ -2303,7 +2303,7 @@ class TestRound9Surfaces:
             "canvas_mcp.tools.accessibility.get_course_id", new_callable=AsyncMock
         ) as mock_cid:
             mock_cid.return_value = "1"
-            mock_fetch.return_value = [{"url": "p1", "title": "HOSTILE TITLE"}]
+            mock_fetch.return_value = [{"url": "p1", "title": "HOSTILE TITLE", "body": "<table><th>x</th></table>"}]
             mock_req.return_value = {
                 "title": "HOSTILE TITLE",
                 "body": "<table><th>x</th></table>",

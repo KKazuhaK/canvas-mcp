@@ -1,0 +1,20 @@
+name: mcphub
+services:
+  mcphub:
+    image: mcphub-with-course-tools:local
+    build:
+      context: ../..
+      dockerfile: deploy/mcphub/Dockerfile.hub
+      additional_contexts:
+        anteater: ${ANTEATER_SOURCE_DIR:?set ANTEATER_SOURCE_DIR to the Anteater checkout}
+      args:
+        MCPHUB_IMAGE: ${MCPHUB_IMAGE:-samanhappy/mcphub:latest}
+        NODE_IMAGE: ${NODE_IMAGE:-node:24.21.0-bookworm-slim}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ${MCPHUB_DATA_DIR:?set MCPHUB_DATA_DIR to the existing Hub data directory}:/app/data
+    environment:
+      ANTEATER_SHARED_API_KEY: "${ANTEATER_SHARED_API_KEY:-}"
