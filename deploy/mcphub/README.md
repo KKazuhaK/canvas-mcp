@@ -183,3 +183,9 @@ Prepare and test launcher corrections before changing live entries. Preserve
 the server name and env-slot declarations and verify binding status afterwards.
 Renaming while changing connection fields, or changing a personal OAuth server
 definition, can require authorization again; never assume bindings survived.
+
+## Official Hub with an independent Canvas Portal
+
+For a Hub that follows official images without custom reminder code, restore this fork's self-hosted Canvas Portal and connect it as a personal OAuth upstream. The Portal stores Canvas tokens, manages user preferences and runs the existing email reminder worker. The official Hub only stores delegated per-user OAuth grants. See [the server deployment task](PORTAL-SERVER-PROMPT.md) and [trial connection template](mcp_settings.portal.example.json).
+
+Start with a separate `canvas-portal` definition and verify two consenting users before replacing the existing `canvas-personal` stdio entry. Each user enrolls in the Portal and authorizes the Hub once. Existing Hub manual bindings are not automatically migrated; users enter their own token in the Portal. Unknown expiry and actual email delivery remain separate acceptance checks. Token rotation/revocation can require reconnecting a grant. Keep the official Hub and Portal versions independently pinned and retain both services' data and encryption keys.

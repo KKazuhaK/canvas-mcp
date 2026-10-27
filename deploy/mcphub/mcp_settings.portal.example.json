@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "canvas-portal": {
+      "type": "streamable-http",
+      "url": "https://canvas.mcp.kazuhahub.com/mcp",
+      "visibility": "public",
+      "description": "Canvas Portal: bind your Canvas token and manage expiration reminders at https://canvas.mcp.kazuhahub.com/account/token, then Connect here with your own account.",
+      "oauth": {
+        "identityMode": "personal",
+        "scopes": ["Canvas.Access"]
+      }
+    }
+  }
+}
