@@ -127,7 +127,7 @@ async def _fetch_planner_peer_reviews(
 def register_student_tools(mcp: FastMCP) -> None:
     """Register student-specific MCP tools."""
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def get_my_upcoming_assignments(days: int = 7) -> str:
         """Get your upcoming assignments across all courses.
@@ -215,7 +215,7 @@ def register_student_tools(mcp: FastMCP) -> None:
 
         return "\n".join(output_lines)
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def get_my_submission_status(course_identifier: str | int | None = None) -> str:
         """Get your submission status for assignments.
@@ -340,7 +340,7 @@ def register_student_tools(mcp: FastMCP) -> None:
 
         return "\n".join(output_lines)
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     async def get_my_course_grades() -> str:
         """Get your current grades across all enrolled courses."""
         courses = await fetch_all_paginated_results(
@@ -394,7 +394,7 @@ def register_student_tools(mcp: FastMCP) -> None:
 
         return "\n".join(output_lines)
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     async def get_my_todo_items() -> str:
         """Get your Canvas TODO list."""
         todos = await fetch_all_paginated_results(
@@ -429,7 +429,7 @@ def register_student_tools(mcp: FastMCP) -> None:
 
         return "\n".join(output_lines)
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def get_my_peer_reviews_todo(
         course_identifier: str | int | None = None,

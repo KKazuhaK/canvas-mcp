@@ -58,6 +58,7 @@ from ..core.document_text import (
     detect_kind,
     is_textual_type,
 )
+from ..core.error_codes import INVALID_ARGUMENT, PERMISSION_DENIED, refuse
 from ..core.file_validation import (
     FileValidationResult,
     format_file_size,
@@ -442,7 +443,7 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
     # opens with O_EXCL and never replaces an existing path (additive), and a
     # repeat fails without writing (idempotent).
     @mcp.tool(annotations=ToolAnnotations(
-        read_only_hint=False, destructive_hint=False, idempotent_hint=True
+        read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=True
     ))
     @validate_params
     async def download_course_file(
@@ -478,11 +479,11 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
         # write primitive against the service account. There is also no reason a
         # remote caller would want it: they cannot read what lands there.
         if is_http_request_active():
-            return (
+            return refuse(INVALID_ARGUMENT, (
                 "Error: 'download_course_file' writes to the server's filesystem and is "
                 "only available on a local (stdio) server. On this hosted server, "
                 f"{_READ_TOOLS_INSTEAD}."
-            )
+            ))
 
         file_key = coerce_canvas_id(file_id)
         if file_key is None:
@@ -507,7 +508,7 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
         reported_size = file_info.get("size") or 0
 
         if not download_url:
-            return "Error: No download URL available for this file. Check permissions."
+            return refuse(PERMISSION_DENIED, "Error: No download URL available for this file. Check permissions.")
 
         # Refuse an oversized file before creating anything on disk.
         download_max_mb = get_config().download_file_max_size_mb
@@ -601,7 +602,7 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
         return result
 
     @mcp.tool(
-        annotations=ToolAnnotations(read_only_hint=True),
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
         # The result mixes text with the file itself; it has no JSON shape.
         output_schema=None,
         meta=FULL_CONTENT_TOOL_META,
@@ -695,7 +696,7 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
 
         download_url = file_info.get("url")
         if not download_url:
-            return "Error: No download URL available for this file. Check permissions."
+            return refuse(PERMISSION_DENIED, "Error: No download URL available for this file. Check permissions.")
 
         # The binding limit, and why it applies. A client that gets text has
         # the text tool's budget; one that gets the file, the wire limit.
@@ -783,7 +784,7 @@ def register_shared_file_tools(mcp: FastMCP) -> None:
             ]
         return ToolResult(content=content)
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def list_course_files(
         course_identifier: str | int,
@@ -923,7 +924,7 @@ async def _list_module_linked_files(
 def register_educator_file_tools(mcp: FastMCP) -> None:
     """Register educator-only file tools (upload)."""
 
-    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False))
+    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False, open_world_hint=True))
     @validate_params
     async def upload_course_file(
         course_identifier: str | int,

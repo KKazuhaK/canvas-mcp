@@ -782,7 +782,7 @@ def register_student_grade_tools(mcp: FastMCP) -> None:
     # The report lists every assignment in the course, so the client is told it
     # may return a large result rather than shortening it.
     @mcp.tool(
-        annotations=ToolAnnotations(read_only_hint=True), meta=FULL_CONTENT_TOOL_META
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True), meta=FULL_CONTENT_TOOL_META
     )
     @validate_params
     async def get_my_assignment_scores(course_identifier: str | int) -> str:
@@ -803,7 +803,7 @@ def register_student_grade_tools(mcp: FastMCP) -> None:
             return data
         return _render_scores_report(data)
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def calculate_grade_scenarios(
         course_identifier: str | int,

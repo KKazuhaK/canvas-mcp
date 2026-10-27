@@ -8,10 +8,21 @@ from typing import Any, get_type_hints
 
 import mcp.types as mt
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError, ValidationError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
 from .config import get_config
+from .error_codes import (
+    ERROR_CODES,
+    INVALID_ARGUMENT,
+    SOURCE_UNAVAILABLE,
+    capture_failures,
+    code_for_status,
+    code_for_text,
+    summarize,
+    without_untrusted_content,
+)
 from .logging import log_warning
 from .mcp_client import client_needs_result_cap
 from .untrusted_content import FENCE_TEXT_END, FENCE_TEXT_START
@@ -278,17 +289,94 @@ def apply_result_cap(
     return ToolResult(content=content, meta=result.meta)
 
 
+_HTTP_STATUS_IN_TEXT = re.compile(r"\bHTTP(?: error:?)? (\d{3})\b")
+
+
+def _failure_message(result: ToolResult) -> tuple[str, dict[str, Any]]:
+    """The human message of a failed result, plus any extra fields its JSON carried."""
+    structured = result.structured_content
+    if isinstance(structured, dict) and "error" in structured:
+        parsed: Any = structured
+    else:
+        text = "\n".join(
+            b.text for b in result.content if isinstance(b, mt.TextContent)
+        )
+        try:
+            parsed = json.loads(text.lstrip())
+        except (json.JSONDecodeError, TypeError):
+            return text, {}
+    if isinstance(parsed, dict) and "error" in parsed:
+        extra = {k: v for k, v in parsed.items() if k not in ("error", "message")}
+        message = parsed.get("message") if isinstance(parsed.get("error"), str) and parsed["error"] in ERROR_CODES else parsed["error"]
+        return str(message if message is not None else parsed["error"]), extra
+    return text, {}
+
+
+def with_error_code(
+    result: ToolResult, codes: list[str], *, raised: bool = False
+) -> ToolResult:
+    """Rewrite a failed result as ``{"error": CODE, "message": ...}`` (human text kept).
+
+    ``codes`` are the failures the Canvas client recorded during the call; with
+    none, the code is inferred from the text (a refusal defaults to
+    INVALID_ARGUMENT; ``raised`` marks an unexpected exception, which defaults to
+    SOURCE_UNAVAILABLE and is never guessed from wording). A result that already carries one
+    of the codes is returned as is.
+    """
+    structured = result.structured_content
+    if isinstance(structured, dict) and structured.get("error") in ERROR_CODES:
+        return result
+    message, extra = _failure_message(result)
+    code = summarize(codes)
+    if code is None and raised:
+        code = SOURCE_UNAVAILABLE
+    if code is None:
+        found = _HTTP_STATUS_IN_TEXT.search(without_untrusted_content(message))
+        if found:
+            code = code_for_status(int(found.group(1)), without_untrusted_content(message))
+        else:
+            code = code_for_text(message)
+    payload = {"error": code, "message": message, **extra}
+    return ToolResult(
+        content=[mt.TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))],
+        # A tool that declared structured output keeps it, now with the code.
+        structured_content=payload if result.structured_content is not None else None,
+        meta=result.meta,
+        is_error=True,
+    )
+
+
+def _coded(message: str, code: str) -> ToolResult:
+    payload = {"error": code, "message": message}
+    return ToolResult(
+        content=[mt.TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))],
+        is_error=True,
+    )
+
+
 class CanvasToolResultMiddleware(Middleware):
-    """Map established Canvas failure payloads to MCP isError."""
+    """Map established Canvas failure payloads to MCP isError, with a machine-readable code."""
 
     async def on_call_tool(
         self,
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        result = await call_next(context)
+        with capture_failures() as codes:
+            try:
+                result = await call_next(context)
+            except ValidationError as exc:
+                # Arguments that do not fit the tool's schema.
+                return _coded(str(exc), INVALID_ARGUMENT)
+            except ToolError as exc:
+                # The tool raised: the code is whatever the Canvas client saw.
+                return with_error_code(
+                    ToolResult(content=str(exc), is_error=True), codes, raised=True
+                )
         if not result.is_error and _result_is_error(result):
             result.is_error = True
+        if result.is_error:
+            return with_error_code(result, codes)
         if not result.is_error:
             result = apply_result_cap(
                 result, context.message.name, context.message.arguments

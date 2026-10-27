@@ -694,7 +694,7 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
     """
     enabled = get_config().student_write_tools
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def list_calendar_events(
         start_date: str | None = None,
@@ -813,7 +813,7 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
         return "\n".join(lines)
 
     @mcp.tool(
-        annotations=ToolAnnotations(read_only_hint=True), meta=FULL_CONTENT_TOOL_META
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True), meta=FULL_CONTENT_TOOL_META
     )
     @validate_params
     async def get_calendar_event(event_id: str | int) -> str:
@@ -859,7 +859,7 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
             lines.append(f"  Open in Canvas: {event['html_url']}")
         return "\n".join(lines)
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def list_planner_notes(
         start_date: str | None = None,
@@ -911,7 +911,7 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
 
     if "create_planner_note" in enabled:
 
-        @mcp.tool(annotations=ToolAnnotations(destructive_hint=False, idempotent_hint=False))
+        @mcp.tool(annotations=ToolAnnotations(destructive_hint=False, idempotent_hint=False, open_world_hint=False))
         @validate_params
         async def create_planner_note(
             title: str,
@@ -991,7 +991,7 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
 
     if "update_planner_note" in enabled:
 
-        @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True))
+        @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True, open_world_hint=False))
         @validate_params
         async def update_planner_note(
             note_id: str | int,
@@ -1143,7 +1143,7 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
 
     if "delete_planner_note" in enabled:
 
-        @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True))
+        @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True, open_world_hint=False))
         @validate_params
         async def delete_planner_note(
             note_id: str | int,
@@ -1207,7 +1207,7 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
         # Destructive: complete=False removes a completion, and Canvas also
         # un-completes the item's "Mark as done" module requirement, which
         # can re-lock later modules. See internal/architecture.md.
-        @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True))
+        @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True, open_world_hint=False))
         @validate_params
         async def mark_planner_item_complete(
             plannable_type: str,
@@ -1395,7 +1395,7 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
 
     if "create_personal_calendar_event" in enabled:
 
-        @mcp.tool(annotations=ToolAnnotations(destructive_hint=False, idempotent_hint=False))
+        @mcp.tool(annotations=ToolAnnotations(destructive_hint=False, idempotent_hint=False, open_world_hint=False))
         @validate_params
         async def create_personal_calendar_event(
             title: str,
@@ -1479,7 +1479,7 @@ def register_student_calendar_tools(mcp: FastMCP) -> None:
 
     if "delete_personal_calendar_event" in enabled:
 
-        @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True))
+        @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True, open_world_hint=False))
         @validate_params
         async def delete_personal_calendar_event(
             event_id: str | int,

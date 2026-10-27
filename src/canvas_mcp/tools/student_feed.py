@@ -613,7 +613,7 @@ async def _format_stream_item(
 def register_student_feed_tools(mcp: FastMCP) -> None:
     """Register the cross-course announcement and activity feed tools."""
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def list_my_announcements(
         course_identifier: str | int | None = None,
@@ -811,7 +811,7 @@ def register_student_feed_tools(mcp: FastMCP) -> None:
             )
         return "\n".join(lines) + failure_note
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def get_my_activity_stream(
         item_type: ActivityType = "all",

@@ -9,6 +9,7 @@ from mcp.types import ToolAnnotations
 
 from ..core.cache import get_course_id
 from ..core.credentials import is_http_request_active
+from ..core.error_codes import INVALID_ARGUMENT, refuse
 from ..core.file_validation import sanitize_filename
 from ..core.peer_reviews import PeerReviewAnalyzer
 from ..core.untrusted_content import fence_untrusted, fence_untrusted_fields
@@ -37,7 +38,7 @@ def _fence_peer_review_names(result: object) -> None:
 def register_peer_review_tools(mcp: FastMCP) -> None:
     """Register all peer review analytics MCP tools."""
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def get_peer_review_assignments(
         course_identifier: str | int,
@@ -73,7 +74,7 @@ def register_peer_review_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return f"Error in get_peer_review_assignments: {str(e)}"
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def get_peer_review_completion_analytics(
         course_identifier: str | int,
@@ -109,7 +110,7 @@ def register_peer_review_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return f"Error in get_peer_review_completion_analytics: {str(e)}"
 
-    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False))
+    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False, open_world_hint=True))
     @validate_params
     async def generate_peer_review_report(
         course_identifier: str | int,
@@ -136,10 +137,10 @@ def register_peer_review_tools(mcp: FastMCP) -> None:
             filename: Custom filename for saved report
         """
         if save_to_file and is_http_request_active():
-            return (
+            return refuse(INVALID_ARGUMENT, (
                 "Error: Saving reports to the server filesystem is only available "
                 "on a local (stdio) server. Set save_to_file=false to return the report."
-            )
+            ))
         try:
             course_id = await get_course_id(course_identifier)
             analyzer = PeerReviewAnalyzer()
@@ -201,7 +202,7 @@ def register_peer_review_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return f"Error in generate_peer_review_report: {str(e)}"
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def get_peer_review_followup_list(
         course_identifier: str | int,

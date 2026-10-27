@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Tool errors are machine-readable.** A failed tool call now returns a single
+  JSON text block `{"error": "<CODE>", "message": "<the former text>"}` with
+  `isError`. The old `Error: ...` text is the `message`. A tool that declared
+  structured output keeps `structuredContent`, but it is replaced by the same
+  object (`error`, `message` and any extra fields), not the old payload.
+- Codes: `CREDENTIAL_INVALID` (a 401 confirmed by a `GET /users/self` probe that
+  also says the token is invalid, expired or revoked; works for `X-Canvas-Token`
+  and for `CANVAS_API_TOKEN` in stdio mode), `PERMISSION_DENIED` (403, or a 401
+  that is not a dead token, including insufficient scope), `RATE_LIMITED`,
+  `INVALID_ARGUMENT` (400/404/409/410/422 and local refusals) and
+  `SOURCE_UNAVAILABLE` (5xx, network failures, unexpected exceptions). Probes are
+  coalesced per token and their verdict is reused for 60 seconds.
+- A missing `X-Canvas-Token` is still a transport-level 401.
+- Self-hosted refusals before a Canvas call report their own reason: not enrolled
+  or token marked invalid is `CREDENTIAL_INVALID`; school no longer offered or
+  custody notice not acknowledged is `PERMISSION_DENIED`.
+- Known limitation: when a tool refuses locally with no Canvas answer, the code is
+  inferred from wording. Fenced untrusted Canvas content is ignored and the
+  wording fallback never yields `CREDENTIAL_INVALID`, but unfenced quoted Canvas
+  text can still steer between the other codes.
+- **`openWorldHint` is declared on every tool**: true for reads, for writes other
+  people can see, and for tools that write to the server's filesystem; false only
+  for the caller's own planner, calendar, module progress and inbox read state.
+  `tests/test_tool_metadata.py` now requires it.
+- **`GET /healthz` is public in every HTTP mode** (legacy, Azure, self-hosted) and
+  answers `{"ok": true, "version": "..."}`; the self-hosted body was `ok`. The
+  legacy `Dockerfile` HEALTHCHECK uses it.
+
+### Added
+
+- `scripts/ci_smoke_http.py` and an `http-smoke` CI job: start the server in legacy
+  HTTP mode, call `/healthz`, `initialize` and `tools/list`, and check every tool's
+  annotations.
+
 ## [1.14.1] — 2026-10-26
 
 Independent fork release with upstream security ports, self-hosted improvements

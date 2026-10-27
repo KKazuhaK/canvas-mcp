@@ -44,6 +44,7 @@ from ..core.document_text import (
     detect_kind,
     extract_text,
 )
+from ..core.error_codes import PERMISSION_DENIED, refuse
 from ..core.file_validation import format_file_size
 from ..core.tool_results import (
     FULL_CONTENT_TOOL_META,
@@ -234,7 +235,7 @@ def register_file_text_tools(mcp: FastMCP) -> None:
     """Register the course-file text extraction tool."""
 
     @mcp.tool(
-        annotations=ToolAnnotations(read_only_hint=True),
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
         meta=FULL_CONTENT_TOOL_META,
     )
     @validate_params
@@ -325,7 +326,7 @@ def register_file_text_tools(mcp: FastMCP) -> None:
 
         download_url = file_info.get("url")
         if not download_url:
-            return "Error: No download URL available for this file. Check permissions."
+            return refuse(PERMISSION_DENIED, "Error: No download URL available for this file. Check permissions.")
 
         data = await download_file_bytes(download_url, max_bytes)
         if isinstance(data, dict):

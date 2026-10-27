@@ -13,9 +13,18 @@ import httpx
 
 from .anonymization import anonymize_response_data, scrub_identity
 from .credentials import (
+    RequestCredentials,
     get_request_credentials,
     is_http_request_active,
+    missing_credentials_code,
     missing_credentials_message,
+)
+from .error_codes import (
+    CREDENTIAL_INVALID,
+    INVALID_ARGUMENT,
+    SOURCE_UNAVAILABLE,
+    code_for_status,
+    record_failure,
 )
 from .logging import log_debug, log_error, log_warning, sanitize_url
 from .token_health import (
@@ -37,6 +46,18 @@ MAX_PAGINATION_PAGES = 10000
 API_ROOT_REST: Final = "rest"
 API_ROOT_QUIZ: Final = "quiz"
 API_ROOT_GRAPHQL: Final = "graphql"
+
+
+def _env_credentials(config: Any) -> RequestCredentials | None:
+    """The server's own ``CANVAS_API_TOKEN`` as credentials, for stdio mode only.
+
+    One stdio server per user is how a platform runs this; its token lives in
+    the environment, so a revoked one has to be recognised the same way as a
+    caller-supplied token. Never used while an HTTP request is active.
+    """
+    if is_http_request_active() or not config.canvas_api_token:
+        return None
+    return RequestCredentials(config.canvas_api_token, config.canvas_api_url)
 
 
 def _canvas_auth_headers(api_token: str) -> dict[str, str]:
@@ -436,6 +457,7 @@ async def canvas_authenticated_client() -> AsyncIterator[httpx.AsyncClient]:
         dead = dead_token_message()
         if dead is not None:
             # This request already found the token dead: send nothing.
+            record_failure(CREDENTIAL_INVALID)
             raise PermissionError(dead)
         config = get_config()
         async with httpx.AsyncClient(
@@ -446,6 +468,7 @@ async def canvas_authenticated_client() -> AsyncIterator[httpx.AsyncClient]:
         return
 
     if is_http_request_active():
+        record_failure(missing_credentials_code())
         raise PermissionError(missing_credentials_message())
 
     yield _get_http_client()
@@ -489,6 +512,7 @@ async def make_canvas_request(
         # earlier page) stops every later call before it is sent.
         short_circuit = dead_token_failure()
         if short_circuit is not None:
+            record_failure(CREDENTIAL_INVALID)
             return short_circuit
 
     # Ensure the endpoint starts with a slash
@@ -508,12 +532,14 @@ async def make_canvas_request(
             "Blocked Canvas API request with a delimiter in the endpoint path",
             endpoint=sanitize_url(endpoint),
         )
+        record_failure(INVALID_ARGUMENT)
         return RequestFailure(f"Invalid endpoint: '{bad_delimiter}' is not allowed in a request path", WriteOutcome.NOT_DISPATCHED)
     if any(seg == ".." for seg in endpoint.split("/")):
         log_warning(
             "Blocked Canvas API request with a traversal segment in the endpoint path",
             endpoint=sanitize_url(endpoint),
         )
+        record_failure(INVALID_ARGUMENT)
         return RequestFailure("Invalid endpoint: '..' is not allowed in a request path", WriteOutcome.NOT_DISPATCHED)
 
     if api_root not in (API_ROOT_REST, API_ROOT_QUIZ, API_ROOT_GRAPHQL):
@@ -539,6 +565,7 @@ async def make_canvas_request(
             "Blocked Canvas API request without per-request Canvas token",
             endpoint=sanitize_url(endpoint),
         )
+        record_failure(missing_credentials_code())
         return {"error": missing_credentials_message()}
     else:
         # Shared client is selected immediately before dispatch (stdio mode).
@@ -663,13 +690,16 @@ async def make_canvas_request(
                     # Canvas confirms it, report that instead of the raw error;
                     # any other 401 stays an ordinary (permission) error below.
                     if e.response.status_code == 401:
-                        dead_message = await check_for_dead_token(e.response, req_creds)
+                        dead_message = await check_for_dead_token(
+                            e.response, req_creds or _env_credentials(config)
+                        )
                         if dead_message is not None:
                             log_error(
                                 f"API error on {sanitize_url(endpoint)}",
                                 status_code=401,
                             )
                             log_data_access(method, endpoint, "error", "HTTP 401 (token rejected)")
+                            record_failure(CREDENTIAL_INVALID)
                             return RequestFailure(dead_message, WriteOutcome.REJECTED)
 
                     # Not a rate limit error or out of retries - format and return error
@@ -682,6 +712,7 @@ async def make_canvas_request(
                         error_message += f", Text: {error_details}"
 
                     log_error(f"API error on {sanitize_url(endpoint)}", status_code=e.response.status_code)
+                    record_failure(code_for_status(e.response.status_code, e.response.text))
 
                     # Audit: log HTTP error (status code only — response body may contain PII)
                     log_data_access(method, endpoint, "error", f"HTTP {e.response.status_code}")
@@ -692,6 +723,7 @@ async def make_canvas_request(
 
                 except Exception as e:
                     log_error(f"Request failed for {sanitize_url(endpoint)}", error_type=type(e).__name__)
+                    record_failure(SOURCE_UNAVAILABLE)
 
                     # Audit: log request exception (type only — message may contain PII)
                     log_data_access(method, endpoint, "error", type(e).__name__)
@@ -843,10 +875,14 @@ async def upload_file_to_storage(
                                 str(confirm_url), follow_redirects=False
                             )
                             if confirm_response.status_code == 401:
+                                from .config import get_config
+
                                 dead_message = await check_for_dead_token(
-                                    confirm_response, get_request_credentials()
+                                    confirm_response,
+                                    get_request_credentials() or _env_credentials(get_config()),
                                 )
                                 if dead_message is not None:
+                                    record_failure(CREDENTIAL_INVALID)
                                     return {"error": dead_message}
                             confirm_response.raise_for_status()
                             confirmed: dict[str, Any] = confirm_response.json()
@@ -859,6 +895,7 @@ async def upload_file_to_storage(
             else:
                 # Unexpected status
                 error_text = response.text
+                record_failure(code_for_status(response.status_code, error_text))
                 return {
                     "error": f"Storage upload failed with status {response.status_code}",
                     "details": error_text

@@ -298,6 +298,9 @@ class CanvasWire:
         self.enrolled: set[str] = {"ada", "grace", "linus"}
         self.revoked: set[str] = set()
         self.seen: list[Seen] = []
+        # Dead-token confirmations (GET /users/self), kept apart from the reads
+        # under test: the client sends one after a 401 that looks like a dead token.
+        self.probes: list[str] = []
         self.held: set[str] = set()
         self.pending: set[str] = set()
         self.peak_pending = 0
@@ -319,6 +322,11 @@ class CanvasWire:
     async def __call__(self, request: httpx.Request) -> httpx.Response:
         token = request.headers["authorization"].removeprefix("Bearer ")
         path = request.url.path
+        if path.endswith("/users/self"):
+            self.probes.append(token)
+            if token in self.revoked or token not in self.users:
+                return httpx.Response(401, json={"errors": [{"message": "Invalid access token."}]})
+            return httpx.Response(200, json={"id": 1})
         self.seen.append(Seen(token, request.method, path))
 
         if token in self.held and request.method == "GET" and path == COURSE_PATH:
@@ -443,6 +451,8 @@ async def test_wire_denial_for_one_caller_does_not_poison_the_next(wire):
     assert healthy == (True, "") and healthy_again == (True, "")
     assert wire.by(TOK_ENROLLED_2) == [course_read(TOK_ENROLLED_2)] * 2
     assert wire.by(TOK_ENROLLED) == [course_read(TOK_ENROLLED)] * 2
+    # The first 401 was confirmed with the same token; the verdict is reused.
+    assert wire.probes == [TOK_ENROLLED]
 
 
 @pytest.mark.asyncio

@@ -13,10 +13,11 @@ from typing import TYPE_CHECKING, Any, Literal
 from fastmcp import FastMCP
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse, RedirectResponse
+from starlette.responses import RedirectResponse, Response
 from starlette.types import ASGIApp
 
 from ..config import Config
+from ..health import HEALTH_PATH, health_body
 from ..logging import log_info
 from ..token_health import set_token_health_monitor
 from .accounts import STATUS_DISABLED, EntraClaimsPolicy, bootstrap_sign_in_gives_owner
@@ -35,7 +36,6 @@ if TYPE_CHECKING:
     from .login.provider_store import ProviderConfigStore
     from .token_store import TokenStore
 
-HEALTH_PATH = "/healthz"
 
 SSRF_TRUST_PROXY_ENV = "FASTMCP_SSRF_TRUST_PROXY"
 _FALSE_WORDS = frozenset({"", "0", "false", "f", "no", "n", "off"})
@@ -562,8 +562,12 @@ def install_selfhost(
         )
 
     @mcp.custom_route(HEALTH_PATH, methods=["GET"])
-    async def healthz(request: Request) -> PlainTextResponse:
-        return PlainTextResponse("ok", headers={"Cache-Control": "no-store"})
+    async def healthz(request: Request) -> Response:
+        return Response(
+            health_body(),
+            media_type="application/json",
+            headers={"Cache-Control": "no-store"},
+        )
 
     log_info("Account UI: built single-page app", account_ui="react")
     return "react"

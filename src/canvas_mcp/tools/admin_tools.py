@@ -8,6 +8,7 @@ from ..core.cache import get_course_code, get_course_id
 from ..core.client import fetch_all_paginated_results, make_canvas_request
 from ..core.credentials import is_http_request_active
 from ..core.csv_safety import csv_safe_cell
+from ..core.error_codes import INVALID_ARGUMENT, refuse
 from ..core.untrusted_content import fence_untrusted_inline
 from ..core.validation import validate_params
 
@@ -15,7 +16,7 @@ from ..core.validation import validate_params
 def register_admin_tools(mcp: FastMCP) -> None:
     """Register admin/developer MCP tools."""
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     async def get_anonymization_status() -> str:
         """Get current data anonymization status and statistics."""
         from ..core.anonymization import get_anonymization_stats
@@ -53,7 +54,7 @@ def register_admin_tools(mcp: FastMCP) -> None:
 
         return result
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def list_groups(course_identifier: str | int) -> str:
         """List all groups and their members for a specific course.
@@ -119,7 +120,7 @@ def register_admin_tools(mcp: FastMCP) -> None:
 
         return output
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def list_users(course_identifier: str) -> str:
         """List users enrolled in a specific course.
@@ -166,7 +167,7 @@ def register_admin_tools(mcp: FastMCP) -> None:
         course_display = await get_course_code(course_id) or course_identifier
         return f"Users in Course {course_display}:\n\n" + "\n".join(users_info)
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def get_student_analytics(course_identifier: str,
                                   include_participation: bool = True,
@@ -296,7 +297,7 @@ def register_admin_tools(mcp: FastMCP) -> None:
 
         return "\n".join(lines)
 
-    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True, open_world_hint=True))
     @validate_params
     async def create_student_anonymization_map(course_identifier: str | int) -> str:
         """Create a local CSV file mapping real student data to anonymous IDs for a course.
@@ -310,10 +311,10 @@ def register_admin_tools(mcp: FastMCP) -> None:
         from ..core.anonymization import generate_anonymous_id
 
         if is_http_request_active():
-            return (
+            return refuse(INVALID_ARGUMENT, (
                 "Error: Creating a local identity map is only available on a local "
                 "(stdio) server. No file was written."
-            )
+            ))
 
         course_id = await get_course_id(course_identifier)
 

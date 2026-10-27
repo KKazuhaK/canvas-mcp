@@ -592,7 +592,7 @@ def _attempt_summary(
 def register_student_quiz_tools(mcp: FastMCP) -> None:
     """Register the read-only student quiz tools."""
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def list_quizzes(course_identifier: str | int) -> str:
         """List the quizzes in one of YOUR courses: Classic and New Quizzes.
@@ -713,7 +713,7 @@ def register_student_quiz_tools(mcp: FastMCP) -> None:
         return "\n".join(lines)
 
     @mcp.tool(
-        annotations=ToolAnnotations(read_only_hint=True), meta=FULL_CONTENT_TOOL_META
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True), meta=FULL_CONTENT_TOOL_META
     )
     @validate_params
     async def get_quiz_details(

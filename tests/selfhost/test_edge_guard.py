@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
+from canvas_mcp import __version__
 from canvas_mcp.core.selfhost import edge_guard
 from canvas_mcp.core.selfhost.authz.clients import DCR_TTL_SECONDS
 from canvas_mcp.core.selfhost.db import schema as s
@@ -341,7 +342,7 @@ class TestThroughTheRealApp:
         assert stack.client.get("/account/").status_code == 200
 
     def test_other_routes_work_through_the_guard(self, stack):
-        assert stack.client.get("/healthz").text == "ok"
+        assert stack.client.get("/healthz").json() == {"ok": True, "version": __version__}
         assert (
             stack.client.get("/.well-known/oauth-authorization-server").status_code
             == 200

@@ -110,6 +110,10 @@ _missing_credentials_message: ContextVar[str | None] = ContextVar(
 )
 
 
+_missing_credentials_code: ContextVar[str | None] = ContextVar(
+    "missing_credentials_code", default=None
+)
+
 _request_token_state: ContextVar[RequestTokenState | None] = ContextVar(
     "request_token_state", default=None
 )
@@ -238,9 +242,31 @@ def set_request_principal(principal: RequestPrincipal | None) -> Token[RequestPr
     return _request_principal.set(principal)
 
 
-def set_missing_credentials_message(message: str | None) -> Token[str | None]:
-    """Set the text returned when an HTTP request has no Canvas token."""
+def set_missing_credentials_message(
+    message: str | None, code: str | None = None
+) -> Token[str | None]:
+    """Set the text returned when an HTTP request has no Canvas token.
+
+    ``code`` is the failure code that refusal reports (see ``error_codes``):
+    CREDENTIAL_INVALID only when the user's token is what needs fixing.
+    """
+    _missing_credentials_code.set(code)
     return _missing_credentials_message.set(message)
+
+
+def missing_credentials_code() -> str:
+    """The failure code for "no Canvas token on this request".
+
+    With no refusal reason given and no custom text (the legacy mode, where the
+    middleware already answers 401), the token is missing: CREDENTIAL_INVALID.
+    A custom text without a reason is an unknown refusal: PERMISSION_DENIED.
+    """
+    from .error_codes import CREDENTIAL_INVALID, PERMISSION_DENIED
+
+    code = _missing_credentials_code.get()
+    if code is not None:
+        return code
+    return PERMISSION_DENIED if _missing_credentials_message.get() else CREDENTIAL_INVALID
 
 
 def missing_credentials_message() -> str:
@@ -405,6 +431,7 @@ def clear_http_request_context() -> None:
     _http_request_active.set(False)
     _request_principal.set(None)
     _missing_credentials_message.set(None)
+    _missing_credentials_code.set(None)
     _request_token_state.set(None)
     _request_tool_prefs.set(None)
     _request_credential_generation.set(None)

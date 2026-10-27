@@ -435,6 +435,7 @@ class TestNativeMcp:
         )
         health = world.client.get("/healthz")
         assert health.status_code == 200
+        assert set(health.json()) == {"ok", "version"}
         assert USER_A.canvas_token not in health.text
 
 

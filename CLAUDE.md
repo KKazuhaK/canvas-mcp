@@ -18,7 +18,9 @@ Codex reads `AGENTS.md`, not this file; its "Developing this server" section poi
 
 ## Coding Standards
 - Type hints on every function; PEP 604 unions (`X | Y`), enforced by ruff UP.
-- Tools use `@mcp.tool()` with `@validate_params`, and every tool carries annotations (`tests/test_tool_metadata.py` fails a bare decorator).
+- Tools use `@mcp.tool()` with `@validate_params`, and every tool carries annotations (`tests/test_tool_metadata.py` fails a bare decorator). `open_world_hint` is explicit on every tool: `True` for reads and for any write others see or that acts on the user's behalf towards others; `False` only for writes that change the caller's own data (planner, own calendar, module progress, inbox read state, local files), listed in `OWN_DATA_WRITES` in that test. A platform aggregating this server classifies tool risk from these hints.
+- A failed tool call returns text JSON `{"error": CODE, "message": ...}` with `isError` (`core/error_codes.py`, applied in `core/tool_results.py`); the Canvas client records the code where the HTTP status is known. Codes: `CREDENTIAL_INVALID` (a 401 confirmed by a `/users/self` probe), `PERMISSION_DENIED`, `RATE_LIMITED`, `INVALID_ARGUMENT`, `SOURCE_UNAVAILABLE`. A missing `X-Canvas-Token` stays a transport-level 401.
+- `GET /healthz` is public in every HTTP mode and answers `{"ok": true, "version": ...}` (`core/health.py`); `scripts/ci_smoke_http.py` is the CI smoke test of the legacy HTTP mode.
 - All Canvas calls are async and go through `make_canvas_request()`; paginate every list endpoint.
 - Course identifiers are `str | int` resolved with `get_course_id()`; dates go out through `format_date()`.
   Code that needs a numeric course ID (paths, context codes, comparisons) uses `resolve_numeric_course_id()`, which returns `(id, error)` and never yields an unvalidated string; the student modules and the student file tools use only it. `get_course_id()` matches the same way but keeps its pass-through fallback on a miss.

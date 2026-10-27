@@ -27,6 +27,7 @@ from ..credentials import (
     set_request_token_state,
     set_request_tool_prefs,
 )
+from ..error_codes import CREDENTIAL_INVALID, PERMISSION_DENIED
 from ..logging import log_error, log_warning
 from . import custody
 from .accounts import (
@@ -344,11 +345,13 @@ class SelfhostRequestContextMiddleware:
     ) -> bool:
         generation = snapshot.credential_generation
         if snapshot.credential_id is None:
-            set_missing_credentials_message(not_enrolled_message(self.account_url))
+            set_missing_credentials_message(
+                not_enrolled_message(self.account_url), CREDENTIAL_INVALID
+            )
             return True
         if snapshot.credential_status == STATUS_INVALID:
             message = invalid_token_message(self.account_url, snapshot.invalid_reason)
-            set_missing_credentials_message(message)
+            set_missing_credentials_message(message, CREDENTIAL_INVALID)
             self._mark_request_dead(message, generation)
             return True
         config = CURRENT_CONFIG.get()
@@ -359,7 +362,7 @@ class SelfhostRequestContextMiddleware:
         )
         if school is None:
             set_missing_credentials_message(
-                school_not_offered_message(self.account_url)
+                school_not_offered_message(self.account_url), PERMISSION_DENIED
             )
             return True
         if (
@@ -367,7 +370,8 @@ class SelfhostRequestContextMiddleware:
             or snapshot.custody_notice_version < custody.CUSTODY_NOTICE_VERSION
         ):
             set_missing_credentials_message(
-                custody.custody_ack_required_message(self.account_url)
+                custody.custody_ack_required_message(self.account_url),
+                PERMISSION_DENIED,
             )
             return True
         if snapshot.generation != generation:
