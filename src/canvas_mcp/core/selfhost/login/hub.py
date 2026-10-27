@@ -95,7 +95,7 @@ class HubLoginProvider:
     display = ProviderDisplay("MCPHub", "key")
     start_path = "/auth/login/hub"
     callback_path = "/auth/callback/hub"
-    response_issuer = None
+    response_issuer: str | None = None
 
     def __init__(
         self,
@@ -265,15 +265,15 @@ def build_hub_bridge_routes(app: AccountCore) -> list[Route]:
             claims = await provider.verify_session(request.headers.get("cookie", ""))
             binding = secrets.token_urlsafe(32)
             csrf = secrets.token_urlsafe(32)
-            saved = {k: params[k] for k in ("state", "nonce", "code_challenge")}
-            saved.update(subject=claims.subject, csrf=csrf)
+            pending = {k: params[k] for k in ("state", "nonce", "code_challenge")}
+            pending.update(subject=claims.subject, csrf=csrf)
             ticket = await provider.flow_store.put(
                 CONFIRM_KIND,
-                json.dumps(saved).encode(),
+                json.dumps(pending).encode(),
                 CONFIRM_TTL_S,
                 binding_hash=hashlib.sha256(binding.encode()).hexdigest(),
             )
-            response = _page(
+            response: Response = _page(
                 "Continue to Canvas",
                 f"Use your MCPHub account: {claims.username}. Existing Canvas accounts must be linked from their sign-in settings.",
                 '<form method="post" action="'
