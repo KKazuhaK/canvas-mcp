@@ -72,7 +72,7 @@ export default function LoginProviderSettings({ names = {} }: { names?: Record<s
       <Typography component="h3" variant="subtitle1" sx={{ fontWeight: 600 }}>{t('admin:providerConfig.add')}</Typography>
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ alignItems: { sm: 'flex-start' } }}>
       <TextField select size="small" sx={{ minWidth: { sm: 200 } }} label={t('admin:providerConfig.type')} value={kind} onChange={(event) => setKind(event.target.value as LoginProviderConfiguration['protocol'])}>
-        {(['local', 'entra', 'google', 'github', 'oidc'] as const).map((value) => <MenuItem key={value} value={value}>{typeName(value)}</MenuItem>)}
+        {(['local', 'hub', 'entra', 'google', 'github', 'oidc'] as const).map((value) => <MenuItem key={value} value={value}>{typeName(value)}</MenuItem>)}
       </TextField>
       {kind === 'oidc' && <TextField size="small" label={t('admin:providerConfig.slug')} value={slug} onChange={(event) => setSlug(event.target.value)} />}
       <Button variant="contained" startIcon={<AddRounded />} disabled={!validId || exists || query.data.providers.length >= 8} onClick={() => select({ id: identifier, protocol: kind, enabled: true, rank: query.data.providers.length, config: {}, secret_present: false })} sx={{ minHeight: 40, flexShrink: 0 }}>{t('admin:providerConfig.add')}</Button>

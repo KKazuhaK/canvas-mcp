@@ -30,6 +30,8 @@ class ProviderConfiguration:
 
     @property
     def issuer(self) -> str:
+        if self.id == "hub":
+            return str(self.config["origin"])
         if self.id == "local":
             return "urn:canvas-mcp:local"
         if self.id == "entra":
@@ -45,6 +47,24 @@ def validate_provider(
     identifier: str, config: object, client_secret: object
 ) -> ProviderConfiguration:
     """Validate closed public fields separately from a write-only secret."""
+    if identifier == "hub":
+        from urllib.parse import urlsplit
+
+        from .config import HubConfig, _issuer_problem
+
+        if (
+            not isinstance(config, Mapping)
+            or set(config) != {"origin"}
+            or not isinstance(config["origin"], str)
+            or _issuer_problem(config["origin"])
+            or urlsplit(config["origin"]).path not in ("", "/")
+            or client_secret is not None
+        ):
+            raise ProviderConfigurationError()
+        hub = HubConfig(config["origin"].rstrip("/"))
+        return ProviderConfiguration(
+            "hub", "hub", MappingProxyType({"origin": hub.origin}), None
+        )
     if identifier == "local":
         if config != {} or client_secret is not None:
             raise ProviderConfigurationError()
@@ -70,9 +90,11 @@ def validate_provider(
     allowed = (
         common | {"tenant_id", "required_role", "owner_role"}
         if identifier == "entra"
-        else common | {"issuer", "scopes", "token_auth_method", "userinfo"}
-        if identifier.startswith("oidc:")
-        else common
+        else (
+            common | {"issuer", "scopes", "token_auth_method", "userinfo"}
+            if identifier.startswith("oidc:")
+            else common
+        )
     )
     if set(config) - allowed:
         raise ProviderConfigurationError()

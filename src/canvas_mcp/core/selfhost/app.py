@@ -28,6 +28,8 @@ from .tool_gate import SelfhostCredentialGate
 from .tool_prefs import ToolPrefsCache, WriteToolCatalog
 
 if TYPE_CHECKING:
+    from starlette.routing import Route
+
     from ..tool_policy import ToolPolicy
     from .authz.runtime import AuthzRuntime
     from .config_snapshot import ConfigSnapshots
@@ -56,6 +58,9 @@ class SelfhostRuntime:
     tool_prefs: ToolPrefsCache
     authz: AuthzRuntime
     snapshots: ConfigSnapshots
+    hub_bridge_routes: list[Route] = field(
+        default_factory=list, repr=False, compare=False
+    )
     provider_store: ProviderConfigStore | None = None
     installation: InstallationAuthority | None = None
     limiters: RateLimiters = field(
@@ -538,6 +543,7 @@ def install_selfhost(
         runtime.store,
         runtime.identity,
         health=runtime.health,
+        bridge_routes=runtime.hub_bridge_routes,
         write_tools=WriteToolCatalog(
             ceiling=ceiling, list_registered=registered_tool_names
         ),
@@ -622,8 +628,10 @@ def build_selfhost_asgi_app(
     async def maintenance() -> None:
         await runner.run()
 
+    from .login.hub import HubBridgeDispatch
+
     return SelfhostEdgeGuard(
-        app,
+        HubBridgeDispatch(app, runtime.hub_bridge_routes),
         clock=clock or time.monotonic,
         maintenance=maintenance,
         reminders=(

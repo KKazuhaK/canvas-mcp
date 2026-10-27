@@ -314,3 +314,7 @@ tokens; restart and proxy failure; both persistence backends; and consecutive-da
 refresh observations. Record exact image/source versions and timestamps without
 secrets. The maintainer's pilot/client compatibility confirmation is a separate
 outstanding gate. Local unit tests do not substitute for these checks.
+
+## Reuse an existing MCPHub login
+
+The optional [Hub session integration](hub-session.md) adds MCPHub as a login method while preserving existing Canvas MCP accounts and OAuth. Existing Canvas LMS connections are retained; first-time connections and expired credentials need setup. It requires only a narrow reverse proxy route alongside the Hub deployment.

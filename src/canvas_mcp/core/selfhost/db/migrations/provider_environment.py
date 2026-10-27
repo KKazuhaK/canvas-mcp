@@ -82,6 +82,11 @@ def import_provider_settings(
                     "owner_role": settings.owner_role,
                 }
                 secret = settings.client_secret
+            elif identifier == "hub":
+                hub = settings.login_providers.hub
+                assert hub is not None
+                config = {"origin": hub.origin}
+                secret = None
             elif identifier == "google":
                 value = settings.login_providers.google
                 assert value is not None

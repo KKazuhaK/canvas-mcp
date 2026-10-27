@@ -87,6 +87,8 @@ def school_display_name(value: object) -> str:
 
 
 def provider_defaults(identifier: str) -> tuple[str, str, str]:
+    if identifier == "hub":
+        return "MCPHub", "hub", "key"
     if identifier == "local":
         return "Local account", "local", "key"
     if identifier in {"entra", "google", "github"}:

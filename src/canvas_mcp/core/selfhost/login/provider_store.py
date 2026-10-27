@@ -100,8 +100,8 @@ class ProviderConfigStore:
 
     def _decode(self, row: Any) -> ProviderConfiguration:
         try:
-            if row["id"] == "local" and row["config_source"] == "db":
-                return validate_provider("local", row["config"], None)
+            if row["id"] in {"local", "hub"} and row["config_source"] == "db":
+                return validate_provider(row["id"], row["config"], None)
             if row["config_source"] != "db" or row["secret_ciphertext"] is None:
                 raise ValueError
             secret = self.keys.decrypt(
@@ -221,7 +221,7 @@ class ProviderConfigStore:
             type(enabled) is not bool
             or auto_link_email is not None
             and type(auto_link_email) is not bool
-            or identifier == "local"
+            or identifier in {"local", "hub"}
             and auto_link_email is True
             or type(rank) is not int
             or not 0 <= rank < MAX_PROVIDERS
@@ -242,7 +242,7 @@ class ProviderConfigStore:
                 .mappings()
                 .one_or_none()
             )
-            if value.client_secret is None and identifier != "local":
+            if value.client_secret is None and identifier not in {"local", "hub"}:
                 if old is None or old["secret_ciphertext"] is None:
                     raise ProviderConfigurationError("provider_secret_required")
                 self._decode(old)  # Refuse retaining a damaged or unknown-key secret.
@@ -344,9 +344,11 @@ class ProviderConfigStore:
                 identifier,
                 {
                     "enabled": enabled,
-                    "auto_link_email": auto_link_email
-                    if auto_link_email is not None
-                    else bool(old and old["auto_link_email"]),
+                    "auto_link_email": (
+                        auto_link_email
+                        if auto_link_email is not None
+                        else bool(old and old["auto_link_email"])
+                    ),
                     "secret_replaced": value.client_secret is not None,
                     "custom_icon": bool(
                         parsed_icon

@@ -73,6 +73,13 @@ _FALSE_WORDS = frozenset({"", "false", "0", "no"})
 
 
 @dataclass(frozen=True)
+class HubConfig:
+    """A same-origin session bridge; no OAuth client secret or shared user token."""
+
+    origin: str
+
+
+@dataclass(frozen=True)
 class GoogleConfig:
     client_id: str
     client_secret: str = field(repr=False)
@@ -115,6 +122,7 @@ class LoginProvidersConfig:
     order: tuple[str, ...] = (PROVIDER_ENTRA,)
     google: GoogleConfig | None = None
     github: GitHubConfig | None = None
+    hub: HubConfig | None = None
     oidc: tuple[OidcConfig, ...] = ()
 
     @property
@@ -178,7 +186,8 @@ _LEGACY_IPV4_RE = re.compile(r"(?:0x[0-9a-f]*|[0-9]+)(?:\.(?:0x[0-9a-f]*|[0-9]+)
 def blocked_host(host: str) -> bool:
     """True for a host the server must not call: ``localhost``, ``*.localhost`` and IP literals
     that are loopback, link-local, unspecified or multicast (IPv4-mapped IPv6 included), and every
-    host spelled as a non-canonical IPv4 number (``127.1``, ``2130706433``, ``0x7f000001``)."""
+    host spelled as a non-canonical IPv4 number (``127.1``, ``2130706433``, ``0x7f000001``).
+    """
     name = host.strip().strip("[]").lower().rstrip(".")
     if not name or name == "localhost" or name.endswith(".localhost"):
         return True
@@ -256,7 +265,7 @@ def parse_login_providers(
                 f"{LOGIN_PROVIDERS_ENV} lists more than {MAX_PROVIDERS} providers"
             )
         for index, entry in enumerate(entries[: MAX_PROVIDERS + 1], start=1):
-            if entry in (PROVIDER_ENTRA, PROVIDER_GOOGLE, PROVIDER_GITHUB):
+            if entry in (PROVIDER_ENTRA, PROVIDER_GOOGLE, PROVIDER_GITHUB, "hub"):
                 provider_id = entry
             elif entry.startswith("oidc:"):
                 if not OIDC_SLUG_RE.match(entry[5:]):
@@ -268,7 +277,7 @@ def parse_login_providers(
                 provider_id = entry
             else:
                 problems.append(
-                    f"{LOGIN_PROVIDERS_ENV} entry {index} is not entra, google, github or "
+                    f"{LOGIN_PROVIDERS_ENV} entry {index} is not entra, google, github, hub or "
                     "oidc:<slug>"
                 )
                 continue
@@ -294,8 +303,17 @@ def parse_login_providers(
     oidc = _parse_oidc(
         env, get, [p[5:] for p in order if p.startswith("oidc:")], problems, strict
     )
+    hub = None
+    origin = get("HUB_ORIGIN")
+    if "hub" in order:
+        if _issuer_problem(origin) or urlsplit(origin).path not in ("", "/"):
+            problems.append("HUB_ORIGIN must be a public https origin without a path")
+        else:
+            hub = HubConfig(origin.rstrip("/"))
+    elif origin:
+        _unlisted("HUB_ORIGIN", "hub", problems, strict)
     return LoginProvidersConfig(
-        order=tuple(order), google=google, github=github, oidc=oidc
+        order=tuple(order), google=google, github=github, oidc=oidc, hub=hub
     )
 
 
