@@ -369,7 +369,7 @@
       "hub": "MCPHub"
     },
     "hubOrigin": "Hub 的 HTTPS 地址",
-    "hubHelp": "通过 /canvas-hub/authorize 反向代理复用 Hub 登录，无需客户端密钥。已有 Canvas 用户需要在自己的账号设置中明确绑定。"
+    "hubHelp": "通过 /canvas-hub/authorize 反向代理复用 Hub 登录，无需客户端密钥。已有 Canvas MCP 用户需要在自己的账号设置中明确绑定。已绑定的 Canvas LMS 访问凭证会保留；首次连接或凭证失效时才需要配置。"
   },
   "settings": {
     "displayName": "显示名称",

@@ -3,7 +3,7 @@
 Only /canvas-hub/authorize is served on the Hub origin. The normal account and
 OAuth routes remain on PUBLIC_BASE_URL. Hub cookies never cross a browser URL,
 enter a stored flow, or reach an arbitrary upstream. Existing account linking
-uses the normal Canvas ceremony; this provider never merges accounts by email.
+uses the normal Canvas MCP ceremony; this provider never merges accounts by email.
 """
 
 from __future__ import annotations
@@ -216,14 +216,14 @@ def _page(title: str, text: str, controls: str) -> HTMLResponse:
     return HTMLResponse(
         '<!doctype html><html lang="en"><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        "<title>Connect Canvas · MCPHub</title><style>" + _STYLE + "</style>"
-        '<main><div class="brand">MCPHub / Canvas</div><h1>'
+        "<title>Connect Canvas MCP · MCPHub</title><style>" + _STYLE + "</style>"
+        '<main><div class="brand">MCPHub / Canvas MCP</div><h1>'
         + html.escape(title)
         + "</h1><p>"
         + html.escape(text)
         + "</p>"
         + controls
-        + "<footer>Canvas keeps its existing account and permissions. Hub passwords and cookies are never stored in Canvas.</footer></main></html>",
+        + "<footer>Your saved Canvas LMS connection is kept. Set up access credentials only for a first-time connection or when existing credentials expire. MCPHub session cookies are never stored in Canvas MCP.</footer></main></html>",
         headers={
             "Cache-Control": "no-store",
             "Referrer-Policy": "no-referrer",
@@ -274,13 +274,13 @@ def build_hub_bridge_routes(app: AccountCore) -> list[Route]:
                 binding_hash=hashlib.sha256(binding.encode()).hexdigest(),
             )
             response: Response = _page(
-                "Continue to Canvas",
-                f"Use your MCPHub account: {claims.username}. Existing Canvas accounts must be linked from their sign-in settings.",
+                "Connect Canvas MCP",
+                f"Use your MCPHub account: {claims.username}. Existing Canvas MCP accounts must be linked from their sign-in settings.",
                 '<form method="post" action="'
                 + BRIDGE_PATH
                 + '"><input type="hidden" name="csrf" value="'
                 + csrf
-                + '"><button type="submit">Continue with this account</button></form>',
+                + '"><button type="submit">Sign in with MCPHub</button></form>',
             )
             response.set_cookie(
                 BRIDGE_COOKIE,
@@ -341,7 +341,7 @@ def build_hub_bridge_routes(app: AccountCore) -> list[Route]:
                 raise ValueError
         except (ValueError, KeyError, TypeError, UnicodeError):
             return PlainTextResponse(
-                "Sign-in expired or account changed. Start again from Canvas.",
+                "Sign-in expired or account changed. Start again from Canvas MCP.",
                 status_code=403,
             )
         code = await provider.flow_store.put(
@@ -380,7 +380,7 @@ def build_hub_bridge_routes(app: AccountCore) -> list[Route]:
                 if exc.code == "provider_error":
                     response = _page(
                         "MCPHub is temporarily unavailable",
-                        "Your account has not been changed. Wait a moment, then start again from Canvas.",
+                        "Your account has not been changed. Wait a moment, then start again from Canvas MCP.",
                         "",
                     )
                     response.status_code = 503
@@ -396,7 +396,7 @@ def build_hub_bridge_routes(app: AccountCore) -> list[Route]:
                 )
                 response = _page(
                     "MCPHub sign-in required",
-                    "Sign in to Hub, then start again from Canvas. No Canvas account has been changed.",
+                    "Sign in to Hub, then start again from Canvas MCP. No Canvas MCP account has been changed.",
                     controls,
                 )
                 response.status_code = 401

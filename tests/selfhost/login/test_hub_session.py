@@ -236,6 +236,10 @@ def test_bridge_hides_credentials_and_escapes_identity(hub_stack: Any) -> None:
     page = bridge_get(person, person.get("/auth/login/hub"))
     assert "<script>" not in page.text
     assert "&lt;script&gt;" in page.text
+    assert "Connect Canvas MCP" in page.text
+    assert "Sign in with MCPHub" in page.text
+    assert "Your saved Canvas LMS connection is kept" in page.text
+    assert "only for a first-time connection or when existing credentials expire" in page.text
     assert "hub-session" not in page.text
     assert page.headers["referrer-policy"] == "no-referrer"
     assert page.headers["cache-control"] == "no-store"
