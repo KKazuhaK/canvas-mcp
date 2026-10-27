@@ -187,6 +187,17 @@ def build_login_runtime(
                 domain_hint=domains[0] if len(domains) == 1 else None,
                 clock=clock,
             )
+        elif provider_id == "hub":
+            from .hub import HubLoginProvider
+
+            assert config.hub is not None
+            built = HubLoginProvider(
+                config.hub,
+                public_base_url=base,
+                http=http,
+                flow_store=flow_store,
+                clock=clock,
+            )
         elif provider_id == PROVIDER_GITHUB:
             assert config.github is not None
             built = GitHubLoginProvider(

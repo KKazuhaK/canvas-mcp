@@ -166,3 +166,13 @@ describe('SignInView with several providers', () => {
     expect(screen.getByRole('link', { name: /School SSO/ })).toBeInTheDocument()
   })
 })
+
+it('offers Hub sign-in and carries the waiting MCP authorization request', async () => {
+  await renderApp(`/sign-in?txn=${TXN}`, 'signed-out', () => {
+    scriptAdapter((request) => request.url === '/me'
+      ? { status: 401, data: errorBody('not_authenticated') }
+      : { status: 200, data: { providers: [{ id: 'hub', kind: 'hub', name: 'MCPHub', icon: 'key', start_url: '/auth/login/hub' }], mcp_url: 'https://canvas.example.test/mcp' } })
+  })
+  expect(await screen.findByRole('link', { name: 'Sign in with MCPHub' })).toHaveAttribute('href', `/auth/login/hub?txn=${TXN}`)
+  expect(document.querySelector('input[type="password"]')).toBeNull()
+})

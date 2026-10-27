@@ -111,3 +111,15 @@ describe('Write-only sign-in provider credentials', () => {
     expect(screen.getByRole('button', { name: zhAdmin.providerConfig.save })).toBeInTheDocument()
   })
 })
+
+it('configures Hub sessions without a shared secret or email auto-linking', async () => {
+  const user = userEvent.setup()
+  const save = vi.fn(async () => {})
+  renderWithQuery(<ProviderConfigurationForm provider={{ id: 'hub', protocol: 'hub', enabled: true, rank: 1, config: {}, secret_present: false }} callbackUri="https://canvas.example.test/auth/callback/hub" onSave={save} />)
+  await user.type(screen.getByRole('textbox', { name: 'Hub HTTPS origin' }), 'https://hub.example.test')
+  expect(screen.queryByLabelText('Client ID')).not.toBeInTheDocument()
+  expect(document.querySelector('input[type="password"]')).toBeNull()
+  expect(screen.getAllByRole('switch')).toHaveLength(1)
+  await user.click(screen.getByRole('button', { name: 'Save sign-in configuration' }))
+  await waitFor(() => expect(save).toHaveBeenCalledWith({ config: { origin: 'https://hub.example.test' }, enabled: true, rank: 1 }))
+})

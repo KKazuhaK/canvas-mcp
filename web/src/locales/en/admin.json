@@ -18,11 +18,26 @@
     "details": "Details",
     "staleDraft": "Settings changed elsewhere. Your draft is preserved; reload saved values before continuing.",
     "discardDraft": "Discard this draft and load saved values",
-    "site": { "title": "Site", "help": "Manage the public address and its impact on sign-in and connected apps." },
-    "providers": { "title": "Sign-in providers", "help": "Configure providers, their appearance and the ways people can sign in." },
-    "access": { "title": "Accounts & access", "help": "Set account-linking rules and sign-in duration. Create local accounts from Accounts." },
-    "schools": { "title": "Schools", "help": "Choose offered Canvas schools and control directory search." },
-    "mail": { "title": "Email reminders", "help": "Configure email delivery and automatic token-expiry reminders." }
+    "site": {
+      "title": "Site",
+      "help": "Manage the public address and its impact on sign-in and connected apps."
+    },
+    "providers": {
+      "title": "Sign-in providers",
+      "help": "Configure providers, their appearance and the ways people can sign in."
+    },
+    "access": {
+      "title": "Accounts & access",
+      "help": "Set account-linking rules and sign-in duration. Create local accounts from Accounts."
+    },
+    "schools": {
+      "title": "Schools",
+      "help": "Choose offered Canvas schools and control directory search."
+    },
+    "mail": {
+      "title": "Email reminders",
+      "help": "Configure email delivery and automatic token-expiry reminders."
+    }
   },
   "site": {
     "title": "Site address",
@@ -350,8 +365,11 @@
       "entra": "Microsoft Entra ID",
       "google": "Google",
       "github": "GitHub",
-      "oidc": "OpenID Connect (OIDC)"
-    }
+      "oidc": "OpenID Connect (OIDC)",
+      "hub": "MCPHub"
+    },
+    "hubOrigin": "Hub HTTPS origin",
+    "hubHelp": "Reuse Hub sign-in through the /canvas-hub/authorize reverse proxy. No client secret is required. Existing Canvas users must link their accounts explicitly."
   },
   "settings": {
     "displayName": "Display name",

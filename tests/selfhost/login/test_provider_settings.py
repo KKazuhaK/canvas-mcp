@@ -171,7 +171,7 @@ def test_oidc_defaults_and_trailing_slash_issuer_are_kept_verbatim() -> None:
 @pytest.mark.parametrize(
     ("value", "fragment"),
     [
-        ("facebook", "entry 1 is not entra, google, github or oidc:<slug>"),
+        ("facebook", "entry 1 is not entra, google, github, hub or oidc:<slug>"),
         ("entra,entra", "lists a provider twice"),
         (",", "is set but lists no provider"),
         ("oidc:Bad_Slug", "entry 1 has an oidc slug outside a-z, 0-9 and '-'"),

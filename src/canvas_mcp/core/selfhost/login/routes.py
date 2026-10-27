@@ -65,7 +65,9 @@ def build_login_routes(app: AccountCore) -> list[Route]:
             app.clear_cookie(response, FLOW_COOKIE)
         return response
 
-    return [
+    from .hub import build_hub_bridge_routes
+
+    return build_hub_bridge_routes(app) + [
         any_method_route(path, dispatch)
         for path in (
             AUTH_LOGIN,

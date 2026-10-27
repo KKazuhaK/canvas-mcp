@@ -27,7 +27,7 @@ function FormSection({ title, children }: { title: string; children: ReactNode }
 
 export interface EditableProvider {
   id: string
-  protocol: 'entra' | 'google' | 'github' | 'oidc' | 'local'
+  protocol: 'entra' | 'google' | 'github' | 'oidc' | 'local' | 'hub'
   enabled: boolean
   rank: number
   config: Record<string, string | string[] | boolean>
@@ -83,7 +83,7 @@ export default function ProviderConfigurationForm({ provider, callbackUri, onSav
     onBusyChange?.(true)
     setError(null)
     const values: ProviderSave = { config, enabled, rank }
-    if (!installation && provider.protocol !== 'local') values.auto_link_email = autoLinkEmail
+    if (!installation && !['local', 'hub'].includes(provider.protocol)) values.auto_link_email = autoLinkEmail
     if (!installation && iconChanged) values.icon_data = iconData
     if (secret.length > 0) values.client_secret = secret
     try {
@@ -120,7 +120,11 @@ export default function ProviderConfigurationForm({ provider, callbackUri, onSav
         {iconError ? <Alert severity="error">{t('admin:providerConfig.iconHelp')}</Alert> : <Typography variant="caption">{t('admin:providerConfig.iconHelp')}</Typography>}
         <TextField type="number" sx={{ maxWidth: { sm: 240 } }} label={t('admin:providerConfig.position')} value={rank + 1} disabled={busy} slotProps={{ htmlInput: { min: 1, max: 8, step: 1 } }} onChange={(event) => setRank(Number(event.target.value) - 1)} />
       </FormSection>}
-      {provider.protocol !== 'local' && <FormSection title={t('admin:providerConfig.connection')}>
+      {provider.protocol === 'hub' && <FormSection title={t('admin:providerConfig.connection')}>
+        <TextField required type="url" label={t('admin:providerConfig.hubOrigin')} value={text('origin')} disabled={busy} onChange={(event) => change('origin', event.target.value)} />
+        <Alert severity="info">{t('admin:providerConfig.hubHelp')}</Alert>
+      </FormSection>}
+      {!['local', 'hub'].includes(provider.protocol) && <FormSection title={t('admin:providerConfig.connection')}>
         <TextField label={t('admin:providerConfig.callback')} value={callbackUri} slotProps={{ input: { readOnly: true } }} helperText={t('admin:providerConfig.callbackHelp')} />
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
           {provider.protocol === 'entra' && <TextField fullWidth required label={t('admin:providerConfig.tenant')} value={text('tenant_id')} disabled={busy} onChange={(event) => change('tenant_id', event.target.value)} />}
@@ -147,7 +151,7 @@ export default function ProviderConfigurationForm({ provider, callbackUri, onSav
       </FormSection>}
       {!installation && <FormSection title={t('admin:providerConfig.rules')}>
         <FormControlLabel control={<Switch checked={enabled} disabled={busy} onChange={(_, value) => setEnabled(value)} />} label={t('admin:providerConfig.enabled')} />
-        {provider.protocol !== 'local' && <FormControlLabel control={<Switch checked={autoLinkEmail} disabled={busy} onChange={(_, value) => setAutoLinkEmail(value)} />} label={t('admin:providerConfig.autoLinkEmail')} />}
+        {!['local', 'hub'].includes(provider.protocol) && <FormControlLabel control={<Switch checked={autoLinkEmail} disabled={busy} onChange={(_, value) => setAutoLinkEmail(value)} />} label={t('admin:providerConfig.autoLinkEmail')} />}
       </FormSection>}
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ borderTop: installation ? 0 : 1, borderColor: 'divider', pt: installation ? 0 : 2.5 }}>
         <Button type="submit" variant="contained" startIcon={!installation && <SaveOutlined />} disabled={busy || disabled || iconReading}>{t(installation ? 'admin:providerConfig.initialize' : 'admin:providerConfig.save')}</Button>

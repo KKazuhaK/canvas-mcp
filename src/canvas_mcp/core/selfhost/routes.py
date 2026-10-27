@@ -14,7 +14,7 @@ _OIDC_SLUG = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
 
 def provider_route_key(provider: str) -> str:
     """Translate a stored provider id into its distinct browser route key."""
-    if provider in ("entra", "google", "github"):
+    if provider in ("entra", "google", "github", "hub"):
         return provider
     if provider.startswith("oidc:") and _OIDC_SLUG.fullmatch(provider[5:]):
         return "oidc/" + provider[5:]
@@ -22,7 +22,7 @@ def provider_route_key(provider: str) -> str:
 
 
 def route_provider(key: str) -> str | None:
-    if key in ("entra", "google", "github"):
+    if key in ("entra", "google", "github", "hub"):
         return key
     if key.startswith("oidc/") and _OIDC_SLUG.fullmatch(key[5:]):
         return "oidc:" + key[5:]

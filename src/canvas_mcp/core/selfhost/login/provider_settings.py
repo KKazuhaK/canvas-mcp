@@ -6,7 +6,13 @@ from dataclasses import replace
 
 from ..accounts import AccessRule, parse_access_settings
 from ..settings import SelfhostConfigError, SelfhostSettings
-from .config import GitHubConfig, GoogleConfig, LoginProvidersConfig, OidcConfig
+from .config import (
+    GitHubConfig,
+    GoogleConfig,
+    HubConfig,
+    LoginProvidersConfig,
+    OidcConfig,
+)
 from .provider_config import ProviderConfigurationError
 from .provider_store import ProviderSnapshot
 
@@ -17,6 +23,7 @@ def settings_from_database(
     """Database values replace every provider credential from the input object."""
     google = None
     github = None
+    hub = None
     oidc = []
     tenant = client = secret = ""
     required = "Canvas.User"
@@ -24,6 +31,9 @@ def settings_from_database(
     for provider in snapshot.providers:
         values = provider.config
         if provider.id == "local":
+            continue
+        if provider.id == "hub":
+            hub = HubConfig(str(values["origin"]))
             continue
         if provider.client_secret is None:
             raise ProviderConfigurationError("provider_configuration_unavailable")
@@ -101,6 +111,7 @@ def settings_from_database(
             order=tuple(provider.id for provider in snapshot.providers),
             google=google,
             github=github,
+            hub=hub,
             oidc=tuple(oidc),
         ),
     )

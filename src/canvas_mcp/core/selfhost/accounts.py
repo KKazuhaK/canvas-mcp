@@ -458,7 +458,7 @@ def default_policy(required_role: str, owner_role: str) -> AccessPolicy:
     )
 
 
-_KNOWN_PROVIDERS = frozenset({PROVIDER_ENTRA, PROVIDER_GOOGLE, PROVIDER_GITHUB, "oidc"})
+_KNOWN_PROVIDERS = frozenset({PROVIDER_ENTRA, PROVIDER_GOOGLE, PROVIDER_GITHUB, "hub", "oidc"})
 _ENTRA_KINDS = frozenset({"role", "group", "tenant"})
 _GOOGLE_KINDS = frozenset({"domain", "email"})
 _GITHUB_KINDS = frozenset({"user", "org", "team"})
@@ -530,6 +530,10 @@ def parse_rule(
         return _parse_google_rule(kind, sep, value)
     if provider_id == PROVIDER_GITHUB:
         return _parse_github_rule(kind, sep, value)
+    if provider_id == "hub":
+        if kind == "any" and not sep:
+            return AccessRule("hub", "any", "")
+        return "has an unknown rule kind (use hub:any)"
     return _parse_oidc_rule(provider_id, kind, sep, value)
 
 

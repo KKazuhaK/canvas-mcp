@@ -18,11 +18,26 @@
     "details": "详情",
     "staleDraft": "设置已在其他位置变更。你的编辑已保留，请先重新载入已保存的值。",
     "discardDraft": "放弃这份编辑并载入已保存的值",
-    "site": { "title": "站点", "help": "管理公开地址，以及地址变更对登录和已连接应用的影响。" },
-    "providers": { "title": "登录服务商", "help": "配置登录服务商、显示样式和可用的登录方式。" },
-    "access": { "title": "账户与访问", "help": "配置账户关联规则和登录有效期。本地账户请在账户管理中创建。" },
-    "schools": { "title": "学校", "help": "管理提供的 Canvas 学校和学校目录搜索。" },
-    "mail": { "title": "邮件提醒", "help": "配置邮件发送和自动令牌到期提醒。" }
+    "site": {
+      "title": "站点",
+      "help": "管理公开地址，以及地址变更对登录和已连接应用的影响。"
+    },
+    "providers": {
+      "title": "登录服务商",
+      "help": "配置登录服务商、显示样式和可用的登录方式。"
+    },
+    "access": {
+      "title": "账户与访问",
+      "help": "配置账户关联规则和登录有效期。本地账户请在账户管理中创建。"
+    },
+    "schools": {
+      "title": "学校",
+      "help": "管理提供的 Canvas 学校和学校目录搜索。"
+    },
+    "mail": {
+      "title": "邮件提醒",
+      "help": "配置邮件发送和自动令牌到期提醒。"
+    }
   },
   "site": {
     "title": "站点地址",
@@ -350,8 +365,11 @@
       "entra": "Microsoft Entra ID",
       "google": "Google",
       "github": "GitHub",
-      "oidc": "OpenID Connect（OIDC）"
-    }
+      "oidc": "OpenID Connect（OIDC）",
+      "hub": "MCPHub"
+    },
+    "hubOrigin": "Hub 的 HTTPS 地址",
+    "hubHelp": "通过 /canvas-hub/authorize 反向代理复用 Hub 登录，无需客户端密钥。已有 Canvas 用户需要在自己的账号设置中明确绑定。"
   },
   "settings": {
     "displayName": "显示名称",

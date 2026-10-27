@@ -78,7 +78,7 @@ export type ApiOnlyErrorCode =
 
 export interface LoginProviderConfiguration {
   id: string
-  protocol: 'entra' | 'google' | 'github' | 'oidc' | 'local'
+  protocol: 'entra' | 'google' | 'github' | 'oidc' | 'local' | 'hub'
   enabled: boolean
   auto_link_email?: boolean
   /** Local, content-addressed PNG URL; image bytes are stored in the data volume. */
@@ -154,7 +154,7 @@ export interface BuildInfo {
 }
 export interface Provider {
   id: string
-  kind: 'oidc' | 'oauth2' | 'local'
+  kind: 'oidc' | 'oauth2' | 'local' | 'hub'
   name: string
   icon: ProviderIcon
   /** Public local PNG URL for a configured sign-in icon. */

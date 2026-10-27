@@ -1539,9 +1539,16 @@ def register_account_routes(
     cfg: AccountConfig,
     store: TokenStore,
     identity: IdentityService,
+    *,
+    bridge_routes: list[Route] | None = None,
     **options: Any,
 ) -> None:
+    from .login.hub import BRIDGE_PATH
+
     for route in build_account_routes(cfg, store, identity, **options):
+        if route.path == BRIDGE_PATH and bridge_routes is not None:
+            bridge_routes.append(route)
+            continue
         if route.methods is None:
             mcp._additional_http_routes.append(route)
         else:

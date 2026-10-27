@@ -36,7 +36,10 @@ def account_app(stack: Stack) -> web.AccountCore:
 
 def test_native_login_route_contract(entra_local: Stack):
     app = account_app(entra_local)
-    assert {r.path for r in build_login_routes(app)} == LOGIN_PATHS
+    assert {r.path for r in build_login_routes(app)} == LOGIN_PATHS | {
+        "/canvas-hub/authorize"
+    }
+    assert entra_local.client.get("/canvas-hub/authorize").status_code == 404
     assert app.external.app is app and app.logins.providers.keys() == {"entra"}
 
 
