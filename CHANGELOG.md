@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.2] — 2026-10-27
+
 ### Changed
 
 - **Tool errors are machine-readable.** A failed tool call now returns a single
