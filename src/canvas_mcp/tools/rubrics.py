@@ -887,7 +887,7 @@ def register_rubric_tools(mcp: FastMCP) -> None:
     """Register all rubric-related MCP tools."""
 
     @mcp.tool(
-        annotations=ToolAnnotations(read_only_hint=True), meta=FULL_CONTENT_TOOL_META
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True), meta=FULL_CONTENT_TOOL_META
     )
     @validate_params
     async def get_rubric(course_identifier: str | int,
@@ -1082,7 +1082,7 @@ def register_rubric_tools(mcp: FastMCP) -> None:
         return result
 
     @mcp.tool(
-        annotations=ToolAnnotations(read_only_hint=True), meta=FULL_CONTENT_TOOL_META
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True), meta=FULL_CONTENT_TOOL_META
     )
     @validate_params
     async def get_rubric_assessment(course_identifier: str | int,
@@ -1197,7 +1197,7 @@ def register_rubric_tools(mcp: FastMCP) -> None:
 
         return result
 
-    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False))
+    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False, open_world_hint=True))
     @validate_params
     async def grade_with_rubric(course_identifier: str | int,
                               assignment_id: str | int,
@@ -1316,7 +1316,7 @@ def register_rubric_tools(mcp: FastMCP) -> None:
 
         return result
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def list_rubrics(course_identifier: str | int,
                               include_criteria: bool = True) -> str:
@@ -1419,7 +1419,7 @@ def register_rubric_tools(mcp: FastMCP) -> None:
 
         return result
 
-    @mcp.tool(annotations=ToolAnnotations(destructive_hint=False, idempotent_hint=False))
+    @mcp.tool(annotations=ToolAnnotations(destructive_hint=False, idempotent_hint=False, open_world_hint=True))
     @validate_params
     async def create_rubric_from_csv(
         course_identifier: str | int,
@@ -1541,7 +1541,7 @@ def register_rubric_tools(mcp: FastMCP) -> None:
 
     # With assignment_id, this creates a rubric_association on that
     # assignment, REPLACING any rubric already attached to it (#204).
-    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False))
+    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False, open_world_hint=True))
     @validate_params
     async def create_rubric(
         course_identifier: str | int,
@@ -1657,7 +1657,7 @@ def register_rubric_tools(mcp: FastMCP) -> None:
 
         return result
 
-    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True, open_world_hint=True))
     @validate_params
     async def update_rubric(
         course_identifier: str | int,
@@ -1847,7 +1847,7 @@ def register_rubric_tools(mcp: FastMCP) -> None:
 
     # Replaces the assignment's existing rubric association, and overwrites
     # use_for_grading / purpose even when re-associating the same rubric (#204).
-    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False))
+    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False, open_world_hint=True))
     @validate_params
     async def associate_rubric(course_identifier: str | int,
                                              rubric_id: str | int,

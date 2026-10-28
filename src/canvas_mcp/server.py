@@ -30,10 +30,13 @@ from . import __version__
 from .core.config import get_config, validate_canvas_url_scheme, validate_config
 from .core.credentials import (
     RequestCredentials,
+    RequestTokenState,
     clear_http_request_context,
     set_http_request_active,
     set_request_credentials,
+    set_request_token_state,
 )
+from .core.health import HEALTH_PATH, health_body
 from .core.logging import log_error, log_info, log_warning, scrub_third_party_logs
 from .core.selfhost.settings import (
     AUTH_MODE_SELFHOST,
@@ -105,6 +108,21 @@ async def _send_json_error(send: Any, status: int, message: str) -> None:
         ],
     })
     await send({"type": "http.response.body", "body": body})
+
+
+async def _send_health(send: Any, method: str) -> None:
+    """Answer the liveness probe: fixed body, never cached, HEAD without a body."""
+    body = health_body()
+    await send({
+        "type": "http.response.start",
+        "status": 200,
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode("ascii")),
+            (b"cache-control", b"no-store"),
+        ],
+    })
+    await send({"type": "http.response.body", "body": b"" if method == "HEAD" else body})
 
 
 # The only public (pre-auth) route posts a form containing one short signed
@@ -320,6 +338,15 @@ class CanvasCredentialMiddleware:
         config = get_config()
         path = scope.get("path", "")
 
+        # --- Liveness probe: public, before the access-key gate and the token check ---
+        if path == HEALTH_PATH:
+            method = scope.get("method", "").upper()
+            if method in ("GET", "HEAD"):
+                await _send_health(send, method)
+            else:
+                await _send_json_error(send, 405, "Method not allowed")
+            return
+
         # --- Admin access-approval routes (intercepted before any token gate) ---
         if path in (_ADMIN_APPROVE_PATH, _ADMIN_CONFIRM_PATH):
             from .core.access.factory import feature_ready
@@ -435,6 +462,9 @@ class CanvasCredentialMiddleware:
             set_request_credentials(
                 RequestCredentials(api_token=token, api_url=canvas_url)
             )
+            # Shared by everything this request starts: once one Canvas call finds
+            # the token dead, the others stop sending requests.
+            set_request_token_state(RequestTokenState())
             await self.app(scope, receive, send)
         finally:
             clear_http_request_context()

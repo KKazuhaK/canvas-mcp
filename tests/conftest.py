@@ -377,8 +377,10 @@ def make_docx():
 @pytest.fixture(autouse=True)
 def no_token_health_monitor():
     """No test may leave a token-health monitor registered for the next one."""
-    from canvas_mcp.core.token_health import set_token_health_monitor
+    from canvas_mcp.core.token_health import reset_probe_cache, set_token_health_monitor
 
     set_token_health_monitor(None)
+    reset_probe_cache()
     yield
     set_token_health_monitor(None)
+    reset_probe_cache()

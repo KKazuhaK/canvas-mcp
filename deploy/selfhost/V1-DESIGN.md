@@ -369,7 +369,7 @@ v1 starts after P7 is merged (handoff 6.1 [B0]). On top of P7:
 | `/account/*` | The React single-page app | HTML and static assets |
 | `/api/v1/*` | The app's JSON API: session cookie, CSRF header, `Origin` check, never CORS | JSON, `no-store` |
 | `/.well-known/*`, `/authorize`, `/token`, `/register`, `/revoke`, `/mcp` | Fixed by the MCP SDK, FastMCP and RFC 8414/9728 | per spec |
-| `/healthz` | Liveness | text |
+| `/healthz` | Liveness | JSON `{"ok": true, "version": "<package version>"}`, `no-store` |
 
 ### 3.2 Complete route table
 
@@ -386,7 +386,7 @@ Nothing else is served. `/` stays a 404.
 | POST OPTIONS | `/register` | Dynamic client registration | MCP SDK behind `_StoreGuard` |
 | POST OPTIONS | `/revoke` | RFC 7009 revocation | `authz/server.py` `_revoke_route` |
 | POST DELETE | `/mcp` | Streamable HTTP (stateless) | FastMCP, behind `request_context.py` `SelfhostRequestContextMiddleware` |
-| GET HEAD | `/healthz` | "ok", no database access | `app.py` `install_selfhost` |
+| GET HEAD | `/healthz` | `{"ok": true, "version": ...}` (shared `core/health.py`), no database access | `app.py` `install_selfhost` |
 
 **Sign-in ceremonies.** The handlers live in the new `selfhost/login/routes.py`. The provider is resolved per request through `login/registry.py`, and paths come from `selfhost/routes.py`.
 

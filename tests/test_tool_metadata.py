@@ -210,6 +210,8 @@ async def test_every_tool_declares_its_effect_on_the_world():
         if annotations is None:
             undeclared.append(f"{tool.name}: no annotations at all")
             continue
+        if annotations.open_world_hint is None:
+            undeclared.append(f"{tool.name}: missing open_world_hint")
         if annotations.read_only_hint:
             continue
         if annotations.destructive_hint is None:
@@ -218,9 +220,70 @@ async def test_every_tool_declares_its_effect_on_the_world():
             undeclared.append(f"{tool.name}: write tool missing idempotent_hint")
 
     assert not undeclared, (
-        "every tool must declare read_only_hint, or both destructive_hint and "
-        "idempotent_hint (see issue #204):\n  " + "\n  ".join(sorted(undeclared))
+        "every tool must declare open_world_hint and read_only_hint, or both "
+        "destructive_hint and idempotent_hint (see issue #204):\n  " + "\n  ".join(sorted(undeclared))
     )
+
+
+# Write tools whose effects stay with the calling user (their own planner,
+# calendar, module progress, inbox read state): open_world_hint=False. A
+# platform that aggregates this server treats such a write as "changes only my
+# own data". Every other write tool must say open_world_hint=True; a NEW write
+# tool defaults to that unless it is deliberately added here. Tools that write
+# to the server's filesystem are deliberately NOT here: on a shared host that
+# is not the caller's own data, and they may hold other students' records.
+OWN_DATA_WRITES = {
+    "create_planner_note",
+    "update_planner_note",
+    "delete_planner_note",
+    "mark_planner_item_complete",
+    "create_personal_calendar_event",
+    "delete_personal_calendar_event",
+    "mark_module_item_done",
+    "mark_conversations_read",
+}
+
+# Sampled: things other people see, or that touch the shared server host.
+VISIBLE_TO_OTHERS = {
+    "send_message",
+    "reply_to_conversation",
+    "submit_assignment",
+    "comment_on_my_submission",
+    "post_discussion_entry",
+    "reply_to_discussion_entry",
+    "create_announcement",
+    "bulk_grade_submissions",
+    "grade_with_rubric",
+    "create_page",
+    "upload_course_file",
+    "execute_typescript",
+    "download_course_file",
+    "generate_peer_review_report",
+    "extract_peer_review_dataset",
+    "create_student_anonymization_map",
+}
+
+
+@pytest.mark.asyncio
+async def test_open_world_hint_separates_own_data_writes_from_writes_others_see():
+    tools = {tool.name: tool for tool in await _registry().list_tools()}
+
+    for name in OWN_DATA_WRITES | VISIBLE_TO_OTHERS:
+        assert name in tools, f"{name} is no longer registered — update this list"
+
+    for tool in tools.values():
+        hint = tool.annotations.open_world_hint
+        if tool.annotations.read_only_hint:
+            assert hint is True, f"{tool.name}: a read tool reads an external system"
+        elif tool.name in OWN_DATA_WRITES:
+            assert hint is False, f"{tool.name} only changes the caller's own data"
+        else:
+            assert hint is True, (
+                f"{tool.name} is a write tool not listed in OWN_DATA_WRITES, so "
+                "it must declare open_world_hint=True (visible to others)"
+            )
+    for name in VISIBLE_TO_OTHERS:
+        assert tools[name].annotations.open_world_hint is True, name
 
 
 @pytest.mark.asyncio

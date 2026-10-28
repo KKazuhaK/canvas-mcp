@@ -1,5 +1,6 @@
 """Central result-size cap for clients that reject large tool results (claude.ai)."""
 
+import json
 import logging
 import random
 import string
@@ -18,6 +19,7 @@ from mcp.types import (
 
 from canvas_mcp.core import tool_results
 from canvas_mcp.core.config import reset_config
+from canvas_mcp.core.error_codes import ERROR_CODES
 from canvas_mcp.core.mcp_client import client_needs_result_cap
 from canvas_mcp.core.tool_results import (
     DEFAULT_MAX_RESULT_CHARS,
@@ -423,7 +425,10 @@ class TestEndToEnd:
         ) as client:
             result = await client.call_tool("big_error", {}, raise_on_error=False)
         assert result.is_error is True
-        assert _first_text(result) == "Error: " + "e" * 300_000
+        # The message is carried whole inside the coded error payload.
+        payload = json.loads(_first_text(result))
+        assert payload["message"] == "Error: " + "e" * 300_000
+        assert payload["error"] in ERROR_CODES
 
     @pytest.mark.asyncio
     async def test_zero_disables_the_cap(self, monkeypatch):

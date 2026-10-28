@@ -219,7 +219,7 @@ async def _group_label(group: dict) -> str:
 def register_student_group_tools(mcp: FastMCP) -> None:
     """Register the read-only student group tools."""
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def list_my_groups(course_identifier: str | int | None = None) -> str:
         """List the Canvas groups you belong to (project teams, study groups).
@@ -302,7 +302,7 @@ def register_student_group_tools(mcp: FastMCP) -> None:
             )
         return "\n".join(lines).rstrip()
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def get_group_members(group_id: str | int) -> str:
         """List the members of one of your groups (names and Canvas user IDs).
@@ -347,7 +347,7 @@ def register_student_group_tools(mcp: FastMCP) -> None:
             )
         return "\n".join(lines)
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def list_group_files(
         group_id: str | int,

@@ -196,7 +196,7 @@ def format_media_inventory(media: list[dict[str, str]]) -> str:
 def register_course_tools(mcp: FastMCP) -> None:
     """Register all course-related MCP tools."""
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def list_courses(
         include_concluded: bool = False, include_all: bool = False
@@ -266,7 +266,7 @@ def register_course_tools(mcp: FastMCP) -> None:
 
         return "Courses:\n\n" + "\n".join(courses_info)
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def get_course_details(course_identifier: str | int) -> str:
         """Get detailed information about a specific course.
@@ -310,7 +310,7 @@ def register_course_tools(mcp: FastMCP) -> None:
         return f"Course Details for {course_display}:\n\n" + "\n".join(details)
 
     @mcp.tool(
-        annotations=ToolAnnotations(read_only_hint=True), meta=FULL_CONTENT_TOOL_META
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True), meta=FULL_CONTENT_TOOL_META
     )
     @validate_params
     async def get_syllabus(course_identifier: str | int,
@@ -390,7 +390,7 @@ def register_course_tools(mcp: FastMCP) -> None:
 
         return "\n".join(sections)
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def get_course_content_overview(course_identifier: str | int,
                                         include_pages: bool = True,
@@ -577,7 +577,7 @@ def register_course_tools(mcp: FastMCP) -> None:
 def register_shared_content_tools(mcp: FastMCP) -> None:
     """Register shared content tools (pages, module items) for both students and educators."""
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def list_pages(course_identifier: str | int,
                         sort: str | None = "title",
@@ -636,7 +636,7 @@ def register_shared_content_tools(mcp: FastMCP) -> None:
         return f"Pages for Course {course_display}:\n\n" + "\n".join(pages_info)
 
     @mcp.tool(
-        annotations=ToolAnnotations(read_only_hint=True), meta=FULL_CONTENT_TOOL_META
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True), meta=FULL_CONTENT_TOOL_META
     )
     @validate_params
     async def get_page_content(course_identifier: str | int, page_url_or_id: str) -> str:
@@ -684,7 +684,7 @@ def register_shared_content_tools(mcp: FastMCP) -> None:
             + fence_untrusted(untrusted, "page title, body, and media inventory")
         )
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def get_page_details(course_identifier: str | int, page_url_or_id: str) -> str:
         """Get a specific page's metadata plus a short text preview.
@@ -779,7 +779,7 @@ def register_shared_content_tools(mcp: FastMCP) -> None:
         return result
 
     @mcp.tool(
-        annotations=ToolAnnotations(read_only_hint=True), meta=FULL_CONTENT_TOOL_META
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True), meta=FULL_CONTENT_TOOL_META
     )
     @validate_params
     async def get_front_page(course_identifier: str | int) -> str:
@@ -812,7 +812,7 @@ def register_shared_content_tools(mcp: FastMCP) -> None:
             + fence_untrusted(f"Title: {title}\n\n{body}", "front page title and body")
         )
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def list_module_items(course_identifier: str | int,
                                module_id: str | int,
@@ -891,7 +891,7 @@ def register_educator_course_tools(mcp: FastMCP) -> None:
     # idempotent_hint=False: a replace converges, but mode="append"/"prepend"
     # adds the same block again on every repeat, and the hint is per-tool (a
     # host retrying a timed-out call cannot know which mode was used).
-    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False))
+    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False, open_world_hint=True))
     @validate_params
     async def update_syllabus(course_identifier: str | int,
                               syllabus_body: str | None = None,

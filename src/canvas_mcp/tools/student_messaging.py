@@ -518,7 +518,7 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
     """
     enabled = get_config().student_write_tools
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def find_message_recipients(
         course_identifier: str | int,
@@ -640,7 +640,7 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
 
     if "send_message" in enabled:
 
-        @mcp.tool(annotations=ToolAnnotations(destructive_hint=False, idempotent_hint=False))
+        @mcp.tool(annotations=ToolAnnotations(destructive_hint=False, idempotent_hint=False, open_world_hint=True))
         @validate_params
         async def send_message(
             course_identifier: str | int,
@@ -810,7 +810,7 @@ def register_student_messaging_tools(mcp: FastMCP) -> None:
 
     if "reply_to_conversation" in enabled:
 
-        @mcp.tool(annotations=ToolAnnotations(destructive_hint=False, idempotent_hint=False))
+        @mcp.tool(annotations=ToolAnnotations(destructive_hint=False, idempotent_hint=False, open_world_hint=True))
         @validate_params
         async def reply_to_conversation(
             conversation_id: str | int,

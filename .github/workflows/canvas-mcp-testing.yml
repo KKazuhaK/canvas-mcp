@@ -350,6 +350,33 @@ jobs:
         tests/selfhost tests/test_multiuser_e2e.py tests/test_fastmcp_compat.py
         -q -p no:cacheprovider
 
+  # The server as a platform sees it: started on its own in legacy HTTP mode
+  # (no platform, a placeholder Canvas URL that is never contacted, a dummy
+  # X-Canvas-Token), then /healthz, initialize and tools/list are called over
+  # HTTP. Fails if the tool list is empty or any tool lacks the annotations a
+  # platform classifies risk from. The unit tests enumerate the registry in
+  # process; this proves the same holds on the wire.
+  http-smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: '3.12'
+
+    - name: Install the package
+      run: python -m pip install -e .
+
+    - name: Smoke-test the HTTP server
+      run: python scripts/ci_smoke_http.py
+
   # Aggregator. Branch protection requires a check literally named
   # "test-enhancements", and a matrix job publishes per-version names
   # ("test (3.11)"), which would leave the required check permanently pending
@@ -359,7 +386,7 @@ jobs:
   # and passed its checks".
   test-enhancements:
     runs-on: ubuntu-latest
-    needs: [test, test-windows, test-locked, test-postgres, test-code-api, verify-confirmation, web]
+    needs: [test, test-windows, test-locked, test-postgres, test-code-api, verify-confirmation, web, http-smoke]
     if: always()
 
     steps:
@@ -370,8 +397,9 @@ jobs:
         echo "locked result: ${{ needs.test-locked.result }}"
         echo "postgres result: ${{ needs.test-postgres.result }}"
         echo "web result: ${{ needs.web.result }}"
-        if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.test-windows.result }}" != "success" ] || [ "${{ needs.test-locked.result }}" != "success" ] || [ "${{ needs.test-postgres.result }}" != "success" ] || [ "${{ needs.test-code-api.result }}" != "success" ] || [ "${{ needs.verify-confirmation.result }}" != "success" ] || [ "${{ needs.web.result }}" != "success" ]; then
-          echo "::error::Python (Linux, Windows, locked or PostgreSQL), code API, web UI, or confirmation verification did not succeed."
+        echo "http smoke result: ${{ needs.http-smoke.result }}"
+        if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.test-windows.result }}" != "success" ] || [ "${{ needs.test-locked.result }}" != "success" ] || [ "${{ needs.test-postgres.result }}" != "success" ] || [ "${{ needs.test-code-api.result }}" != "success" ] || [ "${{ needs.verify-confirmation.result }}" != "success" ] || [ "${{ needs.web.result }}" != "success" ] || [ "${{ needs.http-smoke.result }}" != "success" ]; then
+          echo "::error::Python (Linux, Windows, locked or PostgreSQL), code API, web UI, HTTP smoke test, or confirmation verification did not succeed."
           exit 1
         fi
         echo "## Canvas MCP test results" >> $GITHUB_STEP_SUMMARY

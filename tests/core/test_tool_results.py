@@ -5,6 +5,7 @@ import pytest
 from fastmcp import Client, FastMCP
 from mcp.types import ToolAnnotations
 
+from canvas_mcp.core.error_codes import ERROR_CODES
 from canvas_mcp.core.tool_results import install_tool_result_contract
 
 _EXPLICIT_TEXT_SCHEMA = {
@@ -48,7 +49,7 @@ def _result_server() -> FastMCP:
         json.dumps({"error": "invalid course"}),
     ],
 )
-async def test_text_error_conventions_set_mcp_error_without_rewriting(payload):
+async def test_text_error_conventions_set_mcp_error_and_keep_the_human_message(payload):
     async with Client(_result_server()) as client:
         result = await client.call_tool(
             "text_result", {"value": payload}, raise_on_error=False
@@ -56,7 +57,11 @@ async def test_text_error_conventions_set_mcp_error_without_rewriting(payload):
 
     assert result.is_error is True
     assert len(result.content) == 1
-    assert getattr(result.content[0], "text", None) == payload
+    coded = json.loads(result.content[0].text)
+    assert set(coded) == {"error", "message"}
+    assert coded["error"] in ERROR_CODES
+    expected = "invalid course" if payload.startswith("{") else payload
+    assert coded["message"] == expected
 
 
 @pytest.mark.asyncio
@@ -67,7 +72,12 @@ async def test_top_level_dict_error_keeps_structured_payload_and_sets_mcp_error(
         )
 
     assert result.is_error is True
-    assert result.structured_content == {"error": "boom", "nothing_sent": True}
+    # The tool's own fields stay; the code and the message are added.
+    assert result.structured_content == {
+        "error": "INVALID_ARGUMENT",
+        "message": "boom",
+        "nothing_sent": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -143,7 +153,8 @@ async def test_explicit_string_schema_is_respected_and_legacy_wrapper_errors():
         )
 
     assert tools["explicit_text"].output_schema["x-fastmcp-wrap-result"] is True
-    assert result.structured_content == {"result": "Error: explicit schema failure"}
+    assert result.structured_content["message"] == "Error: explicit schema failure"
+    assert result.structured_content["error"] in ERROR_CODES
     assert result.is_error is True
 
 
@@ -165,7 +176,9 @@ async def test_register_all_tools_marks_existing_validation_failure_as_mcp_error
         )
 
     assert result.is_error is True
-    assert getattr(result.content[0], "text", "").startswith("Error: invalid output_format")
+    coded = json.loads(result.content[0].text)
+    assert coded["error"] == "INVALID_ARGUMENT"
+    assert coded["message"].startswith("Error: invalid output_format")
 
 
 @pytest.mark.asyncio

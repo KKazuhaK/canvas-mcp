@@ -699,7 +699,10 @@ class TestTokenHealthVerdicts:
     ) -> None:
         store = make_store(tmp_path)
         info = put(store)
-        health = probing_health(store, lambda request: httpx.Response(401, json={}))
+        health = probing_health(store, lambda request: httpx.Response(
+                401, json={"errors": [{"message": "Invalid access token."}]}
+            ),
+        )
         message = await health.confirm_dead_token(
             KEY_A, creds(), info.updated_at, info.credential_generation
         )

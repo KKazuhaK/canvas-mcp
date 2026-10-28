@@ -68,7 +68,7 @@ def _peer_review_csv_row(review: dict[str, Any]) -> list[Any]:
 def register_peer_review_comment_tools(mcp: FastMCP) -> None:
     """Register all peer review comment analysis MCP tools."""
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def get_peer_review_comments(
         course_identifier: str | int,
@@ -110,7 +110,7 @@ def register_peer_review_comment_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return f"Error in get_peer_review_comments: {str(e)}"
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def analyze_peer_review_quality(
         course_identifier: str | int,
@@ -154,7 +154,7 @@ def register_peer_review_comment_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return f"Error in analyze_peer_review_quality: {str(e)}"
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def identify_problematic_peer_reviews(
         course_identifier: str | int,
@@ -199,7 +199,7 @@ def register_peer_review_comment_tools(mcp: FastMCP) -> None:
     # and the write opens with mode "w", so a repeat overwrites the same file and
     # converges. destructive_hint=True for the same reason: a caller-supplied
     # filename overwrites whatever is there.
-    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=True, open_world_hint=True))
     @validate_params
     async def extract_peer_review_dataset(
         course_identifier: str | int,
@@ -323,7 +323,7 @@ def register_peer_review_comment_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return f"Error in extract_peer_review_dataset: {str(e)}"
 
-    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
     @validate_params
     async def generate_peer_review_feedback_report(
         course_identifier: str | int,

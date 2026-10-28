@@ -23,6 +23,7 @@ download path over an ``httpx.MockTransport``.
 import asyncio
 import base64
 import inspect
+import json
 import threading
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -470,7 +471,7 @@ class TestProtocol:
             )
 
         assert result.is_error is True
-        assert result.content[0].text.startswith("Error: File")
+        assert json.loads(result.content[0].text)["message"].startswith("Error: File")
         api.download.assert_not_awaited()
 
 

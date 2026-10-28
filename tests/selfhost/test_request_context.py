@@ -17,6 +17,7 @@ from canvas_mcp.core.credentials import (
     get_request_credentials,
     get_request_principal,
     is_http_request_active,
+    missing_credentials_code,
     missing_credentials_message,
     request_local_principal_state,
     uses_request_local_course_state,
@@ -34,6 +35,7 @@ from canvas_mcp.core.selfhost.request_context import (
     unreadable_token_message,
 )
 from canvas_mcp.core.selfhost.schools import School, SchoolPolicy
+from canvas_mcp.core.selfhost.token_store import STATUS_INVALID
 
 from .conftest import OID_A, OID_B, TENANT, acct_key
 
@@ -149,6 +151,7 @@ class Probe:
             "principal": get_request_principal(),
             "key": current_principal_key(),
             "message": missing_credentials_message(),
+            "code": missing_credentials_code(),
             "local": uses_request_local_course_state(),
             "bag": request_local_principal_state(),
             "config": CURRENT_CONFIG.get(),
@@ -447,6 +450,33 @@ class TestCredentials:
             and store.gets == store.touches == []
         )
         assert message.lower() in probe.seen["message"].lower()
+
+    @pytest.mark.parametrize(
+        "changes, code",
+        [
+            ({"credential_id": None}, "CREDENTIAL_INVALID"),
+            ({"credential_status": STATUS_INVALID}, "CREDENTIAL_INVALID"),
+            ({"canvas_host": None}, "PERMISSION_DENIED"),
+            ({"canvas_host": "canvas.other.edu"}, "PERMISSION_DENIED"),
+            ({"custody_notice_version": None}, "PERMISSION_DENIED"),
+            ({"custody_notice_version": 0}, "PERMISSION_DENIED"),
+        ],
+    )
+    async def test_each_refusal_reason_reports_its_own_failure_code(self, changes, code):
+        """A user with a working token must not be told to reconnect it."""
+        probe, store = Probe(), FakeStore({acct_key(OID_A): SECRET_TOKEN})
+        store.snapshots[acct_key(OID_A)] = native_snapshot(**changes)
+        call = await _run(_middleware(probe, store), user=_user(_claims()))
+        assert call.status == 200 and probe.seen["creds"] is None
+        assert probe.seen["code"] == code
+
+    async def test_the_custody_refusal_points_to_the_account_page(self):
+        probe, store = Probe(), FakeStore({acct_key(OID_A): SECRET_TOKEN})
+        store.snapshots[acct_key(OID_A)] = native_snapshot(custody_notice_version=None)
+        await _run(_middleware(probe, store), user=_user(_claims()))
+        message = probe.seen["message"]
+        assert "acknowledge" in message and ACCOUNT_URL.rstrip("/") in message
+        assert "remains stored" in message
 
     async def test_generation_disagreement_is_503_before_decrypt(self):
         probe, store = Probe(), FakeStore({acct_key(OID_A): SECRET_TOKEN})

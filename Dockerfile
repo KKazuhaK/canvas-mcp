@@ -44,9 +44,10 @@ USER mcp
 # HTTP port the container listens on (App Service injects PORT/WEBSITES_PORT)
 EXPOSE 8819
 
-# Health check to verify installation
+# Health check: the unauthenticated /healthz of the HTTP server started below
+# (this image always runs HTTP; it follows the same port as CMD).
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD python -c "import canvas_mcp; print('OK')" || exit 1
+  CMD python -c "import os, urllib.request as u; u.urlopen('http://127.0.0.1:%s/healthz' % (os.environ.get('PORT') or os.environ.get('WEBSITES_PORT') or '8819'), timeout=2)" || exit 1
 
 # Run the MCP server over HTTP (required for container/ingress; stdio is unreachable).
 # Honors the platform-injected port, falling back to 8819.

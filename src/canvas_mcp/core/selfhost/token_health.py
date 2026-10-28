@@ -39,6 +39,7 @@ import httpx
 from .. import audit
 from ..credentials import RequestCredentials
 from ..logging import log_warning
+from ..token_health import _says_token_is_dead
 from .db.workers import run_store
 from .token_store import (
     REASON_CANVAS_TOKEN_REJECTED,
@@ -301,7 +302,8 @@ class TokenHealth:
         except (httpx.HTTPError, ValueError):
             return UNKNOWN
         if response.status_code == 401:
-            return REJECTED
+            # Only a 401 that says the token is dead; "insufficient scope" is not.
+            return REJECTED if _says_token_is_dead(response) else UNKNOWN
         if response.status_code == 200:
             return OK
         return UNKNOWN
