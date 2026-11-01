@@ -481,10 +481,8 @@ class TestTwoBrowsers:
         stranger = Browser(stack)
         refused = stranger.get(started.headers["location"])
         assert refused.status_code == 303
-        assert (
-            refused.headers["location"]
-            == "/account/sign-in?error=authorization_invalid"
-        )
+        # The request is not the stranger's: it is dropped, never followed.
+        assert refused.headers["location"] == "/account/sign-in?notice=authorization_unavailable"
         landed = owner.connect(stack.authorize_params(client_id, challenge), ALICE)
         assert "code" in landed.query
 

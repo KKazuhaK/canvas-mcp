@@ -392,7 +392,7 @@ Nothing else is served. `/` stays a 404.
 
 | Methods | Path | Purpose |
 |---|---|---|
-| GET | `/auth/login` | Dispatcher. Validates `txn`, `return_to` and `reauth`. With one configured provider: 303 to its start, query kept. With several: 303 to `/account/sign-in?...`. With a bad `txn`: 303 to `/account/sign-in?error=authorization_invalid`. |
+| GET | `/auth/login` | Dispatcher. Validates `txn`, `return_to` and `reauth`. With one configured provider: 303 to its start, query kept. With several: 303 to `/account/sign-in?...`. With a `txn` that is not open for this browser: 303 to `/account/sign-in?notice=authorization_unavailable` (the person can still sign in; the request is dropped). |
 | GET | `/auth/login/{provider}` | Start, for `provider` in `entra`, `google`, `github`. Writes a `login_flow` record and sets `__Host-cmcp_flow`. |
 | GET | `/auth/login/oidc/{slug}` | Start for a generic OIDC provider |
 | GET | `/auth/callback/{provider}` | The redirect URI registered at `entra`, `google` or `github` |
@@ -562,7 +562,7 @@ Cost: one constant (`API_PREFIX` in `routes.py`), `web/src/api/client.ts` `API_B
 - **Smoke test** (`deploy/selfhost/smoke-test.sh`):
   - (k) `GET /auth/login/entra`: 302 to `https://login.microsoftonline.com/<tid>/oauth2/v2.0/authorize`, with `redirect_uri=<base>/auth/callback/entra`, and sets `__Host-cmcp_flow`.
   - `GET /auth/login` with one provider: 303 to `/auth/login/entra`.
-  - `GET /auth/login?txn=bogus`: 303 to `/account/sign-in?error=authorization_invalid`.
+  - `GET /auth/login?txn=bogus`: 303 to `/account/sign-in?notice=authorization_unavailable`.
   - `HEAD /auth/login/entra`: 405.
   - `GET /api/v1/providers`: 200 JSON.
   - 404 for the bare `/auth/callback`, for `/consent` and for `/.well-known/openid-configuration`.

@@ -200,28 +200,39 @@ def start_request(stack: Stack, browser: Browser | None = None, **kw: Any) -> tu
     return browser, query_of(url)["txn"], url.replace("/auth/login?", "/auth/login/entra?", 1)
 
 
+NOTICE_HOME = "/account/?notice=authorization_unavailable"
+
+
 class TestLoginContinuation:
-    def test_another_browser_is_refused_without_reaching_microsoft(self, stack: Stack) -> None:
+    def test_another_browser_signs_in_without_the_request_and_is_told(self, stack: Stack) -> None:
         _, _, url = start_request(stack)
         stranger = Browser(stack)
         response = stranger.get(url)
-        assert response.status_code == 303
-        assert response.headers["location"] == "/account/sign-in?error=authorization_invalid"
+        assert response.status_code == 302 and "login.microsoftonline.com" in response.headers["location"]
+        callback = stranger.entra_login(ALICE, response)
+        assert callback.status_code == 303 and callback.headers["location"] == NOTICE_HOME
 
-    def test_a_browser_with_a_different_binding_is_refused(self, stack: Stack) -> None:
+    def test_a_browser_with_a_different_binding_is_told_the_request_is_unavailable(self, stack: Stack) -> None:
         _, _, url = start_request(stack)
         other, _, _ = start_request(stack)  # has its own binding cookie
-        assert other.get(url).headers["location"] == "/account/sign-in?error=authorization_invalid"
+        response = other.get(url)
+        assert response.status_code == 302
+        assert other.entra_login(ALICE, response).headers["location"] == NOTICE_HOME
 
     @pytest.mark.parametrize("txn", ["", "x", "A" * 43, "../../etc", "A" * 500])
-    def test_a_bogus_transaction_is_refused(self, stack: Stack, txn: str) -> None:
+    def test_a_bogus_transaction_never_blocks_the_sign_in(self, stack: Stack, txn: str) -> None:
         browser, _, _ = start_request(stack)
-        assert browser.get("/auth/login/entra", params={"txn": txn}).headers["location"] == "/account/sign-in?error=authorization_invalid"
+        response = browser.get("/auth/login/entra", params={"txn": txn})
+        assert response.status_code == 302 and "login.microsoftonline.com" in response.headers["location"]
+        assert browser.entra_login(ALICE, response).headers["location"] == NOTICE_HOME
 
-    def test_an_expired_transaction_is_refused(self, stack: Stack) -> None:
+    def test_an_expired_transaction_never_blocks_the_sign_in(self, stack: Stack) -> None:
         browser, _, url = start_request(stack)
         stack.clock.advance(601)
-        assert browser.get(url).headers["location"] == "/account/sign-in?error=authorization_invalid"
+        browser.client.cookies.delete("__Host-cmcp_bind")
+        response = browser.get(url)
+        assert response.status_code == 302
+        assert browser.entra_login(ALICE, response).headers["location"] == NOTICE_HOME
 
     def test_the_owner_of_the_request_is_sent_to_microsoft_and_comes_back_to_consent(self, stack: Stack) -> None:
         browser, txn, url = start_request(stack)

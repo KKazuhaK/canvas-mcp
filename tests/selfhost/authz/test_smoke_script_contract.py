@@ -108,7 +108,7 @@ class TestSectionM:
     def test_a_sign_in_request_that_does_not_exist(self, local) -> None:
         response = local.client.get(f"{BASE}/auth/login?txn=bogus")
         assert response.status_code == 303
-        assert "/account/sign-in?error=authorization_invalid" in response.headers["location"]
+        assert "/account/sign-in?notice=authorization_unavailable" in response.headers["location"]
 
     @pytest.mark.parametrize("path", ["/consent", "/auth/callback", "/.well-known/openid-configuration"])
     def test_the_proxys_routes_are_not_served(self, local, path: str) -> None:
@@ -137,7 +137,7 @@ class TestSectionM2:
     def test_a_bad_sign_in_request_ends_on_the_sign_in_page(self, stack) -> None:
         response = stack.client.get(f"{BASE}/auth/login?txn=bogus")
         assert response.status_code == 303
-        assert "/account/sign-in?error=authorization_invalid" in response.headers["location"]
+        assert "/account/sign-in?notice=authorization_unavailable" in response.headers["location"]
 
     def test_the_consent_screen_is_the_app_and_its_api_wants_a_session(self, stack) -> None:
         txn = "A" * 43

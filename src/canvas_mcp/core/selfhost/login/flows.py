@@ -79,7 +79,7 @@ class ExternalSignIn:
         app = self.app
         if self.rt.start_buckets[provider.id].take() > 0:
             return app._provider_failure("rate_limited", 429, provider)
-        txn_id, early = await app._login_txn(request)
+        txn_id, dropped, early = await app._login_txn(request)
         if early is not None:
             return early
         return_to = None
@@ -103,6 +103,7 @@ class ExternalSignIn:
             n=nonce,
             pp="sign_in",
             txn=txn_id,
+            nt=dropped is not None,
             rt=return_to,
             rz=reauth,
             ru=provider.redirect_uri,
@@ -282,8 +283,11 @@ class ExternalSignIn:
             await app._admission_lost(signed)
             return app._sign_in_refused(signed)
         assert isinstance(signed, SignIn)
+        waiting, notice = await app.resume_waiting(request, record.txn)
+        if record.nt:
+            notice = notice or "authorization_unavailable"
         return await app._complete_sign_in(
-            signed, now=now, waiting=record.txn, return_to=record.rt
+            signed, now=now, waiting=waiting, return_to=record.rt, notice=notice
         )
 
     def _failure(

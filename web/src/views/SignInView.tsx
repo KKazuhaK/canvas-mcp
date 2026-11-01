@@ -6,6 +6,7 @@ import Card from '@mui/material/Card'
 import CardContent from '@mui/material/CardContent'
 import Skeleton from '@mui/material/Skeleton'
 import Typography from '@mui/material/Typography'
+import { useEffect, useState } from 'react'
 import { Navigate, useLocation, useSearchParams } from 'react-router'
 import { useTranslation } from 'react-i18next'
 import { isUnauthenticated } from '@/api/errors'
@@ -16,6 +17,7 @@ import McpUrlCard from '@/components/McpUrlCard'
 import ProviderIcon from '@/components/ProviderIcon'
 import { useMe, useProviders } from '@/query/hooks'
 import { codeText } from '@/utils/errorText'
+import { APP_REQUEST_NOTICE } from '@/components/AppRequestNotice'
 import { TXN_PATTERN } from '@/utils/appRedirect'
 import { SITE_BASE, sanitizeReturnTo } from '@/utils/returnTo'
 import { isSessionEnded } from '@/utils/sessionEnded'
@@ -42,13 +44,23 @@ function isPlainPath(url: string): boolean {
  */
 export default function SignInView() {
   const { t } = useTranslation()
-  const [params] = useSearchParams()
+  const [params, setParams] = useSearchParams()
   const sessionEnded = isSessionEnded(useLocation().state)
   const providers = useProviders()
   const me = useMe()
   const errorParam = params.get('error')
   const rawTxn = params.get('txn')
   const txn = rawTxn !== null && TXN_PATTERN.test(rawTxn) ? rawTxn : null
+  // Read once, then removed from the address so a reload does not show it again.
+  const [unavailable] = useState(() => params.get('notice') === APP_REQUEST_NOTICE)
+  const hasNotice = params.has('notice')
+  useEffect(() => {
+    if (!hasNotice) return
+    const next = new URLSearchParams(params)
+    next.delete('notice')
+    setParams(next, { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasNotice])
   const reauth = params.get('reauth') === '1'
   // A waiting app's request ends at the consent screen, not at a page of this app.
   const returnTo = txn === null ? sanitizeReturnTo(params.get('return_to')) : null
@@ -60,7 +72,8 @@ export default function SignInView() {
   // here; the server sends it to the Sign-in methods screen).
   if (me.data && !isUnauthenticated(me.error) && !reauth && txn === null && errorParam === null) {
     const inApp = returnTo ? returnTo.slice(SITE_BASE.length) || '/' : '/'
-    return <Navigate to={inApp} replace />
+    // The notice is for the account home, which then shows it once.
+    return <Navigate to={unavailable ? `/?notice=${APP_REQUEST_NOTICE}` : inApp} replace />
   }
 
   const data = providers.data
@@ -78,6 +91,12 @@ export default function SignInView() {
               {t('auth:login.subtitle')}
             </Typography>
           </Box>
+
+          {unavailable ? (
+            <Alert severity="info" role="note">
+              {t('auth:login.appUnavailable')}
+            </Alert>
+          ) : null}
 
           {txn !== null ? (
             <Alert severity="info" role="note">

@@ -1584,15 +1584,8 @@ class ApiApp:
         ) or not self.app.local_user_limiter.allow((name.strip().lower(),)):
             raise _Fail("rate_limited", {"retry_after_s": 600})
         txn = body.get("txn")
-        waiting = None
-        if txn is not None:
-            if not isinstance(txn, str) or web._TXN_ID_RE.fullmatch(txn) is None:
-                raise _Fail("authorization_invalid")
-            if not await self.app.authz.consent.txn_open(
-                txn, ctx.request.cookies.get(self.app.authz.binding_cookie)
-            ):
-                raise _Fail("authorization_invalid")
-            waiting = txn
+        if txn is not None and not isinstance(txn, str):
+            raise _invalid("txn")
         account = await run_store(
             lambda: self._local_accounts().authenticate(
                 name, password, now=int(self.app.clock())
@@ -1611,11 +1604,15 @@ class ApiApp:
         outcome = SignIn(
             status, ext, status.role == "owner" and status.role_source != "rules", False
         )
+        # Whatever is wrong with the request id (malformed, no or another binding, expired, used)
+        # never blocks the sign-in: it is dropped and the person is told on the account home.
+        waiting, notice = await self.app.resume_waiting(ctx.request, txn)
         completed = await self.app._complete_sign_in(
             outcome,
             now=self.app.clock(),
             waiting=waiting,
             return_to=body.get("return_to"),
+            notice=notice,
         )
         response = self._ok({"redirect_to": completed.headers["location"]})
         response.raw_headers.extend(

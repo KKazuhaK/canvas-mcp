@@ -179,6 +179,16 @@ SIGN_IN_ERROR_CODES = frozenset(
     }
 )
 
+#: Notices the account home may be asked to show (``/account/?notice=<code>``); a closed set.
+ACCOUNT_NOTICES = frozenset({"authorization_unavailable"})
+
+
+def _notice_landing(notice: str | None) -> str:
+    """The account home, with a notice if (and only if) it is one of the closed codes."""
+    if notice in ACCOUNT_NOTICES:
+        return ACCOUNT_PATH + "/?" + urllib.parse.urlencode({"notice": notice})
+    return ACCOUNT_PATH + "/"
+
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9~._-]{20,512}$")
 
 _CSP = (
@@ -658,27 +668,61 @@ class AccountCore:
             self._ua_key, agent.encode("utf-8", "replace"), hashlib.sha256
         ).hexdigest()[:16]
 
-    async def _login_txn(self, request: Request) -> tuple[str | None, Response | None]:
-        """The authorization transaction waiting for this sign-in, and an early answer if there is one.
+    async def _login_txn(
+        self, request: Request
+    ) -> tuple[str | None, str | None, Response | None]:
+        """``(txn, notice, early)`` for a sign-in that may have an app waiting (``?txn=``).
 
-        With the local authorization server an app can be waiting (``?txn=``): the request must
-        exist and belong to this browser before anything else happens; a person who is already
-        signed in goes straight to the consent page unless they asked for another account
-        (``reauth=1``).
+        A request id that is not open for this browser, for any reason (malformed, no or another
+        binding, expired, used), never blocks the sign-in: it is dropped and the person is told
+        at the end (``notice``). A person who is already signed in goes straight to the consent
+        page for a live request, or to the account home with the notice, unless they asked for
+        another account (``reauth=1``).
         """
         if "txn" not in request.query_params:
-            return None, None
-        txn_id = request.query_params.get("txn", "")
-        binding = request.cookies.get(self.authz.binding_cookie)
-        if not await self.authz.consent.txn_open(txn_id, binding):
-            return None, self._authorization_invalid()
+            return None, None, None
+        txn_id, notice = await self.resume_waiting(
+            request, request.query_params.get("txn", "")
+        )
         session = self._session_of(request)
         reauth = request.query_params.get("reauth") == "1"
-        if session is not None and not reauth and (session.pending or session.iat > 0):
-            return txn_id, self.redirect(
-                f"{CONSENT_PATH}?{urllib.parse.urlencode({'txn': txn_id})}", 303
+        signed_in = (
+            session is not None
+            and not reauth
+            and (session.pending or session.iat > 0)
+        )
+        if txn_id is None:
+            if signed_in:
+                return None, notice, self.redirect(_notice_landing(notice), 303)
+            return None, notice, None
+        if signed_in:
+            return (
+                txn_id,
+                None,
+                self.redirect(
+                    f"{CONSENT_PATH}?{urllib.parse.urlencode({'txn': txn_id})}", 303
+                ),
             )
-        return txn_id, None
+        return txn_id, None, None
+
+    async def resume_waiting(
+        self, request: Request, txn_id: str | None
+    ) -> tuple[str | None, str | None]:
+        """``(txn, notice)``: the authorization request to resume after a sign-in, if any.
+
+        The request id was checked when the sign-in started, but a provider round trip, a slow
+        password check or a long pause can outlast it. At the end of the sign-in it must still be
+        live, unused and started in this browser; otherwise it is dropped and the person lands on
+        the account home with the ``authorization_unavailable`` notice.
+        """
+        if txn_id is None:
+            return None, None
+        binding = request.cookies.get(self.authz.binding_cookie)
+        if _TXN_ID_RE.fullmatch(txn_id) is not None and await self.authz.consent.txn_open(
+            txn_id, binding
+        ):
+            return txn_id, None
+        return None, "authorization_unavailable"
 
     @staticmethod
     def _carry(
@@ -696,10 +740,15 @@ class AccountCore:
 
     async def _choose_provider(self, request: Request) -> Response:
         assert self.logins is not None
-        txn_id, early = await self._login_txn(request)
+        txn_id, notice, early = await self._login_txn(request)
         if early is not None:
             return early
         reauth = request.query_params.get("reauth") == "1"
+        if notice is not None:
+            # The notice wins over a return address (see _complete_sign_in), so only a request
+            # for another account is carried on.
+            query = {"notice": notice, **({"reauth": "1"} if reauth else {})}
+            return self.redirect(SIGN_IN_PATH + "?" + urllib.parse.urlencode(query), 303)
         return_to = None
         if txn_id is None:
             return_to = sanitize_return_to(request.query_params.get("return_to"))
@@ -777,7 +826,13 @@ class AccountCore:
         )
 
     async def _complete_sign_in(
-        self, outcome: SignIn, *, now: float, waiting: Any, return_to: Any
+        self,
+        outcome: SignIn,
+        *,
+        now: float,
+        waiting: Any,
+        return_to: Any,
+        notice: str | None = None,
     ) -> Response:
         """The session cookie and the landing page of a successful sign-in (every provider)."""
         standing = outcome.status
@@ -805,10 +860,12 @@ class AccountCore:
         logger.info(
             "account sign-in ok account=%s pending=%s", sign_in_key, outcome.pending
         )
-        landing = ACCOUNT_PATH
         landing = ACCOUNT_PATH + "/"
         if isinstance(return_to, str) and sanitize_return_to(return_to) is not None:
             landing = return_to
+        if notice in ACCOUNT_NOTICES:
+            # A dropped request id wins over a return address: the person must hear about it.
+            landing = _notice_landing(notice)
         if isinstance(waiting, str) and _TXN_ID_RE.fullmatch(waiting):
             landing = f"{CONSENT_PATH}?{urllib.parse.urlencode({'txn': waiting})}"
         response = self.redirect(landing, 303)
@@ -839,9 +896,6 @@ class AccountCore:
                 count,
                 key,
             )
-
-    def _authorization_invalid(self) -> Response:
-        return self._sign_in_failure("authorization_invalid")
 
     def _sign_in_refused(self, denied: Denied) -> Response:
         key = getattr(denied, "account_key", None)

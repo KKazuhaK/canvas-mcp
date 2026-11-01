@@ -24,12 +24,12 @@ def test_the_single_page_app_is_what_serves_the_account_pages(react_stack: Stack
     assert react_stack.client.post("/account/grants/revoke", data={}, headers={"Origin": "https://canvas.example.test"}).status_code in (404, 405)
 
 
-def test_a_request_that_is_not_this_browsers_goes_to_the_sign_in_page_with_a_closed_code(react_stack: Stack) -> None:
+def test_a_request_that_is_not_this_browsers_goes_to_the_sign_in_page_with_a_closed_notice(react_stack: Stack) -> None:
     _, _, url = start_request(react_stack)
-    response = Browser(react_stack, react=True).get(url)
+    response = Browser(react_stack, react=True).get(url.replace("/auth/login/entra?", "/auth/login?", 1))
     assert response.status_code == 303
-    assert response.headers["location"] == "/account/sign-in?error=authorization_invalid"
-    assert parse_qs(urlsplit(response.headers["location"]).query) == {"error": ["authorization_invalid"]}
+    assert response.headers["location"] == "/account/sign-in?notice=authorization_unavailable"
+    assert parse_qs(urlsplit(response.headers["location"]).query) == {"notice": ["authorization_unavailable"]}
 
 
 def test_the_sign_in_continues_to_the_apps_consent_screen_and_the_api_decides(react_stack: Stack) -> None:

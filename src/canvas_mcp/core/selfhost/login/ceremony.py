@@ -75,6 +75,8 @@ class FlowRecord:
     iat: int
     v: int = 1
     revision: int | None = None
+    #: A request id was supplied but could not be used: the person is told when the sign-in ends.
+    nt: bool = False
 
     def to_json(self) -> bytes:
         raw = json.dumps(
@@ -93,6 +95,7 @@ class FlowRecord:
                 "li": self.li,
                 "iat": self.iat,
                 **({"revision": self.revision} if self.revision is not None else {}),
+                **({"nt": True} if self.nt else {}),
             },
             separators=(",", ":"),
         ).encode("utf-8")
@@ -130,6 +133,7 @@ class FlowRecord:
                 revision=None
                 if data.get("revision") is None
                 else _int(data["revision"]),
+                nt=_flag(data.get("nt", False)),
             )
         except (KeyError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
             raise ValueError("invalid flow record") from None
@@ -138,6 +142,12 @@ class FlowRecord:
         ):
             raise ValueError("link without a session")
         return record
+
+
+def _flag(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError("shape")
+    return value
 
 
 def new_cookie_payload(
