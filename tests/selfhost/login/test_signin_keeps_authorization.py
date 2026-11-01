@@ -108,7 +108,7 @@ def test_a_request_that_expired_during_the_provider_round_trip_lands_on_the_acco
     ps.clock.advance(20)
     done = person.get(callback)
     assert done.status_code == 303
-    assert done.headers["location"] == "/account/"
+    assert done.headers["location"] == "/account/?notice=authorization_expired"
     me = person.client.get("/api/v1/me")
     assert me.status_code == 200
 

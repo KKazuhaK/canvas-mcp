@@ -451,12 +451,14 @@ def test_a_local_sign_in_with_a_waiting_app_ends_at_its_consent_step(tmp_path, m
         # Without a waiting app a crafted return address is dropped.
         for bad in ("//evil.example/x", "https://evil.example/", "/auth/login/google"):
             assert sign_in(return_to=bad).json()["redirect_to"] == "/account/"
-        # A request id from nowhere is refused, not followed.
-        assert sign_in(txn="Z" * 43).status_code == 400
+        # A well-formed id this browser cannot resume ends at the home with a notice; a
+        # malformed one is refused, and nothing is ever followed.
+        unknown = sign_in(txn="Z" * 43)
+        assert unknown.json()["redirect_to"] == "/account/?notice=authorization_expired"
         assert sign_in(txn="//evil.example").status_code == 400
 
 
-def test_a_local_sign_in_whose_request_expired_meanwhile_lands_on_the_account_home(tmp_path, monkeypatch):
+def test_a_local_form_left_open_past_the_request_lifetime_still_signs_in_with_a_notice(tmp_path, monkeypatch):
     local_stack, Browser, pkce, query_of = _waiting_app(tmp_path, monkeypatch)
     env = {"ENTRA_TENANT_ID": "", "ENTRA_CLIENT_ID": "", "ENTRA_CLIENT_SECRET": ""}
     with local_stack(tmp_path, monkeypatch, env=env) as stack:
@@ -465,18 +467,9 @@ def test_a_local_sign_in_whose_request_expired_meanwhile_lands_on_the_account_ho
         _verifier, challenge = pkce()
         started = browser.start(stack.authorize_params(stack.register(), challenge))
         txn = query_of(browser.get(started.headers["location"]).headers["location"])["txn"]
-        real = stack.runtime.authz.consent.txn_open
-        calls = []
-
-        async def expiring(txn_id, binding):
-            calls.append(txn_id)
-            # Live when the sign-in is accepted, gone by the time it completes.
-            return len(calls) == 1 and await real(txn_id, binding)
-
-        monkeypatch.setattr(stack.runtime.authz.consent, "txn_open", expiring)
+        stack.clock.advance(601)
         done = browser.api(
             "POST", "/login/local", body={"username": "admin", "password": PASSWORD, "txn": txn}
         )
         assert done.status_code == 200, done.text
-        assert done.json()["redirect_to"] == "/account/"
-        assert len(calls) == 2
+        assert done.json()["redirect_to"] == "/account/?notice=authorization_expired"

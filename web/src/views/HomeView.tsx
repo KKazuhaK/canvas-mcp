@@ -3,7 +3,8 @@ import Button from '@mui/material/Button'
 import Card from '@mui/material/Card'
 import CardContent from '@mui/material/CardContent'
 import Typography from '@mui/material/Typography'
-import { Link as RouterLink, Navigate } from 'react-router'
+import Alert from '@mui/material/Alert'
+import { Link as RouterLink, Navigate, useSearchParams } from 'react-router'
 import { useTranslation } from 'react-i18next'
 import { isUnauthenticated } from '@/api/errors'
 import type { MeResponse } from '@/api/types'
@@ -42,8 +43,16 @@ function SignedOutHome() {
 
 function AccountHome({ me }: { me: MeResponse }) {
   const { t } = useTranslation()
+  // Only this one closed code is recognised; any other value is ignored, never shown.
+  const [params] = useSearchParams()
+  const expired = params.get('notice') === 'authorization_expired'
   return (
     <>
+      {expired ? (
+        <Alert severity="info" role="note" sx={{ mb: 2 }}>
+          {t('auth:login.appExpired')}
+        </Alert>
+      ) : null}
       <PageHeader
         title={t('account:home.title')}
         subtitle={t('account:home.signedInAs', {

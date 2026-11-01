@@ -7,6 +7,18 @@ import { http } from '@/api/client'
 import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 
 describe('Account overview and focused settings', () => {
+  it('says so when the app that sent the person here ran out of time, and ignores any other notice', async () => {
+    await renderApp('/?notice=authorization_expired', 'enrolled')
+    expect(await screen.findByText(/waited too long, so its request expired/)).toBeInTheDocument()
+  })
+
+  it('never renders an unknown notice value from the address', async () => {
+    await renderApp('/?notice=%3Cb%3Ehello%3C%2Fb%3E', 'enrolled')
+    await screen.findByRole('heading', { name: 'My account' }).catch(() => undefined)
+    expect(screen.queryByText(/hello/)).toBeNull()
+    expect(screen.queryByText(/waited too long/)).toBeNull()
+  })
+
   it('previews connected clients with trust labels without treating a partial page as a total', async () => {
     await renderApp('/', 'enrolled', () => {
       const inner = http.defaults.adapter as (config: InternalAxiosRequestConfig) => Promise<AxiosResponse>

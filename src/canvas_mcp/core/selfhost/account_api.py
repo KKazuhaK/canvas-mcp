@@ -84,6 +84,7 @@ from canvas_mcp.core.selfhost.tool_prefs import (
 from canvas_mcp.core.tool_policy import TOOL_EFFECTS, Effect
 
 from . import custody
+from .authz.transactions import binding_ok
 from .build_info import build_info
 from .config_snapshot import CURRENT_CONFIG
 from .config_store import ConfigStore, SchoolRemovalConfirmation
@@ -1588,8 +1589,12 @@ class ApiApp:
         if txn is not None:
             if not isinstance(txn, str) or web._TXN_ID_RE.fullmatch(txn) is None:
                 raise _Fail("authorization_invalid")
-            if not await self.app.authz.consent.txn_open(
-                txn, ctx.request.cookies.get(self.app.authz.binding_cookie)
+            binding = ctx.request.cookies.get(self.app.authz.binding_cookie)
+            # A request that ran out while the form was open does not block the sign-in: it
+            # ends on the account home with a notice. Without a binding from this browser the
+            # request id is simply refused.
+            if not binding_ok(binding) and not await self.app.authz.consent.txn_open(
+                txn, binding
             ):
                 raise _Fail("authorization_invalid")
             waiting = txn
@@ -1611,11 +1616,13 @@ class ApiApp:
         outcome = SignIn(
             status, ext, status.role == "owner" and status.role_source != "rules", False
         )
+        waiting, notice = await self.app.resume_waiting(ctx.request, waiting)
         completed = await self.app._complete_sign_in(
             outcome,
             now=self.app.clock(),
-            waiting=await self.app.still_waiting(ctx.request, waiting),
+            waiting=waiting,
             return_to=body.get("return_to"),
+            notice=notice,
         )
         response = self._ok({"redirect_to": completed.headers["location"]})
         response.raw_headers.extend(

@@ -282,11 +282,9 @@ class ExternalSignIn:
             await app._admission_lost(signed)
             return app._sign_in_refused(signed)
         assert isinstance(signed, SignIn)
+        waiting, notice = await app.resume_waiting(request, record.txn)
         return await app._complete_sign_in(
-            signed,
-            now=now,
-            waiting=await app.still_waiting(request, record.txn),
-            return_to=record.rt,
+            signed, now=now, waiting=waiting, return_to=record.rt, notice=notice
         )
 
     def _failure(
