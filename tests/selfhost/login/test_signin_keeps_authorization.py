@@ -178,3 +178,29 @@ def test_a_signed_in_person_with_a_waiting_app_goes_straight_to_consent(
         person.start("school", txn=txn).headers["location"]
         == f"/account/consent?txn={txn}"
     )
+
+
+def test_a_live_request_whose_binding_cookie_was_lost_ends_on_the_notice_not_consent(
+    ps: ProviderStack,
+) -> None:
+    person = ps.person()
+    _client, _verifier, login = person.begin_connect()
+    txn = _txn(login)
+    start = person.start("school", txn=txn)
+    callback = person.callback_url("school", start)
+    _forget_binding(person)  # no clock advance: the request itself is still live
+    done = person.get(callback)
+    assert done.headers["location"] == NOTICE_HOME
+
+
+def test_the_chooser_keeps_a_request_for_another_account_when_it_drops_the_request(
+    ps: ProviderStack,
+) -> None:
+    person = ps.person()
+    assert person.sign_in("school").status_code == 303
+    _client, _verifier, login = person.begin_connect()
+    _forget_binding(person)
+    chooser = person.get(login + "&reauth=1&return_to=/account/schools")
+    assert chooser.headers["location"] == (
+        "/account/sign-in?notice=authorization_unavailable&reauth=1"
+    )

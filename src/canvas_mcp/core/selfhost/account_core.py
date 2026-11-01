@@ -743,11 +743,12 @@ class AccountCore:
         txn_id, notice, early = await self._login_txn(request)
         if early is not None:
             return early
-        if notice is not None:
-            return self.redirect(
-                SIGN_IN_PATH + "?" + urllib.parse.urlencode({"notice": notice}), 303
-            )
         reauth = request.query_params.get("reauth") == "1"
+        if notice is not None:
+            # The notice wins over a return address (see _complete_sign_in), so only a request
+            # for another account is carried on.
+            query = {"notice": notice, **({"reauth": "1"} if reauth else {})}
+            return self.redirect(SIGN_IN_PATH + "?" + urllib.parse.urlencode(query), 303)
         return_to = None
         if txn_id is None:
             return_to = sanitize_return_to(request.query_params.get("return_to"))

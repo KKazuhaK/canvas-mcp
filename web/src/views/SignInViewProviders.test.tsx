@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { errorBody, scriptAdapter } from '@/test/fixtures'
 import { renderApp } from '@/test/renderWithProviders'
@@ -63,9 +63,11 @@ describe('SignInView with several providers', () => {
   })
 
   it('says up front that the app request is unusable and does not claim an app is waiting', async () => {
-    await renderApp('/sign-in?notice=authorization_unavailable', 'signed-out', signedOutWithProviders)
+    const { router } = await renderApp('/sign-in?notice=authorization_unavailable', 'signed-out', signedOutWithProviders)
     expect(await screen.findByText(/no longer valid/)).toBeInTheDocument()
     expect(screen.queryByText(/An app is waiting/)).toBeNull()
+    await waitFor(() => expect(router.state.location.search).toBe(''))
+    expect(screen.getByText(/no longer valid/)).toBeInTheDocument()
     expect((await screen.findAllByRole('link', { name: /Sign in with/ }))[0]).toHaveAttribute('href', '/auth/login/entra')
   })
 

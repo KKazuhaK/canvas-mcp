@@ -6,6 +6,7 @@ import Card from '@mui/material/Card'
 import CardContent from '@mui/material/CardContent'
 import Skeleton from '@mui/material/Skeleton'
 import Typography from '@mui/material/Typography'
+import { useEffect, useState } from 'react'
 import { Navigate, useLocation, useSearchParams } from 'react-router'
 import { useTranslation } from 'react-i18next'
 import { isUnauthenticated } from '@/api/errors'
@@ -43,14 +44,23 @@ function isPlainPath(url: string): boolean {
  */
 export default function SignInView() {
   const { t } = useTranslation()
-  const [params] = useSearchParams()
+  const [params, setParams] = useSearchParams()
   const sessionEnded = isSessionEnded(useLocation().state)
   const providers = useProviders()
   const me = useMe()
   const errorParam = params.get('error')
   const rawTxn = params.get('txn')
   const txn = rawTxn !== null && TXN_PATTERN.test(rawTxn) ? rawTxn : null
-  const unavailable = params.get('notice') === APP_REQUEST_NOTICE
+  // Read once, then removed from the address so a reload does not show it again.
+  const [unavailable] = useState(() => params.get('notice') === APP_REQUEST_NOTICE)
+  const hasNotice = params.has('notice')
+  useEffect(() => {
+    if (!hasNotice) return
+    const next = new URLSearchParams(params)
+    next.delete('notice')
+    setParams(next, { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasNotice])
   const reauth = params.get('reauth') === '1'
   // A waiting app's request ends at the consent screen, not at a page of this app.
   const returnTo = txn === null ? sanitizeReturnTo(params.get('return_to')) : null
