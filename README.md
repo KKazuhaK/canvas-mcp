@@ -153,14 +153,15 @@ Canvas MCP provides **up to 127 tools** for interacting with Canvas LMS; the def
 
 The Canvas MCP Server bridges the gap between AI assistants and Canvas Learning Management System, providing role-specific workflows for students, educators, learning designers, and developers. Built on the Model Context Protocol (MCP), it is designed for MCP-compatible clients; setup and supported capabilities vary by client.
 
-## Latest Release: v1.14.2 (independent fork)
+## Latest Release: v1.14.3 (independent fork)
 
-**Released:** October 27, 2026 | **[Release notes](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.2)**
+**Released:** November 1, 2026 | **[Release notes](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.3)**
 
-This fork release makes tool failures machine-readable (`{"error", "message"}`
-with stable codes such as `CREDENTIAL_INVALID`), declares `openWorldHint` on every
-tool, and serves a public `/healthz` with the version in every HTTP mode. Tool
-failure text changed shape; see the [changelog](CHANGELOG.md).
+This fork release fixes Portal sign-in when the app request it started with can
+no longer be used (for example it expired after 10 minutes): the person still
+signs in and sees a notice telling them to go back to the app and connect again,
+instead of an error or a silent landing on the account home. See the
+[changelog](CHANGELOG.md).
 
 ## Upstream v1.14.0 highlights
 
