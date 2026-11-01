@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Portal sign-in re-checks the waiting app at the end.** A sign-in (any provider, or the local form) that began with an app waiting for consent now confirms the request is still live, unused and from the same browser before going to the consent step; otherwise it lands on the account home instead of a dead consent page.
+
 ## [1.14.2] — 2026-10-27
 
 ### Changed

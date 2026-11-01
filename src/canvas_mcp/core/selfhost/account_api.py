@@ -1614,7 +1614,7 @@ class ApiApp:
         completed = await self.app._complete_sign_in(
             outcome,
             now=self.app.clock(),
-            waiting=waiting,
+            waiting=await self.app.still_waiting(ctx.request, waiting),
             return_to=body.get("return_to"),
         )
         response = self._ok({"redirect_to": completed.headers["location"]})

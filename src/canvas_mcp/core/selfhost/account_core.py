@@ -680,6 +680,20 @@ class AccountCore:
             )
         return txn_id, None
 
+    async def still_waiting(self, request: Request, txn_id: str | None) -> str | None:
+        """The authorization request to resume after a sign-in, if it can still be resumed.
+
+        The request id was checked when the sign-in started, but a provider round trip or a slow
+        password check can outlast it. At the end of the sign-in it must still be live, unused and
+        started in this browser; otherwise it is dropped and the person lands on the account home.
+        """
+        if txn_id is None or _TXN_ID_RE.fullmatch(txn_id) is None:
+            return None
+        binding = request.cookies.get(self.authz.binding_cookie)
+        if not await self.authz.consent.txn_open(txn_id, binding):
+            return None
+        return txn_id
+
     @staticmethod
     def _carry(
         txn_id: str | None, reauth: bool, return_to: str | None
@@ -805,7 +819,6 @@ class AccountCore:
         logger.info(
             "account sign-in ok account=%s pending=%s", sign_in_key, outcome.pending
         )
-        landing = ACCOUNT_PATH
         landing = ACCOUNT_PATH + "/"
         if isinstance(return_to, str) and sanitize_return_to(return_to) is not None:
             landing = return_to

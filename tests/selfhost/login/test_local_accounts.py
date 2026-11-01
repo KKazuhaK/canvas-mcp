@@ -415,3 +415,68 @@ def test_local_login_completes_pkce_consent_and_password_change_revokes_mcp(
         )
         assert refreshed.status_code == 401, refreshed.text
         assert refreshed.json()["error"] == "invalid_grant"
+
+
+def _waiting_app(tmp_path, monkeypatch):
+    """A local-only installation with an app waiting for the sign-in: yields (stack, txn)."""
+    from canvas_mcp.core.selfhost.settings import load_selfhost_settings
+
+    from ..authz import stack as stack_module
+    from ..authz.stack import Browser, local_stack, pkce, query_of
+
+    monkeypatch.setattr(stack_module, "load_provider_environment", load_selfhost_settings)
+    return local_stack, Browser, pkce, query_of
+
+
+def test_a_local_sign_in_with_a_waiting_app_ends_at_its_consent_step(tmp_path, monkeypatch):
+    local_stack, Browser, pkce, query_of = _waiting_app(tmp_path, monkeypatch)
+    env = {"ENTRA_TENANT_ID": "", "ENTRA_CLIENT_ID": "", "ENTRA_CLIENT_SECRET": ""}
+    with local_stack(tmp_path, monkeypatch, env=env) as stack:
+        assert initialize(stack.client, stack.runtime.installation.issue()).status_code == 200
+        browser = Browser(stack)
+        _verifier, challenge = pkce()
+        started = browser.start(stack.authorize_params(stack.register(), challenge))
+        txn = query_of(browser.get(started.headers["location"]).headers["location"])["txn"]
+
+        def sign_in(**extra):
+            return browser.api(
+                "POST", "/login/local", body={"username": "admin", "password": PASSWORD, **extra}
+            )
+
+        # A crafted return address never overrides the waiting app.
+        for bad in ("//evil.example/x", "https://evil.example/", "/account/../x"):
+            body = sign_in(txn=txn, return_to=bad)
+            assert body.status_code == 200, body.text
+            assert body.json()["redirect_to"] == f"/account/consent?txn={txn}"
+        # Without a waiting app a crafted return address is dropped.
+        for bad in ("//evil.example/x", "https://evil.example/", "/auth/login/google"):
+            assert sign_in(return_to=bad).json()["redirect_to"] == "/account/"
+        # A request id from nowhere is refused, not followed.
+        assert sign_in(txn="Z" * 43).status_code == 400
+        assert sign_in(txn="//evil.example").status_code == 400
+
+
+def test_a_local_sign_in_whose_request_expired_meanwhile_lands_on_the_account_home(tmp_path, monkeypatch):
+    local_stack, Browser, pkce, query_of = _waiting_app(tmp_path, monkeypatch)
+    env = {"ENTRA_TENANT_ID": "", "ENTRA_CLIENT_ID": "", "ENTRA_CLIENT_SECRET": ""}
+    with local_stack(tmp_path, monkeypatch, env=env) as stack:
+        assert initialize(stack.client, stack.runtime.installation.issue()).status_code == 200
+        browser = Browser(stack)
+        _verifier, challenge = pkce()
+        started = browser.start(stack.authorize_params(stack.register(), challenge))
+        txn = query_of(browser.get(started.headers["location"]).headers["location"])["txn"]
+        real = stack.runtime.authz.consent.txn_open
+        calls = []
+
+        async def expiring(txn_id, binding):
+            calls.append(txn_id)
+            # Live when the sign-in is accepted, gone by the time it completes.
+            return len(calls) == 1 and await real(txn_id, binding)
+
+        monkeypatch.setattr(stack.runtime.authz.consent, "txn_open", expiring)
+        done = browser.api(
+            "POST", "/login/local", body={"username": "admin", "password": PASSWORD, "txn": txn}
+        )
+        assert done.status_code == 200, done.text
+        assert done.json()["redirect_to"] == "/account/"
+        assert len(calls) == 2
