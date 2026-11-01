@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Portal sign-in no longer drops an expired app request silently.** A sign-in (any provider, or the local form) that began with an app waiting for consent re-checks the request when it completes. If it expired or was used, the person lands on the account home with a notice (`?notice=authorization_expired`, a closed code) saying the app waited too long. The waiting-app notice now mentions the 10-minute limit.
+- **A sign-in no longer fails, or ends silently, when the app request it began with cannot be used.** If the request id on the sign-in page, the SSO start or the local form is malformed, expired, used, from another browser or missing its binding cookie (which lasts as long as the request, 10 minutes), the person still signs in and lands on the account home with a notice (`?notice=authorization_unavailable`, a closed code; shown once, also to accounts awaiting approval) telling them to go back to the app and connect again. The notice wins over a return address. A request that is still live ends at the consent step as before, and consent still needs a live request started in the same browser. The waiting-app notice mentions the 10-minute limit.
 
 ## [1.14.2] — 2026-10-27
 

@@ -69,6 +69,15 @@ def test_a_crafted_return_address_without_a_waiting_app_lands_on_the_account_hom
     assert done.headers["location"] == "/account/"
 
 
+NOTICE_HOME = "/account/?notice=authorization_unavailable"
+BINDING = "__Host-cmcp_bind"
+
+
+def _forget_binding(person) -> None:
+    """What a browser does when the binding cookie's 600 s are over."""
+    person.client.cookies.delete(BINDING)
+
+
 @pytest.mark.parametrize(
     "bad",
     [
@@ -77,26 +86,32 @@ def test_a_crafted_return_address_without_a_waiting_app_lands_on_the_account_hom
         "x" * 43,
         "short",
         "a" * 43 + "&return_to=//evil.example",
+        "A" * 500,
     ],
 )
-def test_a_bad_request_id_does_not_start_a_sign_in_or_redirect_anywhere(
+def test_an_unusable_request_id_never_blocks_the_sign_in_or_redirects_anywhere(
     ps: ProviderStack, bad: str
 ) -> None:
     person = ps.person()
-    start = person.start("school", txn=bad)
-    assert start.status_code == 303
-    assert start.headers["location"] == "/account/sign-in?error=authorization_invalid"
+    start = person.start("school", txn=bad, return_to="/account/schools")
+    assert start.status_code == 302
+    done = person.get(person.callback_url("school", start))
+    # The notice wins over the return address, and nothing is followed.
+    assert done.status_code == 303 and done.headers["location"] == NOTICE_HOME
+    assert person.client.get("/api/v1/me").status_code == 200
 
 
-def test_a_request_id_from_another_browser_is_refused(ps: ProviderStack) -> None:
+def test_a_request_id_from_another_browser_is_dropped_with_a_notice(
+    ps: ProviderStack,
+) -> None:
     owner, stranger = ps.person(), ps.person()
     _client, _verifier, login = owner.begin_connect()
     start = stranger.start("school", txn=_txn(login))
-    assert start.status_code == 303
-    assert start.headers["location"] == "/account/sign-in?error=authorization_invalid"
+    done = stranger.get(stranger.callback_url("school", start))
+    assert done.headers["location"] == NOTICE_HOME
 
 
-def test_a_request_that_expired_during_the_provider_round_trip_lands_on_the_account_home(
+def test_a_request_that_expired_before_the_sign_in_ended_lands_on_the_notice_without_its_cookie(
     ps: ProviderStack,
 ) -> None:
     person = ps.person()
@@ -106,11 +121,49 @@ def test_a_request_that_expired_during_the_provider_round_trip_lands_on_the_acco
     start = person.start("school", txn=txn)
     callback = person.callback_url("school", start)
     ps.clock.advance(20)
+    _forget_binding(person)
     done = person.get(callback)
-    assert done.status_code == 303
-    assert done.headers["location"] == "/account/?notice=authorization_expired"
-    me = person.client.get("/api/v1/me")
-    assert me.status_code == 200
+    assert done.status_code == 303 and done.headers["location"] == NOTICE_HOME
+    assert person.client.get("/api/v1/me").status_code == 200
+
+
+def test_a_sign_in_that_starts_long_after_the_request_expired_ends_on_the_notice(
+    ps: ProviderStack,
+) -> None:
+    """The production case: the person signs in 57 minutes after the app asked."""
+    person = ps.person()
+    _client, _verifier, login = person.begin_connect()
+    txn = _txn(login)
+    ps.clock.advance(57 * 60)
+    _forget_binding(person)
+    chooser = person.get(login)
+    assert chooser.headers["location"] == "/account/sign-in?notice=authorization_unavailable"
+    # The sign-in page of the single-page app still carries the stale id on its links.
+    start = person.start("school", txn=txn)
+    assert start.status_code == 302
+    done = person.get(person.callback_url("school", start))
+    assert done.headers["location"] == NOTICE_HOME
+
+
+def test_a_signed_in_person_with_an_unusable_request_goes_to_the_notice(
+    ps: ProviderStack,
+) -> None:
+    person = ps.person()
+    assert person.sign_in("school").status_code == 303
+    _client, _verifier, login = person.begin_connect()
+    _forget_binding(person)
+    ps.clock.advance(601)
+    assert person.get(login).headers["location"] == NOTICE_HOME
+
+
+def test_consent_still_needs_a_live_request_of_this_browser(ps: ProviderStack) -> None:
+    person = ps.person()
+    _client, _verifier, login = person.begin_connect()
+    txn = _txn(login)
+    assert person.sign_in("school").status_code == 303
+    _forget_binding(person)
+    shown = person.client.get("/api/v1/consent", params={"txn": txn})
+    assert shown.status_code != 200
 
 
 def test_a_signed_in_person_with_a_waiting_app_goes_straight_to_consent(

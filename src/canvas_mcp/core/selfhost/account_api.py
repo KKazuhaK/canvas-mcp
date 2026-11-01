@@ -84,7 +84,6 @@ from canvas_mcp.core.selfhost.tool_prefs import (
 from canvas_mcp.core.tool_policy import TOOL_EFFECTS, Effect
 
 from . import custody
-from .authz.transactions import binding_ok
 from .build_info import build_info
 from .config_snapshot import CURRENT_CONFIG
 from .config_store import ConfigStore, SchoolRemovalConfirmation
@@ -1585,19 +1584,8 @@ class ApiApp:
         ) or not self.app.local_user_limiter.allow((name.strip().lower(),)):
             raise _Fail("rate_limited", {"retry_after_s": 600})
         txn = body.get("txn")
-        waiting = None
-        if txn is not None:
-            if not isinstance(txn, str) or web._TXN_ID_RE.fullmatch(txn) is None:
-                raise _Fail("authorization_invalid")
-            binding = ctx.request.cookies.get(self.app.authz.binding_cookie)
-            # A request that ran out while the form was open does not block the sign-in: it
-            # ends on the account home with a notice. Without a binding from this browser the
-            # request id is simply refused.
-            if not binding_ok(binding) and not await self.app.authz.consent.txn_open(
-                txn, binding
-            ):
-                raise _Fail("authorization_invalid")
-            waiting = txn
+        if txn is not None and not isinstance(txn, str):
+            raise _invalid("txn")
         account = await run_store(
             lambda: self._local_accounts().authenticate(
                 name, password, now=int(self.app.clock())
@@ -1616,7 +1604,9 @@ class ApiApp:
         outcome = SignIn(
             status, ext, status.role == "owner" and status.role_source != "rules", False
         )
-        waiting, notice = await self.app.resume_waiting(ctx.request, waiting)
+        # Whatever is wrong with the request id (malformed, no or another binding, expired, used)
+        # never blocks the sign-in: it is dropped and the person is told on the account home.
+        waiting, notice = await self.app.resume_waiting(ctx.request, txn)
         completed = await self.app._complete_sign_in(
             outcome,
             now=self.app.clock(),

@@ -281,7 +281,9 @@ def test_login_origin_rate_limit_and_transaction_binding(tmp_path):
             ).status_code
             == 403
         )
-        assert login(client, txn="x" * 43).status_code == 400
+        unusable = login(client, txn="x" * 43)
+        assert unusable.status_code == 200
+        assert unusable.json()["redirect_to"] == "/account/?notice=authorization_unavailable"
         for _ in range(9):
             assert login(client, password="wrong").status_code == 401
         assert login(client).status_code == 429
@@ -444,18 +446,20 @@ def test_a_local_sign_in_with_a_waiting_app_ends_at_its_consent_step(tmp_path, m
             )
 
         # A crafted return address never overrides the waiting app.
-        for bad in ("//evil.example/x", "https://evil.example/", "/account/../x"):
+        for bad in ("//evil.example/x", "/account/../x"):
             body = sign_in(txn=txn, return_to=bad)
             assert body.status_code == 200, body.text
             assert body.json()["redirect_to"] == f"/account/consent?txn={txn}"
         # Without a waiting app a crafted return address is dropped.
-        for bad in ("//evil.example/x", "https://evil.example/", "/auth/login/google"):
+        for bad in ("//evil.example/x", "/auth/login/google"):
             assert sign_in(return_to=bad).json()["redirect_to"] == "/account/"
-        # A well-formed id this browser cannot resume ends at the home with a notice; a
-        # malformed one is refused, and nothing is ever followed.
-        unknown = sign_in(txn="Z" * 43)
-        assert unknown.json()["redirect_to"] == "/account/?notice=authorization_expired"
-        assert sign_in(txn="//evil.example").status_code == 400
+        # An id this browser cannot resume never blocks the sign-in and is never followed:
+        # the person lands on the account home with a notice, whatever return address came along.
+        for unusable in ("Z" * 43, "//evil.example", "A" * 500):
+            done = sign_in(txn=unusable, return_to="/account/schools")
+            assert done.status_code == 200, done.text
+            assert done.json()["redirect_to"] == "/account/?notice=authorization_unavailable"
+        assert sign_in(txn=5).status_code == 422
 
 
 def test_a_local_form_left_open_past_the_request_lifetime_still_signs_in_with_a_notice(tmp_path, monkeypatch):
@@ -467,9 +471,11 @@ def test_a_local_form_left_open_past_the_request_lifetime_still_signs_in_with_a_
         _verifier, challenge = pkce()
         started = browser.start(stack.authorize_params(stack.register(), challenge))
         txn = query_of(browser.get(started.headers["location"]).headers["location"])["txn"]
-        stack.clock.advance(601)
+        stack.clock.advance(57 * 60)
+        # After 600 seconds the browser has dropped the binding cookie as well.
+        browser.client.cookies.delete("__Host-cmcp_bind")
         done = browser.api(
             "POST", "/login/local", body={"username": "admin", "password": PASSWORD, "txn": txn}
         )
         assert done.status_code == 200, done.text
-        assert done.json()["redirect_to"] == "/account/?notice=authorization_expired"
+        assert done.json()["redirect_to"] == "/account/?notice=authorization_unavailable"

@@ -1,4 +1,4 @@
-import { screen } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import { renderApp } from '@/test/renderWithProviders'
@@ -7,16 +7,25 @@ import { http } from '@/api/client'
 import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 
 describe('Account overview and focused settings', () => {
-  it('says so when the app that sent the person here ran out of time, and ignores any other notice', async () => {
-    await renderApp('/?notice=authorization_expired', 'enrolled')
-    expect(await screen.findByText(/waited too long, so its request expired/)).toBeInTheDocument()
+  it('says so once when the app request can no longer be used, and removes the notice from the address', async () => {
+    const { router } = await renderApp('/?notice=authorization_unavailable', 'enrolled')
+    expect(await screen.findByText(/no longer valid/)).toBeInTheDocument()
+    await waitFor(() => expect(router.state.location.search).toBe(''))
+    expect(screen.getByText(/no longer valid/)).toBeInTheDocument()
   })
 
-  it('never renders an unknown notice value from the address', async () => {
-    await renderApp('/?notice=%3Cb%3Ehello%3C%2Fb%3E', 'enrolled')
-    await screen.findByRole('heading', { name: 'My account' }).catch(() => undefined)
+  it('shows the same notice to an account that is waiting for approval', async () => {
+    await renderApp('/?notice=authorization_unavailable', 'pending')
+    expect(await screen.findByRole('heading', { name: 'Waiting for approval' })).toBeInTheDocument()
+    expect(screen.getByText(/no longer valid/)).toBeInTheDocument()
+  })
+
+  it.each(['authorization_expired', '%3Cb%3Ehello%3C%2Fb%3E', ''])('ignores the notice value %j', async (value) => {
+    const { router } = await renderApp(`/?notice=${value}`, 'enrolled')
+    await screen.findByRole('heading', { name: 'My account' })
+    await waitFor(() => expect(router.state.location.search).toBe(''))
+    expect(screen.queryByText(/no longer valid/)).toBeNull()
     expect(screen.queryByText(/hello/)).toBeNull()
-    expect(screen.queryByText(/waited too long/)).toBeNull()
   })
 
   it('previews connected clients with trust labels without treating a partial page as a total', async () => {

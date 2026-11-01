@@ -40,9 +40,7 @@ def test_chooser_preserves_only_its_browser_bound_transaction(ps, reauth):
     stranger = ps.person()
     rejected = stranger.get(login)
     assert rejected.status_code == 303
-    assert (
-        rejected.headers["location"] == "/account/sign-in?error=authorization_invalid"
-    )
+    assert rejected.headers["location"] == "/account/sign-in?notice=authorization_unavailable"
 
 
 @pytest.mark.parametrize(

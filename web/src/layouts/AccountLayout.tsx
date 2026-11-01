@@ -1,3 +1,4 @@
+import AppRequestNotice from '@/components/AppRequestNotice'
 import AdminPanelSettingsIcon from '@mui/icons-material/AdminPanelSettings'
 import AppsIcon from '@mui/icons-material/Apps'
 import HistoryIcon from '@mui/icons-material/History'
@@ -233,6 +234,7 @@ export default function AccountLayout({ me, children }: { me: MeResponse; childr
         >
           <Container maxWidth={adminPage ? 'xl' : 'md'} sx={{ flex: 1, minWidth: 0, py: 3, px: 2 }}>
             {me.custody_ack_required ? <Alert severity="warning" sx={{ mb: 2 }}>{t('account:custody.banner')} <Button component={RouterLink} to="/token">{t('account:custody.open')}</Button></Alert> : null}
+            <AppRequestNotice />
             {children ?? <Outlet />}
           </Container>
           <BuildFooter isAdmin={isOwner && active} />

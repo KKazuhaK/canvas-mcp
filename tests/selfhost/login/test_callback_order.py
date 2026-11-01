@@ -420,7 +420,7 @@ class TestStartRoute:
         value = header.split(";", 1)[0].split("=", 1)[1]
         assert value.startswith("v1.") and "state" not in value
 
-    def test_a_request_for_another_browser_is_refused(self, ps: ProviderStack) -> None:
+    def test_a_request_for_another_browser_is_dropped_not_followed(self, ps: ProviderStack) -> None:
         owner = Browser(ps.stack)
         client_id = ps.stack.register()
         from ..authz.stack import pkce
@@ -430,8 +430,11 @@ class TestStartRoute:
         txn = query_of(response.headers["location"])["txn"]
         stranger = ps.person()
         refused = stranger.get(f"/auth/login/google?txn={txn}")
-        assert failure_text(refused) == "authorization_invalid"
-        assert ps.google.counts["token"] == 0
+        # Not the stranger's request: the sign-in goes on without it (and ends with a notice).
+        assert refused.status_code == 302
+        done = stranger.get(stranger.callback_url("google", refused))
+        assert done.headers["location"] == "/account/?notice=authorization_unavailable"
+        assert ps.google.counts["token"] == 1
 
     def test_a_malformed_return_to_or_reauth_is_not_carried(
         self, ps: ProviderStack

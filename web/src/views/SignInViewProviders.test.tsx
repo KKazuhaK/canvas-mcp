@@ -62,6 +62,13 @@ describe('SignInView with several providers', () => {
     ])
   })
 
+  it('says up front that the app request is unusable and does not claim an app is waiting', async () => {
+    await renderApp('/sign-in?notice=authorization_unavailable', 'signed-out', signedOutWithProviders)
+    expect(await screen.findByText(/no longer valid/)).toBeInTheDocument()
+    expect(screen.queryByText(/An app is waiting/)).toBeNull()
+    expect((await screen.findAllByRole('link', { name: /Sign in with/ }))[0]).toHaveAttribute('href', '/auth/login/entra')
+  })
+
   it('carries a return address and no request id when no app is waiting', async () => {
     await renderApp('/sign-in?return_to=%2Faccount%2Factivity', 'signed-out', signedOutWithProviders)
     const link = await screen.findByRole('link', { name: /Sign in with GitHub/ })
