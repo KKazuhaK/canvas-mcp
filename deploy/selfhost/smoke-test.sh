@@ -164,7 +164,7 @@ for path in /account/api/me /account/login /account/callback; do
   status 405 "$path" -X POST
 done
 status 303 /auth/login?txn=bogus
-grep -qi '^location:.*account/sign-in?error=authorization_invalid' "$WORKDIR/headers" || fail "invalid transaction redirect"
+grep -qi '^location:.*account/sign-in?notice=authorization_unavailable' "$WORKDIR/headers" || fail "invalid transaction redirect"
 if [ -n "${SMOKE_ENTRA_TENANT_ID:-}" ]; then
   status 302 /auth/login/entra
   grep -qi '^location: https://login.microsoftonline.com/' "$WORKDIR/headers" || fail "Entra start redirect"
