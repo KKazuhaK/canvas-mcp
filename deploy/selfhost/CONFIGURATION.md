@@ -83,6 +83,32 @@ zero means keep forever. See [MAINTENANCE.md](MAINTENANCE.md) for scheduled
 retention jobs and bounded cleanup; a policy save does not synchronously prune
 existing history.
 
+## Browser sync
+
+Schools that do not let students create access tokens can use the browser
+extension instead (design and contract: [BROWSER-SYNC-DESIGN.md](BROWSER-SYNC-DESIGN.md)).
+Nothing needs enabling: the account page offers it, and a request uses synced
+browser data only when the account has no usable token for the school the data
+came from. Three operator-only settings (JSON integers) tune it:
+
+| Setting | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `browser_sync.fresh_hours` | 12 | 1–720 | Older synced data is still used, but the tool result says it may be out of date |
+| `browser_sync.max_age_days` | 14 | 1–90 | Synced data older than this is not used at all |
+| `browser_sync.purge_days` | 30 | 1–365 | Maintenance deletes snapshots (and revoked bindings) older than this |
+
+```sh
+python -m canvas_mcp.core.selfhost.token_admin settings set browser_sync.max_age_days 7
+```
+
+Per-binding limits are fixed (not settings): 200 courses, 3000 snapshot rows and 64 MiB of sealed data. Keep `purge_days` at least `max_age_days`. Snapshots are sealed with the same
+keys as stored tokens, so key rotation covers them and a database backup is
+useless without the matching keys. The extension's endpoints are CORS-enabled
+for extension origins only; the reverse proxy must pass the `Origin` and
+`Authorization` headers and must not add cookies. The Portal rate-limits by the
+address it sees, so put the real limiter in the proxy as for the other public
+endpoints.
+
 An internal school can be explicitly added with `schools add SCHOOL_HOST
 --allow-private`. Use `schools allow-private SCHOOL_HOST on|off` to change its
 exception later. Remove a featured internal host before withdrawing its

@@ -588,6 +588,7 @@ def build_selfhost_asgi_app(
     the unauthenticated OAuth endpoints and cleans expired OAuth records.
     """
     settings = runtime.settings
+    from .browser_store import BrowserSyncStore
     from .edge_guard import SelfhostEdgeGuard
     from .mail import MailStore
     from .maintenance import MaintenanceRunner
@@ -610,11 +611,22 @@ def build_selfhost_asgi_app(
                 touch_grant=runtime.authz.store.touch_grant,
                 clock=runtime.authz.clock,
                 course_state=settings.course_state,
+                browser=BrowserSyncStore(
+                    runtime.store.database,
+                    runtime.store.keyring,
+                    clock=runtime.authz.clock,
+                ),
             )
         ],
         host_origin_protection=True,
         allowed_hosts=[settings.public_host],
-        allowed_origins=[settings.public_base_url],
+        # The browser extension's origins pass this guard; its own endpoints check them
+        # exactly (browser_extension_api), and /mcp still needs an OAuth bearer token.
+        allowed_origins=[
+            settings.public_base_url,
+            "chrome-extension://*",
+            "moz-extension://*",
+        ],
     )
 
     runner = MaintenanceRunner(

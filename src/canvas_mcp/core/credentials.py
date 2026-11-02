@@ -18,7 +18,7 @@ import hmac
 import secrets
 import threading
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any
@@ -34,6 +34,26 @@ class RequestCredentials:
 
     api_token: str = field(repr=False)
     api_url: str
+
+
+@dataclass(frozen=True)
+class BrowserSource:
+    """Canvas data read from snapshots the student's browser extension uploaded.
+
+    This is the request's data source instead of a Canvas token: it carries no
+    credential and can only answer reads from stored data, never reach Canvas.
+    ``load(path)`` returns the stored snapshots for one Canvas API path (the
+    objects defined in :mod:`.browser_source`). A request has either
+    :class:`RequestCredentials` or a ``BrowserSource``, never both.
+    """
+
+    binding_id: str
+    canvas_host: str
+    load: Callable[[str], Awaitable[Sequence[Any]]] = field(repr=False)
+    #: A snapshot older than this many seconds is not used at all.
+    max_age_seconds: int = 14 * 86400
+    #: Older than this, a tool result carries a "may be out of date" warning.
+    fresh_seconds: int = 12 * 3600
 
 
 @dataclass(frozen=True)
@@ -95,6 +115,10 @@ LEGACY_MISSING_CREDENTIALS_MESSAGE = "Canvas token required for HTTP request"
 
 _request_credentials: ContextVar[RequestCredentials | None] = ContextVar(
     "request_credentials", default=None
+)
+
+_browser_source: ContextVar[BrowserSource | None] = ContextVar(
+    "browser_source", default=None
 )
 
 _http_request_active: ContextVar[bool] = ContextVar(
@@ -165,14 +189,32 @@ def get_request_credentials() -> RequestCredentials | None:
 
 
 def set_request_credentials(creds: RequestCredentials) -> None:
-    """Set Canvas credentials for the current async context."""
+    """Set Canvas credentials for the current async context.
+
+    A token replaces any browser data source: the two never coexist.
+    """
+    _browser_source.set(None)
     _request_credentials.set(creds)
+    _request_course_labels.set({})
+
+
+def get_browser_source() -> BrowserSource | None:
+    """The browser-snapshot data source of the current request, if it uses one."""
+    return _browser_source.get()
+
+
+def set_browser_source(source: BrowserSource) -> None:
+    """Answer this request from browser snapshots (never alongside a token)."""
+    if _request_credentials.get() is not None:
+        raise RuntimeError("a request cannot use both a Canvas token and browser data")
+    _browser_source.set(source)
     _request_course_labels.set({})
 
 
 def clear_request_credentials() -> None:
     """Clear credentials after request completes."""
     _request_credentials.set(None)
+    _browser_source.set(None)
     _request_credential_generation.set(None)
     _request_course_labels.set(None)
 
@@ -414,6 +456,11 @@ def current_principal_key() -> str:
     principal = _request_principal.get()
     if principal is not None:
         creds = _request_credentials.get()
+        browser = _browser_source.get()
+        if creds is None and browser is not None:
+            # Browser data is a different source than any token of the same
+            # account, so nothing learned from one may be served under the other.
+            return f"{principal.key}|browser|{browser.canvas_host.lower()}|{browser.binding_id}"
         if creds is None:
             return principal.key
         generation = _request_credential_generation.get() or 0
@@ -428,6 +475,7 @@ def current_principal_key() -> str:
 def clear_http_request_context() -> None:
     """Clear all per-request HTTP context after the request completes."""
     _request_credentials.set(None)
+    _browser_source.set(None)
     _http_request_active.set(False)
     _request_principal.set(None)
     _missing_credentials_message.set(None)

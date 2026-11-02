@@ -178,6 +178,16 @@ class TestRouteTables:
             "/api/v1/{rest:path}": (),
         }
         expected.update(dict.fromkeys(LOGIN_PATHS, ()))
+        # Browser sync's extension endpoints answer every method themselves (CORS preflight).
+        expected.update(
+            dict.fromkeys(
+                (
+                    f"/api/v1/extension/{name}"
+                    for name in ("capabilities", "claim", "plan", "snapshots", "binding")
+                ),
+                (),
+            )
+        )
         for path, _endpoints in ApiApp(core).route_table():
             expected[path] = ()
         assert table == {

@@ -13,7 +13,9 @@ import httpx
 
 from .anonymization import anonymize_response_data, scrub_identity
 from .credentials import (
+    BrowserSource,
     RequestCredentials,
+    get_browser_source,
     get_request_credentials,
     is_http_request_active,
     missing_credentials_code,
@@ -452,6 +454,14 @@ async def canvas_authenticated_client() -> AsyncIterator[httpx.AsyncClient]:
     """
     from .config import get_config
 
+    if get_browser_source() is not None:
+        # Browser sync has no Canvas credential to authenticate a download with.
+        record_failure(SOURCE_UNAVAILABLE)
+        raise PermissionError(
+            "Browser sync cannot download files or call Canvas directly: "
+            "it only serves data the browser extension synced."
+        )
+
     req_creds = get_request_credentials()
     if req_creds:
         dead = dead_token_message()
@@ -544,6 +554,12 @@ async def make_canvas_request(
 
     if api_root not in (API_ROOT_REST, API_ROOT_QUIZ, API_ROOT_GRAPHQL):
         return {"error": f"Unsupported api_root: {api_root}"}
+
+    browser = get_browser_source()
+    if browser is not None:
+        return await _answer_from_browser(
+            browser, method, endpoint, params, skip_anonymization, api_root, _pagination
+        )
 
     if req_creds:
         # Per-request client with user's credentials (HTTP mode)
@@ -735,6 +751,44 @@ async def make_canvas_request(
     finally:
         if _close_client:
             await client.aclose()
+
+
+async def _answer_from_browser(
+    browser: BrowserSource,
+    method: str,
+    endpoint: str,
+    params: dict[str, Any] | None,
+    skip_anonymization: bool,
+    api_root: str,
+    pagination: dict[str, str | None] | None,
+) -> Any:
+    """Answer one request from the student's synced browser snapshots; nothing is sent to Canvas."""
+    from .audit import log_data_access
+    from .browser_source import BrowserMiss, answer_get, refusal_for
+    from .config import get_config
+
+    refusal = refusal_for(method, api_root)
+    try:
+        if refusal is not None:
+            raise refusal
+        result = await answer_get(browser, endpoint, params)
+    except BrowserMiss as miss:
+        record_failure(miss.code)
+        log_data_access(method, endpoint, "error", "browser sync: " + miss.code)
+        return RequestFailure(miss.message, WriteOutcome.NOT_DISPATCHED)
+
+    if pagination is not None:
+        # The stored list is whole: one "page", no next link.
+        pagination["current"] = f"https://{browser.canvas_host}/api/v1{endpoint}"
+        pagination["next"] = None
+
+    config = get_config()
+    if not skip_anonymization and config.enable_data_anonymization:
+        result, applied = _anonymize_for_endpoint(result, endpoint)
+        if config.anonymization_debug and applied != ANONYMIZE_NONE:
+            log_debug(f"Applied {applied} anonymization to {endpoint}")
+    log_data_access(method, endpoint, "success")
+    return result
 
 
 async def _upload_destination_refusal(upload_url: str) -> str | None:

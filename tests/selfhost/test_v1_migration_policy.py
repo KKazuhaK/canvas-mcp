@@ -49,6 +49,10 @@ def revision_graph(tmp_path, monkeypatch):
         source / "versions/0006_token_email_reminders.py",
         directory / "versions/0006_token_email_reminders.py",
     )
+    shutil.copyfile(
+        source / "versions/0007_browser_sync.py",
+        directory / "versions/0007_browser_sync.py",
+    )
     migrate._script.cache_clear()
 
     def add(
@@ -57,7 +61,7 @@ def revision_graph(tmp_path, monkeypatch):
         contract=False,
         non_transactional=False,
         revision="0002_policy",
-        down="0006_token_email_reminders",
+        down="0007_browser_sync",
     ):
         script = f"""from alembic import op
 import sqlalchemy as sa
@@ -122,7 +126,7 @@ def test_contract_automatically_backs_up_and_preserves_strict_rowid_indexes_and_
         )
         assert backup.execute(
             "SELECT version_num FROM canvas_mcp_alembic_version"
-        ).fetchone() == ("0006_token_email_reminders",)
+        ).fetchone() == ("0007_browser_sync",)
         assert "obsolete" in {
             row[1] for row in backup.execute("PRAGMA table_info(audit_log)")
         }
@@ -217,7 +221,7 @@ def test_floor_policy_failure_rolls_back_ddl_and_revision(
             conn.exec_driver_sql(
                 "SELECT version_num FROM canvas_mcp_alembic_version"
             ).scalar_one()
-            == "0006_token_email_reminders"
+            == "0007_browser_sync"
         )
 
 
@@ -332,7 +336,7 @@ def test_nontransactional_plan_refuses_atomic_modes_before_any_revision(
             conn.exec_driver_sql(
                 "SELECT version_num FROM canvas_mcp_alembic_version"
             ).scalar_one()
-            == "0006_token_email_reminders"
+            == "0007_browser_sync"
         )
 
 

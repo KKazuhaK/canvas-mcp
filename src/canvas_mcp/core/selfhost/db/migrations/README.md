@@ -5,6 +5,11 @@ compatibility floor to 3 so an older key registry cannot report the SMTP secret
 as safely rotated. Existing credentials are preserved; rollback to an older image
 requires its pre-upgrade database backup.
 
+`0007_browser_sync` is an additive revision for browser sync: extension bindings
+(only a hash of the upload token), single-use pairing codes (hashed) and sealed
+Canvas snapshots, all deleted with their account. It does not raise the
+compatibility floor; an older image ignores the new tables.
+
 `browser_session_environment.py` contains one-time adoption of the former
 browser-duration environment setting; a stored database value wins on all later
 starts. Fresh installations default to 7 days. The account runtime contains no

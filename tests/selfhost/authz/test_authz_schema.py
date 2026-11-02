@@ -62,7 +62,7 @@ class TestSchema:
         with token_store.database.read() as conn:
             assert migrate.compare_schema(conn) == []
             status = migrate.read_status(conn)
-        assert status.alembic_revision == "0006_token_email_reminders"
+        assert status.alembic_revision == "0007_browser_sync"
         assert status.state == migrate.STATE_CURRENT
         assert status.compat_floor == 3 and status.database_id is not None
         assert set(AUTHZ_TABLES) <= set(schema.metadata.tables)

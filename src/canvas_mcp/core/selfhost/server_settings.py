@@ -83,6 +83,10 @@ SETTINGS: Mapping[str, SettingSpec] = MappingProxyType(
         ),
         "retention.auth_events_days": SettingSpec(int, 90, minimum=7, maximum=3650),
         "retention.audit_days": SettingSpec(int, 0, minimum=0, maximum=3650),
+        # Browser sync (see deploy/selfhost/BROWSER-SYNC-DESIGN.md). Operator-only.
+        "browser_sync.fresh_hours": SettingSpec(int, 12, minimum=1, maximum=720),
+        "browser_sync.max_age_days": SettingSpec(int, 14, minimum=1, maximum=90),
+        "browser_sync.purge_days": SettingSpec(int, 30, minimum=1, maximum=365),
     }
 )
 

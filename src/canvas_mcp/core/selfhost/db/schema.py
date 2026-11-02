@@ -924,3 +924,98 @@ Index("ix_notification_deliveries_account_id", notification_deliveries.c.account
 Index(
     "ix_notification_deliveries_credential_id", notification_deliveries.c.credential_id
 )
+
+extension_bindings = Table(
+    "extension_bindings",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column(
+        "account_id",
+        Uuid(),
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("token_hash", Key, nullable=False),
+    Column("canvas_host", Key),
+    Column("canvas_user_id", Text),
+    Column("created_at", Epoch, nullable=False),
+    Column("last_upload_at", Epoch),
+    Column("revoked_at", Epoch),
+    UniqueConstraint("token_hash", name="uq_extension_bindings_token_hash"),
+    CheckConstraint("length(id) = 36", name="id_uuid").ddl_if(dialect="sqlite"),
+    CheckConstraint("length(account_id) = 36", name="account_id_uuid").ddl_if(
+        dialect="sqlite"
+    ),
+    CheckConstraint("length(token_hash) = 64", name="token_hash"),
+    info={"lifecycle": "durable", "cull": "revoked_bindings"},
+    sqlite_strict=True,
+)
+
+extension_pairing_codes = Table(
+    "extension_pairing_codes",
+    metadata,
+    Column("code_hash", Key, primary_key=True),
+    Column(
+        "account_id",
+        Uuid(),
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("created_at", Epoch, nullable=False),
+    Column("expires_at", Epoch, nullable=False),
+    Column("claimed_at", Epoch),
+    CheckConstraint("length(code_hash) = 64", name="code_hash"),
+    CheckConstraint("length(account_id) = 36", name="account_id_uuid").ddl_if(
+        dialect="sqlite"
+    ),
+    info={"lifecycle": "durable", "cull": "extension_codes"},
+    sqlite_strict=True,
+    sqlite_with_rowid=False,
+)
+
+browser_snapshots = Table(
+    "browser_snapshots",
+    metadata,
+    Column(
+        "binding_id",
+        Uuid(),
+        ForeignKey("extension_bindings.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("resource_key", Key, nullable=False),
+    Column("captured_at", Epoch, nullable=False),
+    Column("canvas_status", Integer(), nullable=False),
+    Column("key_id", Key, nullable=False),
+    Column("nonce", Bytes, nullable=False),
+    Column("ciphertext", Bytes, nullable=False),
+    PrimaryKeyConstraint("binding_id", "resource_key"),
+    CheckConstraint("length(binding_id) = 36", name="binding_id_uuid").ddl_if(
+        dialect="sqlite"
+    ),
+    CheckConstraint("canvas_status BETWEEN 100 AND 599", name="canvas_status"),
+    CheckConstraint("length(nonce) = 12", name="nonce"),
+    CheckConstraint("length(ciphertext) >= 17", name="ciphertext"),
+    info={
+        "lifecycle": "durable",
+        "cull": "browser_snapshots",
+        "sealed": {
+            "key_id": "key_id",
+            "nonce": "nonce",
+            "ciphertext": "ciphertext",
+            "prefix": "canvas-mcp/browser-snapshot/v1",
+            "fields": ("binding_id", "resource_key", "key_id"),
+        },
+    },
+    sqlite_strict=True,
+)
+
+Index(
+    "uq_extension_bindings_active",
+    extension_bindings.c.account_id,
+    unique=True,
+    postgresql_where=extension_bindings.c.revoked_at.is_(None),
+    sqlite_where=extension_bindings.c.revoked_at.is_(None),
+)
+Index("ix_extension_pairing_codes_account_id", extension_pairing_codes.c.account_id)
+Index("ix_extension_pairing_codes_expires_at", extension_pairing_codes.c.expires_at)
+Index("ix_browser_snapshots_captured_at", browser_snapshots.c.captured_at)

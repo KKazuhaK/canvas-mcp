@@ -37,6 +37,7 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import Tool, ToolResult
 
 from ..credentials import (
+    get_browser_source,
     get_request_credential_generation,
     get_request_credentials,
     get_request_principal,
@@ -45,7 +46,9 @@ from ..credentials import (
     missing_credentials_message,
     request_credential_is_stale,
 )
+from ..error_codes import PERMISSION_DENIED, record_failure
 from ..logging import log_error
+from ..tool_policy import TOOL_EFFECTS, Effect
 from .mcp_state import MCP_READ
 from .principal_access import (
     access_refusal_message,
@@ -117,7 +120,7 @@ def _check_local_identity(error_type: type[Exception]) -> None:
 
 def _check_credentials(error_type: type[Exception]) -> None:
     """Raise ``error_type`` unless this request carries a usable Canvas credential."""
-    if get_request_credentials() is None:
+    if get_request_credentials() is None and get_browser_source() is None:
         # Also the answer for a token marked invalid: the request context mounts
         # no credentials for it and carries the re-enroll message instead, so
         # the call is refused before any Canvas request is made.
@@ -126,6 +129,19 @@ def _check_credentials(error_type: type[Exception]) -> None:
     state = get_request_token_state()
     if state is not None and state.dead and state.message:
         raise error_type(state.message)
+
+
+_BROWSER_READ_ONLY = (
+    "Browser sync is read-only: this tool would change Canvas, so it was not run. "
+    "Add a Canvas access token at your account page to use it."
+)
+
+
+def _check_browser_read_only(name: str) -> None:
+    """A request answered from browser snapshots may only run read tools (unknown tools: refused)."""
+    if get_browser_source() is not None and TOOL_EFFECTS.get(name) is not Effect.READ:
+        record_failure(PERMISSION_DENIED)
+        raise ToolError(_BROWSER_READ_ONLY)
 
 
 class SelfhostCredentialGate(Middleware):
@@ -175,6 +191,7 @@ class SelfhostCredentialGate(Middleware):
         await _check_access(ToolError)
         _check_credentials(ToolError)
         _check_generation_in_process(ToolError)
+        _check_browser_read_only(context.message.name)
         self._check_write_tool(context.message.name)
         return await call_next(context)
 
@@ -185,11 +202,13 @@ class SelfhostCredentialGate(Middleware):
     ) -> Sequence[Tool]:
         tools = await call_next(context)
         enabled = self._enabled_write_tools()
+        browser = get_browser_source() is not None
         return [
             tool
             for tool in tools
             if decide(tool.name, enabled=enabled, ceiling=self._ceiling)
             is WriteDecision.ALLOWED
+            and not (browser and TOOL_EFFECTS.get(tool.name) is not Effect.READ)
         ]
 
     async def on_read_resource(

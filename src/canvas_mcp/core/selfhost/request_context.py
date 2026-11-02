@@ -10,6 +10,7 @@ from typing import Any, Protocol
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..credentials import (
+    BrowserSource,
     RequestCredentials,
     RequestPrincipal,
     RequestTokenState,
@@ -18,6 +19,7 @@ from ..credentials import (
     get_request_credentials,
     note_credential_generation,
     run_pending_credential_purges,
+    set_browser_source,
     set_http_request_active,
     set_missing_credentials_message,
     set_request_credential_generation,
@@ -41,11 +43,13 @@ from .accounts import (
     valid_account_key,
 )
 from .authz.fastmcp_compat import AuthenticatedUser
+from .browser_store import BrowserSyncStore, browser_decision
 from .config_snapshot import CURRENT_CONFIG, ConfigSnapshots
 from .db.snapshots import McpSnapshot
 from .db.workers import run_store
 from .mcp_state import MCP_READ, MCP_UNAVAILABLE, McpRead
 from .principal_access import access_unavailable_message, snapshot_status
+from .server_settings import SETTINGS
 from .settings import COURSE_STATE_PER_PRINCIPAL, COURSE_STATE_REQUEST_LOCAL
 from .token_store import (
     REASON_DECRYPT_FAILED,
@@ -196,6 +200,14 @@ async def _send_json(send: Send, status: int, message: str) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
+def _setting(config: Any, key: str) -> int:
+    """An integer server setting; its default when the snapshot does not carry it."""
+    try:
+        return int(config.settings[key])
+    except (KeyError, TypeError, ValueError):
+        return int(SETTINGS[key].default)
+
+
 def _is_mcp_path(path: str, mcp_path: str) -> bool:
     return path == mcp_path or path.startswith(mcp_path + "/")
 
@@ -217,8 +229,10 @@ class SelfhostRequestContextMiddleware:
         touch_grant: Callable[[str], None],
         clock: Callable[[], float] = time.time,
         course_state: str = COURSE_STATE_REQUEST_LOCAL,
+        browser: BrowserSyncStore | None = None,
     ) -> None:
         self.app = app
+        self.browser = browser
         # Anything but the explicit opt-in keeps the course state request-local.
         self.request_local_state = course_state != COURSE_STATE_PER_PRINCIPAL
         self.mcp_path = mcp_path
@@ -344,6 +358,10 @@ class SelfhostRequestContextMiddleware:
         self, principal_key: str, snapshot: McpSnapshot
     ) -> bool:
         generation = snapshot.credential_generation
+        if (
+            snapshot.credential_id is None or snapshot.credential_status == STATUS_INVALID
+        ) and await self._attach_browser_source(principal_key, snapshot):
+            return True
         if snapshot.credential_id is None:
             set_missing_credentials_message(
                 not_enrolled_message(self.account_url), CREDENTIAL_INVALID
@@ -392,6 +410,56 @@ class SelfhostRequestContextMiddleware:
             RequestTokenState(
                 token_version=snapshot.credential_updated_at,
                 credential_generation=generation,
+            )
+        )
+        return True
+
+    async def _attach_browser_source(
+        self, principal_key: str, snapshot: McpSnapshot
+    ) -> bool:
+        """Answer this request from the student's synced browser data, if that applies.
+
+        Only reached when the account has no usable personal access token. The
+        request then carries a :class:`BrowserSource` and no Canvas credential:
+        it can read stored snapshots and nothing else. Any failure to establish
+        that falls back to the ordinary "no token" answer.
+        """
+        if self.browser is None:
+            return False
+        config = CURRENT_CONFIG.get()
+        if config is None:
+            return False
+        store = self.browser
+        try:
+            binding = await run_store(store.active_binding, principal_key)
+        except Exception:  # noqa: BLE001 - fall back to the "no token" refusal
+            log_error("browser binding unreadable", account=principal_key)
+            return False
+        if binding is None or binding.canvas_host is None:
+            return False
+        active, _ = browser_decision(
+            token_usable=False,
+            token_host=snapshot.canvas_host,
+            binding_host=binding.canvas_host,
+            school_offered=config.schools.resolve_stored(binding.canvas_host)
+            is not None,
+        )
+        if not active:
+            return False
+        cache: dict[str, list[Any]] = {}
+
+        async def load(path: str) -> list[Any]:
+            if path not in cache:
+                cache[path] = await run_store(store.load_path, binding.id, path)
+            return cache[path]
+
+        set_browser_source(
+            BrowserSource(
+                binding_id=binding.id,
+                canvas_host=binding.canvas_host,
+                load=load,
+                max_age_seconds=_setting(config, "browser_sync.max_age_days") * 86400,
+                fresh_seconds=_setting(config, "browser_sync.fresh_hours") * 3600,
             )
         )
         return True

@@ -39,8 +39,9 @@ def test_graph_preserves_frozen_baseline_and_metadata_matches_real_upgrade(db):
         "0004_onboarding_and_icons",
         "0005_canvas_expiry",
         "0006_token_email_reminders",
+        "0007_browser_sync",
     }
-    assert migrate.head_revision() == "0006_token_email_reminders"
+    assert migrate.head_revision() == "0007_browser_sync"
     assert migrate.current(db).state == migrate.STATE_UNINITIALIZED
     migrate.ensure_ready(db)
     first = migrate.current(db)
@@ -407,6 +408,9 @@ def test_offline_upgrade_contains_frozen_ddl_and_no_legacy_tables(dialect):
         "mail_settings",
         "notification_preferences",
         "notification_deliveries",
+        "extension_bindings",
+        "extension_pairing_codes",
+        "browser_snapshots",
     }:
         assert "CREATE TABLE " + table + " " in sql
     assert "canvas_mcp_alembic_version" in sql and "0001_v1_baseline" in sql

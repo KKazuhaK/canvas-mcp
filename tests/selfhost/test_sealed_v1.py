@@ -100,6 +100,40 @@ def populate_sealed(store, ring):
                 updated_at=NOW,
             )
         )
+    # Two snapshots of one binding: a composite primary key must rotate row by row.
+    snapshot = next(value for value in SEALED if value.table is s.browser_snapshots)
+    binding = new_id()
+    with store.database.write() as conn:
+        conn.execute(
+            insert(s.extension_bindings).values(
+                id=binding,
+                account_id=account,
+                token_hash="0" * 64,
+                created_at=NOW,
+            )
+        )
+        for key, body in (("/users/self", b"first"), ("/courses", b"second")):
+            kid, nonce, ciphertext = ring.encrypt(
+                body,
+                snapshot.aad(
+                    {
+                        "binding_id": binding,
+                        "resource_key": key,
+                        "key_id": ring.active_key_id,
+                    }
+                ),
+            )
+            conn.execute(
+                insert(s.browser_snapshots).values(
+                    binding_id=binding,
+                    resource_key=key,
+                    captured_at=NOW,
+                    canvas_status=200,
+                    key_id=kid,
+                    nonce=nonce,
+                    ciphertext=ciphertext,
+                )
+            )
     return account, info
 
 
@@ -123,7 +157,7 @@ def test_registry_covers_every_ciphertext_column_and_uses_one_layout():
         for column in table.c
         if column.name.endswith("ciphertext")
     }
-    assert actual == expected and len(actual) == 4
+    assert actual == expected and len(actual) == 5
     credential = next(entry for entry in SEALED if entry.table is s.canvas_credentials)
     assert credential.fields == ("account_id", "canvas_host", "kind", "key_id")
 
@@ -132,25 +166,58 @@ def test_rotation_covers_reserved_secrets_and_preserves_all_other_fields(sealed_
     store, _, account, info = sealed_store
     with store.database.read() as conn:
         before = {
-            entry.table.name: dict(conn.execute(select(entry.table)).mappings().one())
+            entry.table.name: [
+                dict(row)
+                for row in conn.execute(
+                    select(entry.table).order_by(*entry.table.primary_key.columns)
+                ).mappings()
+            ]
             for entry in SEALED
         }
     store._keyring = keyring("k2", both=True)
-    assert store.rotate() == 4 and store.rotate() == 0
+    # Four single-row tables, plus both snapshots of the composite-keyed table.
+    assert store.rotate() == 6 and store.rotate() == 0
     assert store.get(account).api_token == "pat-secret"
     from canvas_mcp.core.selfhost.mail import MailStore
 
     assert MailStore(store.database, keyring("k2")).load().password == "smtp-secret"
     assert store.info(account).credential_generation == info.credential_generation
     with store.database.read() as conn:
-        assert verify(conn, keyring("k2"), all_values=True) == 4
+        assert verify(conn, keyring("k2"), all_values=True) == 6
         for entry in SEALED:
-            row = dict(conn.execute(select(entry.table)).mappings().one())
-            assert row[entry.key_id] == "k2"
-            for name in (entry.key_id, entry.nonce, entry.ciphertext):
-                del row[name]
-                del before[entry.table.name][name]
-            assert row == before[entry.table.name]
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    select(entry.table).order_by(*entry.table.primary_key.columns)
+                ).mappings()
+            ]
+            assert len(rows) == len(before[entry.table.name])
+            for row, original in zip(rows, before[entry.table.name], strict=True):
+                assert row[entry.key_id] == "k2"
+                for name in (entry.key_id, entry.nonce, entry.ciphertext):
+                    del row[name]
+                    del original[name]
+                assert row == original
+
+
+def test_rotation_reseals_each_snapshot_of_a_binding_under_its_own_resource_key(
+    sealed_store,
+):
+    store, _, _, _ = sealed_store
+    store._keyring = keyring("k2", both=True)
+    store.rotate()
+    entry = next(value for value in SEALED if value.table is s.browser_snapshots)
+    ring = keyring("k2")
+    with store.database.read() as conn:
+        rows = {
+            row["resource_key"]: bytes(
+                ring.decrypt(
+                    row["key_id"], bytes(row["nonce"]), bytes(row["ciphertext"]), entry.aad(row)
+                )
+            )
+            for row in conn.execute(select(entry.table)).mappings()
+        }
+    assert rows == {"/users/self": b"first", "/courses": b"second"}
 
 
 @pytest.mark.parametrize(
