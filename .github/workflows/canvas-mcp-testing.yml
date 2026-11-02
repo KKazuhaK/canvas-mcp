@@ -326,6 +326,17 @@ jobs:
         python -m pip install -e ".[documents,selfhost,postgres]"
         python -m pip install pytest pytest-asyncio pytest-xdist pyyaml respx
 
+    # The service database is thrown away with the job, so it does not need to survive
+    # a crash: skip the disk flushes every commit and DDL statement would otherwise wait on.
+    - name: Turn off durability in the throwaway PostgreSQL
+      run: >-
+        psql "postgresql://canvas:ci-only-not-a-secret@127.0.0.1:5432/canvas_mcp_test"
+        -v ON_ERROR_STOP=1
+        -c "ALTER SYSTEM SET fsync = off"
+        -c "ALTER SYSTEM SET synchronous_commit = off"
+        -c "ALTER SYSTEM SET full_page_writes = off"
+        -c "SELECT pg_reload_conf()"
+
     - name: Verify account, reminder and migration paths before the full suite
       env:
         TEST_DEPENDENCIES: ${{ matrix.dependencies }}
