@@ -32,7 +32,48 @@ def pytest_configure(config):
     )
 
 
+def _shard_setting() -> tuple[int, int] | None:
+    """Parse CANVAS_MCP_TEST_SHARD="i/N" (1-based); None when unset."""
+    raw = os.environ.get("CANVAS_MCP_TEST_SHARD", "").strip()
+    if not raw:
+        return None
+    index, sep, total = raw.partition("/")
+    if not (sep and index.isdecimal() and total.isdecimal() and 1 <= int(index) <= int(total)):
+        raise pytest.UsageError(f"CANVAS_MCP_TEST_SHARD must look like 2/3, got {raw!r}")
+    return int(index), int(total)
+
+
+def _select_shard(config, items, index: int, total: int) -> None:
+    """Keep only this shard's test files.
+
+    Whole files go to one shard, so module fixtures still run once. Files are
+    assigned largest first to the shard with the fewest tests so far, which only
+    depends on the collected items: every shard (and every xdist worker) collects
+    the same items and so computes the same split.
+    """
+    def file_of(item) -> str:
+        return item.nodeid.split("::", 1)[0]
+
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[file_of(item)] = counts.get(file_of(item), 0) + 1
+    loads = [0] * total
+    owner: dict[str, int] = {}
+    for path in sorted(counts, key=lambda p: (-counts[p], p)):
+        shard = loads.index(min(loads))
+        owner[path] = shard
+        loads[shard] += counts[path]
+    kept = [item for item in items if owner[file_of(item)] == index - 1]
+    deselected = [item for item in items if owner[file_of(item)] != index - 1]
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+    items[:] = kept
+
+
 def pytest_collection_modifyitems(config, items):
+    shard = _shard_setting()
+    if shard is not None:
+        _select_shard(config, items, *shard)
     for item in items:
         if dbbackend.IS_POSTGRES and item.get_closest_marker("sqlite_only"):
             item.add_marker(pytest.mark.skip(reason="SQLite-specific; backend is postgres"))

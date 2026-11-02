@@ -164,10 +164,12 @@ Runs on pushes to `main`, `development`, `selfhost`, `feature/**`, `fix/**`, `ci
 | `web` | `web/`: lint (oxlint), typecheck, vitest, build, `check:dist` |
 | `verify-confirmation` | Lean 4.19.0 and TLA+ proofs (`verify/run.py`) |
 | `test` | `pytest tests/` on Python 3.11-3.14 with latest deps, `fetch-depth: 0` (closing-keyword history replay) |
-| `test-windows` | same on Windows, 3.14, `PYTHONUTF8=1` |
+| `test-windows` | same on Windows, 3.14, `PYTHONUTF8=1`; two shards side by side |
 | `test-locked` | `uv sync --locked`, `uv run --locked pytest tests/` on 3.14 |
-| `test-postgres` | PostgreSQL service container; `tests/selfhost tests/test_multiuser_e2e.py tests/test_fastmcp_compat.py -n auto` |
+| `test-postgres` | PostgreSQL service container; `tests/selfhost tests/test_multiuser_e2e.py tests/test_fastmcp_compat.py -n auto`; two shards per dependency set, and the path pre-check runs in shard 1 only |
 | `test-enhancements` | aggregator; requires all above |
+
+Shards come from `CANVAS_MCP_TEST_SHARD=i/N` (`tests/conftest.py`): whole files are spread over N shards by test count and the rest are deselected. Every shard collects the same items, so the split is the same in each job and each xdist worker. Leave it unset locally; with a narrow path argument a shard can end up empty (pytest exit code 5).
 
 Other workflows: `closing-keyword-guard.yml`; `selfhost-image.yml` (section 8); upstream's `scorecard.yml`, `deploy-*.yml`, `publish-mcp.yml`, `create-release.yml`, `claude-code-review.yml`, `claude.yml` (their jobs are guarded by `github.repository == 'vishalsachdev/canvas-mcp'`, so they do nothing in the fork); `security-testing.yml` and `weekly-maintenance.yml` have no such guard but GitHub shows them as `disabled_fork` in the fork, as `scorecard.yml`. On a fork PR into upstream, upstream's `claude-code-review.yml` runs without the secret and `claude-review` goes red; upstream's triage (2026-10-11) records this as an upstream workflow issue.
 

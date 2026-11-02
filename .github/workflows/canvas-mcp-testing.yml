@@ -166,8 +166,15 @@ jobs:
   # where things Linux never exercises break: an open file cannot be deleted,
   # symlinks need a privilege, `python3` may be the Store alias, and the
   # default text encoding is the ANSI code page rather than UTF-8.
+  #
+  # Split in two shards that run side by side (tests/conftest.py, CANVAS_MCP_TEST_SHARD):
+  # the Windows runner is the slowest, and one job would set the time of the whole run.
   test-windows:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     env:
       FASTMCP_MCP_CAMELCASE_COMPAT: "false"
       # UTF-8 mode for the interpreter and the Pythons it spawns, so stdio and
@@ -200,7 +207,9 @@ jobs:
         python -m pip install -e ".[documents,selfhost,postgres]"
         python -m pip install pytest pytest-asyncio pytest-xdist pyyaml respx
 
-    - name: Run the test suite
+    - name: Run the test suite (shard ${{ matrix.shard }} of 2)
+      env:
+        CANVAS_MCP_TEST_SHARD: ${{ matrix.shard }}/2
       run: python -m pytest tests/ -q -n auto
 
   # The same full suite on Linux, installed strictly from uv.lock instead of the
@@ -267,7 +276,9 @@ jobs:
   # so this job cannot pass without exercising PostgreSQL. The image is pinned by tag
   # and digest and is the one deploy/selfhost/docker-compose.postgres.yml deploys
   # (tests/test_selfhost_compose_postgres.py keeps the two identical). The password is
-  # a throwaway that only exists inside this job's private service container.
+  # a throwaway that only exists inside this job's private service container. Each
+  # dependency set runs in two shards side by side (tests/conftest.py,
+  # CANVAS_MCP_TEST_SHARD); the short path check before the suite runs in shard 1 only.
   test-postgres:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -275,6 +286,7 @@ jobs:
       fail-fast: false
       matrix:
         dependencies: [latest, locked]
+        shard: [1, 2]
     permissions:
       contents: read
     env:
@@ -327,6 +339,7 @@ jobs:
         python -m pip install pytest pytest-asyncio pytest-xdist pyyaml respx
 
     - name: Verify account, reminder and migration paths before the full suite
+      if: matrix.shard == 1
       env:
         TEST_DEPENDENCIES: ${{ matrix.dependencies }}
       run: |
@@ -338,15 +351,19 @@ jobs:
           python -m pytest "${checks[@]}" -q -p no:cacheprovider
         fi
 
-    - name: Run the lock-pinned self-hosted tests on PostgreSQL
+    - name: Run the lock-pinned self-hosted tests on PostgreSQL (shard ${{ matrix.shard }} of 2)
       if: matrix.dependencies == 'locked'
+      env:
+        CANVAS_MCP_TEST_SHARD: ${{ matrix.shard }}/2
       run: >-
         uv run --locked pytest
         tests/selfhost tests/test_multiuser_e2e.py tests/test_fastmcp_compat.py
         -q -p no:cacheprovider -n auto
 
-    - name: Run the latest-dependency self-hosted tests on PostgreSQL
+    - name: Run the latest-dependency self-hosted tests on PostgreSQL (shard ${{ matrix.shard }} of 2)
       if: matrix.dependencies == 'latest'
+      env:
+        CANVAS_MCP_TEST_SHARD: ${{ matrix.shard }}/2
       run: >-
         python -m pytest
         tests/selfhost tests/test_multiuser_e2e.py tests/test_fastmcp_compat.py
