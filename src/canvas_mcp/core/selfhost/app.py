@@ -620,8 +620,9 @@ def build_selfhost_asgi_app(
         ],
         host_origin_protection=True,
         allowed_hosts=[settings.public_host],
-        # The browser extension's origins pass this guard; its own endpoints check them
-        # exactly (browser_extension_api), and /mcp still needs an OAuth bearer token.
+        # The browser extension's origins pass this guard, but SelfhostEdgeGuard refuses
+        # them outside /api/v1/extension/, whose endpoints check them exactly
+        # (browser_extension_api).
         allowed_origins=[
             settings.public_base_url,
             "chrome-extension://*",

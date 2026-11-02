@@ -448,7 +448,7 @@ export interface ExtensionPairing {
   /** ISO 8601 UTC. */
   expiresAt: string
 }
-export type ExtensionReason = 'token_preferred' | 'school_unknown'
+export type ExtensionReason = 'token_preferred' | 'school_unknown' | 'user_mismatch'
 export interface ExtensionResource {
   path: string
   capturedAt: string | null

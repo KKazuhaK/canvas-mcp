@@ -86,8 +86,9 @@ Extension endpoints (`/api/v1/extension/*`):
   origins, methods `GET, POST, DELETE`, headers `Authorization, Content-Type`,
   `Max-Age 600`, never credentials. The server's Host/Origin guard
   (`allowed_origins`) lets `chrome-extension://*` and `moz-extension://*` through
-  so the endpoints can apply the exact check above; `/mcp` still needs an OAuth
-  bearer token.
+  so the endpoints can apply the exact check above. The outer edge guard
+  (`SelfhostEdgeGuard`) refuses those origins with 403 on every path outside
+  `/api/v1/extension/`, so `/mcp`, OAuth and the account API never see them.
 - Rate limits (429 `rate_limited`, `Retry-After`). The Portal sees only the
   proxy's address (`proxy_headers` is off), so no limit is per client address:
   an address key would be one key for everybody, and a loop of anonymous
@@ -140,13 +141,19 @@ usual `Origin` check):
 | Method and path | Response |
 | --- | --- |
 | `POST /api/v1/me/extension/pairing` | `{"code": "...", "expiresAt": "..."}` |
-| `GET /api/v1/me/extension` | `{"binding": null}` or `{"binding": {"createdAt", "lastUploadAt", "canvasHost", "resources": [{"path", "capturedAt", "canvasStatus"}], "active": bool, "reason": null or "token_preferred" or "school_unknown"}}` |
+| `GET /api/v1/me/extension` | `{"binding": null}` or `{"binding": {"createdAt", "lastUploadAt", "canvasHost", "resources": [{"path", "capturedAt", "canvasStatus"}], "active": bool, "reason": null or "token_preferred" or "school_unknown" or "user_mismatch"}}` |
 | `DELETE /api/v1/me/extension` | 204; revokes and deletes snapshots |
 
 `reason` is `token_preferred` when the account has a usable token (stored, not
 marked invalid), and `school_unknown` when the binding has no Canvas host yet,
 its host is not a school the server offers, or it differs from the school of the
-account's (unusable) token. Pairing is limited to 10 codes per 10 minutes per
+account's (unusable) token. It is `user_mismatch` when that token names a Canvas
+user and the binding is pinned to a different one: switching the account to
+another Canvas user goes through the token's identity-change confirmation, so a
+browser signed in as someone else is never served in its place. The binding
+stays pinned to its first user, so this clears only when the token is replaced
+or removed, or the extension is disconnected and paired again while signed in to
+Canvas as the token's user. Pairing is limited to 10 codes per 10 minutes per
 account.
 
 ## Pairing

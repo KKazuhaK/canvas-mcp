@@ -444,6 +444,8 @@ class SelfhostRequestContextMiddleware:
             binding_host=binding.canvas_host,
             school_offered=config.schools.resolve_stored(binding.canvas_host)
             is not None,
+            token_user_id=snapshot.canvas_user_id,
+            binding_user_id=binding.canvas_user_id,
         )
         if not active:
             return False

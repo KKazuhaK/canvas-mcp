@@ -41,11 +41,16 @@ from .db.errors import StoreUnavailable
 from .limits import InMemoryTokenBucket, RateLimiters, build_rate_limiters
 from .maintenance import MAINTENANCE_INTERVAL_SECONDS, Maintenance, MaintenanceScheduler
 from .mcp_state import MCP_READ, MCP_UNAVAILABLE
+from .routes import API_PREFIX
 
 REGISTER_PATH = "/register"
 AUTHORIZE_PATH = "/authorize"
 TOKEN_PATH = "/token"
 REVOKE_PATH = "/revoke"
+# The browser extension's origins pass FastMCP's Origin guard (app.py lists them) only
+# because its endpoints live here; every other path refuses them as that guard would.
+EXTENSION_PATH_PREFIX = f"{API_PREFIX}/extension/"
+EXTENSION_ORIGIN_SCHEMES = ("chrome-extension://", "moz-extension://")
 
 # Per-minute allowance for each of the two public endpoints (also the burst).
 PUBLIC_REQUESTS_PER_MINUTE = 30
@@ -139,6 +144,9 @@ class SelfhostEdgeGuard:
         if scope_type == "http":
             path = scope.get("path", "")
             method = scope.get("method", "")
+            if not path.startswith(EXTENSION_PATH_PREFIX) and _extension_origin(scope):
+                await _forbidden_origin(send)
+                return
             if path == REGISTER_PATH and method == "POST":
                 await self._guarded_register(scope, receive, send)
                 return
@@ -293,6 +301,27 @@ async def _respond(
     if retry_after is not None:
         headers.append((b"retry-after", str(retry_after).encode()))
     await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": body})
+
+
+def _extension_origin(scope: Scope) -> bool:
+    for name, value in scope.get("headers", ()):
+        if name == b"origin":
+            origin = value.decode("latin-1").strip().lower()
+            if origin.startswith(EXTENSION_ORIGIN_SCHEMES):
+                return True
+    return False
+
+
+async def _forbidden_origin(send: Send) -> None:
+    # The same answer FastMCP's Host/Origin guard gives an origin it does not allow.
+    body = b"Forbidden Origin"
+    headers = [
+        (b"content-type", b"text/plain; charset=utf-8"),
+        (b"content-length", str(len(body)).encode()),
+        (b"cache-control", b"no-store"),
+    ]
+    await send({"type": "http.response.start", "status": 403, "headers": headers})
     await send({"type": "http.response.body", "body": body})
 
 
