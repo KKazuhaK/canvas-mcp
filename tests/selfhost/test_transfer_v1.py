@@ -224,6 +224,14 @@ def source(tmp_path):
                 updated_at=NOW,
             )
         )
+        conn.execute(
+            insert(s.extension_pairing_codes).values(
+                code_hash="p" * 64,
+                account_id=account,
+                created_at=NOW,
+                expires_at=NOW + 300,
+            )
+        )
     try:
         yield store, path, ring, account, credential
     finally:
@@ -268,7 +276,8 @@ def test_all_lifecycle_tables_copy_native_types_and_sequences_and_skip_ephemeral
     checksum = digest(path)
     report = transfer.import_sqlite(target, path, ring)
     assert digest(path) == checksum
-    assert report.sealed_values_checked == 4
+    # Four single-row sealed tables, plus the two browser snapshots populate_sealed adds.
+    assert report.sealed_values_checked == 6
     assert set(report.counts) == {table.name for table in transfer.copied_tables()}
     assert all(count >= 1 for count in report.counts.values())
     with store.database.read() as src, target.read() as dst:
@@ -289,7 +298,7 @@ def test_all_lifecycle_tables_copy_native_types_and_sequences_and_skip_ephemeral
             state["jwt_epoch"],
             state["settings_revision"],
         ) == (3, 17, 13)
-        assert verify(dst, ring, all_values=True) == 4
+        assert verify(dst, ring, all_values=True) == 6
         assert (
             dst.execute(
                 text("SELECT pg_typeof(id)::text FROM accounts LIMIT 1")
