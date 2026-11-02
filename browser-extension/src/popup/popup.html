@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canvas MCP Sync</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <h1>Canvas MCP Sync</h1>
+
+    <section aria-labelledby="status-h">
+      <h2 id="status-h">Status</h2>
+      <p id="headline" class="headline" role="status"></p>
+      <dl id="rows"></dl>
+      <p id="error" class="error" role="alert" hidden></p>
+      <ul id="skips" class="skips" aria-label="Skipped items"></ul>
+      <p id="message" class="message" role="status" hidden></p>
+    </section>
+
+    <section id="connect" aria-labelledby="connect-h">
+      <h2 id="connect-h">Connect to your portal</h2>
+      <label for="portal">Portal address</label>
+      <input id="portal" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://portal.example.com">
+      <div class="row"><button id="connect-btn" type="button">Connect</button></div>
+      <details>
+        <summary>Have a pairing code?</summary>
+        <label for="code">Pairing code</label>
+        <input id="code" type="text" autocomplete="off" spellcheck="false">
+        <div class="row"><button id="pair-btn" type="button" class="secondary">Pair with code</button></div>
+      </details>
+    </section>
+
+    <section id="canvas" aria-labelledby="canvas-h">
+      <h2 id="canvas-h">Canvas site</h2>
+      <label for="canvas-origin">Canvas address</label>
+      <input id="canvas-origin" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://school.instructure.com">
+      <div class="row"><button id="canvas-btn" type="button" class="secondary">Save Canvas site</button></div>
+    </section>
+
+    <section id="actions" aria-labelledby="actions-h">
+      <h2 id="actions-h">Sync</h2>
+      <div class="row">
+        <button id="sync-btn" type="button">Sync now</button>
+        <button id="disconnect-btn" type="button" class="danger">Disconnect</button>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
