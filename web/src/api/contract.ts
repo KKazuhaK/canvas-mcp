@@ -23,6 +23,8 @@ import type {
   ConsentDecision,
   ConsentDecisionResponse,
   ConsentResponse,
+  ExtensionPairing,
+  ExtensionStatus,
   GrantRevokeResponse,
   GrantsResponse,
   IdentitiesResponse,
@@ -124,6 +126,11 @@ export interface Contract {
   'DELETE /me/grants/{id}': { response: void }
   'GET /admin/accounts/{id}/grants': { query: PageQuery; response: GrantsResponse }
   'DELETE /admin/grants/{id}': { response: GrantRevokeResponse }
+  // Browser sync: the extension's own endpoints (/extension/*) are not part of this table; these are the
+  // signed-in account's side. The pairing code is single use and expires after five minutes.
+  'POST /me/extension/pairing': { response: ExtensionPairing }
+  'GET /me/extension': { response: ExtensionStatus }
+  'DELETE /me/extension': { response: void }
 }
 
 export type RouteKey = keyof Contract

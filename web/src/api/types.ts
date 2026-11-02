@@ -440,6 +440,34 @@ export interface GrantRevokeResponse {
   changed: boolean
 }
 
+// ---- browser extension (browser sync) ----------------------------------------------------
+
+export interface ExtensionPairing {
+  /** A single-use pairing code. Secret: never logged, never cached, dropped when it expires. */
+  code: string
+  /** ISO 8601 UTC. */
+  expiresAt: string
+}
+export type ExtensionReason = 'token_preferred' | 'school_unknown'
+export interface ExtensionResource {
+  path: string
+  capturedAt: string | null
+  /** The status Canvas answered the extension with; anything but 200 means no data. */
+  canvasStatus: number
+}
+export interface ExtensionBinding {
+  createdAt: string
+  lastUploadAt: string | null
+  canvasHost: string | null
+  resources: ExtensionResource[]
+  /** Whether tool calls are answered from the synced data right now. */
+  active: boolean
+  reason: ExtensionReason | null
+}
+export interface ExtensionStatus {
+  binding: ExtensionBinding | null
+}
+
 // ---- owner admin ------------------------------------------------------------------------
 
 export type AdminAccountStatus = 'active' | 'pending' | 'disabled' | 'missing'

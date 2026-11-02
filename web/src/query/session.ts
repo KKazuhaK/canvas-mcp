@@ -6,7 +6,7 @@ import { keys } from './keys'
 
 /** The slice of a react-router data router that wireSession needs. */
 export interface SessionRouter {
-  state: { location: { pathname: string; search: string } }
+  state: { location: { pathname: string; search: string; hash?: string } }
   navigate: (to: string, opts?: { replace?: boolean; state?: unknown }) => unknown
 }
 
@@ -26,7 +26,7 @@ export function wireSession(client: QueryClient, router: SessionRouter): void {
       clearCsrfToken()
       client.clear()
       const here = router.state.location
-      void router.navigate(loginPathFor(here.pathname + here.search), {
+      void router.navigate(loginPathFor(here.pathname + here.search + (here.hash ?? '')), {
         replace: true,
         state: SESSION_ENDED_STATE,
       })

@@ -34,6 +34,9 @@ import {
   adminUnlinkIdentity,
   acknowledgeCanvasToken,
   getIdentities,
+  createExtensionPairing,
+  getExtension,
+  deleteExtension,
 } from './endpoints'
 import { meFixture, scriptAdapter } from '@/test/fixtures'
 
@@ -57,6 +60,9 @@ describe('the wire shape of every endpoint', () => {
     ['getLoginHistory', () => getLoginHistory(), 'GET', '/me/login-history'],
     ['logout', () => logout(), 'POST', '/session/logout'],
     ['getGrants', () => getGrants(), 'GET', '/me/grants'],
+    ['createExtensionPairing', () => createExtensionPairing(), 'POST', '/me/extension/pairing'],
+    ['getExtension', () => getExtension(), 'GET', '/me/extension'],
+    ['deleteExtension', () => deleteExtension(), 'DELETE', '/me/extension'],
     ['revokeGrant', () => revokeGrant(ID), 'DELETE', `/me/grants/${ID}`],
     ['adminGrants', () => adminGrants(ID), 'GET', `/admin/accounts/${ID}/grants`],
     ['adminRevokeGrant', () => adminRevokeGrant(ID), 'DELETE', `/admin/grants/${ID}`],

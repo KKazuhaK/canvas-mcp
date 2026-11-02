@@ -2,6 +2,7 @@ import { createBrowserRouter, createMemoryRouter, type RouteObject } from 'react
 import AdminLayout from '@/layouts/AdminLayout'
 import PublicLayout from '@/layouts/PublicLayout'
 import ActivityView from '@/views/ActivityView'
+import BrowserExtensionView from '@/views/BrowserExtensionView'
 import ConnectedAppsView from '@/views/ConnectedAppsView'
 import ConsentView from '@/views/ConsentView'
 import HomeView from '@/views/HomeView'
@@ -56,6 +57,11 @@ export const routes: RouteObject[] = [
             path: 'connected-apps',
             element: <ConnectedAppsView />,
             handle: { titleKey: 'common:nav.connectedApps' },
+          },
+          {
+            path: 'browser-extension',
+            element: <BrowserExtensionView />,
+            handle: { titleKey: 'common:nav.browserExtension' },
           },
           { path: 'sign-in-methods', element: <SignInMethodsView />, handle: { titleKey: 'common:nav.signInMethods' } },
           { path: 'activity', element: <ActivityView />, handle: { titleKey: 'common:nav.activity' } },

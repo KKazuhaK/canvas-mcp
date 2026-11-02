@@ -20,6 +20,9 @@ import {
   deleteWriteTools,
   getConsent,
   getGrants,
+  getExtension,
+  createExtensionPairing,
+  deleteExtension,
   getIdentities,
   getLoginHistory,
   getMe,
@@ -289,5 +292,26 @@ export function useAdminRevokeGrant(accountId: string) {
   return useMutation({
     mutationFn: (id: string) => adminRevokeGrant(id),
     onSettled: () => client.invalidateQueries({ queryKey: keys.adminGrants(accountId) }),
+  })
+}
+
+export function useExtension() {
+  return useQuery({ queryKey: keys.extension, queryFn: getExtension })
+}
+
+/** A new pairing code replaces any earlier binding once the extension claims it, so the status is stale. */
+export function useCreateExtensionPairing() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: createExtensionPairing,
+    onSettled: () => client.invalidateQueries({ queryKey: keys.extension }),
+  })
+}
+
+export function useDeleteExtension() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: deleteExtension,
+    onSettled: () => client.invalidateQueries({ queryKey: keys.extension }),
   })
 }

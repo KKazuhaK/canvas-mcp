@@ -1,6 +1,7 @@
 import AppRequestNotice from '@/components/AppRequestNotice'
 import AdminPanelSettingsIcon from '@mui/icons-material/AdminPanelSettings'
 import AppsIcon from '@mui/icons-material/Apps'
+import ExtensionIcon from '@mui/icons-material/Extension'
 import HistoryIcon from '@mui/icons-material/History'
 import HomeIcon from '@mui/icons-material/Home'
 import KeyIcon from '@mui/icons-material/Key'
@@ -52,6 +53,7 @@ function navFor(features: Features): NavItem[] {
       ? [{ to: '/write-tools', labelKey: 'common:nav.writeTools', Icon: TuneIcon }]
       : []),
     { to: '/connected-apps', labelKey: 'common:nav.connectedApps', Icon: AppsIcon },
+    { to: '/browser-extension', labelKey: 'common:nav.browserExtension', Icon: ExtensionIcon },
     { to: '/sign-in-methods', labelKey: 'common:nav.signInMethods', Icon: LoginIcon },
     { to: '/activity', labelKey: 'common:nav.activity', Icon: HistoryIcon },
     ...(features.admin

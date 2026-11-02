@@ -23,7 +23,7 @@ export default function RequireAuth() {
     // first visit by someone who never signed in gets no such message.
     return (
       <Navigate
-        to={loginPathFor(location.pathname + location.search)}
+        to={loginPathFor(location.pathname + location.search + location.hash)}
         replace
         state={me.data ? SESSION_ENDED_STATE : undefined}
       />

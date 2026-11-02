@@ -327,5 +327,55 @@
     "save": "Save reminder preferences",
     "saved": "Reminder preferences saved.",
     "unavailable": "The administrator has not enabled email delivery. You can save your preference now; the home page still shows expiry reminders."
+  },
+  "extension": {
+    "title": "Browser extension",
+    "intro": "Some schools do not let students create Canvas access tokens. The browser extension reads Canvas while you are signed in to it and syncs that data to this Portal, so your apps can still use the Canvas tools. Your Canvas password and cookies are never sent.",
+    "notSyncedYet": "Not synced yet",
+    "status": {
+      "title": "Connection",
+      "connected": "Connected",
+      "notConnected": "Not connected",
+      "notConnectedBody": "No browser extension is paired with your account. Install the extension, open it and choose this Portal, or show a pairing code below.",
+      "canvasHost": "Canvas site",
+      "paired": "Paired",
+      "lastSync": "Last sync"
+    },
+    "reason": {
+      "active": "Your apps are answered from the synced data.",
+      "token_preferred": "Your Canvas access token is used instead while it works. The synced data is kept as a fallback.",
+      "school_unknown": "This school is not in the Portal's school list, so the synced data is not used yet. Ask the server owner to add it.",
+      "inactive": "The synced data is not in use yet."
+    },
+    "resources": {
+      "title": "Synced data",
+      "empty": "Nothing has been synced yet. Open Canvas in this browser to start a sync."
+    },
+    "columns": {
+      "path": "Canvas path",
+      "captured": "Captured",
+      "status": "Canvas answered"
+    },
+    "statusOk": "OK",
+    "statusBlocked": "Status {{status}}",
+    "disconnect": {
+      "button": "Disconnect and delete synced data",
+      "title": "Disconnect the browser extension?",
+      "body": "The extension is unpaired and all data it synced is deleted from this Portal. Your apps stop getting Canvas data from the browser until you pair again.",
+      "confirm": "Disconnect and delete",
+      "done": "Browser extension disconnected."
+    },
+    "pairing": {
+      "title": "Pair the extension",
+      "fromExtension": "The extension asked to pair with your account.",
+      "returnToExtension": "Return to the extension; it will finish connecting.",
+      "manualHelp": "Pairing normally starts from the extension. If it asks for a code instead, show one here and enter it in the extension.",
+      "show": "Show pairing code",
+      "again": "Get a new code",
+      "codeLabel": "Pairing code",
+      "copyLabel": "Copy pairing code",
+      "expiresIn": "Single use. Expires in {{time}}.",
+      "expired": "The code expired."
+    }
   }
 }
