@@ -30,6 +30,7 @@
     "adminEnrollments": "Enrollments",
     "adminAudit": "Audit log",
     "connectedApps": "Connected apps",
+    "browserExtension": "Browser extension",
     "signInMethods": "Sign-in methods",
     "adminSettings": "Settings"
   },

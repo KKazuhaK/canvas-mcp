@@ -45,6 +45,16 @@ describe('routing and the session gate', () => {
     expect(new URLSearchParams(router.state.location.search).get('return_to')).toBe('/account/write-tools')
   })
 
+  it('keeps the URL hash through the sign-in redirect (the extension pairing state)', async () => {
+    const hash = '#extension-auth=AbCdEfGhIjKlMnOp_-123456'
+    const { router } = await renderApp(`/browser-extension${hash}`, 'signed-out')
+    await screen.findByRole('link', { name: /Sign in with Microsoft/ })
+    expect(router.state.location.pathname).toBe('/sign-in')
+    expect(new URLSearchParams(router.state.location.search).get('return_to')).toBe(
+      `/account/browser-extension${hash}`,
+    )
+  })
+
   it('renders not-found for an unknown path', async () => {
     await renderApp('/definitely/not/here', 'enrolled')
     expect(await screen.findByText('Page not found')).toBeInTheDocument()
@@ -73,6 +83,7 @@ describe('routing and the session gate', () => {
       '/token',
       '/write-tools',
       '/connected-apps',
+      '/browser-extension',
       '/sign-in-methods',
       '/activity',
     ])

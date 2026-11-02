@@ -327,5 +327,55 @@
     "save": "保存提醒偏好",
     "saved": "提醒偏好已保存。",
     "unavailable": "管理员尚未启用邮件发送。您可以先保存偏好；主页仍会显示到期提醒。"
+  },
+  "extension": {
+    "title": "浏览器扩展",
+    "intro": "部分学校不允许学生创建 Canvas 访问令牌。浏览器扩展会在你登录 Canvas 时读取其中的数据并同步到此门户，这样你的应用仍可使用 Canvas 工具。你的 Canvas 密码和 Cookie 不会被发送。",
+    "notSyncedYet": "尚未同步",
+    "status": {
+      "title": "连接状态",
+      "connected": "已连接",
+      "notConnected": "未连接",
+      "notConnectedBody": "你的账户尚未配对任何浏览器扩展。请安装扩展，打开后选择此门户，或在下方显示配对码。",
+      "canvasHost": "Canvas 站点",
+      "paired": "配对时间",
+      "lastSync": "最近同步"
+    },
+    "reason": {
+      "active": "你的应用将使用已同步的数据作答。",
+      "token_preferred": "只要你的 Canvas 访问令牌可用，就会优先使用令牌，已同步的数据作为备用。",
+      "school_unknown": "此学校不在门户的学校列表中，因此暂不使用已同步的数据。请联系服务器所有者添加。",
+      "inactive": "已同步的数据尚未启用。"
+    },
+    "resources": {
+      "title": "已同步的数据",
+      "empty": "尚未同步任何数据。请在此浏览器中打开 Canvas 以开始同步。"
+    },
+    "columns": {
+      "path": "Canvas 路径",
+      "captured": "采集时间",
+      "status": "Canvas 响应"
+    },
+    "statusOk": "正常",
+    "statusBlocked": "状态 {{status}}",
+    "disconnect": {
+      "button": "断开连接并删除已同步的数据",
+      "title": "断开浏览器扩展？",
+      "body": "扩展将被取消配对，它同步的所有数据都会从此门户删除。重新配对之前，你的应用将无法通过浏览器获取 Canvas 数据。",
+      "confirm": "断开并删除",
+      "done": "浏览器扩展已断开。"
+    },
+    "pairing": {
+      "title": "配对扩展",
+      "fromExtension": "扩展请求与你的账户配对。",
+      "returnToExtension": "请返回扩展，它会自动完成连接。",
+      "manualHelp": "配对通常由扩展发起。如果扩展要求输入配对码，请在此显示并填入扩展。",
+      "show": "显示配对码",
+      "again": "获取新的配对码",
+      "codeLabel": "配对码",
+      "copyLabel": "复制配对码",
+      "expiresIn": "仅可使用一次，{{time}} 后过期。",
+      "expired": "配对码已过期。"
+    }
   }
 }

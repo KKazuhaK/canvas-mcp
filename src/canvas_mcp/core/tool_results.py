@@ -12,7 +12,9 @@ from fastmcp.exceptions import ToolError, ValidationError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
+from .browser_source import capture_freshness, freshness_note
 from .config import get_config
+from .credentials import get_browser_source
 from .error_codes import (
     ERROR_CODES,
     INVALID_ARGUMENT,
@@ -362,7 +364,7 @@ class CanvasToolResultMiddleware(Middleware):
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        with capture_failures() as codes:
+        with capture_failures() as codes, capture_freshness() as synced:
             try:
                 result = await call_next(context)
             except ValidationError as exc:
@@ -373,6 +375,7 @@ class CanvasToolResultMiddleware(Middleware):
                 return with_error_code(
                     ToolResult(content=str(exc), is_error=True), codes, raised=True
                 )
+            browser = get_browser_source()
         if not result.is_error and _result_is_error(result):
             result.is_error = True
         if result.is_error:
@@ -381,6 +384,18 @@ class CanvasToolResultMiddleware(Middleware):
             result = apply_result_cap(
                 result, context.message.name, context.message.arguments
             )
+            note = freshness_note(
+                synced,
+                stale_after_seconds=(
+                    browser.fresh_seconds if browser is not None else 24 * 3600
+                ),
+            )
+            if note is not None:
+                result = ToolResult(
+                    content=[*result.content, mt.TextContent(type="text", text=note)],
+                    structured_content=result.structured_content,
+                    meta=result.meta,
+                )
         return result
 
 

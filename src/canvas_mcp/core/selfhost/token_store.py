@@ -867,6 +867,11 @@ class TokenStore:
         return self._db
 
     @property
+    def keyring(self) -> Keyring:
+        """The keyring that seals this store's data (also used for browser snapshots)."""
+        return self._keyring
+
+    @property
     def description(self) -> str:
         """The backend, without credentials (``postgresql+psycopg://host:port/db`` or a path)."""
         return self._db.description

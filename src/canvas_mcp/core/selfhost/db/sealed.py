@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from sqlalchemy import Table, or_, select, update
+from sqlalchemy import Table, and_, bindparam, or_, select, tuple_, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -119,8 +119,10 @@ def rotate(db: Database, keys: SealKeys, *, chunk_size: int = 500) -> int:
     changed = 0
     for sealed in SEALED:
         table = sealed.table
-        primary = next(iter(table.primary_key.columns))
-        cursor: Any = None
+        # A composite primary key identifies a row by every column: walking and
+        # updating by the first column alone would skip or overwrite its siblings.
+        primary = list(table.primary_key.columns)
+        cursor: tuple[Any, ...] | None = None
         while True:
             with db.write() as conn:
                 statement = (
@@ -129,11 +131,23 @@ def rotate(db: Database, keys: SealKeys, *, chunk_size: int = 500) -> int:
                         table.c[sealed.ciphertext].is_not(None),
                         table.c[sealed.key_id] != keys.active_key_id,
                     )
-                    .order_by(primary)
+                    .order_by(*primary)
                     .limit(chunk_size)
                 )
                 if cursor is not None:
-                    statement = statement.where(primary > cursor)
+                    statement = statement.where(
+                        primary[0] > cursor[0]
+                        if len(primary) == 1
+                        # Each bound value takes its column's type: PostgreSQL has no
+                        # uuid > varchar operator.
+                        else tuple_(*primary)
+                        > tuple_(
+                            *(
+                                bindparam(None, value, type_=column.type)
+                                for column, value in zip(primary, cursor, strict=True)
+                            )
+                        )
+                    )
                 rows = conn.execute(statement).mappings().all()
                 for row in rows:
                     plaintext = keys.decrypt(
@@ -145,9 +159,9 @@ def rotate(db: Database, keys: SealKeys, *, chunk_size: int = 500) -> int:
                     kid, nonce, ciphertext = keys.encrypt(
                         plaintext, sealed.aad(row, key_id=keys.active_key_id)
                     )
-                    condition = (primary == row[primary.name]) & (
-                        table.c[sealed.key_id] == row[sealed.key_id]
-                    )
+                    condition = and_(
+                        *(column == row[column.name] for column in primary)
+                    ) & (table.c[sealed.key_id] == row[sealed.key_id])
                     if "generation" in table.c:
                         condition &= table.c.generation == row["generation"]
                     result = conn.execute(
@@ -160,11 +174,11 @@ def rotate(db: Database, keys: SealKeys, *, chunk_size: int = 500) -> int:
                                 sealed.ciphertext: ciphertext,
                             }
                         )
-                        .returning(primary)
+                        .returning(primary[0])
                     )
                     changed += int(result.first() is not None)
                 if rows:
-                    cursor = rows[-1][primary.name]
+                    cursor = tuple(rows[-1][column.name] for column in primary)
             if len(rows) < chunk_size:
                 break
     return changed

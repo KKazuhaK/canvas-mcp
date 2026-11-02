@@ -12,6 +12,7 @@ export const keys = {
   // The consent request id is a one-time secret of this browser: it is never part of a key.
   consent: ['consent'] as const,
   grants: ['grants'] as const,
+  extension: ['extension'] as const,
   adminGrants: (accountId: string) => ['admin', 'grants', accountId] as const,
   admin: ['admin'] as const,
   adminAccounts: (status: AdminStatusFilter | '') => ['admin', 'accounts', status] as const,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatDateTime, knownTimeZone } from './time'
+import { formatDateTime, formatRelative, knownTimeZone } from './time'
 
 const NOON_UTC = '2026-01-15T12:00:00Z'
 
@@ -27,5 +27,23 @@ describe('formatDateTime', () => {
   it('returns null for an absent or invalid time', () => {
     expect(formatDateTime(null, 'en', 'UTC')).toBeNull()
     expect(formatDateTime('nope', 'en', 'UTC')).toBeNull()
+  })
+})
+
+describe('formatRelative', () => {
+  const now = Date.parse(NOON_UTC)
+  const ago = (seconds: number) => new Date(now - seconds * 1000).toISOString()
+
+  it('reads naturally in each step', () => {
+    expect(formatRelative(ago(20), 'en', now)).toBe('now')
+    expect(formatRelative(ago(5 * 60), 'en', now)).toBe('5 minutes ago')
+    expect(formatRelative(ago(3 * 3600), 'en', now)).toBe('3 hours ago')
+    expect(formatRelative(ago(2 * 86400), 'en', now)).toBe('2 days ago')
+  })
+
+  it('is null for a missing or invalid value, and follows the language', () => {
+    expect(formatRelative(null, 'en', now)).toBeNull()
+    expect(formatRelative('nope', 'en', now)).toBeNull()
+    expect(formatRelative(ago(5 * 60), 'zh', now)).toContain('5')
   })
 })

@@ -171,6 +171,16 @@ export const adminGrants = (accountId: string, query: PageQuery = {}) =>
 
 export const adminRevokeGrant = (id: string) => call('DELETE /admin/grants/{id}', { id })
 
+// ---- browser extension ---------------------------------------------------------------
+
+/** A fresh single-use pairing code. The caller keeps it in memory only. */
+export const createExtensionPairing = () => call('POST /me/extension/pairing')
+export const getExtension = () => call('GET /me/extension')
+
+export async function deleteExtension(): Promise<void> {
+  await call('DELETE /me/extension')
+}
+
 // ---- sign-in ------------------------------------------------------------------------
 
 /** The server-side OIDC start (a full-page navigation, never an XHR). */

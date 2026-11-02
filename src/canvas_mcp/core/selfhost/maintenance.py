@@ -188,6 +188,32 @@ class MaintenanceRunner:
                 100,
             ),
             ("orphan_schools", schools, orphan, schools.c.host, batch),
+            # Browser sync: snapshots nobody refreshed, spent or expired pairing
+            # codes, and bindings revoked long ago. Appended last: a job's advisory
+            # lock key is its position.
+            (
+                "browser_snapshots",
+                s.browser_snapshots,
+                s.browser_snapshots.c.captured_at
+                < now - int(settings["browser_sync.purge_days"]) * DAY,
+                s.browser_snapshots.c.captured_at,
+                batch,
+            ),
+            (
+                "extension_codes",
+                s.extension_pairing_codes,
+                s.extension_pairing_codes.c.expires_at < now - 3600,
+                s.extension_pairing_codes.c.expires_at,
+                batch,
+            ),
+            (
+                "revoked_bindings",
+                s.extension_bindings,
+                s.extension_bindings.c.revoked_at
+                < now - int(settings["browser_sync.purge_days"]) * DAY,
+                s.extension_bindings.c.revoked_at,
+                200,
+            ),
         ]
         return tuple(
             Job(

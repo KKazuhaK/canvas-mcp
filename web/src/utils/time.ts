@@ -72,3 +72,27 @@ export function formatCalendarDate(ymd: string | null | undefined, lang: Languag
   if (Number.isNaN(date.getTime())) return null
   return new Intl.DateTimeFormat(intlLocale(lang), { dateStyle: 'medium' }).format(date)
 }
+
+const RELATIVE_STEPS: [Intl.RelativeTimeFormatUnit, number][] = [
+  ['year', 31_536_000],
+  ['month', 2_592_000],
+  ['day', 86_400],
+  ['hour', 3_600],
+  ['minute', 60],
+]
+
+/** "5 minutes ago" in the viewer's language, or null if the value is absent or invalid. Under a minute reads "now". */
+export function formatRelative(
+  iso: string | null | undefined,
+  lang: Language,
+  now: number = Date.now(),
+): string | null {
+  const date = parse(iso)
+  if (!date) return null
+  const seconds = Math.round((date.getTime() - now) / 1000)
+  const formatter = new Intl.RelativeTimeFormat(intlLocale(lang), { numeric: 'auto' })
+  for (const [unit, size] of RELATIVE_STEPS) {
+    if (Math.abs(seconds) >= size) return formatter.format(Math.trunc(seconds / size), unit)
+  }
+  return formatter.format(0, 'second')
+}

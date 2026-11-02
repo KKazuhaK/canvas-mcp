@@ -27,6 +27,9 @@ grant chunks contain at most 200 rows on either database.
 | Audit history | `retention.audit_days`, default 0: keep forever |
 | Pending accounts | 30 days, at most 100 accounts per run |
 | Orphan schools | One day; only unfeatured, public schools without credentials or OAuth apps |
+| Browser-sync snapshots | `browser_sync.purge_days`, default 30, after the capture time |
+| Browser-sync pairing codes | One hour after expiry, spent or not |
+| Revoked browser-sync bindings | `browser_sync.purge_days` after revocation |
 
 History jobs walk the primary key. An earlier record with a timestamp in the
 future is skipped without prematurely stopping a chunk whose last record is due.

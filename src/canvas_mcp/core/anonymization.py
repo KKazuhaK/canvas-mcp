@@ -23,6 +23,7 @@ from typing import Any
 
 from .credentials import (
     current_principal_key,
+    get_browser_source,
     get_request_credentials,
     is_http_request_active,
     register_credential_purge_listener,
@@ -47,7 +48,11 @@ def _principal_cache(*, create: bool) -> dict[tuple[str, str], str] | None:
     maps below are not touched.
     """
     # A missing or cleared HTTP credential must never select stdio history.
-    if is_http_request_active() and get_request_credentials() is None:
+    if (
+        is_http_request_active()
+        and get_request_credentials() is None
+        and get_browser_source() is None
+    ):
         return {} if create else None
     local = request_local_principal_state()
     if local is not None:

@@ -30,6 +30,7 @@
     "adminEnrollments": "令牌绑定",
     "adminAudit": "审计日志",
     "connectedApps": "已连接的应用",
+    "browserExtension": "浏览器扩展",
     "signInMethods": "登录方式",
     "adminSettings": "设置"
   },

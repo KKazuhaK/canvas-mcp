@@ -84,11 +84,13 @@ from canvas_mcp.core.selfhost.tool_prefs import (
 from canvas_mcp.core.tool_policy import TOOL_EFFECTS, Effect
 
 from . import custody
+from .browser_store import BrowserSyncStore, browser_decision
 from .build_info import build_info
 from .config_snapshot import CURRENT_CONFIG
 from .config_store import ConfigStore, SchoolRemovalConfirmation
 from .db.settings_repo import SettingsAccessDenied, SettingsConflict
 from .db.workers import run_store
+from .limits import build_rate_limiters
 from .login.local_accounts import LocalAccounts
 from .login.provider_config import ProviderConfigurationError
 from .login.runtime_config import CURRENT_LOGIN
@@ -394,6 +396,10 @@ class ApiApp:
     def __init__(self, app: web.AccountCore) -> None:
         self.app = app
         self.config_store = ConfigStore(app.snapshots)
+        self._browser: BrowserSyncStore | None = None
+        self.pairing_limiter = build_rate_limiters("memory").sliding_window(
+            10, 600, 1024, app.clock
+        )
         from .mail import MailStore
 
         self.mail = (
@@ -734,6 +740,24 @@ class ApiApp:
                         body="empty",
                         linking=True,
                     )
+                },
+            ),
+            # Browser sync: the signed-in account's side of the extension binding.
+            (
+                f"{API_PREFIX}/me/extension/pairing",
+                {
+                    "POST": e(
+                        self.extension_pairing, mutating=True, body="empty"
+                    )
+                },
+            ),
+            (
+                f"{API_PREFIX}/me/extension",
+                {
+                    "GET": e(self.extension_status),
+                    "DELETE": e(
+                        self.extension_unpair, mutating=True, body="empty"
+                    ),
                 },
             ),
             # SELFHOST_AUTH_MODE=local only (not_found otherwise).
@@ -2712,7 +2736,71 @@ class ApiApp:
             self._apply_unlink_cookie(response, session, outcome)
         return response
 
+    # -- browser sync ------------------------------------------------------------------------
+
+    @property
+    def browser(self) -> BrowserSyncStore:
+        if self._browser is None:
+            self._browser = BrowserSyncStore(
+                self.app.store.database, self.app.store.keyring, clock=self.app.clock
+            )
+        return self._browser
+
+    async def extension_pairing(self, ctx: _Ctx) -> Response:
+        session = ctx.session
+        assert session is not None
+        if not self.pairing_limiter.allow((session.acct,)):
+            raise _Fail("rate_limited", {"retry_after_s": 600})
+        code, expires = await run_store(self.browser.create_pairing_code, session.acct)
+        return self._ok({"code": code, "expiresAt": _ts(expires)})
+
+    async def extension_status(self, ctx: _Ctx) -> Response:
+        session = ctx.session
+        assert session is not None
+        binding = await run_store(self.browser.active_binding, session.acct)
+        if binding is None:
+            return self._ok({"binding": None})
+        stored = await run_store(self.browser.resources, binding.id)
+        info = await run_store(self.app.store.info, session.acct)
+        usable = info is not None and info.status != STATUS_INVALID
+        active, reason = browser_decision(
+            token_usable=usable,
+            token_host=info.canvas_host if info is not None else None,
+            binding_host=binding.canvas_host,
+            school_offered=self.app.schools.resolve_stored(binding.canvas_host)
+            is not None,
+        )
+        return self._ok(
+            {
+                "binding": {
+                    "createdAt": _ts(binding.created_at),
+                    "lastUploadAt": _ts(binding.last_upload_at),
+                    "canvasHost": binding.canvas_host,
+                    "resources": [
+                        {
+                            "path": resource.key.split("?", 1)[0],
+                            "capturedAt": _ts(resource.captured_at),
+                            "canvasStatus": resource.status,
+                        }
+                        for resource in stored
+                    ],
+                    "active": active,
+                    "reason": reason,
+                }
+            }
+        )
+
+    async def extension_unpair(self, ctx: _Ctx) -> Response:
+        session = ctx.session
+        assert session is not None
+        await run_store(self.browser.revoke_account, session.acct)
+        return self._no_content()
+
 
 def build_api_routes(app: web.AccountCore) -> list[Route]:
     """The ``/api/v1`` routes over an existing account application."""
-    return ApiApp(app).routes()
+    from .browser_extension_api import build_extension_routes
+
+    api = ApiApp(app)
+    # The extension's routes go first: the API's catch-all would answer them not_found.
+    return [*build_extension_routes(app, api.browser), *api.routes()]

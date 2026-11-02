@@ -39,6 +39,7 @@ import type {
   ConsentResponse,
   ErrorParams,
   Features,
+  ExtensionBinding,
   Grant,
   Identity,
   InvalidReason,
@@ -216,6 +217,8 @@ interface MockState {
   audit: AuditEntry[]
   /** Live connected apps by account id (local scenarios). */
   grants: Map<string, Grant[]>
+  /** The paired browser extension and what it synced, if any. */
+  extension: ExtensionBinding | null
   /** Consent requests not decided yet. */
   txns: Set<string>
   /** Two or more sign-in providers are configured. */
@@ -335,6 +338,22 @@ function grantOf(
     created_at: ago(60 * 24 * n),
     last_used_at: lastUsedMinutes === null ? null : ago(lastUsedMinutes),
     expires_at: ago(-60 * 24 * (30 - n)),
+  }
+}
+
+function seedExtension(): ExtensionBinding {
+  return {
+    createdAt: ago(60 * 24 * 3),
+    lastUploadAt: ago(12),
+    canvasHost: SCHOOL.host,
+    active: true,
+    reason: null,
+    resources: [
+      { path: '/users/self', capturedAt: ago(12), canvasStatus: 200 },
+      { path: '/courses', capturedAt: ago(12), canvasStatus: 200 },
+      { path: '/courses/101/assignments', capturedAt: ago(12), canvasStatus: 200 },
+      { path: '/planner/items', capturedAt: ago(12), canvasStatus: 403 },
+    ],
   }
 }
 
@@ -500,6 +519,7 @@ function buildState(scenario: MockScenario): MockState {
     accounts,
     audit,
     grants: local ? seedGrants(SELF_ID) : new Map(),
+    extension: scenario === 'enrolled' ? seedExtension() : null,
     txns: new Set(Object.values(MOCK_TXN)),
     multi,
     providers: multi ? MULTI_PROVIDERS : [MULTI_PROVIDERS[0]],
@@ -1367,6 +1387,19 @@ route('DELETE /admin/grants/{id}', 'owner', (c, s) => {
     }
   }
   return ok({ changed })
+})
+
+route('POST /me/extension/pairing', 'active', () => {
+  const bytes = crypto.getRandomValues(new Uint8Array(12))
+  const code = Array.from(bytes, (byte) => byte.toString(36).padStart(2, '0')).join('').slice(0, 20)
+  return ok({ code, expiresAt: new Date(Date.now() + 5 * 60_000).toISOString() })
+})
+
+route('GET /me/extension', 'active', (_c, s) => ok({ binding: s.extension }))
+
+route('DELETE /me/extension', 'active', (_c, s) => {
+  s.extension = null
+  return noContent()
 })
 
 // ---- the adapter -------------------------------------------------------------------
