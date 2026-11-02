@@ -162,6 +162,18 @@ def test_registry_covers_every_ciphertext_column_and_uses_one_layout():
     assert credential.fields == ("account_id", "canvas_host", "kind", "key_id")
 
 
+def test_rotation_walks_a_composite_key_one_row_per_chunk(sealed_store):
+    """The cursor branch: each chunk resumes after the last (uuid, text) key."""
+    from canvas_mcp.core.selfhost.db.sealed import rotate
+
+    store, _, _, _ = sealed_store
+    ring = keyring("k2", both=True)
+    assert rotate(store.database, ring, chunk_size=1) == 6
+    assert rotate(store.database, ring, chunk_size=1) == 0
+    with store.database.read() as conn:
+        assert verify(conn, keyring("k2"), all_values=True) == 6
+
+
 def test_rotation_covers_reserved_secrets_and_preserves_all_other_fields(sealed_store):
     store, _, account, info = sealed_store
     with store.database.read() as conn:
@@ -212,7 +224,10 @@ def test_rotation_reseals_each_snapshot_of_a_binding_under_its_own_resource_key(
         rows = {
             row["resource_key"]: bytes(
                 ring.decrypt(
-                    row["key_id"], bytes(row["nonce"]), bytes(row["ciphertext"]), entry.aad(row)
+                    row["key_id"],
+                    bytes(row["nonce"]),
+                    bytes(row["ciphertext"]),
+                    entry.aad(row),
                 )
             )
             for row in conn.execute(select(entry.table)).mappings()

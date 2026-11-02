@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from sqlalchemy import Table, and_, or_, select, tuple_, update
+from sqlalchemy import Table, and_, bindparam, or_, select, tuple_, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -138,7 +138,15 @@ def rotate(db: Database, keys: SealKeys, *, chunk_size: int = 500) -> int:
                     statement = statement.where(
                         primary[0] > cursor[0]
                         if len(primary) == 1
-                        else tuple_(*primary) > tuple_(*cursor)
+                        # Each bound value takes its column's type: PostgreSQL has no
+                        # uuid > varchar operator.
+                        else tuple_(*primary)
+                        > tuple_(
+                            *(
+                                bindparam(None, value, type_=column.type)
+                                for column, value in zip(primary, cursor, strict=True)
+                            )
+                        )
                     )
                 rows = conn.execute(statement).mappings().all()
                 for row in rows:
