@@ -312,6 +312,15 @@ def test_a_token_is_not_an_account_or_mcp_credential(rig: Rig):
 # -- origins, cookies, CORS ------------------------------------------------------------------------
 
 
+def test_an_extension_origin_reaches_nothing_but_the_extension_api(rig: Rig):
+    client = rig.h.stack.new_client()
+    for origin in (EXT, FIREFOX):
+        assert client.post("/mcp", headers={"Origin": origin}, json={}).status_code == 403
+        assert client.get(P + "/me", headers={"Origin": origin}).status_code == 403
+        assert client.get("/.well-known/oauth-authorization-server", headers={"Origin": origin}).status_code == 403
+        assert rig.call("GET", "/capabilities", origin=origin).status_code == 200
+
+
 def test_capabilities_answer_an_extension_origin_with_cors(rig: Rig):
     for origin in (EXT, FIREFOX):
         response = rig.call("GET", "/capabilities", origin=origin)
@@ -414,11 +423,12 @@ def test_a_method_the_path_does_not_serve_is_refused_with_allow(rig: Rig):
 
 
 def test_the_account_api_stays_closed_to_cors(rig: Rig):
+    # The edge guard refuses an extension origin before the account API sees it.
     response = rig.ext.options(P + "/me/extension", headers={"Origin": EXT, "Access-Control-Request-Method": "GET"})
-    assert response.status_code == 405
+    assert response.status_code == 403
     assert "access-control-allow-origin" not in response.headers
     response = rig.ext.get(P + "/me/extension", headers={"Origin": EXT})
-    assert response.status_code == 401 and "access-control-allow-origin" not in response.headers
+    assert response.status_code == 403 and "access-control-allow-origin" not in response.headers
 
 
 def test_capabilities_is_never_limited(rig: Rig):
@@ -935,6 +945,15 @@ def test_a_usable_token_wins_and_an_unusable_one_does_not(rig: Rig):
     assert rig.h.store.mark_invalid(KEY, reason="canvas_token_rejected")
     shown = rig.api.get("/me/extension").json()["binding"]
     assert (shown["active"], shown["reason"]) == (True, None)
+
+
+def test_an_unusable_token_of_another_canvas_user_keeps_the_synced_data_unused(rig: Rig):
+    token = rig.pair()
+    rig.upload(token, [res("/users/self", {}, {"id": 77})])
+    put_row(rig.h.store, OID, token=CANVAS_TOKEN, name="Ada", canvas_user_id="78")
+    assert rig.h.store.mark_invalid(KEY, reason="canvas_token_rejected")
+    shown = rig.api.get("/me/extension").json()["binding"]
+    assert (shown["active"], shown["reason"]) == (False, "user_mismatch")
 
 
 def test_deleting_the_binding_from_the_account_removes_the_data(rig: Rig):

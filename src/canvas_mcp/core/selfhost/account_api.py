@@ -2769,6 +2769,8 @@ class ApiApp:
             binding_host=binding.canvas_host,
             school_offered=self.app.schools.resolve_stored(binding.canvas_host)
             is not None,
+            token_user_id=info.canvas_user_id if info is not None else None,
+            binding_user_id=binding.canvas_user_id,
         )
         return self._ok(
             {

@@ -116,6 +116,32 @@ class TestTokenBucket:
         assert [bucket.take() for _ in range(3)] == [0.0, 0.0, pytest.approx(1.0)]
 
 
+class TestExtensionOrigins:
+    """An extension origin reaches only the extension's own endpoints."""
+
+    @pytest.mark.parametrize(
+        "origin",
+        [b"chrome-extension://" + b"a" * 32, b"moz-extension://12345678-1234-1234-1234-123456789abc", b"Chrome-Extension://x"],
+    )
+    @pytest.mark.parametrize("path", ["/mcp", "/api/v1/me", "/authorize", "/api/v1/extension", "/api/v1/extensions/x"])
+    async def test_an_extension_origin_is_refused_outside_the_extension_api(self, origin, path):
+        inner = Recorder()
+        status, _ = await call(SelfhostEdgeGuard(inner), "GET", path, headers=[(b"origin", origin)])
+        assert status == 403 and inner.scopes == []
+
+    @pytest.mark.parametrize("path", ["/api/v1/extension/capabilities", "/api/v1/extension/snapshots"])
+    async def test_the_extension_api_still_sees_its_origin(self, path):
+        inner = Recorder()
+        origin = b"chrome-extension://" + b"a" * 32
+        status, _ = await call(SelfhostEdgeGuard(inner), "POST", path, headers=[(b"origin", origin)])
+        assert status == 200 and len(inner.scopes) == 1
+
+    async def test_other_origins_are_left_to_the_inner_guard(self):
+        inner = Recorder()
+        status, _ = await call(SelfhostEdgeGuard(inner), "GET", "/mcp", headers=[(b"origin", b"https://evil.example")])
+        assert status == 200 and len(inner.scopes) == 1
+
+
 class TestRegistrationLimits:
     async def test_the_31st_registration_in_a_minute_gets_429(self):
         clock = FakeClock()

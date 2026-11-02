@@ -116,6 +116,7 @@ describe('Browser extension: status', () => {
   it.each([
     ['token_preferred', /Your Canvas access token is used instead while it works/],
     ['school_unknown', /not in the Portal's school list/],
+    ['user_mismatch', /belongs to a different Canvas user/],
     [null, /not in use yet/],
   ])('explains why synced data is not used (%s)', async (reason, text) => {
     await open('/browser-extension', { binding: { ...BINDING, reason } })

@@ -117,12 +117,17 @@ def browser_decision(
     token_host: str | None,
     binding_host: str | None,
     school_offered: bool,
+    token_user_id: str | None = None,
+    binding_user_id: str | None = None,
 ) -> tuple[bool, str | None]:
     """Whether tool calls are answered from browser data, and if not, why.
 
     A usable personal access token always wins. Otherwise the binding is used
     when its Canvas host is a school this server offers and, if the account
-    already has a school (from an unusable token), the same one.
+    already has a school (from an unusable token), the same one. If that token
+    also names a Canvas user, the browser must be signed in as the same user:
+    changing who the account reads as goes through the token's identity-change
+    confirmation, never through a browser signed in as someone else.
     """
     if token_usable:
         return False, "token_preferred"
@@ -130,6 +135,8 @@ def browser_decision(
         return False, "school_unknown"
     if token_host is not None and token_host != binding_host:
         return False, "school_unknown"
+    if token_user_id is not None and token_user_id != binding_user_id:
+        return False, "user_mismatch"
     return True, None
 
 

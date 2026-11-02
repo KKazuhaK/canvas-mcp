@@ -345,6 +345,7 @@
       "active": "Your apps are answered from the synced data.",
       "token_preferred": "Your Canvas access token is used instead while it works. The synced data is kept as a fallback.",
       "school_unknown": "This school is not in the Portal's school list, so the synced data is not used yet. Ask the server owner to add it.",
+      "user_mismatch": "The synced data belongs to a different Canvas user from your saved access token, so it is not used. To fix it, replace or remove the saved token, or disconnect here and pair again while signed in to Canvas as the token's user.",
       "inactive": "The synced data is not in use yet."
     },
     "resources": {

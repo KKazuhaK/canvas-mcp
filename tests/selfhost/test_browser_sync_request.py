@@ -182,6 +182,16 @@ async def test_a_dead_token_of_another_school_does_not_hand_over(browser):
     assert probe.seen["code"] == "CREDENTIAL_INVALID"
 
 
+async def test_a_dead_token_of_another_canvas_user_does_not_hand_over(browser):
+    # The browser is signed in as user 42; the account's token belongs to user 7.
+    bind(browser)
+    store = FakeStore()
+    store.snapshots[KEY_A] = native_snapshot(canvas_user_id="7", **INVALID)
+    probe = await serve(store, browser, endpoint=None)
+    assert probe.browser is None and probe.seen["creds"] is None
+    assert probe.seen["code"] == "CREDENTIAL_INVALID"
+
+
 async def test_a_binding_that_has_not_uploaded_yet_does_not_count(browser):
     bind(browser, host=None)
     probe = await serve(without_token(), browser, endpoint=None)
