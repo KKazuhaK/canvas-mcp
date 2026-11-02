@@ -118,7 +118,7 @@ PY=<locked-venv>/Scripts/python.exe   # or the dev venv
 ```bash
 $PY -m pytest tests/selfhost -q -p no:cacheprovider        # self-hosted (~4660 tests on the P7 branch)
 $PY -m pytest tests -q -p no:cacheprovider                 # whole suite (~8700 on the P7 branch)
-$PY -m pytest tests/selfhost tests/test_multiuser_e2e.py tests/test_fastmcp_compat.py -q   # what CI test-postgres runs
+$PY -m pytest tests/selfhost tests/test_multiuser_e2e.py tests/test_fastmcp_compat.py -q -n auto   # what CI test-postgres runs
 $PY -m ruff check src/ tests/
 $PY -m mypy src/                                           # needs .[selfhost,postgres] installed
 <dev-venv>/Scripts/uv.exe lock --check   # from the checkout; fails if uv.lock is stale
@@ -148,7 +148,7 @@ $BIN/pg_ctl.exe -D $CPG/data -m fast stop
 Elsewhere, any PostgreSQL 16+ reachable at that URL works (Docker `postgres:16` is fine).
 - If the backend is requested but unreachable, `tests/conftest.py` aborts the run (it does not skip), so green means PostgreSQL was exercised.
 - Only `CANVAS_MCP_TEST_DATABASE_URL` set (no backend var): the SQLite run also executes `@pytest.mark.postgres` tests. `@pytest.mark.sqlite_only` tests skip on PostgreSQL.
-- Tests create and drop scratch schemas (`tests/dbbackend.py`).
+- Tests create and drop scratch schemas (`tests/dbbackend.py`). Add `-n auto` (pytest-xdist, in the dev group) to run in parallel, as CI does: each worker then uses its own database `<name>_gw0`, `<name>_gw1`, ... on the same server, created from `template1` on first use, so the URL's user needs `CREATEDB`. Worker databases are kept between runs; drop them by hand if you want them gone.
 - CI uses `postgres:18.6-alpine` pinned by digest; CI is the authority.
 
 **The full matrix for any self-hosted change: {dev venv, locked venv} x {SQLite, PostgreSQL}**, plus ruff, mypy, `uv lock --check`, and the web checks if `web/` or the API changed. v1 adds its own checks (V1-DESIGN 6.1).
@@ -166,7 +166,7 @@ Runs on pushes to `main`, `development`, `selfhost`, `feature/**`, `fix/**`, `ci
 | `test` | `pytest tests/` on Python 3.11-3.14 with latest deps, `fetch-depth: 0` (closing-keyword history replay) |
 | `test-windows` | same on Windows, 3.14, `PYTHONUTF8=1` |
 | `test-locked` | `uv sync --locked`, `uv run --locked pytest tests/` on 3.14 |
-| `test-postgres` | PostgreSQL service container; `tests/selfhost tests/test_multiuser_e2e.py tests/test_fastmcp_compat.py` |
+| `test-postgres` | PostgreSQL service container; `tests/selfhost tests/test_multiuser_e2e.py tests/test_fastmcp_compat.py -n auto` |
 | `test-enhancements` | aggregator; requires all above |
 
 Other workflows: `closing-keyword-guard.yml`; `selfhost-image.yml` (section 8); upstream's `scorecard.yml`, `deploy-*.yml`, `publish-mcp.yml`, `create-release.yml`, `claude-code-review.yml`, `claude.yml` (their jobs are guarded by `github.repository == 'vishalsachdev/canvas-mcp'`, so they do nothing in the fork); `security-testing.yml` and `weekly-maintenance.yml` have no such guard but GitHub shows them as `disabled_fork` in the fork, as `scorecard.yml`. On a fork PR into upstream, upstream's `claude-code-review.yml` runs without the secret and `claude-review` goes red; upstream's triage (2026-10-11) records this as an upstream workflow issue.

@@ -43,6 +43,13 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
+def fail_without_worker_database():
+    """Fail, not skip, every test of an xdist worker whose PostgreSQL database is missing."""
+    if dbbackend.WORKER_ERROR:
+        pytest.fail(dbbackend.WORKER_ERROR, pytrace=False)
+
+
+@pytest.fixture(autouse=True)
 def drop_postgres_test_schemas():
     """Leave the scratch PostgreSQL database empty after each test."""
     yield

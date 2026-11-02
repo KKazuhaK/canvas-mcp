@@ -6,7 +6,7 @@ Codex reads `AGENTS.md`, not this file; its "Developing this server" section poi
 
 ## Commands
 - Install `uv pip install -e .`; run `canvas-mcp-server` (`--test`, `--config`); `.env` holds `CANVAS_API_TOKEN` and `CANVAS_API_URL`.
-- Before committing: `uv run python -m pytest tests/ -v -rf`. TypeScript changes: `npm test` and `npm run build`.
+- Before committing: `uv run python -m pytest tests/ -rf -n auto` (parallel, as CI runs it; drop `-n auto` to debug one test). TypeScript changes: `npm test` and `npm run build`.
 
 ## Git Workflow - ASK FIRST
 - Before a feature or significant change, ask: feature branch or `main`? Defaults: new tool `feature/`, bug `fix/`, docs or typo may go straight to `main`. Prefixes: `feature/`, `fix/`, `docs/`, `refactor/`.
