@@ -330,12 +330,18 @@ def drop_test_schemas() -> None:
     if _SCHEMAS:
         engine = _bootstrap()
         try:
-            with engine.begin() as conn:
-                for schema in sorted(_SCHEMAS):
+            # One transaction per schema: a CASCADE drop locks every object it
+            # removes until commit, and all xdist workers share the server's lock
+            # table, so dropping several schemas at once can run it out
+            # ("out of shared memory").
+            for schema in sorted(_SCHEMAS):
+                with engine.begin() as conn:
                     conn.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+                # Forget each schema once it is gone, so a failure part way
+                # through leaves only the ones that still exist.
+                _SCHEMAS.discard(schema)
         finally:
             engine.dispose()
-        _SCHEMAS.clear()
 
 
 def track_database(db: Any) -> None:
