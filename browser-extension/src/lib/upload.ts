@@ -45,3 +45,23 @@ export function splitUploads(
   if (current.length) batches.push(current);
   return { batches, oversized };
 }
+
+// Upload order. The portal prunes old per-course chunk rows when it sees new
+// course and group lists, so the lists must travel in the same batch as every
+// courseList chunk and group-calendar chunk (lists first). If that set is bigger
+// than one batch it still goes first, lists together with as many chunks as fit,
+// ahead of all other resources. The sort is stable.
+export function rankForUpload(r: UploadResource, expand: string | null | undefined): 0 | 1 | 2 {
+  if (r.path === '/courses' || r.path === '/users/self/groups') return 0;
+  const codes = r.query['context_codes[]'];
+  const list = Array.isArray(codes) ? codes : codes ? [codes] : [];
+  const groupCalendar = r.path === '/calendar_events' && list.length > 0 && list.every((c) => c.startsWith('group_'));
+  return expand === 'courseList' || groupCalendar ? 1 : 2;
+}
+
+export function orderForUpload(resources: UploadResource[], expandOf: (r: UploadResource) => string | null | undefined): UploadResource[] {
+  return resources
+    .map((r, i) => ({ r, i, rank: rankForUpload(r, expandOf(r)) }))
+    .sort((a, b) => a.rank - b.rank || a.i - b.i)
+    .map((x) => x.r);
+}

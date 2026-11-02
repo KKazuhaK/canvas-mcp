@@ -228,3 +228,44 @@ test('tab visit after 10+ minutes triggers a sync', async () => {
   await new Promise((r) => setTimeout(r, 1800));
   assert.ok(s.requests.some((r) => r.url.endsWith('/snapshots')));
 });
+
+test('lastFetchedAt: set after a sync, pruned when keys leave the plan, and "Sync now" forces cold resources', async () => {
+  const plan = { planVersion: 2, canvasHost: null, maxPages: 5, coldIntervalHours: 12, resources: [{ path: '/users/self', query: {} }, { path: '/announcements', query: {}, tier: 'cold' }] };
+  const recent = new Date(NOW - 3600_000).toISOString();
+  const script = async (d: any) => [{ result: d.args[1].map((j: any) => ({ path: j.path, query: j.query, status: 200, body: j.path === '/users/self' ? { id: 9 } : [], pages: 1 })) }];
+  const s = setup(
+    { storage: { ...connected, lastFetchedAt: { '/announcements?{}': recent, '/stale?{}': recent } }, permissions: granted, tabs: canvasTab, executeScript: script },
+    (url) => (url.endsWith('/plan') ? jsonResponse(plan) : (syncFetch() as any)(url)),
+  );
+  await s.c.handleMessage({ type: 'canvas.sync.now' }, popup);
+  const lf = s.storage.data.lastFetchedAt as Record<string, string>;
+  assert.deepEqual(Object.keys(lf).sort(), ['/announcements?{}', '/users/self?{}']);
+  assert.equal(lf['/announcements?{}'], new Date(NOW).toISOString()); // forced by Sync now, so refreshed
+  // A page visit does not force: the cold item is now fresh and is skipped.
+  s.injected.length = 0;
+  await s.c.runSyncOnce('tab');
+  assert.deepEqual(s.injected[0].args[1].map((j: any) => j.path), ['/users/self']);
+});
+
+const V2 = (resources: object[]) => ({ planVersion: 2, canvasHost: 'school.instructure.com', maxPages: 5, coldIntervalHours: 12, resources });
+const COURSE_SRC = { path: '/courses', query: { enrollment_state: 'active' }, paginate: true, courseSource: true };
+const COLD_MODULES = { path: '/courses/{course_id}/modules', query: {}, expand: 'eachCourse', tier: 'cold' };
+const modKey = (id: number) => `/courses/${id}/modules?{}`;
+
+test('after a course set change, stored fetch times keep only keys of this run and per-course entries are reset', async () => {
+  const plan = V2([{ path: '/users/self', query: {} }, COURSE_SRC, COLD_MODULES]);
+  const script = async (d: any) => [{ result: d.args[1].map((j: any) => ({ path: j.path, query: j.query, status: 200, pages: 1,
+    body: j.path === '/users/self' ? { id: 9 } : j.path === '/courses' ? [{ id: 2 }, { id: 3 }] : [] })) }];
+  const recent = new Date(NOW - 3600_000).toISOString();
+  const s = setup(
+    { storage: { ...connected, lastCourseIds: [1, 2], lastFetchedAt: { [modKey(1)]: recent, [modKey(2)]: recent } }, permissions: granted, tabs: canvasTab, executeScript: script },
+    (url) => (url.endsWith('/plan') ? jsonResponse(plan) : (syncFetch() as any)(url)),
+  );
+  await s.c.runSyncOnce('tab');
+  const lf = s.storage.data.lastFetchedAt as Record<string, string>;
+  assert.equal(lf[modKey(1)], undefined); // left the plan
+  assert.equal(lf[modKey(2)], new Date(NOW).toISOString()); // refetched under the new set
+  assert.equal(lf[modKey(3)], new Date(NOW).toISOString());
+  assert.deepEqual(s.storage.data.lastCourseIds, [2, 3]);
+});
+

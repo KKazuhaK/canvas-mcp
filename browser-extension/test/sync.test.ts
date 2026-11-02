@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runSync, type SyncDeps } from '../src/lib/sync.ts';
+import { validateQuery } from '../src/lib/allowlist.ts';
 import type { FetchJob } from '../src/lib/allowlist.ts';
 import type { FetchResult } from '../src/lib/canvas-fetch.ts';
 import { CANVAS, PORTAL, TOKEN, jsonResponse } from './helpers.ts';
@@ -241,4 +242,275 @@ test('other 4xx errors back off but are not treated as quota', async () => {
   assert.ok((other.retryAfterMs ?? 0) > 0);
   const server = await runSync(input, setup({ uploadStatus: 500, uploadBody: {} }).deps);
   assert.equal(server.retryAfterMs, undefined);
+});
+
+test('courseSource: per-course expansion uses only flagged /courses results', async () => {
+  const plan = {
+    ...PLAN,
+    resources: [
+      { path: '/users/self', query: {} },
+      { path: '/courses', query: { enrollment_state: 'active' }, paginate: true, courseSource: true },
+      { path: '/courses', query: {}, paginate: true },
+      { path: '/courses/{course_id}/assignments', query: {}, paginate: true, perCourse: true },
+    ],
+  };
+  const s = setup({
+    plan,
+    canvas: (j) => (j.path === '/courses' ? { body: j.query.enrollment_state ? [{ id: 10 }] : [{ id: 10 }, { id: 99 }] } : {}),
+  });
+  await runSync(input, s.deps);
+  assert.deepEqual(s.canvasCalls[1]?.jobs.map((j) => j.path), ['/courses/10/assignments']);
+});
+
+test('without any courseSource flag, all /courses results are used (older portals)', async () => {
+  const plan = {
+    ...PLAN,
+    resources: [
+      { path: '/users/self', query: {} },
+      { path: '/courses', query: { enrollment_state: 'active' }, paginate: true },
+      { path: '/courses', query: {}, paginate: true },
+      { path: '/courses/{course_id}/assignments', query: {}, perCourse: true },
+    ],
+  };
+  const s = setup({
+    plan,
+    canvas: (j) => (j.path === '/courses' ? { body: j.query.enrollment_state ? [{ id: 10 }] : [{ id: 99 }] } : {}),
+  });
+  await runSync(input, s.deps);
+  assert.deepEqual(s.canvasCalls[1]?.jobs.map((j) => j.path).sort(), ['/courses/10/assignments', '/courses/99/assignments']);
+});
+
+test('a resource still throttled by Canvas is left out of the upload with a skip reason', async () => {
+  const s = setup({ plan: CLEAN_PLAN, canvas: (j) => (j.path === '/courses' ? { status: null, body: null, error: 'rate_limited' } : {}) });
+  const out = await runSync(input, s.deps);
+  assert.ok(!s.posts[0].resources.some((r: any) => r.path === '/courses'));
+  assert.ok(s.posts[0].resources.every((r: any) => r.status !== 403));
+  assert.ok(out.skipReasons?.includes('/courses: rate limited by Canvas'));
+  assert.equal(out.counts.skipped >= 1, true);
+  assert.equal(out.counts.canvasErrors, 0);
+});
+
+// ---- plan v2: tiers and courseList ----
+const COLD_KEY = '/announcements?{}';
+const V2_PLAN = {
+  planVersion: 2, canvasHost: 'school.instructure.com', maxPages: 5, coldIntervalHours: 12,
+  resources: [
+    { path: '/users/self', query: {} },
+    { path: '/announcements', query: {}, tier: 'cold' },
+  ],
+};
+const hoursAgo = (h: number) => new Date(Date.parse('2026-11-01T12:00:00Z') - h * 3600_000).toISOString();
+const fetchedPaths = (s: ReturnType<typeof setup>) => s.canvasCalls.flatMap((c) => c.jobs.map((j) => j.path));
+
+test('cold tier gating: never fetched is fetched', async () => {
+  const s = setup({ plan: V2_PLAN });
+  const out = await runSync({ ...input, lastFetched: {} }, s.deps);
+  assert.ok(fetchedPaths(s).includes('/announcements'));
+  assert.ok(out.fetchedKeys?.includes(COLD_KEY));
+  assert.equal(out.counts.notDue ?? 0, 0);
+});
+
+test('cold tier gating: not due is skipped on purpose, not uploaded, not an error', async () => {
+  const s = setup({ plan: V2_PLAN });
+  const out = await runSync({ ...input, lastFetched: { [COLD_KEY]: hoursAgo(1) } }, s.deps);
+  assert.ok(!fetchedPaths(s).includes('/announcements'));
+  assert.ok(!s.posts[0].resources.some((r: any) => r.path === '/announcements'));
+  assert.equal(out.counts.notDue, 1);
+  assert.equal(out.code, 'ok');
+  assert.ok(!out.fetchedKeys?.includes(COLD_KEY));
+  assert.ok(out.planKeys?.includes(COLD_KEY)); // still in the plan, so it is not pruned
+  assert.match(out.message, /1 not due yet/);
+});
+
+test('cold tier gating: due after coldIntervalHours, and forced by Sync now', async () => {
+  const due = setup({ plan: V2_PLAN });
+  await runSync({ ...input, lastFetched: { [COLD_KEY]: hoursAgo(13) } }, due.deps);
+  assert.ok(fetchedPaths(due).includes('/announcements'));
+  const forced = setup({ plan: V2_PLAN });
+  const out = await runSync({ ...input, force: true, lastFetched: { [COLD_KEY]: hoursAgo(1) } }, forced.deps);
+  assert.ok(fetchedPaths(forced).includes('/announcements'));
+  assert.equal(out.counts.notDue ?? 0, 0);
+});
+
+test('hot resources (and a missing tier) are fetched every time', async () => {
+  const s = setup({ plan: { ...V2_PLAN, resources: [...V2_PLAN.resources, { path: '/planner_notes', query: {}, tier: 'hot' }] } });
+  await runSync({ ...input, lastFetched: { '/planner_notes?{}': hoursAgo(0.1) } }, s.deps);
+  assert.ok(fetchedPaths(s).includes('/planner_notes'));
+});
+
+test('a cold /courses list or profile is still fetched, since they drive expansion', async () => {
+  const plan = { ...V2_PLAN, resources: [{ path: '/users/self', query: {}, tier: 'cold' }, { path: '/courses', query: {}, tier: 'cold', courseSource: true }] };
+  const s = setup({ plan });
+  const out = await runSync({ ...input, lastFetched: { '/users/self?{}': hoursAgo(1), '/courses?{}': hoursAgo(1) } }, s.deps);
+  assert.equal(out.ok, true);
+  assert.deepEqual(fetchedPaths(s), ['/users/self', '/courses']);
+});
+
+test('courseList over courseSource ids uploads chunked requests; mixed v1 and v2 resources work together', async () => {
+  const ids = Array.from({ length: 23 }, (_, i) => 23 - i); // descending on purpose
+  const plan = {
+    planVersion: 2, canvasHost: 'school.instructure.com', maxPages: 5, coldIntervalHours: 12,
+    resources: [
+      { path: '/users/self', query: {} },
+      { path: '/courses', query: { enrollment_state: 'active' }, paginate: true, courseSource: true },
+      { path: '/courses', query: {}, paginate: true },
+      { path: '/courses/{course_id}/modules', query: {}, perCourse: true }, // v1 style
+      { path: '/announcements', query: { 'context_codes[]': ['course_{course_id}'] }, paginate: true, expand: 'courseList', tier: 'cold' },
+    ],
+  };
+  const s = setup({
+    plan,
+    canvas: (j) => (j.path === '/courses' ? { body: j.query.enrollment_state ? ids.map((id) => ({ id })) : [{ id: 999 }] } : {}),
+  });
+  const out = await runSync({ ...input, lastFetched: {} }, s.deps);
+  assert.equal(out.ok, true);
+  const jobs = s.canvasCalls[1]!.jobs;
+  const announcements = jobs.filter((j) => j.path === '/announcements');
+  assert.deepEqual(announcements.map((j) => (j.query['context_codes[]'] as string[]).length), [10, 10, 3]);
+  assert.equal(jobs.filter((j) => j.path.endsWith('/modules')).length, 23); // v1 perCourse = eachCourse
+  assert.ok(!jobs.some((j) => j.path.includes('999')));
+  // Everything fetched is reported so the caller can record last-fetched times.
+  assert.equal(out.fetchedKeys?.filter((k) => k.startsWith('/announcements')).length, 3);
+});
+
+test('fetch times are recorded for accepted, kept_stored_data and older_than_stored, not for other rejections', async () => {
+  const plan = {
+    planVersion: 2, canvasHost: 'school.instructure.com', maxPages: 5, coldIntervalHours: 12,
+    resources: ['/users/self', '/announcements', '/planner_notes', '/calendar_events', '/courses', '/planner/items'].map((path) => ({ path, query: {}, tier: 'cold' })),
+  };
+  const rejected = [
+    { path: '/announcements', reason: 'kept_stored_data' },
+    { path: '/planner_notes', reason: 'older_than_stored' },
+    { path: '/calendar_events', reason: 'not_in_plan' },
+    { path: '/courses', reason: 'too_many_courses' },
+    { path: '/planner/items', reason: 'invalid_resource' },
+  ];
+  const out = await runSync({ ...input, force: true }, setup({ plan, uploadBody: { accepted: 1, rejected } }).deps);
+  const keys = (out.fetchedKeys ?? []).map((k) => k.split('?')[0]).sort();
+  assert.deepEqual(keys, ['/announcements', '/planner_notes', '/users/self']);
+});
+
+test('an unreadable upload acknowledgement records no fetch times', async () => {
+  const s = setup({ plan: V2_PLAN, uploadBody: 'not json' });
+  const out = await runSync(input, s.deps);
+  assert.deepEqual(out.fetchedKeys, []);
+});
+
+test('course ids skip unpublished courses and non-integers, keep objects without workflow_state, for both expand modes', async () => {
+  const courses = [
+    { id: 30, workflow_state: 'available' }, { id: 10 }, { id: 20, workflow_state: 'unpublished' },
+    { id: 1.5, workflow_state: 'available' }, { id: '7' }, { id: 10, workflow_state: 'available' }, { id: 5, workflow_state: 'completed' }, null,
+  ];
+  const plan = {
+    planVersion: 2, canvasHost: 'school.instructure.com', maxPages: 5, coldIntervalHours: 12,
+    resources: [
+      { path: '/users/self', query: {} },
+      { path: '/courses', query: { enrollment_state: 'active' }, paginate: true, courseSource: true },
+      { path: '/courses/{course_id}/modules', query: {}, expand: 'eachCourse' },
+      { path: '/announcements', query: { 'context_codes[]': ['course_{course_id}'] }, expand: 'courseList', chunk: 2 },
+    ],
+  };
+  const s = setup({ plan, canvas: (j) => (j.path === '/courses' ? { body: courses } : {}) });
+  await runSync(input, s.deps);
+  const jobs = s.canvasCalls[1]!.jobs;
+  assert.deepEqual(jobs.filter((j) => j.path.endsWith('/modules')).map((j) => j.path), ['/courses/5/modules', '/courses/10/modules', '/courses/30/modules']);
+  assert.deepEqual(jobs.filter((j) => j.path === '/announcements').map((j) => j.query['context_codes[]']), [['course_5', 'course_10'], ['course_30']]);
+});
+
+test('fallback (no courseSource flag) applies the same unpublished filter', async () => {
+  const plan = {
+    ...PLAN, canvasHost: 'school.instructure.com',
+    resources: [{ path: '/users/self', query: {} }, { path: '/courses', query: {} }, { path: '/courses/{course_id}/modules', query: {}, perCourse: true }],
+  };
+  const s = setup({ plan, canvas: (j) => (j.path === '/courses' ? { body: [{ id: 2, workflow_state: 'unpublished' }, { id: 1 }] } : {}) });
+  await runSync(input, s.deps);
+  assert.deepEqual(s.canvasCalls[1]!.jobs.map((j) => j.path), ['/courses/1/modules']);
+});
+
+test('group_<id> context codes pass validation and are synced by the first-upload second pass', async () => {
+  assert.equal(validateQuery({ 'context_codes[]': ['group_123'], type: 'event' }), null);
+  const s = setup();
+  const orig = s.deps.fetch;
+  let planCalls = 0;
+  const group = { path: '/calendar_events', query: { 'context_codes[]': ['group_123'], type: 'event' }, paginate: true, tier: 'hot' };
+  s.deps.fetch = (async (u: any, i: any) =>
+    String(u).endsWith('/plan')
+      ? jsonResponse(++planCalls === 1 ? { ...PLAN, canvasHost: null } : { ...PLAN, canvasHost: null, resources: [...PLAN.resources, group] })
+      : orig(u, i)) as typeof fetch;
+  const out = await runSync(input, s.deps);
+  assert.equal(out.ok, true);
+  assert.deepEqual(s.canvasCalls.at(-1)!.jobs.map((j) => j.query['context_codes[]']), [['group_123']]);
+  assert.equal(s.posts.at(-1).resources[0].query['context_codes[]'][0], 'group_123');
+});
+
+// ---- course-set consistency and upload ordering ----
+const V2 = (resources: object[]) => ({ planVersion: 2, canvasHost: 'school.instructure.com', maxPages: 5, coldIntervalHours: 12, resources });
+const COURSE_SRC = { path: '/courses', query: { enrollment_state: 'active' }, paginate: true, courseSource: true };
+const COLD_MODULES = { path: '/courses/{course_id}/modules', query: {}, expand: 'eachCourse', tier: 'cold' };
+const modKey = (id: number) => `/courses/${id}/modules?{}`;
+
+test('a changed course set refetches all per-course data even when cold items are not due; an unchanged set does not', async () => {
+  const plan = V2([{ path: '/users/self', query: {} }, COURSE_SRC, COLD_MODULES]);
+  const canvas = (j: FetchJob) => (j.path === '/courses' ? { body: [{ id: 1 }, { id: 2 }, { id: 3 }] } : {});
+  const recent = { [modKey(1)]: hoursAgo(1), [modKey(2)]: hoursAgo(1), [modKey(3)]: hoursAgo(1) };
+  const changed = setup({ plan, canvas });
+  const out = await runSync({ ...input, lastFetched: recent, lastCourseIds: [1, 2] }, changed.deps);
+  assert.equal(changed.canvasCalls[1]!.jobs.length, 3);
+  assert.equal(out.courseSetChanged, true);
+  assert.deepEqual(out.courseIds, [1, 2, 3]);
+  assert.deepEqual([...(out.perCourseKeys ?? [])].sort(), [modKey(1), modKey(2), modKey(3)]);
+  const same = setup({ plan, canvas });
+  const out2 = await runSync({ ...input, lastFetched: recent, lastCourseIds: [3, 2, 1] }, same.deps);
+  assert.equal(same.canvasCalls.length, 1); // nothing per-course is due
+  assert.equal(out2.courseSetChanged, false);
+  assert.equal(out2.counts.notDue, 3);
+});
+
+test('if a courseSource list fails, nothing is expanded, nothing is recorded, and the reason is "course list unavailable"', async () => {
+  const plan = V2([
+    { path: '/users/self', query: {} }, COURSE_SRC,
+    { path: '/courses', query: { enrollment_state: 'completed' }, courseSource: true },
+    COLD_MODULES,
+    { path: '/announcements', query: { 'context_codes[]': ['course_{course_id}'] }, expand: 'courseList' },
+  ]);
+  const s = setup({ plan, canvas: (j) => (j.path === '/courses' ? (j.query.enrollment_state === 'completed' ? { status: 500, body: null } : { body: [{ id: 1 }] }) : {}) });
+  const out = await runSync({ ...input, lastFetched: {} }, s.deps);
+  assert.equal(s.canvasCalls.length, 1); // no per-course reads
+  assert.ok(!out.fetchedKeys?.some((k) => k.includes('/modules') || k.startsWith('/announcements')));
+  assert.equal(out.planKeys, undefined); // plan not fully seen, so no pruning
+  assert.equal(out.courseIds, undefined);
+  assert.equal(out.skipReasons?.filter((r) => r.endsWith('course list unavailable')).length, 2);
+  assert.equal(out.counts.skipped, 2);
+});
+
+test('a fetch error or rate limit on the only course list also blocks expansion', async () => {
+  const plan = V2([{ path: '/users/self', query: {} }, COURSE_SRC, COLD_MODULES]);
+  const s = setup({ plan, canvas: (j) => (j.path === '/courses' ? { status: null, body: null, error: 'network' } : {}) });
+  const out = await runSync(input, s.deps);
+  assert.equal(s.canvasCalls.length, 1);
+  assert.ok(out.skipReasons?.includes('/courses/{course_id}/modules: course list unavailable'));
+});
+
+test('lists, courseList chunks and group-calendar chunks are uploaded together and first', async () => {
+  const plan = V2([
+    { path: '/users/self', query: {} },
+    { path: '/planner_notes', query: {} },
+    { path: '/planner/items', query: {} },
+    COURSE_SRC,
+    { path: '/users/self/groups', query: {}, paginate: true },
+    { path: '/announcements', query: { 'context_codes[]': ['course_{course_id}'] }, expand: 'courseList', chunk: 1 },
+    { path: '/calendar_events', query: { 'context_codes[]': ['group_7'], type: 'event' } },
+  ]);
+  const s = setup({
+    plan, maxBodyBytes: 12000,
+    canvas: (j) => (j.path === '/courses' ? { body: [{ id: 1 }, { id: 2 }] } : j.path.startsWith('/planner') ? { body: ['x'.repeat(5000)] } : {}),
+  });
+  const out = await runSync({ ...input, lastFetched: {} }, s.deps);
+  assert.equal(out.ok, true);
+  assert.ok(s.posts.length >= 2);
+  const first = s.posts[0].resources.map((r: any) => r.path);
+  assert.deepEqual(first.slice(0, 2), ['/courses', '/users/self/groups']);
+  assert.deepEqual(first.slice(2, 5).sort(), ['/announcements', '/announcements', '/calendar_events']);
+  const later = s.posts.slice(1).flatMap((p: any) => p.resources.map((r: any) => r.path));
+  assert.ok(!later.some((p: string) => ['/courses', '/users/self/groups', '/announcements', '/calendar_events'].includes(p)));
 });

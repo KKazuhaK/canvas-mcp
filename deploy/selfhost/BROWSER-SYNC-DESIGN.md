@@ -166,53 +166,113 @@ account.
 
 ## Plan
 
+Plan version 2 (the extension still accepts version 1; an upload may carry
+`planVersion` 1 or 2). A sync is light: a few aggregate requests per visit, with
+per-course content refreshed at most every 12 hours.
+
 ```json
 {
-  "planVersion": 1,
+  "planVersion": 2,
   "canvasHost": "canvas.example.edu",
   "maxPages": 50,
+  "coldIntervalHours": 12,
   "resources": [
-    {"path": "/users/self", "query": {}},
-    {"path": "/courses", "query": {"include[]": ["term", "total_scores"], "enrollment_state": "active"}, "paginate": true},
-    {"path": "/courses/{course_id}/assignments", "query": {"include[]": ["submission"]}, "paginate": true, "perCourse": true}
+    {"path": "/users/self", "query": {}, "tier": "hot"},
+    {"path": "/courses", "query": {"include[]": ["term", "total_scores"], "enrollment_state": "active"}, "paginate": true, "tier": "hot", "courseSource": true},
+    {"path": "/announcements", "query": {"context_codes[]": ["course_{course_id}"], "active_only": "true", "start_date": "2026-09-01T00:00:00Z", "end_date": "2027-03-01T00:00:00Z"}, "paginate": true, "tier": "hot", "expand": "courseList", "chunk": 10},
+    {"path": "/courses/{course_id}/assignments", "query": {"include[]": ["submission"]}, "paginate": true, "tier": "cold", "expand": "eachCourse"}
   ]
 }
 ```
 
 - `path` is relative to `/api/v1`. `canvasHost` is null until the first upload
   sets it, and it is then fixed for the binding.
-- `perCourse: true` expands `{course_id}` for every course id returned by
-  `/courses` in the same run, in the path and in every query value (for example
-  `context_codes[]=course_{course_id}` on `/announcements`). The placeholder
-  must appear in at least one of them, and a brace left after expansion is a
-  rejection. `{user_id}` is filled by the server, so personal-calendar
-  resources appear in the plan only after the first upload.
+- **`tier`**: `hot` resources are fetched on every sync. `cold` ones only when the
+  extension's last successful fetch of that expanded key is older than
+  `coldIntervalHours` (12), or has never happened.
+- **`expand`** (replaces the v1 `perCourse: true`, which meant `eachCourse`; the
+  server still emits `perCourse: true` next to `expand: "eachCourse"` so a v1
+  extension keeps expanding those, and leaves it off `courseList` entries, which a
+  v1 extension then rejects locally and visibly):
+  - `eachCourse`: one request per course, `{course_id}` replaced in the path and in
+    query values.
+  - `courseList`: the query array element containing `{course_id}` (for example
+    `context_codes[]: ["course_{course_id}"]`) is replaced by one element per
+    course. The ids are de-duplicated, sorted ascending **as numbers**, and cut
+    into chunks of `chunk` ids (10: Canvas caps `context_codes[]` at ten on the
+    calendar). Each chunk is one request, keyed by its full query. The server
+    cuts the same chunks from the same ids to check an upload, so both sides must
+    use exactly this rule.
+  - The ids come only from the `/courses` resources marked `"courseSource": true`
+    in the same run: the `enrollment_state=active` lists whose `state[]` has no
+    `unpublished` (two of the four). **The exact rule, which the extension
+    mirrors:** from those lists take every object whose `id` is an integer and
+    whose `workflow_state` is not `"unpublished"`, de-duplicate, sort ascending as
+    numbers, then chunk. A student gets 403 on every sub-resource of an unpublished
+    course, and Canvas rejects a whole `/calendar_events` chunk when one code in it
+    is forbidden. The unpublished variant is still stored (a tool reads it) but
+    never expands. The unfiltered
+    `/courses` list is still fetched and stored, since tools read it, but does not
+    expand: it also lists concluded courses whose sub-resources Canvas usually
+    refuses. A placeholder must appear in the path or a query value, and a brace
+    left after expansion is a rejection.
+  - `{user_id}` is filled by the server, so the personal-calendar resources
+    (`user_<id>`, hot, two types) appear in the plan only after the first upload.
+  - Group calendars are filled by the server too. Once a 200 `/users/self/groups`
+    is stored, the plan has plain hot `/calendar_events` resources (`type=event`
+    and `type=assignment`) whose `context_codes[]` are the concrete `group_<id>`
+    values: distinct ids sorted ascending as numbers, ten to a request, no
+    placeholders (at most 200 groups; a refused or failed group list plans none).
+    A group whose `context_type` is `"Course"` is included only when its
+    `course_id` is one of the expansion course ids (course-source lists, minus
+    unpublished): the groups of an unpublished or concluded course are forbidden,
+    and Canvas would reject the whole chunk. Groups of another context (an
+    account) stay.
+    An upload is validated against exactly those. On the very first sync the
+    extension's second pass over the plan (it runs because `canvasHost` was still
+    null) fetches them; afterwards a changed group list takes effect on the sync
+    after the one that uploads it.
 - Dates are concrete (the server computes the window, about 60 days back and
   120 days ahead).
 - The server derives the resources from what the student read tools request.
   A test (`tests/selfhost/test_browser_sync_coverage.py`) runs every student
-  read tool against snapshots built from the plan and fails on any miss; each
-  read tool is either covered or listed there as a known gap.
-- The resources (`selfhost/browser_plan.py`): `/users/self`, `/users/self/profile`,
-  `/users/self/todo`, `/users/self/groups`, `/users/self/activity_stream` and
-  `.../summary` (`only_active_courses=true`); four `/courses` lists (bare,
-  `enrollment_state=active`, plus `state[]=available`, and the `term`-only list
-  with `state[]=available,unpublished`), all with the include superset the tools
-  ask for; `/planner/items` (window), `/planner/items?filter=incomplete_items`,
-  `/planner_notes` (window); per course: `assignments`
-  (`include[]=all_dates,checkpoints,submission`), `assignment_groups`
-  (`assignments,submission`), `quizzes`, `modules` (`include[]=items`),
-  `front_page`, `discussion_topics` and `discussion_topics?only_announcements=true`,
-  `/announcements` (that course, `active_only`, window) and `/calendar_events`
-  for `type=event` and `type=assignment` (that course, window,
-  `excludes[]=child_events`). Once the first upload has told the server the
-  student's id, the same two calendar resources are added for `user_<id>`.
+  read tool against snapshots of a full sync (hot plus cold) built from the plan
+  and fails on any miss; each read tool is either covered or listed there as a
+  known gap.
+- The resources (`selfhost/browser_plan.py`), tier and expansion:
+
+  | Resource | Tier | Expand |
+  | --- | --- | --- |
+  | `/users/self`, `/users/self/profile`, `/users/self/todo`, `/users/self/groups` | hot | |
+  | `/users/self/activity_stream`, `.../summary` (`only_active_courses=true`) | hot | |
+  | `/courses` x4: unfiltered, and `enrollment_state=active` (plain, `state[]=available`, `term` with `state[]=available,unpublished`; these three are `courseSource`) | hot | |
+  | `/planner/items` (window), `/planner/items?filter=incomplete_items`, `/planner_notes` (window) | hot | |
+  | `/calendar_events` `type=event` and `type=assignment`, `user_<id>` (after the first upload) | hot | |
+  | `/announcements` (`active_only`, window) | hot | courseList, 10 |
+  | `/calendar_events` `type=event` and `type=assignment` (window, `excludes[]=child_events`) | hot | courseList, 10 |
+  | `/courses/{id}/assignments` (`include[]=all_dates,checkpoints,submission`), `assignment_groups` (`assignments,submission`), `quizzes`, `modules` (`include[]=items`), `front_page`, `discussion_topics`, `discussion_topics?only_announcements=true` | cold | eachCourse |
+
+  The four `/courses` variants are kept: one stored list cannot reproduce
+  Canvas's `enrollment_state=active` and `state[]` filtering exactly (enrollment
+  states, term dates and invitations are not all visible in the course objects).
+  Cold content can therefore be up to about 12 hours old plus the time to the next
+  visit (submission status in `get_my_submission_status` is cold; "upcoming" reads
+  `/planner/items`, which is hot).
 - The window is `[today 00:00Z - 60 days, today 00:00Z + 120 days]`.
 - Not in the plan, because the extension's allowlist cannot carry them: pages,
   module items, quiz submissions and permissions, group members and files,
   conversations and the address book, planner overrides, group calendars,
   discussion entries, submissions, grading standards. The affected tools fail
   with `SOURCE_UNAVAILABLE` ("not synced by the browser extension yet").
+- `list_calendar_events` fetches the personal, course and group contexts as
+  separate requests and reports a failed one ("Some entries may be missing")
+  without failing the tool. A group chunk stored as 403 therefore gives the other
+  events plus an honest "Canvas refused access to this data (HTTP 403)" for those
+  groups; nothing is dropped silently.
+- Answering `context_codes[]`: a tool may ask for any subset or grouping of
+  course codes. The matcher answers from the union of the stored chunk
+  snapshots, filters each item by its `context_code`, applies the window rule
+  per snapshot, and misses if any requested code is in no stored chunk.
 
 The extension enforces its own allowlist regardless of the plan: GET only,
 path matches `^/(users/self(/(profile|todo|groups|activity_stream(/summary)?))?|courses(/\d+(/(assignments|assignment_groups|modules|quizzes|front_page|discussion_topics))?)?|planner/items|planner_notes|calendar_events|announcements)$`
@@ -257,10 +317,24 @@ after `{course_id}` expansion, and only on the user's Canvas origin.
   data. Only transient results (408, 429, any 5xx) are kept out: the resource is
   rejected with `kept_stored_data` and the old copy keeps serving with its age
   note. 401, 403, 404 and other 4xx are answers (access lost, content deleted)
-  and replace the old copy. "This school blocks session access" is only
-  said when a 401/403 is all there is.
+  and replace the old copy.
+- The lists that decide the plan are protected. A `/courses` list (any variant)
+  or `/users/self/groups` that comes back with any non-200 status never replaces a
+  stored 200 for that key (`kept_stored_data`): only a good list can change the
+  course or group set, so one bad sync (a gateway 403 while `/users/self` works)
+  cannot empty the plan. As a second guard, pruning (next item) is skipped
+  entirely if any course-source or group row it would compute from is not a 200.
+- Rows that left the plan are deleted. On every accepted upload, in the same
+  transaction, the binding's rows whose `resource_key` is not in the current
+  expected set are removed (hot and cold, computed from the course and group lists
+  as they are after the upload): an old calendar chunk naming a course that is now
+  unpublished, a per-course row of such a course, rows of an older plan version.
+  A row is never deleted just because an upload did not mention it, so cold rows
+  that are not due stay. Independently, a tool request is answered only from rows
+  whose key the current plan can hold, so a stale row can never be served even
+  before it is deleted.
 - Limits per binding (constants in `browser_plan.py` and `browser_store.py`, not
-  settings): at most 200 distinct course ids, not counting the course lists the upload really replaces (newer, and not a transient failure kept out) so a new term can roll over (a `/courses` list that would exceed
+  settings): at most 200 distinct course ids (counted over the course-source lists only; a per-course resource for any other id is `not_in_plan`, and a tool pointed at a concluded course gets a "not synced" miss), not counting the course lists the upload really replaces (newer, and not a transient failure kept out) so a new term can roll over (a `/courses` list that would exceed
   it, or is longer than 1000 entries, is rejected with `too_many_courses` before
   the plan is expanded, and so is everything depending on it), at most 3000
   stored snapshot rows and 64 MiB of sealed bytes. An upload that would go over
@@ -307,8 +381,10 @@ binding:
   - `all_dates` is ignored when the stored `include[]` has `all_dates`.
   No match returns `SOURCE_UNAVAILABLE` "not synced by the browser extension
   yet".
-- A stored non-200 status returns `SOURCE_UNAVAILABLE` naming the Canvas status
-  ("this school blocks session access to the Canvas API").
+- A stored non-200 status returns `SOURCE_UNAVAILABLE` naming the Canvas status.
+  A 401/403 says "Canvas refused access to this data (HTTP 403)" when the binding
+  has a 200 `/users/self` snapshot (the session works; this data is forbidden),
+  and "this school blocks session access to the Canvas API" only when it has none.
 - A single-object path whose last segment is a numeric id (for example
   `/courses/1/assignments/9`, `/courses/1`, `/calendar_events/5`) is answered
   from the stored list at the parent path by `id` when no exact snapshot exists.
@@ -319,13 +395,13 @@ binding:
 - Anonymization runs exactly as for live responses.
 - Freshness: the oldest `captured_at` used in a tool call is reported. The tool
   result gains a final text block "Data synced from your browser N minutes ago."
-  (only on success, only when browser data was used). Over 12 hours it adds "It
+  (only on success, only when browser data was used). Over 24 hours it adds "It
   may be out of date; open Canvas in the browser to refresh it." Over 14 days the
   snapshot is not used (`SOURCE_UNAVAILABLE`, "more than 14 days old"). Snapshots
   older than 30 days are deleted by the maintenance loop (jobs
   `browser_snapshots`, `extension_codes` for spent or expired codes, and
   `revoked_bindings` after the same age). The thresholds are operator settings
-  (`token_admin settings set`): `browser_sync.fresh_hours` (12),
+  (`token_admin settings set`): `browser_sync.fresh_hours` (24: cold content is refreshed every 12 hours, plus the time to the next visit),
   `browser_sync.max_age_days` (14), `browser_sync.purge_days` (30).
 
 ## How a request chooses browser mode
@@ -346,7 +422,10 @@ a token is served from browser data or the other way round.
 - A 60-minute alarm: try a service worker `fetch` with
   `credentials: "include"`; if Canvas answers 401 or a login redirect, wait for
   the next page visit instead. Never open background tabs.
-- The popup's "Sync now".
+- The popup's "Sync now" (a full sync: hot and cold).
+- Each sync fetches the hot resources and the cold ones whose last successful
+  fetch is older than `coldIntervalHours`. An upload of hot resources only leaves
+  the stored cold rows as they are (a resource replaces only its own row).
 
 ## Permissions
 

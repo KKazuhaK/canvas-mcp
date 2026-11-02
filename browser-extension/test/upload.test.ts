@@ -30,3 +30,17 @@ test('counts multi-byte characters in bytes, not characters', () => {
 test('empty input gives no batches', () => {
   assert.deepEqual(splitUploads(header, [], 1000), { batches: [], oversized: [] });
 });
+
+import { orderForUpload } from '../src/lib/upload.ts';
+
+test('orderForUpload puts lists first, then chunks, then the rest, keeping relative order', () => {
+  const r = (path: string, q: Record<string, string | string[]> = {}): UploadResource => ({ path, query: q, status: 200, body: [] });
+  const list = [
+    r('/users/self'), r('/announcements', { 'context_codes[]': ['course_1'] }), r('/planner_notes'), r('/users/self/groups'),
+    r('/calendar_events', { 'context_codes[]': ['group_5'] }), r('/calendar_events', { 'context_codes[]': ['user_5'] }), r('/courses'),
+  ];
+  const out = orderForUpload(list, (x) => (x.path === '/announcements' ? 'courseList' : null));
+  assert.deepEqual(out.map((x) => x.path + JSON.stringify(x.query['context_codes[]'] ?? '')), [
+    '/users/self/groups""', '/courses""', '/announcements["course_1"]', '/calendar_events["group_5"]', '/users/self""', '/planner_notes""', '/calendar_events["user_5"]',
+  ]);
+});

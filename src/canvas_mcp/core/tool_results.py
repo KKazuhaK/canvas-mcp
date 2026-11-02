@@ -387,7 +387,7 @@ class CanvasToolResultMiddleware(Middleware):
             note = freshness_note(
                 synced,
                 stale_after_seconds=(
-                    browser.fresh_seconds if browser is not None else 12 * 3600
+                    browser.fresh_seconds if browser is not None else 24 * 3600
                 ),
             )
             if note is not None:

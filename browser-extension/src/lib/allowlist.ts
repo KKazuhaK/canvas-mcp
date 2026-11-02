@@ -8,13 +8,18 @@ export interface PlanResource {
   path: string;
   query: Query;
   paginate: boolean;
-  perCourse: boolean;
+  perCourse: boolean; // true when expand is set (v1 perCourse means eachCourse)
+  courseSource: boolean;
+  tier: 'hot' | 'cold';
+  expand: 'eachCourse' | 'courseList' | null;
+  chunk: number;
 }
 
 export interface Plan {
   planVersion: number;
   canvasHost: string | null;
   maxPages: number;
+  coldIntervalHours: number;
   resources: PlanResource[];
 }
 
@@ -27,6 +32,8 @@ export interface FetchJob {
   path: string;
   query: Query;
   paginate: boolean;
+  tier?: 'hot' | 'cold';
+  expand?: 'eachCourse' | 'courseList' | null;
 }
 
 const KEY = /^[A-Za-z0-9_.[\]-]{1,64}$/;
@@ -90,33 +97,74 @@ export function parsePlan(raw: unknown): { plan: Plan; rejected: Rejected[] } {
       rejected.push({ path, reason: bad });
       continue;
     }
-    resources.push({ path, query, paginate: it.paginate === true, perCourse: it.perCourse === true });
+    // v1 plans only have perCourse: true, which means eachCourse.
+    let expand: PlanResource['expand'] = it.perCourse === true ? 'eachCourse' : null;
+    if (it.expand !== undefined) {
+      if (it.expand !== 'eachCourse' && it.expand !== 'courseList') {
+        rejected.push({ path, reason: 'unknown expand mode' });
+        continue;
+      }
+      expand = it.expand;
+    }
+    if (it.tier !== undefined && it.tier !== 'hot' && it.tier !== 'cold') {
+      rejected.push({ path, reason: 'unknown tier' });
+      continue;
+    }
+    const chunk = typeof it.chunk === 'number' && Number.isInteger(it.chunk) && it.chunk >= 1 && it.chunk <= 50 ? it.chunk : 10;
+    resources.push({
+      path,
+      query,
+      paginate: it.paginate === true,
+      perCourse: expand !== null,
+      courseSource: it.courseSource === true,
+      tier: it.tier === 'cold' ? 'cold' : 'hot',
+      expand,
+      chunk,
+    });
   }
-  return { plan: { planVersion: r.planVersion, canvasHost, maxPages, resources }, rejected };
+  const coldIntervalHours =
+    typeof r.coldIntervalHours === 'number' && r.coldIntervalHours >= 1 && r.coldIntervalHours <= 168 ? r.coldIntervalHours : 12;
+  return { plan: { planVersion: r.planVersion, canvasHost, maxPages, coldIntervalHours, resources }, rejected };
 }
 
+const PLACEHOLDER = '{course_id}';
+const hasBrace = (job: FetchJob): boolean =>
+  /[{}]/.test(job.path) || Object.values(job.query).some((v) => (Array.isArray(v) ? v : [v]).some((x) => /[{}]/.test(x)));
+const hasPlaceholder = (res: PlanResource): boolean =>
+  res.path.includes(PLACEHOLDER) ||
+  Object.values(res.query).some((v) => (Array.isArray(v) ? v : [v]).some((x) => x.includes(PLACEHOLDER)));
+
+// Deduplicated course ids, ascending as numbers. Chunking depends on this order.
+export function sortedCourseIds(ids: number[]): number[] {
+  return [...new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0))].sort((a, b) => a - b);
+}
+
+export const jobKey = (j: { path: string; query: unknown }): string => j.path + '?' + JSON.stringify(j.query);
+
 // Expands the plan into concrete requests. Plain resources first; per-course
-// resources are expanded over the supplied course ids.
+// resources are expanded over the supplied course ids. eachCourse makes one
+// request per id; courseList replaces the one query array element that holds
+// {course_id} with one element per id and cuts the list into chunks.
 export function expandPlan(
   resources: PlanResource[],
-  courseIds: number[] | null,
+  courseIdsRaw: number[] | null,
 ): { plain: FetchJob[]; perCourse: FetchJob[]; rejected: Rejected[] } {
   const plain: FetchJob[] = [];
   const perCourse: FetchJob[] = [];
   const rejected: Rejected[] = [];
   const seen = new Set<string>();
+  const courseIds = courseIdsRaw ? sortedCourseIds(courseIdsRaw) : null;
   const add = (list: FetchJob[], job: FetchJob) => {
     const bad = hasBrace(job) ? 'leftover brace after expansion' : validateRequest(job.path, job.query);
     if (bad) {
       rejected.push({ path: job.path.slice(0, 80), reason: bad });
       return;
     }
-    const id = job.path + '?' + JSON.stringify(job.query);
+    const id = jobKey(job);
     if (seen.has(id)) return;
     seen.add(id);
     list.push(job);
   };
-  const PLACEHOLDER = '{course_id}';
   const fill = (res: PlanResource, id: string): FetchJob => ({
     path: res.path.replaceAll(PLACEHOLDER, id),
     query: Object.fromEntries(
@@ -126,20 +174,55 @@ export function expandPlan(
       ]),
     ),
     paginate: res.paginate,
+    tier: res.tier,
+    expand: res.expand,
   });
-  const hasBrace = (job: FetchJob): boolean =>
-    /[{}]/.test(job.path) || Object.values(job.query).some((v) => (Array.isArray(v) ? v : [v]).some((x) => /[{}]/.test(x)));
-  const hasPlaceholder = (res: PlanResource): boolean =>
-    res.path.includes(PLACEHOLDER) ||
-    Object.values(res.query).some((v) => (Array.isArray(v) ? v : [v]).some((x) => x.includes(PLACEHOLDER)));
   for (const res of resources) {
-    if (!res.perCourse) {
-      // A placeholder here would be sent literally; validateRequest rejects it.
-      add(plain, { path: res.path, query: res.query, paginate: res.paginate });
+    const base: FetchJob = { path: res.path, query: res.query, paginate: res.paginate, tier: res.tier, expand: null };
+    if (!res.expand) {
+      // A placeholder here would be sent literally; the brace check rejects it.
+      add(plain, base);
       continue;
     }
     if (!hasPlaceholder(res)) {
       rejected.push({ path: res.path, reason: 'perCourse resource has no {course_id}' });
+      continue;
+    }
+    if (res.expand === 'courseList') {
+      // Exactly one array element in the query may hold the placeholder; the path may not.
+      let target: { key: string; index: number } | null = null;
+      let count = 0;
+      for (const [k, v] of Object.entries(res.query)) {
+        const list = Array.isArray(v) ? v : [v];
+        list.forEach((x, i) => {
+          if (x.includes(PLACEHOLDER)) {
+            count++;
+            if (Array.isArray(v)) target = { key: k, index: i };
+          }
+        });
+      }
+      if (res.path.includes(PLACEHOLDER) || count !== 1 || !target) {
+        rejected.push({ path: res.path, reason: 'courseList needs exactly one query array element with {course_id}' });
+        continue;
+      }
+      const { key, index } = target as { key: string; index: number };
+      const probe = fill(res, '1');
+      const bad = hasBrace(probe) ? 'leftover brace after expansion' : validateRequest(probe.path, probe.query);
+      if (bad) {
+        rejected.push({ path: res.path, reason: bad });
+        continue;
+      }
+      if (!courseIds) {
+        rejected.push({ path: res.path, reason: 'course list unavailable' });
+        continue;
+      }
+      const template = (res.query[key] as string[])[index] as string;
+      for (let i = 0; i < courseIds.length; i += res.chunk) {
+        const ids = courseIds.slice(i, i + res.chunk);
+        const arr = res.query[key] as string[];
+        const next = [...arr.slice(0, index), ...ids.map((id) => template.replaceAll(PLACEHOLDER, String(id))), ...arr.slice(index + 1)];
+        add(perCourse, { path: res.path, query: { ...res.query, [key]: next }, paginate: res.paginate, tier: res.tier, expand: 'courseList' });
+      }
       continue;
     }
     const probe = fill(res, '1');
@@ -149,13 +232,10 @@ export function expandPlan(
       continue;
     }
     if (!courseIds) {
-      rejected.push({ path: res.path, reason: 'no course list available to expand' });
+      rejected.push({ path: res.path, reason: 'course list unavailable' });
       continue;
     }
-    for (const id of courseIds) {
-      if (!Number.isSafeInteger(id) || id <= 0) continue;
-      add(perCourse, fill(res, String(id)));
-    }
+    for (const id of courseIds) add(perCourse, fill(res, String(id)));
   }
   return { plain, perCourse, rejected };
 }

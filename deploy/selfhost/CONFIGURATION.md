@@ -93,7 +93,7 @@ came from. Three operator-only settings (JSON integers) tune it:
 
 | Setting | Default | Range | Meaning |
 | --- | --- | --- | --- |
-| `browser_sync.fresh_hours` | 12 | 1–720 | Older synced data is still used, but the tool result says it may be out of date |
+| `browser_sync.fresh_hours` | 24 | 1–720 | Older synced data is still used, but the tool result says it may be out of date |
 | `browser_sync.max_age_days` | 14 | 1–90 | Synced data older than this is not used at all |
 | `browser_sync.purge_days` | 30 | 1–365 | Maintenance deletes snapshots (and revoked bindings) older than this |
 

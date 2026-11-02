@@ -160,26 +160,23 @@ def body_for(path: str, query: dict[str, list[str]]) -> Any:
 
 
 def snapshots_from_plan() -> list[BrowserSnapshot]:
-    plan = browser_plan.build_plan(canvas_host=HOST, canvas_user_id=USER_ID, now=NOW)
+    """Every request of a full sync (hot and cold), expanded the way the extension does."""
+    start, end = browser_plan.window_bounds(NOW)
     out: list[BrowserSnapshot] = []
-    for resource in plan["resources"]:
-        ids: tuple[Any, ...] = COURSES if resource.get("perCourse") else (None,)
-        for cid in ids:
-            fill = (lambda s: s) if cid is None else (lambda s, c=cid: s.replace("{course_id}", str(c)))
-            path = fill(resource["path"])
-            query = {
-                key: [fill(v) for v in (value if isinstance(value, list) else [value])]
-                for key, value in resource["query"].items()
-            }
-            out.append(
-                BrowserSnapshot(
-                    path=path,
-                    query=query,
-                    captured_at=int(NOW) - 60,
-                    status=200,
-                    body=body_for(path, query),
-                )
+    for resource, path, query in browser_plan.expanded_resources(
+        [str(c) for c in COURSES], USER_ID, group_ids=["31"]
+    ):
+        if resource.windowed:
+            query = {**query, "start_date": [start], "end_date": [end]}
+        out.append(
+            BrowserSnapshot(
+                path=path,
+                query=query,
+                captured_at=int(NOW) - 60,
+                status=200,
+                body=body_for(path, query),
             )
+        )
     return out
 
 
@@ -264,7 +261,7 @@ GAPS: dict[str, tuple[dict[str, Any], str]] = {
 
 #: Misses a covered tool's normal call is allowed to have, by tool: group calendars
 #: need one request per group, which the extension cannot expand from a plan.
-ALLOWED_MISSES: dict[str, str] = {"list_calendar_events": "group_"}
+ALLOWED_MISSES: dict[str, str] = {}
 
 #: Read tools that never ask Canvas for data.
 NO_CANVAS_DATA = {"search_canvas_tools"}
@@ -382,3 +379,62 @@ async def test_every_planned_resource_is_used_by_some_covered_tool(run: Run):
 
     unused = sorted(p for p in plan_paths if not covers(p))
     assert unused == [], unused
+
+
+async def test_a_concluded_course_has_no_per_course_data_to_read(run: Run):
+    """Canvas usually refuses a concluded course's sub-resources, and the plan does not
+    ask for them: a tool pointed at such a course says it is not synced (a known,
+    deliberate gap for every course-scoped tool), while its course list entry is read."""
+    stored = snapshots_from_plan()
+    # The unfiltered list also holds a past course; no plan resource exists for it.
+    for snapshot in stored:
+        if snapshot.path == "/courses" and "enrollment_state" not in snapshot.query:
+            snapshot.body.append(course(999))
+
+    async def load(path: str) -> list[BrowserSnapshot]:
+        return [s for s in stored if s.path == path]
+
+    mcp = FastMCP("coverage")
+    register_all_tools(mcp, role="student")
+    set_http_request_active(True)
+    set_browser_source(BrowserSource("binding", HOST, load))
+    try:
+        with offline():
+            async with Client(mcp) as c:
+                for name in ("list_assignments", "list_quizzes", "list_modules"):
+                    await c.call_tool(name, {"course_identifier": 999}, raise_on_error=False)
+    finally:
+        clear_http_request_context()
+    assert run.misses and all("/courses/999/" in m.message for m in run.misses)
+
+
+async def test_a_forbidden_group_chunk_is_reported_not_silently_dropped(run: Run):
+    """list_calendar_events fetches personal, course and group contexts separately. When the
+    group chunks are stored as 403, the other events are still listed and the tool says,
+    honestly and for the groups only, that Canvas refused access."""
+    stored = snapshots_from_plan()
+    for snapshot in stored:
+        if snapshot.path == "/calendar_events" and any(
+            c.startswith("group_") for c in snapshot.query.get("context_codes[]", [])
+        ):
+            object.__setattr__(snapshot, "status", 403)
+            object.__setattr__(snapshot, "body", None)
+    stored.append(BrowserSnapshot("/users/self", {}, int(NOW) - 60, 200, {"id": int(USER_ID)}))
+
+    async def load(path: str) -> list[BrowserSnapshot]:
+        return [s for s in stored if s.path == path]
+
+    mcp = FastMCP("coverage")
+    register_all_tools(mcp, role="student")
+    set_http_request_active(True)
+    set_browser_source(BrowserSource("binding", HOST, load))
+    try:
+        with offline():
+            async with Client(mcp) as c:
+                result = await c.call_tool("list_calendar_events", {}, raise_on_error=False)
+    finally:
+        clear_http_request_context()
+    text = "\n".join(getattr(block, "text", "") for block in result.content)
+    assert "Lecture" in text, "events of the courses are still listed"
+    assert "group_31" in text and "Canvas refused access to this data (HTTP 403)" in text
+    assert "school blocks" not in text

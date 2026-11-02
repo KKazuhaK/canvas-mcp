@@ -2,6 +2,7 @@ import { runFetches, type FetchResult } from './canvas-fetch.ts';
 import type { FetchJob } from './allowlist.ts';
 import { UserError } from './errors.ts';
 import { hostPattern, parseOrigin, sameOrigin } from './origin.ts';
+import { updateFetched } from './fetched.ts';
 import { claimCode, mayInject, newPairing, pairingUrl, validateClaim } from './pairing.ts';
 import { isPopupSender, type SenderLike } from './senders.ts';
 import {
@@ -163,11 +164,20 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
     return result;
   }
 
-  async function record(trigger: Trigger, outcome: Outcome) {
+  async function record(trigger: Trigger, outcome: Outcome, previous: Record<string, string> | undefined) {
     const at = new Date(env.now()).toISOString();
     const last: LastResult = { at, trigger, ok: outcome.ok, code: outcome.code, message: outcome.message, counts: outcome.counts, skipReasons: (outcome.skipReasons ?? []).slice(0, 10) };
     const patch: Record<string, unknown> = { lastResult: last, lastAttemptAt: at };
     if (outcome.ok) patch.lastSyncAt = at;
+    if (outcome.fetchedKeys?.length || outcome.planKeys) {
+      let base = previous;
+      if (outcome.courseSetChanged && base) {
+        const drop = new Set(outcome.perCourseKeys ?? []);
+        base = Object.fromEntries(Object.entries(base).filter(([k]) => !drop.has(k)));
+      }
+      patch.lastFetchedAt = updateFetched(base, outcome.fetchedKeys ?? [], outcome.planKeys, at);
+    }
+    if (outcome.ok && outcome.courseIds) patch.lastCourseIds = outcome.courseIds;
     if (outcome.retryAfterMs) patch.backoffUntil = env.now() + outcome.retryAfterMs;
     await storage.set(patch);
     if (outcome.reconnect) await markDisconnected(storage);
@@ -198,13 +208,17 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
           uploadToken: s.uploadToken!,
           canvasOrigin: s.canvasOrigin,
           probeFirst: trigger === 'alarm' && tabId === undefined,
+          // Only "Sync now" refreshes cold resources that are not due.
+          force: trigger === 'manual',
+          lastFetched: s.lastFetchedAt ?? {},
+          ...(s.lastCourseIds ? { lastCourseIds: s.lastCourseIds } : {}),
         },
         deps,
       );
       // A signed-out alarm run changes nothing and waits for the next page visit.
       if (outcome.waiting) return outcome;
       // Without a Canvas tab, a manual run that finds Canvas signed out says so.
-      await record(trigger, outcome);
+      await record(trigger, outcome, s.lastFetchedAt);
       return outcome;
     })().finally(() => {
       running = undefined;
@@ -240,7 +254,7 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
         const s = await readState(storage);
         await storage.set({ canvasOrigin });
         // A different school starts from a clean sync history.
-        if (s.canvasOrigin && s.canvasOrigin !== canvasOrigin) await storage.remove(['lastSyncAt', 'lastAttemptAt', 'lastResult']);
+        if (s.canvasOrigin && s.canvasOrigin !== canvasOrigin) await storage.remove(['lastSyncAt', 'lastAttemptAt', 'lastResult', 'lastFetchedAt', 'lastCourseIds']);
         return { ok: true };
       }
       case 'canvas.sync.now': {

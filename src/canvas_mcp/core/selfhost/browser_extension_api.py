@@ -19,7 +19,7 @@ import datetime as dt
 import json
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -30,16 +30,19 @@ from starlette.routing import Route
 from . import account_core as web
 from .account_api import _object_pairs, _parse_float, _refuse_constant
 from .browser_plan import (
+    ACCEPTED_PLAN_VERSIONS,
     ALLOWED_PATH,
     MAX_COURSE_LIST_LENGTH,
     MAX_COURSES_PER_BINDING,
     MAX_RESOURCES_PER_UPLOAD,
-    PLAN_VERSION,
     SCHEMA_VERSION,
     build_plan,
+    course_source_keys,
     expected_resources,
+    group_ids_of,
     normalize_upload_query,
     resource_key,
+    usable_course_ids,
     valid_window,
 )
 from .browser_store import (
@@ -333,10 +336,12 @@ class ExtensionApi:
 
     async def plan(self, request: Request, origin: str | None) -> Response:
         binding = await self._authenticate(request)
+        groups = await run_store(self.store.group_ids, binding.id)
         plan = build_plan(
             canvas_host=binding.canvas_host,
             canvas_user_id=binding.canvas_user_id,
             now=self.app.clock(),
+            group_ids=groups,
         )
         return self._reply(200, plan, origin)
 
@@ -397,6 +402,7 @@ class ExtensionApi:
         (older, a transient failure, refused, a repeat) leaves its stored ids counting.
         """
         base = expected_resources((), user_id)
+        sources = course_source_keys()
         first: list[tuple[int, str, int, Any]] = []
         seen: set[str] = set()
         for index, (path, query, status, content) in enumerate(uploaded):
@@ -411,7 +417,7 @@ class ExtensionApi:
         refused: dict[int, str] = {}
         writing = []
         for index, key, status, content in first:
-            if rejection_reason(stored.get(key), captured_at, status) is not None:
+            if rejection_reason(stored.get(key), captured_at, status, key) is not None:
                 continue
             if status == 200 and len(content) > MAX_COURSE_LIST_LENGTH:
                 refused[index] = "too_many_courses"
@@ -421,16 +427,10 @@ class ExtensionApi:
         while True:
             known = self.store.course_ids(binding_id, excluding=replacing)
             over: set[int] = set()
-            for index, _key, status, content in writing:
+            for index, key, status, content in writing:
                 if status != 200 or index in over:
                     continue
-                ids = {
-                    str(c["id"])
-                    for c in content
-                    if isinstance(c, dict)
-                    and isinstance(c.get("id"), int)
-                    and not isinstance(c.get("id"), bool)
-                }
+                ids = usable_course_ids(content) if key in sources else set()
                 if len(known | ids) > MAX_COURSES_PER_BINDING:
                     over.add(index)
                 else:
@@ -442,6 +442,33 @@ class ExtensionApi:
             writing = [entry for entry in writing if entry[0] not in over]
             replacing = {key for _, key, _, _ in writing}
 
+    def _group_ids(
+        self,
+        binding_id: str,
+        captured_at: int,
+        uploaded: list[tuple[Any, dict[str, list[str]] | None, Any, Any]],
+        courses: Collection[str],
+    ) -> list[str]:
+        """The group ids group calendars are planned for: the stored groups, or this upload's.
+
+        The first valid ``/users/self/groups`` entry decides, exactly when the store
+        will write it (the same ``rejection_reason``).
+        """
+        base = expected_resources((), "0")
+        for path, query, status, content in uploaded:
+            if path != "/users/self/groups" or query is None:
+                continue
+            if self._reject_reason(path, query, status, content, base, set()) is not None:
+                continue
+            key = resource_key(path, query)
+            if key != "/users/self/groups":
+                continue
+            stored = self.store.stored_state(binding_id, [key])
+            if rejection_reason(stored.get(key), captured_at, status, key) is None:
+                return group_ids_of(content, courses) if status == 200 else []
+            break
+        return self.store.group_ids(binding_id)
+
     def _checked_items(
         self,
         binding_id: str,
@@ -451,7 +478,8 @@ class ExtensionApi:
     ) -> tuple[list[SnapshotItem], list[dict[str, str]]]:
         """Validate an upload against the plan: the items to store, and the rejections."""
         refused, known = self._course_decisions(binding_id, user_id, captured_at, uploaded)
-        expected = expected_resources(known, user_id)
+        groups = self._group_ids(binding_id, captured_at, uploaded, known)
+        expected = expected_resources(known, user_id, groups)
 
         items: list[SnapshotItem] = []
         rejected: list[dict[str, str]] = []
@@ -490,7 +518,8 @@ class ExtensionApi:
     def _upload_header(self, body: dict[str, Any]) -> tuple[str, str, int, list[Any]]:
         if body.get("schemaVersion") != SCHEMA_VERSION or isinstance(body.get("schemaVersion"), bool):
             raise _Reply(400, "unsupported_schema")
-        if body.get("planVersion") != PLAN_VERSION or isinstance(body.get("planVersion"), bool):
+        version = body.get("planVersion")
+        if isinstance(version, bool) or version not in ACCEPTED_PLAN_VERSIONS:
             raise _Reply(409, "plan_outdated")
         host = _canvas_host(body.get("canvasOrigin"))
         if host is None:

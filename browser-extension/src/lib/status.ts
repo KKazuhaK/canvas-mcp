@@ -35,7 +35,8 @@ export function describeStatus(s: Stored, now: number): StatusView {
     rows.push(['Last sync', relativeTime(s.lastSyncAt, now)]);
     const c = s.lastResult?.counts;
     if (c) {
-      const parts = [`${c.accepted} stored`];
+      const parts = [`${c.accepted} updated`];
+      if (c.notDue) parts.push(`${c.notDue} not due yet`);
       if (c.canvasErrors) parts.push(`${c.canvasErrors} unreadable`);
       if (c.skipped) parts.push(`${c.skipped} skipped`);
       if (c.rejected) parts.push(`${c.rejected} rejected`);

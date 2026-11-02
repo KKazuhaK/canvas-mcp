@@ -104,6 +104,8 @@ def bind(
 class SourceProbe(Probe):
     """Records what a request carries, and reads one Canvas path through the client."""
 
+    params: dict[str, Any] | None = None
+
     def __init__(self, endpoint: str | None = "/users/self") -> None:
         super().__init__()
         self.endpoint = endpoint
@@ -114,7 +116,9 @@ class SourceProbe(Probe):
         self.browser = get_browser_source()
         self.key_seen = current_principal_key()
         if self.endpoint is not None:
-            self.answer = await canvas_client.make_canvas_request("get", self.endpoint)
+            self.answer = await canvas_client.make_canvas_request(
+                "get", self.endpoint, params=self.params
+            )
         await super().__call__(scope, receive, send)
 
 
@@ -233,6 +237,62 @@ async def test_each_account_reads_only_its_own_snapshots(browser, db):
     assert probe_a.answer["name"] == "alice"
 
 
+# -- only rows the current plan can hold are served --------------------------------------------------------------
+
+
+def plant(browser: BrowserSyncStore, binding_id: str, key: str, path: str, query: dict, body: Any) -> None:
+    """A row written behind the store's back, as an older server version might have left it."""
+    from sqlalchemy import insert
+
+    from canvas_mcp.core.selfhost.db import schema as s
+
+    item = SnapshotItem(key, path, query, NOW - 60, 200, body)
+    with browser.database.write() as conn:
+        conn.execute(insert(s.browser_snapshots).values(**browser._seal(binding_id, item)))
+
+
+async def test_a_stale_row_outside_the_plan_is_never_served(browser):
+    from canvas_mcp.core.selfhost import browser_plan
+
+    active = {"enrollment_state": ["active"], "include[]": sorted(browser_plan.RESOURCES[6].query["include[]"])}
+    binding = bind(browser, items={"/users/self": {"id": 42}})
+    kept = SnapshotItem(
+        browser_plan.resource_key("/courses", active), "/courses", active, NOW - 60, 200,
+        [{"id": 101}, {"id": 999, "workflow_state": "unpublished"}],
+    )
+    browser.save(binding, canvas_host=CANVAS_HOST, canvas_user_id="42", items=[kept])
+    stale_query = {
+        "type": ["event"],
+        "context_codes[]": ["course_101", "course_999"],
+        "excludes[]": ["child_events"],
+        "start_date": ["2026-11-01T00:00:00Z"],
+        "end_date": ["2026-11-30T00:00:00Z"],
+    }
+    key = browser_plan.resource_key("/calendar_events", stale_query)
+    plant(browser, binding, key, "/calendar_events", stale_query, [{"id": 1, "context_code": "course_999", "start_at": "2026-11-05T10:00:00Z"}])
+    asked = {
+        "type": "event",
+        "context_codes[]": ["course_999"],
+        "excludes[]": ["child_events"],
+        "start_date": "2026-11-02T00:00:00Z",
+        "end_date": "2026-11-20T00:00:00Z",
+    }
+    probe = SourceProbe("/calendar_events")
+    probe.params = asked
+    mw = _middleware(probe, without_token(), browser=browser)
+    call = await _run(mw, user=_user(_claims()))
+    assert call.status == 200
+    assert "not been synced" in probe.answer["error"], probe.answer
+    # The same request is answered when the row is one the plan can hold.
+    ok_query = {**stale_query, "context_codes[]": ["course_101"]}
+    plant(browser, binding, browser_plan.resource_key("/calendar_events", ok_query), "/calendar_events", ok_query,
+          [{"id": 2, "context_code": "course_101", "start_at": "2026-11-05T10:00:00Z"}])
+    probe = SourceProbe("/calendar_events")
+    probe.params = {**asked, "context_codes[]": ["course_101"]}
+    await _run(_middleware(probe, without_token(), browser=browser), user=_user(_claims()))
+    assert [e["id"] for e in probe.answer] == [2]
+
+
 # -- data age, as settings -----------------------------------------------------------------------
 
 
@@ -243,7 +303,7 @@ async def test_data_older_than_the_limit_is_refused_and_the_limit_is_a_setting(b
     default = await serve(without_token(), browser, settings=SettingsSnapshots())
     assert default.answer == {"id": 42}
     assert default.browser is not None and default.browser.max_age_seconds == 14 * 86400
-    assert default.browser.fresh_seconds == 12 * 3600
+    assert default.browser.fresh_seconds == 24 * 3600
     tuned = await serve(
         without_token(),
         browser,
@@ -280,7 +340,7 @@ def tool_server(source: BrowserSource | None) -> FastMCP:
     return mcp
 
 
-def source_with(age_seconds: int, *, fresh_hours: int = 12) -> BrowserSource:
+def source_with(age_seconds: int, *, fresh_hours: int = 24) -> BrowserSource:
     from canvas_mcp.core.browser_source import BrowserSnapshot
 
     async def load(path: str) -> list[BrowserSnapshot]:
@@ -313,11 +373,11 @@ async def test_a_result_from_browser_data_says_how_old_the_data_is():
 
 
 async def test_old_data_carries_the_warning_after_the_threshold():
-    fresh = await call(source_with(11 * 3600), "read_quizzes")
+    fresh = await call(source_with(23 * 3600), "read_quizzes")
     assert "out of date" not in fresh.content[-1].text
-    stale = await call(source_with(13 * 3600), "read_quizzes")
+    stale = await call(source_with(25 * 3600), "read_quizzes")
     assert stale.content[-1].text == (
-        "Data synced from your browser 13 hours ago. It may be out of date; open Canvas in the browser to refresh it."
+        "Data synced from your browser 25 hours ago. It may be out of date; open Canvas in the browser to refresh it."
     )
     shorter = await call(source_with(3 * 3600, fresh_hours=2), "read_quizzes")
     assert "out of date" in shorter.content[-1].text

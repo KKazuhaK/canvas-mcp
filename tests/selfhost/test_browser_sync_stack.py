@@ -21,7 +21,7 @@ from canvas_mcp.server import register_all_tools
 from .account_fixture import _display_in_utc, build_harness, sign_in  # noqa: F401
 from .authz.stack import User
 from .conftest import OID_A
-from .test_browser_sync import COURSES, Rig, res
+from .test_browser_sync import BARE, COURSES, Rig, res
 from .test_selfhost_integration import call_tool, rpc, text_of
 
 
@@ -42,8 +42,8 @@ def rig(tmp_path: pathlib.Path):
         [
             res("/users/self", {}, {"id": 77, "name": "Ada Student"}),
             res("/users/self/profile", {}, {"id": 77, "name": "Ada Student", "login_id": "ada"}),
+            res("/courses", BARE, [course]),
             res("/courses", COURSES, [course]),
-            res("/courses", {"enrollment_state": "active", **COURSES}, [course]),
             res("/users/self/todo", {}, todo),
         ],
         captured_at=h.now - 600,  # the stack runs on the harness clock

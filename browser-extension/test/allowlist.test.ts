@@ -72,7 +72,7 @@ test('expandPlan expands perCourse over course ids and validates the result', ()
   assert.deepEqual(r.rejected.map((x) => x.path).sort(), ['/conversations', '/courses/5/modules', '/courses/{course_id}/files', '/courses/{course_id}/modules'].sort());
   const noCourses = expandPlan(resources, null);
   assert.equal(noCourses.perCourse.length, 0);
-  assert.ok(noCourses.rejected.some((x) => x.reason.includes('no course list')));
+  assert.ok(noCourses.rejected.some((x) => x.reason.includes('course list unavailable')));
 });
 
 test('perCourse placeholders in query values and mixed path+query expand; bad cases are rejected', () => {
@@ -101,4 +101,58 @@ test('perCourse placeholders in query values and mixed path+query expand; bad ca
   assert.ok(reasons.includes('perCourse resource has no {course_id}'));
   assert.equal(reasons.filter((x) => x === 'leftover brace after expansion').length, 3);
   assert.equal(r.plain.length, 0);
+});
+
+test('plan v2 fields are parsed; v1 perCourse means eachCourse; defaults apply', () => {
+  const { plan, rejected } = parsePlan({
+    planVersion: 2, coldIntervalHours: 6,
+    resources: [
+      { path: '/courses', tier: 'cold', chunk: 5 },
+      { path: '/courses/{course_id}/modules', perCourse: true },
+      { path: '/announcements', query: { 'context_codes[]': ['course_{course_id}'] }, expand: 'courseList' },
+      { path: '/planner_notes', expand: 'sideways' },
+      { path: '/planner_notes', tier: 'lukewarm' },
+    ],
+  });
+  assert.equal(plan.coldIntervalHours, 6);
+  assert.equal(rejected.length, 2);
+  assert.deepEqual(plan.resources.map((r) => [r.tier, r.expand, r.chunk]), [['cold', null, 5], ['hot', 'eachCourse', 10], ['hot', 'courseList', 10]]);
+  assert.equal(parsePlan({ planVersion: 1, resources: [] }).plan.coldIntervalHours, 12);
+});
+
+test('courseList: 23 unsorted, duplicated ids give chunks of 10, 10 and 3 in ascending numeric order', () => {
+  const ids = [9, 23, 5, 7, 8, 1, 2, 3, 4, 6, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 9];
+  const resources = parsePlan({
+    planVersion: 2,
+    resources: [{ path: '/calendar_events', query: { type: 'event', 'context_codes[]': ['course_{course_id}'], end: 'x' }, paginate: true, expand: 'courseList', tier: 'cold' }],
+  }).plan.resources;
+  const r = expandPlan(resources, ids);
+  assert.equal(r.rejected.length, 0);
+  assert.equal(r.perCourse.length, 3);
+  const lists = r.perCourse.map((j) => j.query['context_codes[]'] as string[]);
+  assert.deepEqual(lists.map((l) => l.length), [10, 10, 3]);
+  assert.deepEqual(lists[0], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `course_${n}`));
+  assert.deepEqual(lists[2], ['course_21', 'course_22', 'course_23']);
+  assert.equal(r.perCourse[0]?.query.type, 'event');
+  assert.equal(r.perCourse[0]?.tier, 'cold');
+  // Same input in a different order gives identical requests.
+  assert.deepEqual(expandPlan(resources, [...ids].reverse()).perCourse, r.perCourse);
+});
+
+test('courseList keeps other array elements in place, honours chunk, and rejects bad shapes', () => {
+  const mk = (res: object) => expandPlan(parsePlan({ planVersion: 2, resources: [res] }).plan.resources, [2, 1, 3]);
+  const ok = mk({ path: '/announcements', query: { 'context_codes[]': ['user_5', 'course_{course_id}'] }, expand: 'courseList', chunk: 2 });
+  assert.deepEqual(ok.perCourse.map((j) => j.query['context_codes[]']), [['user_5', 'course_1', 'course_2'], ['user_5', 'course_3']]);
+  for (const res of [
+    { path: '/announcements', query: { x: 'course_{course_id}' }, expand: 'courseList' }, // not an array
+    { path: '/courses/{course_id}/modules', query: {}, expand: 'courseList' }, // path placeholder
+    { path: '/announcements', query: { 'context_codes[]': ['a_{course_id}', 'b_{course_id}'] }, expand: 'courseList' }, // two elements
+    { path: '/announcements', query: { 'context_codes[]': ['course_{course_id}', 'x{y}'] }, expand: 'courseList' }, // leftover brace
+    { path: '/announcements', query: { 'context_codes[]': ['course_1'] }, expand: 'courseList' }, // no placeholder
+  ]) {
+    const r = mk(res);
+    assert.equal(r.perCourse.length, 0, JSON.stringify(res));
+    assert.equal(r.rejected.length, 1, JSON.stringify(res));
+  }
+  assert.equal(expandPlan(parsePlan({ planVersion: 2, resources: [{ path: '/announcements', query: { 'context_codes[]': ['course_{course_id}'] }, expand: 'courseList' }] }).plan.resources, null).rejected.length, 1);
 });

@@ -109,3 +109,68 @@ test('a failing later page fails the resource instead of storing a partial list'
   assert.equal(r?.error, 'page_failed');
   assert.equal(r?.body, null);
 });
+
+test('at most 2 resources are in flight, results keep their order, pages stay sequential', async () => {
+  let inFlight = 0;
+  let max = 0;
+  mockFetch(async (url) => {
+    inFlight++;
+    max = Math.max(max, inFlight);
+    await new Promise((r) => setTimeout(r, 15));
+    inFlight--;
+    return jsonResponse({ url });
+  });
+  const jobs = Array.from({ length: 12 }, (_, i) => job(`/courses/${i + 1}`));
+  const results = await runFetches(ORIGIN, jobs, 5);
+  assert.equal(max, 2);
+  assert.deepEqual(results.map((r) => r.path), jobs.map((j) => j.path));
+  assert.ok(results.every((r) => r.status === 200));
+});
+
+test('a 429 pauses new requests for Retry-After, then the request is retried', async () => {
+  const times: number[] = [];
+  let first = true;
+  mockFetch(() => {
+    times.push(Date.now());
+    if (first) {
+      first = false;
+      return new Response('', { status: 429, headers: { 'retry-after': '1' } });
+    }
+    return jsonResponse([]);
+  });
+  const results = await runFetches(ORIGIN, [job('/courses'), job('/planner_notes'), job('/announcements')], 5);
+  assert.ok(results.every((r) => r.status === 200));
+  // The three initial requests start together; the retry waits out Retry-After.
+  assert.equal(times.length, 4);
+  assert.ok(times[3]! - times[0]! >= 900);
+});
+
+const throttle403 = () =>
+  new Response('403 Forbidden (Rate Limit Exceeded)', { status: 403, headers: { 'retry-after': '0.05', 'x-rate-limit-remaining': '0' } });
+
+test('a throttle-403 is retried like a 429 and then succeeds with the real status', async () => {
+  let n = 0;
+  const calls = mockFetch(() => (n++ < 2 ? throttle403() : jsonResponse([1])));
+  const [r] = await runFetches(ORIGIN, [job('/courses')], 5);
+  assert.equal(calls.length, 3);
+  assert.equal(r?.status, 200);
+  assert.deepEqual(r?.body, [1]);
+  assert.equal(r?.error, undefined);
+});
+
+test('a persistent throttle-403 is never recorded as a status', async () => {
+  const calls = mockFetch(() => throttle403());
+  const [r] = await runFetches(ORIGIN, [job('/courses')], 5);
+  assert.equal(calls.length, 4); // first try + 3 retries
+  assert.equal(r?.error, 'rate_limited');
+  assert.equal(r?.status, null);
+  assert.equal(r?.body, null);
+});
+
+test('a real 403 without rate-limit text is still recorded as 403', async () => {
+  const calls = mockFetch(() => jsonResponse({ errors: [{ message: 'user not authorized' }] }, { status: 403 }));
+  const [r] = await runFetches(ORIGIN, [job('/courses')], 5);
+  assert.equal(calls.length, 1);
+  assert.equal(r?.status, 403);
+  assert.equal(r?.error, undefined);
+});

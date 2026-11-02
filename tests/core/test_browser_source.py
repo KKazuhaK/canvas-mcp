@@ -392,6 +392,87 @@ async def test_type_is_matched_or_filtered():
     assert [e["id"] for e in got] == [2]
 
 
+def chunked_announcements(chunks: list[list[int]]) -> list[BrowserSnapshot]:
+    """Stored announcements, one snapshot per chunk of course ids, as a v2 plan produces."""
+    return [
+        snap(
+            "/announcements",
+            [
+                {"id": c * 10, "context_code": f"course_{c}", "posted_at": "2026-11-05T10:00:00Z"}
+                for c in chunk
+            ],
+            {"context_codes[]": [f"course_{c}" for c in chunk], "active_only": ["true"], **WINDOW},
+        )
+        for chunk in chunks
+    ]
+
+
+ANNOUNCE = {"active_only": True, "start_date": "2026-11-01", "end_date": "2026-11-30"}
+
+
+async def test_three_of_twelve_courses_are_answered_from_two_stored_chunks():
+    # Twelve courses in two chunks of ten and two; the tool asks for 3, 11 and 12.
+    src = source(*chunked_announcements([list(range(1, 11)), [11, 12]]))
+    got = await ask(src, "/announcements", {**ANNOUNCE, "context_codes[]": ["course_12", "course_3", "course_11"]})
+    assert sorted(a["context_code"] for a in got) == ["course_11", "course_12", "course_3"]
+    # A different grouping of codes than the one stored is fine too, and so is all twelve.
+    everything = await ask(src, "/announcements", {**ANNOUNCE, "context_codes[]": [f"course_{c}" for c in range(1, 13)]})
+    assert len(everything) == 12
+
+
+async def test_a_code_in_a_missing_chunk_is_a_miss():
+    src = source(*chunked_announcements([list(range(1, 11))]))  # the chunk with 11 and 12 never synced
+    assert (await miss(src, "/announcements", {**ANNOUNCE, "context_codes[]": ["course_3", "course_11"]})).code == SOURCE_UNAVAILABLE
+    # Covered codes alone are still answered.
+    assert len(await ask(src, "/announcements", {**ANNOUNCE, "context_codes[]": ["course_3"]})) == 1
+
+
+async def test_the_window_rule_applies_per_stored_chunk():
+    narrow = {"start_date": ["2026-11-01T00:00:00Z"], "end_date": ["2026-11-10T00:00:00Z"]}
+    old = snap("/announcements", [], {"context_codes[]": ["course_1"], "active_only": ["true"], **narrow})
+    fresh = chunked_announcements([[2]])
+    src = source(old, *fresh)
+    params = {**ANNOUNCE, "context_codes[]": ["course_1", "course_2"]}
+    # Course 1's chunk does not cover the asked window: miss, even though course 2's does.
+    assert (await miss(src, "/announcements", params)).code == SOURCE_UNAVAILABLE
+
+
+async def test_group_codes_are_answered_like_course_codes():
+    chunk = [
+        snap(
+            "/calendar_events",
+            [
+                {"id": 1, "context_code": "group_31", "start_at": "2026-11-05T10:00:00Z"},
+                {"id": 2, "context_code": "group_32", "start_at": "2026-11-05T10:00:00Z"},
+            ],
+            {"type": ["event"], "context_codes[]": ["group_31", "group_32"], "excludes[]": ["child_events"], **WINDOW},
+        )
+    ]
+    src = source(*chunk)
+    params = {"type": "event", "excludes[]": ["child_events"], "start_date": "2026-11-01", "end_date": "2026-11-30"}
+    got = await ask(src, "/calendar_events", {**params, "context_codes[]": ["group_32"]})
+    assert [e["id"] for e in got] == [2]
+    await miss(src, "/calendar_events", {**params, "context_codes[]": ["group_32", "group_99"]})
+
+
+async def test_a_refusal_of_one_resource_is_not_blamed_on_the_school():
+    # The student's own profile was read: Canvas refused this data in particular.
+    working = source(snap("/users/self", {"id": 1}), snap("/courses/5/quizzes", None, status=403))
+    err = await miss(working, "/courses/5/quizzes")
+    assert err.message == "Canvas refused access to this data (HTTP 403)."
+    assert "blocks session access" not in err.message
+    unauthorized = source(snap("/users/self", {"id": 1}), snap("/courses/5/quizzes", None, status=401))
+    assert (await miss(unauthorized, "/courses/5/quizzes")).message == "Canvas refused access to this data (HTTP 401)."
+    # With no good /users/self (or a failed one) the school-level wording stays.
+    blocked = source(snap("/users/self", None, status=403), snap("/courses/5/quizzes", None, status=403))
+    assert "blocks session access" in (await miss(blocked, "/courses/5/quizzes")).message
+    nothing = source(snap("/courses/5/quizzes", None, status=403))
+    assert "blocks session access" in (await miss(nothing, "/courses/5/quizzes")).message
+    # Other statuses keep their own wording either way.
+    gone = source(snap("/users/self", {"id": 1}), snap("/courses/5/front_page", None, status=404))
+    assert "HTTP 404" in (await miss(gone, "/courses/5/front_page")).message
+
+
 # -- one object by id -------------------------------------------------------------------------
 
 
@@ -484,9 +565,9 @@ def test_freshness_note_wording_and_thresholds():
     assert freshness_note([], now=NOW) is None
     assert freshness_note([NOW - 5], now=NOW) == "Data synced from your browser less than a minute ago."
     assert freshness_note([NOW - 600], now=NOW) == "Data synced from your browser 10 minutes ago."
-    at_limit = freshness_note([NOW - 12 * 3600], now=NOW)
+    at_limit = freshness_note([NOW - 24 * 3600], now=NOW)
     assert at_limit is not None and "out of date" not in at_limit
-    stale = freshness_note([NOW - 12 * 3600 - 1], now=NOW)
+    stale = freshness_note([NOW - 24 * 3600 - 1], now=NOW)
     assert stale is not None and "may be out of date; open Canvas" in stale
     custom = freshness_note([NOW - 3 * 3600], now=NOW, stale_after_seconds=3600)
     assert custom is not None and "out of date" in custom

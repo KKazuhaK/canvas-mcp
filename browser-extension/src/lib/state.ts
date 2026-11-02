@@ -17,6 +17,7 @@ export interface Counts {
   accepted: number;
   rejected: number;
   kept?: number; // resources where the server kept an older good copy
+  notDue?: number; // cold resources deliberately not fetched yet
 }
 
 export interface LastResult {
@@ -36,6 +37,8 @@ export interface Stored {
   lastSyncAt?: string;
   lastAttemptAt?: string;
   lastResult?: LastResult;
+  lastFetchedAt?: Record<string, string>;
+  lastCourseIds?: number[];
   needsReconnect?: boolean;
   backoffUntil?: number;
   pairing?: Pairing;
@@ -48,6 +51,8 @@ export const STORAGE_KEYS: (keyof Stored)[] = [
   'lastSyncAt',
   'lastAttemptAt',
   'lastResult',
+  'lastFetchedAt',
+  'lastCourseIds',
   'needsReconnect',
   'backoffUntil',
   'pairing',
@@ -71,7 +76,7 @@ export const isConnected = (s: Stored): boolean =>
 
 export async function saveConnection(area: StorageArea, portalOrigin: string, uploadToken: string): Promise<void> {
   await area.set({ portalOrigin, uploadToken, needsReconnect: false });
-  await area.remove(['lastResult', 'lastSyncAt', 'lastAttemptAt', 'backoffUntil']);
+  await area.remove(['lastResult', 'lastSyncAt', 'lastAttemptAt', 'lastFetchedAt', 'lastCourseIds', 'backoffUntil']);
 }
 
 // The server no longer accepts the token: forget it but keep the settings so

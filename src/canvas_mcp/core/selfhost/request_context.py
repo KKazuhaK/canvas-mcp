@@ -43,6 +43,7 @@ from .accounts import (
     valid_account_key,
 )
 from .authz.fastmcp_compat import AuthenticatedUser
+from .browser_plan import resource_key
 from .browser_store import BrowserSyncStore, browser_decision
 from .config_snapshot import CURRENT_CONFIG, ConfigSnapshots
 from .db.snapshots import McpSnapshot
@@ -447,10 +448,22 @@ class SelfhostRequestContextMiddleware:
         if not active:
             return False
         cache: dict[str, list[Any]] = {}
+        plan_keys: list[frozenset[str]] = []
+
+        def current(path: str) -> list[Any]:
+            # Only rows whose key the binding's current plan can hold are ever served:
+            # a stale chunk (say one naming a course that is now unpublished) is not.
+            if not plan_keys:
+                plan_keys.append(store.expected_keys(binding.id, binding.canvas_user_id))
+            return [
+                snap
+                for snap in store.load_path(binding.id, path)
+                if resource_key(snap.path, snap.query) in plan_keys[0]
+            ]
 
         async def load(path: str) -> list[Any]:
             if path not in cache:
-                cache[path] = await run_store(store.load_path, binding.id, path)
+                cache[path] = await run_store(current, path)
             return cache[path]
 
         set_browser_source(

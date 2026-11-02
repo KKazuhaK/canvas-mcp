@@ -7,6 +7,7 @@ export type FetchErrorCode =
   | 'pagination_moved'
   | 'too_many_pages'
   | 'page_failed'
+  | 'rate_limited'
   | 'bad_json'
   | 'network';
 
@@ -52,10 +53,42 @@ export async function runFetches(origin: string, jobs: FetchJobInput[], maxPages
     return `${origin}${API}${job.path}${qs ? `?${qs}` : ''}`;
   };
 
-  const results: FetchResult[] = [];
-  for (const job of jobs) {
+  const CONCURRENCY = 2;
+  const MAX_429_RETRIES = 3;
+  let pauseUntil = 0;
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  // Canvas throttles with 429, or with 403 and a "Rate Limit Exceeded" body. Either
+  // pauses every worker's next request for Retry-After (default 5 s, at most 30 s)
+  // and retries this request. A throttle response is never returned as a status.
+  const doFetch = async (url: string): Promise<{ res: Response; throttled: boolean }> => {
+    for (let attempt = 0; ; attempt++) {
+      const wait = pauseUntil - Date.now();
+      if (wait > 0) await sleep(wait);
+      const res = await fetch(url, {
+        credentials: 'include',
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(30000),
+      });
+      let throttled = res.status === 429;
+      if (res.status === 403) {
+        try {
+          throttled = /rate limit exceeded/i.test(await res.clone().text());
+        } catch {
+          throttled = false;
+        }
+      }
+      if (!throttled) return { res, throttled: false };
+      if (attempt >= MAX_429_RETRIES) return { res, throttled: true };
+      const secs = Number(res.headers.get('retry-after'));
+      const ms = Number.isFinite(secs) && secs > 0 ? Math.min(secs * 1000, 30000) : 5000;
+      pauseUntil = Math.max(pauseUntil, Date.now() + ms);
+      await res.body?.cancel();
+    }
+  };
+
+  const runJob = async (job: FetchJobInput): Promise<FetchResult> => {
     const out: FetchResult = { path: job.path, query: job.query, status: null, body: null, pages: 0 };
-    results.push(out);
     const apiPath = `${API}${job.path}`;
     let url: string | null = urlFor(job);
     let merged: unknown = null;
@@ -68,11 +101,14 @@ export async function runFetches(origin: string, jobs: FetchJobInput[], maxPages
           out.status = null;
           break;
         }
-        const res: Response = await fetch(url, {
-          credentials: 'include',
-          headers: { Accept: 'application/json' },
-          signal: AbortSignal.timeout(30000),
-        });
+        const { res, throttled } = await doFetch(url);
+        if (throttled) {
+          out.pages++;
+          out.error = 'rate_limited';
+          out.status = null;
+          out.body = null;
+          break;
+        }
         out.pages++;
         let finalUrl: URL | null = null;
         try {
@@ -145,6 +181,18 @@ export async function runFetches(origin: string, jobs: FetchJobInput[], maxPages
       out.status = null;
       out.body = null;
     }
-  }
+    return out;
+  };
+
+  // Resources run with a small concurrency cap; pages within one resource stay sequential.
+  const results: FetchResult[] = new Array(jobs.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < jobs.length) {
+      const i = nextIndex++;
+      results[i] = await runJob(jobs[i] as FetchJobInput);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, jobs.length) }, worker));
   return results;
 }

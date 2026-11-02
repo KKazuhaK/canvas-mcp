@@ -1,7 +1,8 @@
-import { expandPlan, parsePlan, type FetchJob } from './allowlist.ts';
+import { expandPlan, jobKey, parsePlan, sortedCourseIds, type FetchJob } from './allowlist.ts';
+import { isDue } from './fetched.ts';
 import type { FetchResult } from './canvas-fetch.ts';
 import type { Counts } from './state.ts';
-import { splitUploads, type UploadResource } from './upload.ts';
+import { orderForUpload, splitUploads, type UploadResource } from './upload.ts';
 
 export interface SyncInput {
   portalOrigin: string;
@@ -9,6 +10,12 @@ export interface SyncInput {
   canvasOrigin: string;
   // Alarm runs with no Canvas tab probe Canvas first and stay silent when signed out.
   probeFirst?: boolean;
+  // "Sync now" also fetches cold resources that are not due.
+  force?: boolean;
+  // Expanded request key -> ISO time of the last successful fetch.
+  lastFetched?: Record<string, string>;
+  // Course ids used by the previous successful run (ascending). A different set refetches per-course data.
+  lastCourseIds?: number[];
 }
 
 export interface SyncDeps {
@@ -26,6 +33,14 @@ export interface Outcome {
   retryAfterMs?: number;
   waiting?: boolean;
   skipReasons?: string[];
+  // Keys fetched and stored in this run, and (when the whole plan was seen) every key in the plan.
+  fetchedKeys?: string[];
+  planKeys?: string[];
+  // Set when the course expansion was complete: the ids used, whether they differ from the
+  // previous run's, and the per-course request keys of this run.
+  courseIds?: number[];
+  courseSetChanged?: boolean;
+  perCourseKeys?: string[];
 }
 
 class Stop extends Error {
@@ -59,6 +74,12 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
   const counts = zeroCounts();
   const reasons: string[] = [];
   let quotaMessage = '';
+  const fetchedKeys: string[] = [];
+  let planKeys: string[] | undefined;
+  let courseSetChanged = false;
+  let usedCourseIds: number[] | undefined;
+  const perCourseKeys = new Set<string>();
+  const expandOfKey = new Map<string, string | null | undefined>();
   const skip = (path: string, reason: string) => {
     if (reasons.length < 10) reasons.push(`${path.slice(0, 60)}: ${reason}`);
   };
@@ -157,9 +178,19 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
         results.push(...out);
         return out;
       };
-      const keyOf = (j: FetchJob) => j.path + '?' + JSON.stringify(j.query);
+      const keyOf = jobKey;
+      const nowMs = deps.now().getTime();
+      // The profile and course lists drive expansion, so they are always fetched.
+      const due = (j: FetchJob) =>
+        j.tier !== 'cold' ||
+        j.path === '/users/self' ||
+        j.path === '/courses' ||
+        !!input.force ||
+        isDue(input.lastFetched?.[keyOf(j)], plan.coldIntervalHours, nowMs);
       const fresh = (j: FetchJob) => !prev || !prev.keys.has(keyOf(j));
-      const freshPlain = first.plain.filter(fresh);
+      const newPlain = first.plain.filter(fresh);
+      const freshPlain = newPlain.filter(due);
+      counts.notDue = (counts.notDue ?? 0) + newPlain.length - freshPlain.length;
       const plainResults = await read(freshPlain);
       counts.planned += freshPlain.length;
 
@@ -180,10 +211,29 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
         }
         canvasUserId = self.id;
 
-        const coursesResult = plainResults.find((r) => r.path === '/courses' && r.status === 200 && Array.isArray(r.body));
-        courseIds = coursesResult
-          ? [...new Set((coursesResult.body as { id?: unknown }[]).map((c) => c?.id).filter((id): id is number => typeof id === 'number'))]
-          : null;
+        // Expand over the course lists the portal flags with courseSource; older
+        // portals send no flag, so every /courses result is used.
+        const sources = plan.resources.filter((r) => r.path === '/courses' && r.courseSource);
+        const sourceKeys = new Set(sources.map((r) => keyOf(r)));
+        // If any course list failed this run, the ids would come from a different set than the
+        // portal's, and the chunks would not match. Do not expand; the portal keeps its old lists.
+        const sourceResults = plainResults.filter((r) => r.path === '/courses' && (!sources.length || sourceKeys.has(keyOf(r))));
+        const listOk = (r: FetchResult) => r.status === 200 && Array.isArray(r.body);
+        const missing = sources.length > 0 && new Set(sourceResults.map(keyOf)).size < sourceKeys.size;
+        courseIds =
+          sourceResults.length && !missing && sourceResults.every(listOk)
+            ? // Same rule as the portal: integer ids, skipping unpublished courses (they answer 403
+              // to everything). Objects without workflow_state are kept.
+              sourceResults.flatMap((r) =>
+                (r.body as { id?: unknown; workflow_state?: unknown }[])
+                  .filter((c) => Number.isInteger(c?.id) && c?.workflow_state !== 'unpublished')
+                  .map((c) => c.id as number),
+              )
+            : null;
+        if (courseIds) {
+          usedCourseIds = sortedCourseIds(courseIds);
+          courseSetChanged = !!input.lastCourseIds && JSON.stringify(usedCourseIds) !== JSON.stringify(sortedCourseIds(input.lastCourseIds));
+        }
       }
 
       const second = expandPlan(plan.resources, courseIds);
@@ -192,7 +242,18 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
         counts.skipped += second.rejected.length;
         for (const r of second.rejected) skip(r.path, r.reason);
       }
-      const freshCourse = second.perCourse.filter(fresh);
+      // Pruning is safe only when every per-course resource could be expanded.
+      const complete = courseIds !== null || !plan.resources.some((r) => r.expand);
+      const allKeys = new Set([...first.plain, ...second.perCourse].map(keyOf));
+      planKeys = complete ? [...new Set([...(planKeys ?? []), ...allKeys])] : undefined;
+      const newCourse = second.perCourse.filter(fresh);
+      for (const j of second.perCourse) {
+        perCourseKeys.add(keyOf(j));
+        expandOfKey.set(keyOf(j), j.expand);
+      }
+      // A changed course set means the portal's expected rows changed: refetch all per-course data.
+      const freshCourse = newCourse.filter((j) => courseSetChanged || due(j));
+      counts.notDue = (counts.notDue ?? 0) + newCourse.length - freshCourse.length;
       counts.planned += freshCourse.length;
       await read(freshCourse);
 
@@ -201,6 +262,12 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
       for (const r of results) {
         if (r.error === 'not_signed_in') {
           throw new Stop('not_signed_in', 'Your Canvas session ended during the sync. Sign in to Canvas and try again.');
+        }
+        if (r.error === 'rate_limited') {
+          // Never upload a throttle response: the server would treat it as lost access.
+          counts.skipped++;
+          skip(r.path, 'rate limited by Canvas');
+          continue;
         }
         if (r.error) {
           counts.canvasErrors++;
@@ -214,7 +281,7 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
         else counts.canvasErrors++;
         upload.push({ path: r.path, query: r.query, status: r.status, body: r.status === 200 ? r.body : null });
       }
-      if (!upload.length && prev) return { plan, keys: new Set([...first.plain, ...second.perCourse].map(keyOf)), canvasUserId, courseIds };
+      if (!upload.length && prev) return { plan, keys: allKeys, canvasUserId, courseIds };
       if (!upload.length) {
         throw new Stop('nothing_to_upload', 'Canvas data could not be read, so nothing was uploaded.');
       }
@@ -227,7 +294,11 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
         capturedAt: startedAt.toISOString(),
         planVersion: plan.planVersion,
       };
-      const { batches, oversized } = splitUploads(header, upload, Math.floor(maxBody * 0.75));
+      const { batches, oversized } = splitUploads(
+        header,
+        orderForUpload(upload, (r) => expandOfKey.get(keyOf(r))),
+        Math.floor(maxBody * 0.75),
+      );
       counts.skipped += oversized.length;
       for (const r of oversized) skip(r.path, 'too large to upload');
       for (const batch of batches) {
@@ -272,7 +343,11 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
         try {
           const body = (await res.json()) as { accepted?: number; rejected?: unknown[] };
           counts.accepted += typeof body.accepted === 'number' ? body.accepted : 0;
+          // A fetch time is recorded only for resources the portal accepted, or held equal or
+          // better data for. Anything else is retried on the next run.
+          const notStored = new Set<string>();
           for (const r of Array.isArray(body.rejected) ? (body.rejected as { path?: unknown; reason?: unknown }[]) : []) {
+            if (r?.reason !== 'kept_stored_data' && r?.reason !== 'older_than_stored') notStored.add(typeof r?.path === 'string' ? r.path : '');
             const reason = typeof r?.reason === 'string' ? r.reason : 'unknown';
             const path = typeof r?.path === 'string' ? r.path : 'upload';
             if (reason === 'kept_stored_data') {
@@ -286,11 +361,12 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
               skip(path, 'more courses than the portal accepts');
             } else skip(path, `rejected by the portal (${reason.slice(0, 80)})`);
           }
+          for (const r of batch) if (!notStored.has(r.path)) fetchedKeys.push(keyOf(r));
         } catch {
           /* an unreadable acknowledgement is not fatal */
         }
       }
-      return { plan, keys: new Set([...first.plain, ...second.perCourse].map(keyOf)), canvasUserId, courseIds };
+      return { plan, keys: allKeys, canvasUserId, courseIds };
     };
 
     const done = await pass(null);
@@ -306,6 +382,7 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
         message: `${quotaMessage} ${counts.accepted} item${counts.accepted === 1 ? ' was' : 's were'} stored.`,
         counts,
         skipReasons: reasons,
+        fetchedKeys,
         retryAfterMs: QUOTA_BACKOFF_MS,
       };
     }
@@ -313,16 +390,19 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
     if (counts.canvasErrors) notes.push(`${counts.canvasErrors} could not be read from Canvas`);
     if (counts.skipped) notes.push(`${counts.skipped} skipped`);
     if (counts.rejected) notes.push(`${counts.rejected} rejected by the portal`);
-    const kept = counts.kept ? ` ${counts.kept} kept previous data.` : '';
+    const kept = (counts.kept ? ` ${counts.kept} kept previous data.` : '') + (counts.notDue ? ` ${counts.notDue} not due yet.` : '');
     return {
       ok: true,
       code: notes.length ? 'partial' : 'ok',
       message: `Synced ${counts.accepted} item${counts.accepted === 1 ? '' : 's'}${notes.length ? ` (${notes.join('; ')})` : ''}.${kept}`,
       counts,
       skipReasons: reasons,
+      fetchedKeys,
+      ...(planKeys ? { planKeys } : {}),
+      ...(usedCourseIds ? { courseIds: usedCourseIds, courseSetChanged, perCourseKeys: [...perCourseKeys] } : {}),
     };
   } catch (e) {
-    if (e instanceof Stop) return { ok: false, code: e.code, message: e.message, counts, skipReasons: reasons, ...e.extra };
-    return { ok: false, code: 'error', message: 'The sync failed unexpectedly.', counts, skipReasons: reasons };
+    if (e instanceof Stop) return { ok: false, code: e.code, message: e.message, counts, skipReasons: reasons, fetchedKeys, ...e.extra };
+    return { ok: false, code: 'error', message: 'The sync failed unexpectedly.', counts, skipReasons: reasons, fetchedKeys };
   }
 }

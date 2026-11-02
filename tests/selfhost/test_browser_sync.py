@@ -47,7 +47,9 @@ EXT = "chrome-extension://" + "a" * 32
 FIREFOX = "moz-extension://12345678-1234-1234-1234-123456789abc"
 P = "/api/v1"
 X = P + "/extension"
-COURSES = {"include[]": sorted(browser_plan.RESOURCES[6].query["include[]"])}
+BARE = {"include[]": sorted(browser_plan.RESOURCES[6].query["include[]"])}  # every enrollment
+COURSES = {"enrollment_state": "active", **BARE}  # the active ones: the course source
+ACTIVE_B = {**COURSES, "state[]": ["available"]}  # a second course-source list
 
 
 def iso(epoch: float) -> str:
@@ -469,12 +471,14 @@ def test_the_authenticated_ceiling_counts_valid_requests_only(tmp_path: pathlib.
 def test_the_plan_follows_the_contract_and_fits_the_extension_allowlist(rig: Rig):
     token = rig.pair()
     plan = rig.call("GET", "/plan", token=token).json()
-    assert set(plan) == {"planVersion", "canvasHost", "maxPages", "resources"}
-    assert plan["planVersion"] == 1 and plan["maxPages"] == 50 and plan["canvasHost"] is None
+    assert set(plan) == {"planVersion", "canvasHost", "maxPages", "coldIntervalHours", "resources"}
+    assert plan["planVersion"] == 2 and plan["maxPages"] == 50 and plan["canvasHost"] is None
+    assert plan["coldIntervalHours"] == 12
     paths = [r["path"] for r in plan["resources"]]
     assert paths[:2] == ["/users/self", "/users/self/profile"]
     for resource in plan["resources"]:
-        assert set(resource) <= {"path", "query", "paginate", "perCourse"}
+        assert set(resource) <= {"path", "query", "paginate", "tier", "expand", "chunk", "courseSource", "perCourse"}
+        assert resource["tier"] in ("hot", "cold")
         assert isinstance(resource["query"], dict)
         concrete = resource["path"].replace("{course_id}", "123")
         assert browser_plan.ALLOWED_PATH.fullmatch(concrete), resource["path"]
@@ -482,7 +486,7 @@ def test_the_plan_follows_the_contract_and_fits_the_extension_allowlist(rig: Rig
         for key, value in resource["query"].items():
             assert isinstance(value, list) if key.endswith("[]") else isinstance(value, str)
     # The first course list precedes every per-course resource, so ids are known before use.
-    first_per_course = next(i for i, r in enumerate(plan["resources"]) if r.get("perCourse"))
+    first_per_course = next(i for i, r in enumerate(plan["resources"]) if r.get("expand"))
     assert any(r["path"] == "/courses" for r in plan["resources"][:first_per_course])
     # Dates are concrete: about 60 days back and 120 ahead of the server's day.
     windowed = [r for r in plan["resources"] if "start_date" in r["query"]]
@@ -677,7 +681,9 @@ def test_a_failed_canvas_status_is_stored_without_a_body(rig: Rig):
         ({"canvasOrigin": 5}, 409, "canvas_mismatch"),
         ({"schemaVersion": 2}, 400, "unsupported_schema"),
         ({"schemaVersion": True}, 400, "unsupported_schema"),
-        ({"planVersion": 2}, 409, "plan_outdated"),
+        ({"planVersion": 3}, 409, "plan_outdated"),
+        ({"planVersion": 0}, 409, "plan_outdated"),
+        ({"planVersion": "2"}, 409, "plan_outdated"),
         ({"canvasUserId": 0}, 400, "invalid_request"),
         ({"canvasUserId": "abc"}, 400, "invalid_request"),
         ({"canvasUserId": True}, 400, "invalid_request"),
@@ -901,8 +907,8 @@ def test_the_account_lists_what_was_synced_and_whether_it_is_used(rig: Rig):
     rig.upload(
         token,
         [
+            res("/courses", BARE, [{"id": 101}]),
             res("/courses", COURSES, [{"id": 101}]),
-            res("/courses", {"enrollment_state": "active", **COURSES}, [{"id": 101}]),
             res("/courses/101/front_page", {}, None, status=404),
         ],
     )
@@ -999,7 +1005,7 @@ def test_the_thresholds_are_settings_with_the_documented_defaults(rig: Rig):
         values["browser_sync.fresh_hours"],
         values["browser_sync.max_age_days"],
         values["browser_sync.purge_days"],
-    ) == (12, 14, 30)
+    ) == (24, 14, 30)
 
 
 # -- limits on what one binding can hold ------------------------------------------------------------------
@@ -1028,11 +1034,11 @@ def test_a_binding_may_name_at_most_two_hundred_courses(rig: Rig):
 def test_the_cap_counts_courses_across_uploads_and_list_variants(rig: Rig):
     token = rig.pair()
     rig.upload(token, [course_list(range(1, 151))])
-    other = res("/courses", {"enrollment_state": "active", **COURSES}, [{"id": i} for i in range(1000, 1100)])
+    other = res("/courses", ACTIVE_B, [{"id": i} for i in range(1000, 1100)])
     response = rig.upload(token, [other])
     assert response.json()["rejected"] == [{"path": "/courses", "reason": "too_many_courses"}]
     # Ids already known do not count twice.
-    same = res("/courses", {"enrollment_state": "active", **COURSES}, [{"id": i} for i in range(1, 151)])
+    same = res("/courses", ACTIVE_B, [{"id": i} for i in range(1, 151)])
     assert rig.upload(token, [same]).json()["accepted"] == 1
 
 
@@ -1233,18 +1239,14 @@ def test_an_older_course_list_does_not_free_the_cap(rig: Rig):
     assert sneaky.json()["rejected"] == [{"path": "/courses", "reason": "older_than_stored"}]
     assert rig.store.course_ids(rig.binding_id()) == {str(i) for i in range(1, 201)}
     # Next to it, a different list may not take the room the older one pretended to free.
-    other = res("/courses", {"enrollment_state": "active", **COURSES}, [{"id": i} for i in range(1000, 1100)])
+    other = res("/courses", ACTIVE_B, [{"id": i} for i in range(1000, 1100)])
     both = rig.upload(token, [course_list(range(1000, 1200)), other], captured_at=rig.h.now - 500)
     assert sorted(r["reason"] for r in both.json()["rejected"]) == ["older_than_stored", "too_many_courses"]
 
 
 def test_several_list_variants_cannot_each_hold_two_hundred_courses(rig: Rig):
     token = rig.pair()
-    variants = [
-        {"enrollment_state": "active", **COURSES},
-        {"enrollment_state": "active", "state[]": ["available"], **COURSES},
-        COURSES,
-    ]
+    variants = [COURSES, ACTIVE_B]
     rig.upload(token, [res("/courses", variants[0], [{"id": i} for i in range(1, 201)])], captured_at=rig.h.now - 10)
     for n, query in enumerate(variants[1:], 1):
         ids = [{"id": i} for i in range(n * 1000, n * 1000 + 200)]
@@ -1269,20 +1271,22 @@ def test_a_transient_failure_on_the_course_list_keeps_the_per_course_resources(r
     assert rig.store.course_ids(rig.binding_id()) == {"101", "102"}
 
 
-def test_a_newer_list_or_a_real_error_does_replace_and_frees_the_cap(rig: Rig):
+def test_a_newer_list_replaces_and_frees_the_cap_but_a_failure_does_not(rig: Rig):
     token = rig.pair()
     rig.upload(token, [course_list(range(1, 201))], captured_at=rig.h.now - 100)
     newer = rig.upload(token, [course_list(range(1000, 1200))], captured_at=rig.h.now - 50)
     assert newer.json() == {"accepted": 1, "rejected": []}
-    gone = rig.upload(token, [res("/courses", COURSES, None, status=403)], captured_at=rig.h.now - 10)
-    assert gone.json()["accepted"] == 1
+    for status in (401, 403, 404):
+        failed = rig.upload(token, [res("/courses", COURSES, None, status=status)], captured_at=rig.h.now - 10)
+        assert failed.json()["rejected"] == [{"path": "/courses", "reason": "kept_stored_data"}], status
+    assert rig.store.course_ids(rig.binding_id()) == {str(i) for i in range(1000, 1200)}
     assert rig.upload(token, [course_list(range(2000, 2200))], captured_at=rig.h.now - 5).json()["accepted"] == 1
 
 
 def test_a_refused_repeat_of_a_list_does_not_free_the_cap_for_another_variant(rig: Rig):
     token = rig.pair()
-    variant_a = {"enrollment_state": "active", **COURSES}
-    variant_b = {"enrollment_state": "active", "state[]": ["available"], **COURSES}
+    variant_a = COURSES
+    variant_b = ACTIVE_B
     rig.upload(token, [res("/courses", variant_a, [{"id": i} for i in range(1, 201)])], captured_at=rig.h.now - 10)
     # A again with 1001 ids (refused: too long) next to B with 200 new ids.
     response = rig.upload(
@@ -1318,3 +1322,463 @@ def test_an_invalid_first_copy_does_not_hide_a_valid_second_one(rig: Rig):
     response = rig.upload(token, [bad, course_list([1, 2])])
     assert response.json() == {"accepted": 1, "rejected": [{"path": "/courses", "reason": "invalid_resource"}]}
     assert rig.store.course_ids(rig.binding_id()) == {"1", "2"}
+
+
+# -- only the active enrollments expand the plan ----------------------------------------------------------------
+
+
+def test_the_plan_marks_exactly_the_active_course_lists_as_the_source(rig: Rig):
+    token = rig.pair()
+    lists = [r for r in rig.call("GET", "/plan", token=token).json()["resources"] if r["path"] == "/courses"]
+    assert len(lists) == 4
+    flagged = [r for r in lists if r.get("courseSource")]
+    # The active lists without `unpublished`: the unpublished variant never expands.
+    assert len(flagged) == 2 and all(r["query"].get("enrollment_state") == "active" for r in flagged)
+    assert all("unpublished" not in r["query"].get("state[]", []) for r in flagged)
+    unflagged = [r for r in lists if not r.get("courseSource")]
+    assert len(unflagged) == 2 and sorted("enrollment_state" in r["query"] for r in unflagged) == [False, True]
+    assert not any(r.get("courseSource") for r in rig.call("GET", "/plan", token=token).json()["resources"] if r["path"] != "/courses")
+
+
+def test_a_past_course_only_in_the_unfiltered_list_gets_no_per_course_resources(rig: Rig):
+    token = rig.pair()
+    response = rig.upload(
+        token,
+        [
+            res("/courses", BARE, [{"id": 101}, {"id": 999}]),  # 999 is concluded
+            res("/courses", COURSES, [{"id": 101}]),
+            res("/courses/101/quizzes", {}, []),
+            res("/courses/999/quizzes", {}, []),
+            res("/announcements", {"context_codes[]": ["course_999"], "active_only": "true", **window()}, []),
+        ],
+    )
+    assert response.json() == {
+        "accepted": 3,
+        "rejected": [
+            {"path": "/courses/999/quizzes", "reason": "not_in_plan"},
+            {"path": "/announcements", "reason": "not_in_plan"},
+        ],
+    }
+    # The unfiltered list is still stored for the tools that read it.
+    assert [c["id"] for c in rig.store.load_path(rig.binding_id(), "/courses")[0].body or []] in ([101, 999], [101])
+    assert rig.store.course_ids(rig.binding_id()) == {"101"}
+
+
+def test_an_unfiltered_list_alone_names_no_courses(rig: Rig):
+    token = rig.pair()
+    assert rig.upload(token, [res("/courses", BARE, [{"id": 101}])]).json()["accepted"] == 1
+    response = rig.upload(token, [res("/courses/101/quizzes", {}, [])])
+    assert response.json()["rejected"] == [{"path": "/courses/101/quizzes", "reason": "not_in_plan"}]
+
+
+def test_the_cap_counts_only_active_ids(rig: Rig):
+    token = rig.pair()
+    # Hundreds of past courses in the unfiltered list do not use up the cap ...
+    past = res("/courses", BARE, [{"id": i} for i in range(5000, 5900)])
+    assert rig.upload(token, [past, course_list(range(1, 201))]).json() == {"accepted": 2, "rejected": []}
+    assert rig.store.course_ids(rig.binding_id()) == {str(i) for i in range(1, 201)}
+    # ... while a 201st active id is still refused.
+    over = rig.upload(token, [res("/courses", ACTIVE_B, [{"id": i} for i in range(300, 301)])], captured_at=rig.h.now - 1)
+    assert over.json()["rejected"] == [{"path": "/courses", "reason": "too_many_courses"}]
+
+
+# -- plan v2: tiers, aggregated requests, deterministic chunks ----------------------------------------------------
+
+
+def test_the_plan_resources_by_tier_and_expansion(rig: Rig):
+    token = rig.pair()
+    rig.sync_courses(token)
+    plan = rig.call("GET", "/plan", token=token).json()
+    table = [
+        (r["path"], r["tier"], r.get("expand"), r.get("chunk")) for r in plan["resources"]
+    ]
+    hot = [row for row in table if row[1] == "hot"]
+    cold = [row for row in table if row[1] == "cold"]
+    assert {row[0] for row in cold} == {
+        "/courses/{course_id}/assignments",
+        "/courses/{course_id}/assignment_groups",
+        "/courses/{course_id}/quizzes",
+        "/courses/{course_id}/modules",
+        "/courses/{course_id}/front_page",
+        "/courses/{course_id}/discussion_topics",
+    }
+    assert len(cold) == 7 and all(row[2] == "eachCourse" and row[3] is None for row in cold)
+    aggregated = [row for row in hot if row[2] is not None]
+    assert sorted(aggregated) == [
+        ("/announcements", "hot", "courseList", 10),
+        ("/calendar_events", "hot", "courseList", 10),
+        ("/calendar_events", "hot", "courseList", 10),
+    ]
+    assert len(hot) == 18  # incl. the two personal calendars, known after the first upload
+    assert all(row[2] is None for row in hot if row not in aggregated)
+
+
+def ids_unsorted(count: int) -> list[int]:
+    # Numeric order differs from text order (9 < 10 < 100), and there are duplicates.
+    ids = [100, 9, 10, 2, 1, 33, 8, 7, 6, 5, 4, 3, 11, 12]
+    return (ids + ids[:3])[: count + 3]
+
+
+def test_chunks_are_cut_from_sorted_distinct_ids_in_tens():
+    ids = [str(i) for i in ids_unsorted(14)]
+    keys = lambda order: sorted(  # noqa: E731
+        k for k in browser_plan.expected_resources(order, "77") if k.startswith("/announcements?")
+    )
+    forward, backward = keys(ids), keys(list(reversed(ids)))
+    assert forward == backward and len(forward) == 2
+    sizes = sorted(len(browser_plan.sorted_course_ids(ids)[i : i + 10]) for i in (0, 10))
+    assert sizes == [4, 10]
+    assert browser_plan.sorted_course_ids(ids) == ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "33", "100"]
+
+
+def test_an_upload_must_use_the_servers_chunks(rig: Rig):
+    token = rig.pair()
+    ids = list(range(1, 13))
+    rig.upload(token, [course_list(ids)])
+
+    def announcements(codes: list[int]) -> dict[str, Any]:
+        query = {"context_codes[]": [f"course_{c}" for c in codes], "active_only": "true", **window()}
+        return res("/announcements", query, [])
+
+    ok = rig.upload(token, [announcements(ids[:10]), announcements(ids[10:])])
+    assert ok.json() == {"accepted": 2, "rejected": []}
+    odd = rig.upload(token, [announcements(ids[:5]), announcements(ids[5:]), announcements([3, 11, 12]), announcements(ids)])
+    assert [r["reason"] for r in odd.json()["rejected"]] == ["not_in_plan"] * 4
+    # Re-uploading the same chunk is a replacement, not a second row.
+    again = rig.upload(token, [announcements(ids[:10])], captured_at=rig.h.now - 1)
+    assert again.json()["accepted"] == 1
+    assert sum(r.key.startswith("/announcements") for r in rig.store.resources(rig.binding_id())) == 2
+
+
+def test_an_upload_of_hot_resources_only_keeps_the_cold_rows(rig: Rig):
+    token = rig.pair()
+    rig.upload(token, [course_list([101])], captured_at=rig.h.now - 5000)
+    cold = rig.upload(
+        token,
+        [res("/courses/101/assignments", {"include[]": ["all_dates", "checkpoints", "submission"]}, [{"id": 1}]),
+         res("/courses/101/quizzes", {}, [{"id": 2}])],
+        captured_at=rig.h.now - 5000,
+    )
+    assert cold.json()["accepted"] == 2
+    hot = rig.upload(token, [res("/users/self", {}, {"id": 77}), course_list([101])], captured_at=rig.h.now - 10)
+    assert hot.json() == {"accepted": 2, "rejected": []}
+    binding = rig.binding_id()
+    [quiz] = rig.store.load_path(binding, "/courses/101/quizzes")
+    assert quiz.body == [{"id": 2}] and quiz.captured_at == int(rig.h.now) - 5000
+    assert len(rig.store.load_path(binding, "/courses/101/assignments")) == 1
+
+
+def test_a_v1_upload_is_still_understood(rig: Rig):
+    token = rig.pair()
+    assert rig.upload(token, [res("/users/self", {}, {"id": 77})], planVersion=1).json()["accepted"] == 1
+    assert rig.upload(token, [res("/users/self", {}, {"id": 77})], planVersion=2, captured_at=rig.h.now - 1).json()["accepted"] == 1
+
+
+# -- unpublished courses never expand the plan --------------------------------------------------------------------
+
+
+UNPUBLISHED = {"enrollment_state": "active", "include[]": ["term"], "state[]": ["available", "unpublished"]}
+
+
+def calendar_chunk(codes: list[str], kind: str = "event") -> dict[str, Any]:
+    query = {"type": kind, "context_codes[]": codes, "excludes[]": ["child_events"], **window()}
+    return res("/calendar_events", query, [])
+
+
+def test_an_unpublished_course_is_left_out_of_the_expansion(rig: Rig):
+    token = rig.pair()
+    courses = [
+        {"id": 101, "workflow_state": "available"},
+        {"id": 191436, "workflow_state": "unpublished"},
+        {"id": 102},  # no state given: kept
+    ]
+    assert rig.upload(token, [res("/courses", COURSES, courses)]).json()["accepted"] == 1
+    assert rig.store.course_ids(rig.binding_id()) == {"101", "102"}
+    response = rig.upload(
+        token,
+        [
+            res("/courses/101/quizzes", {}, []),
+            res("/courses/191436/quizzes", {}, []),
+            calendar_chunk(["course_101", "course_102"]),
+            calendar_chunk(["course_101", "course_102", "course_191436"]),
+        ],
+    )
+    assert response.json()["accepted"] == 2
+    assert [r["reason"] for r in response.json()["rejected"]] == ["not_in_plan"] * 2
+
+
+def test_the_unpublished_variant_is_stored_but_never_expands(rig: Rig):
+    token = rig.pair()
+    stored = rig.upload(token, [res("/courses", UNPUBLISHED, [{"id": 555, "workflow_state": "available"}])])
+    assert stored.json()["accepted"] == 1
+    assert rig.store.load_path(rig.binding_id(), "/courses")
+    assert rig.store.course_ids(rig.binding_id()) == set()
+    refused_ = rig.upload(token, [res("/courses/555/quizzes", {}, [])])
+    assert refused_.json()["rejected"] == [{"path": "/courses/555/quizzes", "reason": "not_in_plan"}]
+
+
+def test_unpublished_courses_do_not_count_toward_the_cap(rig: Rig):
+    token = rig.pair()
+    mixed = [{"id": i, "workflow_state": "unpublished" if i > 150 else "available"} for i in range(1, 400)]
+    assert rig.upload(token, [res("/courses", COURSES, mixed)]).json() == {"accepted": 1, "rejected": []}
+    assert len(rig.store.course_ids(rig.binding_id())) == 150
+
+
+# -- group calendars are planned from the stored groups --------------------------------------------------------------
+
+
+def group_body(ids: range | list[int]) -> list[dict[str, Any]]:
+    return [{"id": i, "name": f"Group {i}"} for i in ids]
+
+
+def plan_calendars(rig: Rig, token: str) -> list[list[str]]:
+    plan = rig.call("GET", "/plan", token=token).json()
+    return [
+        r["query"]["context_codes[]"]
+        for r in plan["resources"]
+        if r["path"] == "/calendar_events" and not r.get("expand") and r["query"]["context_codes[]"][0].startswith("group_")
+    ]
+
+
+def test_groups_become_concrete_calendar_resources_after_they_are_synced(rig: Rig):
+    token = rig.pair()
+    rig.sync_courses(token)
+    assert plan_calendars(rig, token) == []
+    ids = [100, 9, 10, 2, 1, 33, 8, 7, 6, 5, 4, 3]  # twelve, unsorted
+    assert rig.upload(token, [res("/users/self/groups", {}, group_body(ids))]).json()["accepted"] == 1
+    calendars = plan_calendars(rig, token)
+    first = [f"group_{i}" for i in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)]
+    second = ["group_33", "group_100"]
+    assert calendars == [first, first, second, second]  # event and assignment, chunks of ten, numeric order
+    plan = rig.call("GET", "/plan", token=token).json()
+    group_entries = [r for r in plan["resources"] if r["query"].get("context_codes[]", [""])[0].startswith("group_")]
+    assert all(r["tier"] == "hot" and "expand" not in r and "{course_id}" not in json.dumps(r) and "{user_id}" not in json.dumps(r) for r in group_entries)
+
+
+def test_an_upload_must_carry_exactly_the_planned_group_calendars(rig: Rig):
+    token = rig.pair()
+    rig.sync_courses(token)
+    rig.upload(token, [res("/users/self/groups", {}, group_body(range(1, 13)))])
+    first = [f"group_{i}" for i in range(1, 11)]
+    second = ["group_11", "group_12"]
+    ok = rig.upload(token, [calendar_chunk(first), calendar_chunk(second, "assignment")])
+    assert ok.json() == {"accepted": 2, "rejected": []}
+    odd = rig.upload(
+        token,
+        [calendar_chunk(["group_1", "group_2"]), calendar_chunk(first + second), calendar_chunk(["group_999"])],
+    )
+    assert [r["reason"] for r in odd.json()["rejected"]] == ["not_in_plan"] * 3
+
+
+def test_groups_and_their_calendars_may_arrive_in_one_upload(rig: Rig):
+    token = rig.pair()
+    response = rig.upload(
+        token,
+        [res("/users/self/groups", {}, group_body([7, 8])), calendar_chunk(["group_7", "group_8"])],
+    )
+    assert response.json() == {"accepted": 2, "rejected": []}
+
+
+def test_a_refused_group_list_plans_no_group_calendars(rig: Rig):
+    token = rig.pair()
+    rig.upload(token, [res("/users/self/groups", {}, group_body([7]))], captured_at=rig.h.now - 10)
+    assert len(plan_calendars(rig, token)) == 2
+    failed = rig.upload(token, [res("/users/self/groups", {}, None, status=403)], captured_at=rig.h.now - 5)
+    assert failed.json()["rejected"] == [{"path": "/users/self/groups", "reason": "kept_stored_data"}]
+    assert len(plan_calendars(rig, token)) == 2  # a failed read does not unplan them
+    too_many = rig.upload(token, [res("/users/self/groups", {}, group_body(range(1, 202)))], captured_at=rig.h.now - 1)
+    assert too_many.json()["accepted"] == 1
+    assert plan_calendars(rig, token) == []
+
+
+# -- group calendars skip forbidden groups -----------------------------------------------------------------------------
+
+
+def mixed_groups() -> list[dict[str, Any]]:
+    return [
+        {"id": 1, "context_type": "Course", "course_id": 101},
+        {"id": 2, "context_type": "Course", "course_id": 555},  # a course that is not a source
+        {"id": 3, "context_type": "Account", "course_id": None},
+        {"id": 4, "context_type": "Course", "course_id": 191436},  # unpublished
+    ]
+
+
+def test_only_groups_of_expanding_courses_and_other_contexts_get_calendars(rig: Rig):
+    token = rig.pair()
+    courses = [{"id": 101}, {"id": 191436, "workflow_state": "unpublished"}]
+    rig.upload(token, [res("/courses", COURSES, courses), res("/users/self/groups", {}, mixed_groups())])
+    assert plan_calendars(rig, token) == [["group_1", "group_3"]] * 2
+    ok = rig.upload(token, [calendar_chunk(["group_1", "group_3"])])
+    assert ok.json()["accepted"] == 1
+    bad = rig.upload(token, [calendar_chunk(["group_1", "group_2", "group_3"]), calendar_chunk(["group_4"])])
+    assert [r["reason"] for r in bad.json()["rejected"]] == ["not_in_plan"] * 2
+
+
+def test_groups_and_courses_in_one_upload_agree_with_the_plan(rig: Rig):
+    token = rig.pair()
+    response = rig.upload(
+        token,
+        [
+            res("/users/self/groups", {}, mixed_groups()),
+            res("/courses", COURSES, [{"id": 101}]),
+            calendar_chunk(["group_1", "group_3"]),
+        ],
+    )
+    assert response.json() == {"accepted": 3, "rejected": []}
+
+
+# -- rows that left the plan are deleted, and never served ------------------------------------------------------------
+
+
+def row_keys(rig: Rig) -> set[str]:
+    return {r.key for r in rig.store.resources(rig.binding_id())}
+
+
+def test_rows_that_left_the_plan_are_deleted_on_the_next_accepted_upload(rig: Rig):
+    token = rig.pair()
+    both = [{"id": 101}, {"id": 102}]
+    rig.upload(
+        token,
+        [
+            res("/courses", COURSES, both),
+            res("/courses/101/quizzes", {}, []),
+            res("/courses/102/quizzes", {}, []),
+            calendar_chunk(["course_101", "course_102"]),
+        ],
+        captured_at=rig.h.now - 100,
+    )
+    assert any(k.startswith("/calendar_events") for k in row_keys(rig)) and "/courses/102/quizzes" in row_keys(rig)
+    # Course 102 becomes unpublished: its rows and every chunk naming it go.
+    rig.upload(
+        token,
+        [res("/courses", COURSES, [{"id": 101}, {"id": 102, "workflow_state": "unpublished"}])],
+        captured_at=rig.h.now - 10,
+    )
+    keys = row_keys(rig)
+    assert "/courses/102/quizzes" not in keys
+    assert not any(k.startswith("/calendar_events") for k in keys)
+    # Rows still in the plan stay although this upload did not mention them (cold, not due).
+    assert "/courses/101/quizzes" in keys
+
+
+def test_an_upload_never_deletes_rows_only_because_it_left_them_out(rig: Rig):
+    token = rig.pair()
+    rig.upload(
+        token,
+        [res("/courses", COURSES, [{"id": 101}]), res("/courses/101/quizzes", {}, [{"id": 1}]),
+         res("/courses/101/modules", {"include[]": ["items"]}, []), res("/users/self/todo", {}, [])],
+        captured_at=rig.h.now - 5000,
+    )
+    before = row_keys(rig)
+    hot_only = rig.upload(token, [res("/users/self", {}, {"id": 77})], captured_at=rig.h.now - 10)
+    assert hot_only.json()["accepted"] == 1
+    assert row_keys(rig) == before | {"/users/self"}
+
+
+def test_a_group_of_a_course_that_stops_expanding_loses_its_calendar_rows(rig: Rig):
+    token = rig.pair()
+    rig.upload(
+        token,
+        [res("/courses", COURSES, [{"id": 101}]), res("/users/self/groups", {}, mixed_groups()),
+         calendar_chunk(["group_1", "group_3"])],
+        captured_at=rig.h.now - 100,
+    )
+    assert any(k.startswith("/calendar_events") for k in row_keys(rig))
+    rig.upload(token, [res("/courses", COURSES, [{"id": 7}])], captured_at=rig.h.now - 10)
+    assert not any(k.startswith("/calendar_events") for k in row_keys(rig))
+
+
+def test_a_refused_upload_changes_nothing(rig: Rig):
+    token = rig.pair()
+    rig.upload(token, [res("/courses", COURSES, [{"id": 101}]), res("/courses/101/quizzes", {}, [])], captured_at=rig.h.now - 100)
+    before = row_keys(rig)
+    nothing = rig.upload(token, [res("/courses", COURSES, [{"id": 9}])], captured_at=rig.h.now - 500)  # older
+    assert nothing.json()["accepted"] == 0
+    assert row_keys(rig) == before
+
+
+# -- a failed course or group list never empties the plan -----------------------------------------------------------
+
+
+def seed_two_courses(rig: Rig, token: str) -> None:
+    rig.upload(
+        token,
+        [
+            res("/courses", COURSES, [{"id": 101}, {"id": 102}]),
+            res("/courses/101/quizzes", {}, [{"id": 1}]),
+            res("/courses/102/quizzes", {}, [{"id": 2}]),
+            res("/courses/102/modules", {"include[]": ["items"]}, []),
+            calendar_chunk(["course_101", "course_102"]),
+        ],
+        captured_at=rig.h.now - 5000,
+    )
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 500])
+def test_a_failed_course_list_keeps_the_old_list_and_every_per_course_row(rig: Rig, status):
+    token = rig.pair()
+    seed_two_courses(rig, token)
+    before = row_keys(rig)
+    for query in (COURSES, ACTIVE_B, BARE):
+        res_ = rig.upload(token, [res("/courses", query, None, status=status), res("/users/self", {}, {"id": 77})], captured_at=rig.h.now - 10)
+        assert res_.json()["accepted"] >= 1
+    assert before <= row_keys(rig)
+    assert {"/courses/101/quizzes", "/courses/102/quizzes", "/courses/102/modules?include%5B%5D=items"} <= row_keys(rig)
+    assert any(k.startswith("/calendar_events") for k in row_keys(rig))
+    assert rig.store.course_ids(rig.binding_id()) == {"101", "102"}
+
+
+def test_a_later_good_list_that_drops_a_course_prunes_its_rows(rig: Rig):
+    token = rig.pair()
+    seed_two_courses(rig, token)
+    rig.upload(token, [res("/courses", COURSES, None, status=403)], captured_at=rig.h.now - 100)
+    assert "/courses/102/quizzes" in row_keys(rig)
+    rig.upload(token, [res("/courses", COURSES, [{"id": 101}])], captured_at=rig.h.now - 10)
+    keys = row_keys(rig)
+    assert "/courses/101/quizzes" in keys
+    assert not [k for k in keys if k.startswith("/courses/102")]
+    assert not any(k.startswith("/calendar_events") for k in keys)  # the chunk named 102
+
+
+def test_pruning_is_skipped_when_a_list_it_would_use_is_not_good(rig: Rig):
+    """Defence in depth: even if a failed list row got stored, nothing is pruned from it."""
+    from sqlalchemy import update
+
+    token = rig.pair()
+    seed_two_courses(rig, token)
+    with rig.h.store.database.write() as conn:
+        conn.execute(
+            update(s.browser_snapshots)
+            .where(s.browser_snapshots.c.resource_key.like("/courses?%"))
+            .values(canvas_status=403)
+        )
+    before = row_keys(rig)
+    assert rig.upload(token, [res("/users/self", {}, {"id": 77})], captured_at=rig.h.now - 10).json()["accepted"] == 1
+    assert row_keys(rig) == before | {"/users/self"}
+
+
+# -- a v1 extension after a portal upgrade ----------------------------------------------------------------------
+
+
+def test_each_course_entries_still_carry_the_v1_flag_and_course_lists_do_not(rig: Rig):
+    token = rig.pair()
+    resources = rig.call("GET", "/plan", token=token).json()["resources"]
+    each = [r for r in resources if r.get("expand") == "eachCourse"]
+    lists = [r for r in resources if r.get("expand") == "courseList"]
+    assert len(each) == 7 and all(r["perCourse"] is True for r in each)
+    assert len(lists) == 3 and not any("perCourse" in r for r in lists)
+    assert not any("perCourse" in r for r in resources if r.get("expand") is None)
+
+
+def test_a_v1_extension_upload_is_accepted(rig: Rig):
+    token = rig.pair()
+    v1 = rig.upload(
+        token,
+        [
+            res("/courses", COURSES, [{"id": 101}]),
+            res("/courses/101/quizzes", {}, []),
+            res("/courses/101/assignments", {"include[]": ["all_dates", "checkpoints", "submission"]}, []),
+        ],
+        planVersion=1,
+    )
+    assert v1.json() == {"accepted": 3, "rejected": []}

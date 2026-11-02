@@ -75,10 +75,12 @@ class BrowserSnapshot:
 class BrowserMiss(Exception):
     """The request cannot be answered from browser data."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, stored_status: int | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        #: Set when the miss is a Canvas status stored for the data asked for.
+        self.stored_status = stored_status
 
 
 # -- freshness -------------------------------------------------------------------------
@@ -104,7 +106,7 @@ def _note_used(captured_at: int) -> None:
 
 
 def freshness_note(
-    used: Sequence[int], *, now: float | None = None, stale_after_seconds: int = 12 * 3600
+    used: Sequence[int], *, now: float | None = None, stale_after_seconds: int = 24 * 3600
 ) -> str | None:
     """The line appended to a tool result that was answered from browser data."""
     if not used:
@@ -400,7 +402,13 @@ def _status_miss(snapshot: BrowserSnapshot) -> BrowserMiss:
             if snapshot.status in (401, 403)
             else "It is not available to browser sync."
         ),
+        stored_status=snapshot.status,
     )
+
+
+async def _session_works(source: BrowserSource) -> bool:
+    """Whether Canvas answered the extension's own ``/users/self`` read with data."""
+    return any(s.status == 200 for s in await source.load("/users/self"))
 
 
 async def answer_get(
@@ -424,6 +432,16 @@ async def answer_get(
     marker = _date_zone.set(zone)
     try:
         return await _answer(source, path, wanted, clock)
+    except BrowserMiss as miss:
+        # A refusal of one resource says nothing about the school when the student's
+        # own profile was read fine: only claim "the school blocks" when nothing was.
+        if miss.stored_status in (401, 403) and await _session_works(source):
+            raise BrowserMiss(
+                SOURCE_UNAVAILABLE,
+                f"Canvas refused access to this data (HTTP {miss.stored_status}).",
+                stored_status=miss.stored_status,
+            ) from None
+        raise
     finally:
         _date_zone.reset(marker)
 

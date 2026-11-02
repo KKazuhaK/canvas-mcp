@@ -22,7 +22,13 @@ from sqlalchemy import and_, delete, func, insert, select, update
 from sqlalchemy.engine import Connection
 
 from ..browser_source import BrowserSnapshot
-from .browser_plan import resource_key
+from .browser_plan import (
+    course_source_keys,
+    expected_resources,
+    group_ids_of,
+    resource_key,
+    usable_course_ids,
+)
 from .db import schema as s
 from .db.engine import Database
 from .db.sealed import SEALED, SealKeys
@@ -127,8 +133,18 @@ def browser_decision(
     return True, None
 
 
+def drives_the_plan(key: str) -> bool:
+    """Whether a resource's data decides which other resources the plan holds.
+
+    The course lists name the courses every per-course resource and calendar chunk
+    is expanded from, and the group list names the group calendars. One bad sync
+    (a WAF or maintenance 403 while the rest works) must not empty them.
+    """
+    return key == "/users/self/groups" or key == "/courses" or key.startswith("/courses?")
+
+
 def rejection_reason(
-    prior: tuple[int, int] | None, captured_at: int, status: int
+    prior: tuple[int, int] | None, captured_at: int, status: int, key: str = ""
 ) -> str | None:
     """Why a resource would not replace its stored row, or None when it would.
 
@@ -139,6 +155,9 @@ def rejection_reason(
         return None
     if prior[0] > captured_at:
         return "older_than_stored"
+    if prior[1] == 200 and status != 200 and drives_the_plan(key):
+        # Only a 200 list can change the course or group set; any failure keeps it.
+        return "kept_stored_data"
     if prior[1] == 200 and status in TRANSIENT_STATUSES:
         # A transient failure (rate limit, timeout, 5xx) must not wipe good data.
         # 401, 403 and 404 are answers: access lost or content gone.
@@ -446,6 +465,7 @@ class BrowserSyncStore:
                     None if before is None else (before[0], before[1]),
                     item.captured_at,
                     item.status,
+                    item.key,
                 )
                 if reason is not None:
                     rejected.append((item.key, reason))
@@ -485,7 +505,59 @@ class BrowserSyncStore:
                 else:
                     conn.execute(insert(snapshots).values(**values))
                 accepted += 1
+            if accepted:
+                self._drop_stale(conn, binding_id, canvas_user_id)
         return accepted, rejected
+
+    def _drop_stale(self, conn: Connection, binding_id: str, canvas_user_id: str) -> None:
+        """Delete rows whose key the current plan can no longer hold.
+
+        Computed from the course and group lists as they are after this upload, in the
+        same transaction. A row is never deleted because an upload did not mention it
+        (cold rows that are not due stay): only because its key left the plan, such as
+        a calendar chunk naming a course that is now unpublished.
+        """
+        snapshots = s.browser_snapshots
+
+        def rows(path: str) -> list[BrowserSnapshot]:
+            found = conn.execute(
+                select(snapshots).where(snapshots.c.binding_id == binding_id, _under_path(path))
+            ).mappings()
+            return [self._open(row) for row in found]
+
+        sources = course_source_keys()
+        courses: set[str] = set()
+        listings = [
+            snapshot
+            for snapshot in rows("/courses")
+            if resource_key(snapshot.path, snapshot.query) in sources
+        ]
+        group_rows = [
+            snapshot
+            for snapshot in rows("/users/self/groups")
+            if resource_key(snapshot.path, snapshot.query) == "/users/self/groups"
+        ]
+        if any(snapshot.status != 200 for snapshot in [*listings, *group_rows]):
+            # The lists the expected set would come from are not all good: prune nothing.
+            return
+        for snapshot in listings:
+            courses |= usable_course_ids(snapshot.body)
+        groups = self._groups_among(group_rows, courses)
+        expected = expected_resources(courses, canvas_user_id, groups)
+        held: list[str] = [
+            cast(str, row[0])
+            for row in conn.execute(
+                select(snapshots.c.resource_key).where(snapshots.c.binding_id == binding_id)
+            ).all()
+        ]
+        stale = [key for key in held if key not in expected]
+        for start in range(0, len(stale), 500):
+            conn.execute(
+                delete(snapshots).where(
+                    snapshots.c.binding_id == binding_id,
+                    snapshots.c.resource_key.in_(stale[start : start + 500]),
+                )
+            )
 
     def load_path(self, binding_id: str, path: str) -> list[BrowserSnapshot]:
         """Every stored snapshot of one Canvas path, decrypted."""
@@ -523,16 +595,41 @@ class BrowserSyncStore:
         return {cast(str, k): (cast(int, at), cast(int, st)) for k, at, st in rows}
 
     def course_ids(self, binding_id: str, *, excluding: Collection[str] = ()) -> set[str]:
-        """Course ids named by the binding's stored ``/courses`` snapshots.
+        """Course ids of the binding's stored course-source ``/courses`` snapshots.
 
         ``excluding`` names resource keys whose rows are about to be replaced.
         """
         ids: set[str] = set()
+        sources = course_source_keys()
         for snapshot in self.load_path(binding_id, "/courses"):
-            if resource_key(snapshot.path, snapshot.query) in excluding:
+            key = resource_key(snapshot.path, snapshot.query)
+            # Only the active enrollments expand: the unfiltered list also holds past
+            # courses whose sub-resources Canvas usually refuses.
+            if key not in sources or key in excluding:
                 continue
-            if snapshot.status == 200 and isinstance(snapshot.body, list):
-                for course in snapshot.body:
-                    if isinstance(course, dict) and isinstance(course.get("id"), int):
-                        ids.add(str(course["id"]))
+            if snapshot.status == 200:
+                ids |= usable_course_ids(snapshot.body)
         return ids
+
+    def group_ids(self, binding_id: str) -> list[str]:
+        """Group ids of the stored ``/users/self/groups`` snapshot (sorted), or []."""
+        return self._groups_among(
+            self.load_path(binding_id, "/users/self/groups"), self.course_ids(binding_id)
+        )
+
+    @staticmethod
+    def _groups_among(snapshots: Sequence[BrowserSnapshot], courses: Collection[str]) -> list[str]:
+        for snapshot in snapshots:
+            if resource_key(snapshot.path, snapshot.query) == "/users/self/groups" and (
+                snapshot.status == 200
+            ):
+                return group_ids_of(snapshot.body, courses)
+        return []
+
+    def expected_keys(self, binding_id: str, canvas_user_id: str | None) -> frozenset[str]:
+        """Every resource key the binding's current plan can hold, from its stored lists."""
+        return frozenset(
+            expected_resources(
+                self.course_ids(binding_id), canvas_user_id, self.group_ids(binding_id)
+            )
+        )

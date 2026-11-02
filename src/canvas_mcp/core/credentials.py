@@ -53,7 +53,7 @@ class BrowserSource:
     #: A snapshot older than this many seconds is not used at all.
     max_age_seconds: int = 14 * 86400
     #: Older than this, a tool result carries a "may be out of date" warning.
-    fresh_seconds: int = 12 * 3600
+    fresh_seconds: int = 24 * 3600
 
 
 @dataclass(frozen=True)
