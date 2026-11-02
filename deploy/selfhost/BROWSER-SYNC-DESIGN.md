@@ -189,7 +189,26 @@ per-course content refreshed at most every 12 hours.
   sets it, and it is then fixed for the binding.
 - **`tier`**: `hot` resources are fetched on every sync. `cold` ones only when the
   extension's last successful fetch of that expanded key is older than
-  `coldIntervalHours` (12), or has never happened.
+  `coldIntervalHours` (12), or has never happened. A "fetch" here is the last
+  attempt that should not be repeated at once: a response the portal stored, kept
+  older data for, or rejected (its checks give the same answer on a retry), and a
+  response that could not be read (too many pages, a failed page, bad JSON) or was
+  too large to upload. Only network errors, Canvas throttling and a lost session
+  leave no time, so they retry on the next run. Without this, such a key would
+  rank first for the cold budget on every run and starve the rest. Keys sort their
+  query parameters, so a key from the plan and one from an upload always match.
+- **`refreshMinutes`** (optional, hot resources only): the extension refetches the
+  resource only when its last successful fetch is older than this many minutes;
+  without it a hot resource is fetched on every sync. Set on
+  `/users/self/activity_stream` and `.../summary` (60: a large feed Canvas is slow
+  to answer) and on every `/calendar_events` chunk, both `type=event` and
+  `type=assignment` (30: events change rarely and only in Canvas itself, since
+  writes are refused here; due dates are also in `/planner/items`, which stays on
+  every sync with the rest of the hot set). The assignment entries nest the whole
+  assignment object, and `list_calendar_events` prints `Assignment ID` from
+  `assignment.id` (the event's own id is `assignment_<n>`), so they cannot be
+  trimmed with `excludes[]=assignment`; refreshing them less often is the saving.
+  The freshness note reports the real age of whatever a tool read.
 - **`expand`** (replaces the v1 `perCourse: true`, which meant `eachCourse`; the
   server still emits `perCourse: true` next to `expand: "eachCourse"` so a v1
   extension keeps expanding those, and leaves it off `courseList` entries, which a
@@ -232,8 +251,8 @@ per-course content refreshed at most every 12 hours.
     extension's second pass over the plan (it runs because `canvasHost` was still
     null) fetches them; afterwards a changed group list takes effect on the sync
     after the one that uploads it.
-- Dates are concrete (the server computes the window, about 60 days back and
-  120 days ahead).
+- Dates are concrete (the server computes the window, 30 days back and 90 days
+  ahead).
 - The server derives the resources from what the student read tools request.
   A test (`tests/selfhost/test_browser_sync_coverage.py`) runs every student
   read tool against snapshots of a full sync (hot plus cold) built from the plan
@@ -258,7 +277,25 @@ per-course content refreshed at most every 12 hours.
   Cold content can therefore be up to about 12 hours old plus the time to the next
   visit (submission status in `get_my_submission_status` is cold; "upcoming" reads
   `/planner/items`, which is hot).
-- The window is `[today 00:00Z - 60 days, today 00:00Z + 120 days]`.
+- The window is `[today 00:00Z - 30 days, today 00:00Z + 90 days]`. The tools'
+  defaults are 14 days from today (calendar, planner notes), the 14 days before
+  today (announcements) and 7 days (upcoming assignments), so each has a margin of
+  at least double. The documented maximum span of the calendar tools (366 days,
+  from any start date) does not fit any fixed window, before or after this change;
+  a request outside the window is a "not synced" miss.
+- Payload: each include is there because a tool asks for it, on the one `/courses`
+  query that tool issues. The unfiltered list has none (course-code resolution);
+  the plain active list has `total_scores`, `current_grading_period_scores`,
+  `grading_scheme`, `restrict_quantitative_data` and the heavy `syllabus_body`
+  (grade tools; by id the syllabus and grading fields, so a by-id request for a
+  course with no active enrollment, such as a concluded one, is a "not synced"
+  miss); `state[]=available` has
+  `teachers`, `term` and `total_students` (`list_courses`); the `unpublished`
+  variant has `term` (`get_my_enrollments`). `type=assignment` calendar chunks also
+  exclude `description` (the whole assignment text per entry): assignment entries
+  have non-numeric ids so no tool reads one by id, and the list tools exclude
+  descriptions by default; only `include_descriptions=true` for assignment entries
+  is not served.
 - Not in the plan, because the extension's allowlist cannot carry them: pages,
   module items, quiz submissions and permissions, group members and files,
   conversations and the address book, planner overrides, group calendars,

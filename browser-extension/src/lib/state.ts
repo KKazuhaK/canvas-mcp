@@ -28,6 +28,7 @@ export interface LastResult {
   message: string;
   counts: Counts;
   skipReasons?: string[];
+  timing?: { totalMs: number; slowest: { path: string; ms: number; bytes: number }[] };
 }
 
 export interface Stored {

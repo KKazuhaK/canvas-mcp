@@ -47,9 +47,10 @@ EXT = "chrome-extension://" + "a" * 32
 FIREFOX = "moz-extension://12345678-1234-1234-1234-123456789abc"
 P = "/api/v1"
 X = P + "/extension"
-BARE = {"include[]": sorted(browser_plan.RESOURCES[6].query["include[]"])}  # every enrollment
-COURSES = {"enrollment_state": "active", **BARE}  # the active ones: the course source
-ACTIVE_B = {**COURSES, "state[]": ["available"]}  # a second course-source list
+# The plan's four course lists, as the extension would upload them.
+BARE = dict(browser_plan.RESOURCES[6].query)  # every enrollment
+COURSES = dict(browser_plan.RESOURCES[7].query)  # active: a course source
+ACTIVE_B = dict(browser_plan.RESOURCES[8].query)  # active and available: a second source
 
 
 def iso(epoch: float) -> str:
@@ -477,7 +478,7 @@ def test_the_plan_follows_the_contract_and_fits_the_extension_allowlist(rig: Rig
     paths = [r["path"] for r in plan["resources"]]
     assert paths[:2] == ["/users/self", "/users/self/profile"]
     for resource in plan["resources"]:
-        assert set(resource) <= {"path", "query", "paginate", "tier", "expand", "chunk", "courseSource", "perCourse"}
+        assert set(resource) <= {"path", "query", "paginate", "tier", "expand", "chunk", "courseSource", "perCourse", "refreshMinutes"}
         assert resource["tier"] in ("hot", "cold")
         assert isinstance(resource["query"], dict)
         concrete = resource["path"].replace("{course_id}", "123")
@@ -488,7 +489,7 @@ def test_the_plan_follows_the_contract_and_fits_the_extension_allowlist(rig: Rig
     # The first course list precedes every per-course resource, so ids are known before use.
     first_per_course = next(i for i, r in enumerate(plan["resources"]) if r.get("expand"))
     assert any(r["path"] == "/courses" for r in plan["resources"][:first_per_course])
-    # Dates are concrete: about 60 days back and 120 ahead of the server's day.
+    # Dates are concrete: 30 days back and 90 ahead of the server's day.
     windowed = [r for r in plan["resources"] if "start_date" in r["query"]]
     assert windowed
     for resource in windowed:
@@ -496,7 +497,7 @@ def test_the_plan_follows_the_contract_and_fits_the_extension_allowlist(rig: Rig
             dt.datetime.fromtimestamp(rig.h.now, tz=dt.UTC)
             .replace(hour=0, minute=0, second=0, microsecond=0)
             .timestamp()
-            - 60 * 86400
+            - 30 * 86400
         )
         assert resource["query"]["end_date"].endswith("Z")
 
@@ -1481,7 +1482,8 @@ UNPUBLISHED = {"enrollment_state": "active", "include[]": ["term"], "state[]": [
 
 
 def calendar_chunk(codes: list[str], kind: str = "event") -> dict[str, Any]:
-    query = {"type": kind, "context_codes[]": codes, "excludes[]": ["child_events"], **window()}
+    excludes = ["child_events", "description"] if kind == "assignment" else ["child_events"]
+    query = {"type": kind, "context_codes[]": codes, "excludes[]": excludes, **window()}
     return res("/calendar_events", query, [])
 
 
@@ -1782,3 +1784,78 @@ def test_a_v1_extension_upload_is_accepted(rig: Rig):
         planVersion=1,
     )
     assert v1.json() == {"accepted": 3, "rejected": []}
+
+
+# -- a light payload: each include has a tool that asks for it -----------------------------------------------------
+
+
+def test_each_course_list_carries_only_what_its_tools_ask_for():
+    lists = [r for r in browser_plan.RESOURCES if r.path == "/courses"]
+    by_filter = {
+        (r.query.get("enrollment_state", [""])[0], tuple(r.query.get("state[]", []))): sorted(r.query.get("include[]", []))
+        for r in lists
+    }
+    assert by_filter == {
+        # course-code resolution reads this one; it has no includes
+        ("", ()): [],
+        # grade tools, and by id the syllabus and grading fields
+        ("active", ()): [
+            "current_grading_period_scores", "grading_scheme", "restrict_quantitative_data", "syllabus_body", "total_scores",
+        ],
+        # list_courses
+        ("active", ("available",)): ["teachers", "term", "total_students"],
+        # get_my_enrollments
+        ("active", ("available", "unpublished")): ["term"],
+    }
+    # A heavy include lives on one list only.
+    for heavy in ("syllabus_body", "teachers", "total_students"):
+        assert sum(heavy in r.query.get("include[]", []) for r in lists) == 1
+
+
+def test_assignment_calendar_entries_leave_their_descriptions_out_and_events_keep_theirs():
+    calendars = [r for r in browser_plan.RESOURCES if r.path == "/calendar_events"]
+    for resource in calendars:
+        kind = resource.query["type"][0]
+        excludes = resource.query["excludes[]"]
+        assert ("description" in excludes) == (kind == "assignment"), kind
+        assert "child_events" in excludes
+
+
+def test_the_window_covers_every_tool_default_with_a_margin():
+    # list_calendar_events and list_planner_notes default to 14 days from today,
+    # list_my_announcements to the 14 days before today, get_my_upcoming_assignments to 7.
+    assert browser_plan.WINDOW_PAST_DAYS >= 2 * 14 and browser_plan.WINDOW_FUTURE_DAYS >= 2 * 14
+    assert (browser_plan.WINDOW_PAST_DAYS, browser_plan.WINDOW_FUTURE_DAYS) == (30, 90)
+
+
+def test_refresh_minutes_marks_only_the_slow_hot_feeds(rig: Rig):
+    token = rig.pair()
+    rig.sync_courses(token)
+    rig.upload(token, [res("/users/self/groups", {}, group_body([7]))])
+    resources = rig.call("GET", "/plan", token=token).json()["resources"]
+    marked = sorted(
+        (r["path"], r["query"].get("type"), r["query"].get("context_codes[]", [""])[0].split("_")[0], r["refreshMinutes"])
+        for r in resources
+        if "refreshMinutes" in r
+    )
+    assert marked == sorted(
+        [("/users/self/activity_stream", None, "", 60), ("/users/self/activity_stream/summary", None, "", 60)]
+        + [
+            ("/calendar_events", kind, who, 30)
+            for kind in ("event", "assignment")
+            for who in ("course", "group", "user")
+        ]
+    ), marked
+    # Only hot resources carry it; the rest of the hot set is fetched on every sync.
+    assert all(r["tier"] == "hot" for r in resources if "refreshMinutes" in r)
+    every_sync = [r["path"] for r in resources if r["tier"] == "hot" and "refreshMinutes" not in r]
+    assert "/planner/items" in every_sync and "/users/self/todo" in every_sync
+    assert "/calendar_events" not in every_sync
+
+
+def test_assignment_calendar_chunks_keep_the_nested_assignment_object():
+    """list_calendar_events prints `Assignment ID` from event["assignment"]["id"]: the numeric
+    id exists nowhere else (the event's own id is "assignment_<n>"), so it cannot be excluded."""
+    for resource in browser_plan.RESOURCES:
+        if resource.path == "/calendar_events":
+            assert "assignment" not in resource.query["excludes[]"]

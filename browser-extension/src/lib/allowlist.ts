@@ -13,6 +13,7 @@ export interface PlanResource {
   tier: 'hot' | 'cold';
   expand: 'eachCourse' | 'courseList' | null;
   chunk: number;
+  refreshMinutes?: number;
 }
 
 export interface Plan {
@@ -34,6 +35,7 @@ export interface FetchJob {
   paginate: boolean;
   tier?: 'hot' | 'cold';
   expand?: 'eachCourse' | 'courseList' | null;
+  refreshMinutes?: number;
 }
 
 const KEY = /^[A-Za-z0-9_.[\]-]{1,64}$/;
@@ -110,6 +112,8 @@ export function parsePlan(raw: unknown): { plan: Plan; rejected: Rejected[] } {
       rejected.push({ path, reason: 'unknown tier' });
       continue;
     }
+    // Optional minimum minutes between fetches of a hot resource; out-of-range values are ignored.
+    const refresh = typeof it.refreshMinutes === 'number' && Number.isInteger(it.refreshMinutes) && it.refreshMinutes >= 1 && it.refreshMinutes <= 1440 ? it.refreshMinutes : 0;
     const chunk = typeof it.chunk === 'number' && Number.isInteger(it.chunk) && it.chunk >= 1 && it.chunk <= 50 ? it.chunk : 10;
     resources.push({
       path,
@@ -120,6 +124,7 @@ export function parsePlan(raw: unknown): { plan: Plan; rejected: Rejected[] } {
       tier: it.tier === 'cold' ? 'cold' : 'hot',
       expand,
       chunk,
+      ...(refresh ? { refreshMinutes: refresh } : {}),
     });
   }
   const coldIntervalHours =
@@ -139,7 +144,10 @@ export function sortedCourseIds(ids: number[]): number[] {
   return [...new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0))].sort((a, b) => a - b);
 }
 
-export const jobKey = (j: { path: string; query: unknown }): string => j.path + '?' + JSON.stringify(j.query);
+// The query keys are sorted: a job built from the plan and the same request read back from
+// an upload must give the same key, or refreshMinutes and the cold interval never match.
+export const jobKey = (j: { path: string; query: Record<string, unknown> }): string =>
+  j.path + '?' + JSON.stringify(Object.fromEntries(Object.entries(j.query).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))));
 
 // Expands the plan into concrete requests. Plain resources first; per-course
 // resources are expanded over the supplied course ids. eachCourse makes one
@@ -176,9 +184,10 @@ export function expandPlan(
     paginate: res.paginate,
     tier: res.tier,
     expand: res.expand,
+    ...(res.refreshMinutes ? { refreshMinutes: res.refreshMinutes } : {}),
   });
   for (const res of resources) {
-    const base: FetchJob = { path: res.path, query: res.query, paginate: res.paginate, tier: res.tier, expand: null };
+    const base: FetchJob = { path: res.path, query: res.query, paginate: res.paginate, tier: res.tier, expand: null, ...(res.refreshMinutes ? { refreshMinutes: res.refreshMinutes } : {}) };
     if (!res.expand) {
       // A placeholder here would be sent literally; the brace check rejects it.
       add(plain, base);
@@ -221,7 +230,7 @@ export function expandPlan(
         const ids = courseIds.slice(i, i + res.chunk);
         const arr = res.query[key] as string[];
         const next = [...arr.slice(0, index), ...ids.map((id) => template.replaceAll(PLACEHOLDER, String(id))), ...arr.slice(index + 1)];
-        add(perCourse, { path: res.path, query: { ...res.query, [key]: next }, paginate: res.paginate, tier: res.tier, expand: 'courseList' });
+        add(perCourse, { path: res.path, query: { ...res.query, [key]: next }, paginate: res.paginate, tier: res.tier, expand: 'courseList', ...(res.refreshMinutes ? { refreshMinutes: res.refreshMinutes } : {}) });
       }
       continue;
     }

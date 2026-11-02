@@ -269,3 +269,26 @@ test('after a course set change, stored fetch times keep only keys of this run a
   assert.deepEqual(s.storage.data.lastCourseIds, [2, 3]);
 });
 
+
+test('page visits and the alarm are budgeted once synced before; Sync now and the first sync are not; timing is stored', async () => {
+  const plan = V2([{ path: '/users/self', query: {} }, COURSE_SRC, COLD_MODULES]);
+  const script = async (d: any) => [{ result: d.args[1].map((j: any) => ({ path: j.path, query: j.query, status: 200, pages: 1, ms: 7, bytes: 11,
+    body: j.path === '/users/self' ? { id: 9 } : j.path === '/courses' ? Array.from({ length: 40 }, (_, i) => ({ id: i + 1 })) : [] })) }];
+  const mk = (extra: Record<string, unknown>) => setup(
+    { storage: { ...connected, ...extra }, permissions: granted, tabs: canvasTab, executeScript: script },
+    (url) => (url.endsWith('/plan') ? jsonResponse(plan) : (syncFetch() as any)(url)),
+  );
+  const perCourseRequests = (s: ReturnType<typeof mk>) => s.injected.flatMap((d: any) => d.args[1]).filter((j: any) => j.path.endsWith('/modules')).length;
+  const first = mk({});
+  await first.c.runSyncOnce('tab');
+  assert.equal(perCourseRequests(first), 40); // no lastSyncAt: first sync after pairing is unbudgeted
+  const visit = mk({ lastSyncAt: new Date(NOW - 3600_000).toISOString(), lastCourseIds: Array.from({ length: 40 }, (_, i) => i + 1) });
+  await visit.c.runSyncOnce('tab');
+  assert.equal(perCourseRequests(visit), 30);
+  const manual = mk({ lastSyncAt: new Date(NOW - 3600_000).toISOString(), lastCourseIds: Array.from({ length: 40 }, (_, i) => i + 1) });
+  await manual.c.runSyncOnce('manual');
+  assert.equal(perCourseRequests(manual), 40);
+  const timing = (visit.storage.data.lastResult as any).timing;
+  assert.equal(typeof timing.totalMs, 'number');
+  assert.ok(timing.slowest.length > 0 && timing.slowest.length <= 5);
+});

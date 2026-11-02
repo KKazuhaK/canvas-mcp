@@ -110,7 +110,7 @@ test('a failing later page fails the resource instead of storing a partial list'
   assert.equal(r?.body, null);
 });
 
-test('at most 2 resources are in flight, results keep their order, pages stay sequential', async () => {
+test('at most 3 resources are in flight, results keep their order, pages stay sequential', async () => {
   let inFlight = 0;
   let max = 0;
   mockFetch(async (url) => {
@@ -122,7 +122,7 @@ test('at most 2 resources are in flight, results keep their order, pages stay se
   });
   const jobs = Array.from({ length: 12 }, (_, i) => job(`/courses/${i + 1}`));
   const results = await runFetches(ORIGIN, jobs, 5);
-  assert.equal(max, 2);
+  assert.equal(max, 3);
   assert.deepEqual(results.map((r) => r.path), jobs.map((j) => j.path));
   assert.ok(results.every((r) => r.status === 200));
 });
@@ -173,4 +173,49 @@ test('a real 403 without rate-limit text is still recorded as 403', async () => 
   assert.equal(calls.length, 1);
   assert.equal(r?.status, 403);
   assert.equal(r?.error, undefined);
+});
+
+test('after any throttle the rest of the run goes one request at a time', async () => {
+  let inFlight = 0;
+  let throttled = false;
+  let maxAfter = 0;
+  let first = true;
+  mockFetch(async () => {
+    inFlight++;
+    if (throttled) maxAfter = Math.max(maxAfter, inFlight);
+    await new Promise((r) => setTimeout(r, 15));
+    inFlight--;
+    if (first) {
+      first = false;
+      throttled = true;
+      return new Response('', { status: 429, headers: { 'retry-after': '0.02' } });
+    }
+    return jsonResponse([]);
+  });
+  const jobs = Array.from({ length: 10 }, (_, i) => job(`/courses/${i + 1}`));
+  const results = await runFetches(ORIGIN, jobs, 5);
+  assert.ok(results.every((r) => r.status === 200));
+  // Requests already in flight when the throttle hit may finish; nothing new overlaps afterwards.
+  assert.ok(maxAfter <= 3);
+  const late: number[] = [];
+  let live = 0;
+  mockFetch(async () => {
+    live++;
+    late.push(live);
+    const isFirst = late.length === 1;
+    await new Promise((r) => setTimeout(r, 10));
+    live--;
+    return isFirst ? new Response('', { status: 429, headers: { 'retry-after': '0.02' } }) : jsonResponse([]);
+  });
+  await runFetches(ORIGIN, Array.from({ length: 12 }, (_, i) => job(`/courses/${i + 1}`)), 5);
+  assert.ok(late.slice(4).every((n) => n === 1), JSON.stringify(late));
+});
+
+test('paginated requests send per_page=100, others do not, and results carry timing and size', async () => {
+  const calls = mockFetch(() => jsonResponse([1, 2]));
+  const r = await runFetches(ORIGIN, [job('/courses', true, { enrollment_state: 'active' }), job('/planner_notes', false)], 5);
+  assert.ok(calls.find((c) => c.url.includes('/api/v1/courses?'))!.url.includes('per_page=100'));
+  assert.ok(!calls.find((c) => c.url.includes('/planner_notes'))!.url.includes('per_page'));
+  assert.equal(typeof r[0]?.ms, 'number');
+  assert.equal(r[0]?.bytes, 5);
 });

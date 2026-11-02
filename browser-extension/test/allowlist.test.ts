@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildUrl, expandPlan, parsePlan, validateRequest } from '../src/lib/allowlist.ts';
+import { buildUrl, expandPlan, jobKey, parsePlan, validateRequest } from '../src/lib/allowlist.ts';
 
 test('allowlist accepts the documented read paths', () => {
   for (const p of [
@@ -155,4 +155,21 @@ test('courseList keeps other array elements in place, honours chunk, and rejects
     assert.equal(r.rejected.length, 1, JSON.stringify(res));
   }
   assert.equal(expandPlan(parsePlan({ planVersion: 2, resources: [{ path: '/announcements', query: { 'context_codes[]': ['course_{course_id}'] }, expand: 'courseList' }] }).plan.resources, null).rejected.length, 1);
+});
+
+test('refreshMinutes is kept only for integers 1..1440', () => {
+  const { plan } = parsePlan({
+    planVersion: 2,
+    resources: [30, 1, 1440, 0, 1441, 1.5, '30', -5, null].map((m) => ({ path: '/announcements', query: {}, refreshMinutes: m })),
+  });
+  assert.deepEqual(plan.resources.map((r) => r.refreshMinutes), [30, 1, 1440, undefined, undefined, undefined, undefined, undefined, undefined]);
+  const r = expandPlan(parsePlan({ planVersion: 2, resources: [{ path: '/courses/{course_id}/modules', expand: 'eachCourse', refreshMinutes: 20 }] }).plan.resources, [1]);
+  assert.equal(r.perCourse[0]?.refreshMinutes, 20);
+});
+
+test('jobKey does not depend on query key order', () => {
+  const a = jobKey({ path: '/calendar_events', query: { type: 'event', 'context_codes[]': ['user_1'], end_date: 'x' } });
+  const b = jobKey({ path: '/calendar_events', query: { end_date: 'x', 'context_codes[]': ['user_1'], type: 'event' } });
+  assert.equal(a, b);
+  assert.equal(jobKey({ path: '/users/self', query: {} }), '/users/self?{}');
 });

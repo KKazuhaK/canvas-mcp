@@ -373,7 +373,7 @@ test('courseList over courseSource ids uploads chunked requests; mixed v1 and v2
   assert.equal(out.fetchedKeys?.filter((k) => k.startsWith('/announcements')).length, 3);
 });
 
-test('fetch times are recorded for accepted, kept_stored_data and older_than_stored, not for other rejections', async () => {
+test('fetch times are recorded for every uploaded resource, rejected ones too (they wait one interval)', async () => {
   const plan = {
     planVersion: 2, canvasHost: 'school.instructure.com', maxPages: 5, coldIntervalHours: 12,
     resources: ['/users/self', '/announcements', '/planner_notes', '/calendar_events', '/courses', '/planner/items'].map((path) => ({ path, query: {}, tier: 'cold' })),
@@ -387,7 +387,7 @@ test('fetch times are recorded for accepted, kept_stored_data and older_than_sto
   ];
   const out = await runSync({ ...input, force: true }, setup({ plan, uploadBody: { accepted: 1, rejected } }).deps);
   const keys = (out.fetchedKeys ?? []).map((k) => k.split('?')[0]).sort();
-  assert.deepEqual(keys, ['/announcements', '/planner_notes', '/users/self']);
+  assert.deepEqual(keys, ['/announcements', '/calendar_events', '/courses', '/planner/items', '/planner_notes', '/users/self']);
 });
 
 test('an unreadable upload acknowledgement records no fetch times', async () => {
@@ -513,4 +513,137 @@ test('lists, courseList chunks and group-calendar chunks are uploaded together a
   assert.deepEqual(first.slice(2, 5).sort(), ['/announcements', '/announcements', '/calendar_events']);
   const later = s.posts.slice(1).flatMap((p: any) => p.resources.map((r: any) => r.path));
   assert.ok(!later.some((p: string) => ['/courses', '/users/self/groups', '/announcements', '/calendar_events'].includes(p)));
+});
+
+// ---- cold budget and timing ----
+const MODS = (id: number) => `/courses/${id}/modules?{}`;
+const budgetPlan = V2([{ path: '/users/self', query: {} }, COURSE_SRC, COLD_MODULES]);
+const fiveCourses = (j: FetchJob) => (j.path === '/courses' ? { body: [1, 2, 3, 4, 5].map((id) => ({ id })) } : {});
+const ages = { [MODS(1)]: hoursAgo(13), [MODS(2)]: hoursAgo(40), [MODS(3)]: hoursAgo(20), [MODS(5)]: hoursAgo(15) }; // course 4 never fetched
+const moduleIds = (s: ReturnType<typeof setup>) => s.canvasCalls.flatMap((c) => c.jobs.map((j) => j.path)).filter((p) => p.endsWith('/modules')).map((p) => Number(p.split('/')[2])).sort();
+
+test('cold budget takes the most overdue first (never fetched, then oldest) and defers the rest as not due', async () => {
+  const s = setup({ plan: budgetPlan, canvas: fiveCourses });
+  const out = await runSync({ ...input, budget: 2, lastFetched: ages, lastCourseIds: [1, 2, 3, 4, 5] }, s.deps);
+  assert.deepEqual(moduleIds(s), [2, 4]);
+  assert.equal(out.counts.notDue, 3);
+  assert.equal(out.code, 'ok');
+  assert.ok(!out.fetchedKeys?.includes(MODS(3)));
+  assert.ok(out.planKeys?.includes(MODS(3))); // deferred, not pruned
+});
+
+test('forced runs, unbudgeted runs and a changed course set ignore the budget', async () => {
+  const forced = setup({ plan: budgetPlan, canvas: fiveCourses });
+  await runSync({ ...input, budget: 2, force: true, lastFetched: ages, lastCourseIds: [1, 2, 3, 4, 5] }, forced.deps);
+  assert.deepEqual(moduleIds(forced), [1, 2, 3, 4, 5]);
+  const unbudgeted = setup({ plan: budgetPlan, canvas: fiveCourses });
+  await runSync({ ...input, lastFetched: ages, lastCourseIds: [1, 2, 3, 4, 5] }, unbudgeted.deps);
+  assert.deepEqual(moduleIds(unbudgeted), [1, 2, 3, 5, 4].sort());
+  const changed = setup({ plan: budgetPlan, canvas: fiveCourses });
+  await runSync({ ...input, budget: 1, lastFetched: ages, lastCourseIds: [1, 2, 3] }, changed.deps);
+  assert.deepEqual(moduleIds(changed), [1, 2, 3, 4, 5]);
+});
+
+test('timing: total duration and at most 5 slowest resources, ids stripped, no bodies', async () => {
+  const s = setup({
+    plan: V2([{ path: '/users/self', query: {} }, COURSE_SRC, { path: '/courses/{course_id}/modules', query: {}, expand: 'eachCourse' }]),
+    canvas: (j) => (j.path === '/courses' ? { body: [1, 2, 3, 4, 5, 6].map((id) => ({ id })), ms: 5, bytes: 100 } : { ms: j.path.includes('modules') ? Number(j.path.split('/')[2]) * 10 : 1, bytes: 2048 }),
+  });
+  const out = await runSync(input, s.deps);
+  const t = out.timing!;
+  assert.equal(typeof t.totalMs, 'number');
+  assert.equal(t.slowest.length, 5);
+  assert.deepEqual(Object.keys(t.slowest[0]!).sort(), ['bytes', 'ms', 'path']);
+  assert.deepEqual(t.slowest.map((x) => x.ms), [...t.slowest.map((x) => x.ms)].sort((a, b) => b - a));
+  assert.equal(t.slowest[0]!.path, '/courses/:id/modules');
+  assert.equal(t.slowest[0]!.ms, 60);
+  assert.ok(!t.slowest.some((x) => /\/\d/.test(x.path)));
+});
+
+// ---- refreshMinutes on hot resources ----
+const AS_KEY = '/users/self/activity_stream?{}';
+const minutesAgo = (m: number) => new Date(Date.parse('2026-11-01T12:00:00Z') - m * 60_000).toISOString();
+const refreshPlan = (extra: object[] = []) => V2([
+  { path: '/users/self', query: {}, refreshMinutes: 5 },
+  { path: '/users/self/activity_stream', query: {}, refreshMinutes: 30 },
+  { path: '/planner_notes', query: {} },
+  ...extra,
+]);
+const paths = (s: ReturnType<typeof setup>) => s.canvasCalls.flatMap((c) => c.jobs.map((j) => j.path));
+
+test('refreshMinutes: a recently fetched hot resource is skipped on visit/alarm runs and counted as not due', async () => {
+  const s = setup({ plan: refreshPlan() });
+  const out = await runSync({ ...input, budget: 30, lastFetched: { [AS_KEY]: minutesAgo(10), '/users/self?{}': minutesAgo(1) } }, s.deps);
+  assert.ok(!paths(s).includes('/users/self/activity_stream'));
+  assert.ok(paths(s).includes('/planner_notes')); // no refreshMinutes: always fetched
+  assert.ok(paths(s).includes('/users/self')); // the profile is never skipped
+  assert.equal(out.counts.notDue, 1);
+  assert.equal(out.code, 'ok');
+  assert.ok(out.planKeys?.includes(AS_KEY));
+});
+
+test('refreshMinutes: missing or older than the interval is fetched', async () => {
+  const missing = setup({ plan: refreshPlan() });
+  await runSync({ ...input, budget: 30, lastFetched: {} }, missing.deps);
+  assert.ok(paths(missing).includes('/users/self/activity_stream'));
+  const old = setup({ plan: refreshPlan() });
+  await runSync({ ...input, budget: 30, lastFetched: { [AS_KEY]: minutesAgo(31) } }, old.deps);
+  assert.ok(paths(old).includes('/users/self/activity_stream'));
+});
+
+test('refreshMinutes: Sync now and the first sync (no budget) still fetch it', async () => {
+  const fresh = { [AS_KEY]: minutesAgo(1) };
+  const forced = setup({ plan: refreshPlan() });
+  await runSync({ ...input, budget: 30, force: true, lastFetched: fresh }, forced.deps);
+  assert.ok(paths(forced).includes('/users/self/activity_stream'));
+  const first = setup({ plan: refreshPlan() });
+  await runSync({ ...input, lastFetched: fresh }, first.deps);
+  assert.ok(paths(first).includes('/users/self/activity_stream'));
+});
+
+test('refreshMinutes: a changed course set fetches per-course hot resources; an unchanged set skips them', async () => {
+  const plan = refreshPlan([COURSE_SRC, { path: '/courses/{course_id}/assignments', query: {}, expand: 'eachCourse', refreshMinutes: 60 }]);
+  const canvas = (j: FetchJob) => (j.path === '/courses' ? { body: [{ id: 1 }, { id: 2 }] } : {});
+  const lastFetched = { [AS_KEY]: minutesAgo(5), '/courses/1/assignments?{}': minutesAgo(5), '/courses/2/assignments?{}': minutesAgo(5) };
+  const same = setup({ plan, canvas });
+  const o1 = await runSync({ ...input, budget: 30, lastFetched, lastCourseIds: [1, 2] }, same.deps);
+  assert.ok(!paths(same).some((p) => p.endsWith('/assignments')));
+  assert.equal(o1.counts.notDue, 3); // activity_stream + 2 assignments
+  const changed = setup({ plan, canvas });
+  await runSync({ ...input, budget: 30, lastFetched, lastCourseIds: [1] }, changed.deps);
+  assert.equal(paths(changed).filter((p) => p.endsWith('/assignments')).length, 2);
+});
+
+test('refreshMinutes does not affect cold resources', async () => {
+  const plan = V2([{ path: '/users/self', query: {} }, { path: '/announcements', query: {}, tier: 'cold', refreshMinutes: 5 }]);
+  const s = setup({ plan });
+  await runSync({ ...input, budget: 30, lastFetched: { '/announcements?{}': minutesAgo(60) } }, s.deps);
+  assert.ok(!paths(s).includes('/announcements')); // cold: only the 12 h interval counts
+});
+
+test('refreshMinutes: the keys a sync records gate the next visit, whatever the query key order', async () => {
+  const cal = { path: '/calendar_events', query: { type: 'event', 'context_codes[]': ['user_1'], start_date: '2026-10-01' }, refreshMinutes: 30 };
+  const first = setup({ plan: refreshPlan([cal]) });
+  const o1 = await runSync({ ...input, budget: 30, lastFetched: {} }, first.deps);
+  assert.ok(paths(first).includes('/calendar_events'));
+  const lastFetched = Object.fromEntries((o1.fetchedKeys ?? []).map((k) => [k, minutesAgo(5)]));
+  const second = setup({ plan: refreshPlan([cal]) });
+  await runSync({ ...input, budget: 30, lastFetched }, second.deps);
+  assert.ok(!paths(second).includes('/calendar_events'));
+  assert.ok(!paths(second).includes('/users/self/activity_stream'));
+});
+
+test('an unreadable or oversized resource records an attempt; a network error does not', async () => {
+  const plan = {
+    planVersion: 2, canvasHost: 'school.instructure.com', maxPages: 5, coldIntervalHours: 12,
+    resources: ['/users/self', '/announcements', '/planner_notes', '/calendar_events'].map((path) => ({ path, query: {}, tier: 'cold' })),
+  };
+  const canvas = (j: FetchJob) =>
+    j.path === '/announcements' ? { status: null, body: null, error: 'too_many_pages' as const }
+      : j.path === '/planner_notes' ? { status: null, body: null, error: 'network' as const }
+        : j.path === '/calendar_events' ? { body: ['x'.repeat(20000)] }
+          : {};
+  const out = await runSync({ ...input, force: true }, setup({ plan, canvas, maxBodyBytes: 12000 }).deps);
+  const keys = (out.fetchedKeys ?? []).map((k) => k.split('?')[0]).sort();
+  assert.deepEqual(keys, ['/announcements', '/calendar_events', '/users/self']);
 });

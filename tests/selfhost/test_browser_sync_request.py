@@ -254,7 +254,7 @@ def plant(browser: BrowserSyncStore, binding_id: str, key: str, path: str, query
 async def test_a_stale_row_outside_the_plan_is_never_served(browser):
     from canvas_mcp.core.selfhost import browser_plan
 
-    active = {"enrollment_state": ["active"], "include[]": sorted(browser_plan.RESOURCES[6].query["include[]"])}
+    active = dict(browser_plan.RESOURCES[7].query)
     binding = bind(browser, items={"/users/self": {"id": 42}})
     kept = SnapshotItem(
         browser_plan.resource_key("/courses", active), "/courses", active, NOW - 60, 200,

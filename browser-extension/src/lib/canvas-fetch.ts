@@ -24,6 +24,8 @@ export interface FetchResult {
   body: unknown;
   error?: FetchErrorCode;
   pages: number;
+  ms?: number;
+  bytes?: number;
 }
 
 export async function runFetches(origin: string, jobs: FetchJobInput[], maxPages: number): Promise<FetchResult[]> {
@@ -48,14 +50,17 @@ export async function runFetches(origin: string, jobs: FetchJobInput[], maxPages
     for (const [k, v] of Object.entries(job.query)) {
       for (const item of Array.isArray(v) ? v : [v]) params.append(k, item);
     }
-    if (job.paginate) params.set('per_page', '100');
+    // Large pages mean fewer round trips. A per_page in the query itself wins.
+    if (job.paginate && !params.has('per_page')) params.set('per_page', '100');
     const qs = params.toString();
     return `${origin}${API}${job.path}${qs ? `?${qs}` : ''}`;
   };
 
-  const CONCURRENCY = 2;
+  const CONCURRENCY = 3;
   const MAX_429_RETRIES = 3;
   let pauseUntil = 0;
+  // After any throttle the rest of this run goes one request at a time.
+  let limit = CONCURRENCY;
   const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
   // Canvas throttles with 429, or with 403 and a "Rate Limit Exceeded" body. Either
@@ -83,12 +88,14 @@ export async function runFetches(origin: string, jobs: FetchJobInput[], maxPages
       const secs = Number(res.headers.get('retry-after'));
       const ms = Number.isFinite(secs) && secs > 0 ? Math.min(secs * 1000, 30000) : 5000;
       pauseUntil = Math.max(pauseUntil, Date.now() + ms);
+      limit = 1;
       await res.body?.cancel();
     }
   };
 
   const runJob = async (job: FetchJobInput): Promise<FetchResult> => {
-    const out: FetchResult = { path: job.path, query: job.query, status: null, body: null, pages: 0 };
+    const startedAt = Date.now();
+    const out: FetchResult = { path: job.path, query: job.query, status: null, body: null, pages: 0, bytes: 0 };
     const apiPath = `${API}${job.path}`;
     let url: string | null = urlFor(job);
     let merged: unknown = null;
@@ -138,7 +145,9 @@ export async function runFetches(origin: string, jobs: FetchJobInput[], maxPages
         }
         let page: unknown;
         try {
-          page = JSON.parse(stripPrefix(await res.text()));
+          const text = await res.text();
+          out.bytes = (out.bytes ?? 0) + text.length;
+          page = JSON.parse(stripPrefix(text));
         } catch {
           out.error = 'bad_json';
           out.status = null;
@@ -181,16 +190,28 @@ export async function runFetches(origin: string, jobs: FetchJobInput[], maxPages
       out.status = null;
       out.body = null;
     }
+    out.ms = Date.now() - startedAt;
     return out;
   };
 
   // Resources run with a small concurrency cap; pages within one resource stay sequential.
   const results: FetchResult[] = new Array(jobs.length);
   let nextIndex = 0;
+  let active = 0;
   const worker = async () => {
     while (nextIndex < jobs.length) {
+      // `limit` drops to 1 after a throttle; surplus workers wait their turn.
+      if (active >= limit) {
+        await sleep(10);
+        continue;
+      }
       const i = nextIndex++;
-      results[i] = await runJob(jobs[i] as FetchJobInput);
+      active++;
+      try {
+        results[i] = await runJob(jobs[i] as FetchJobInput);
+      } finally {
+        active--;
+      }
     }
   };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, jobs.length) }, worker));

@@ -686,3 +686,25 @@ async def test_without_a_source_an_http_request_still_fails_closed(http_mode):
     with no_network(), capture_failures() as codes:
         result = await client.make_canvas_request("get", "/users/self")
     assert "error" in result and codes
+
+
+async def test_assignment_entries_stored_without_descriptions_answer_the_default_list():
+    items = [{"id": "assignment_1", "type": "assignment", "context_code": "course_5", "start_at": "2026-11-05T10:00:00Z"}]
+    src = source(
+        snap(
+            "/calendar_events",
+            items,
+            {"type": ["assignment"], "context_codes[]": ["course_5"], "excludes[]": ["child_events", "description"], **WINDOW},
+        )
+    )
+    default = {
+        "type": "assignment",
+        "context_codes[]": ["course_5"],
+        "excludes[]": ["description", "child_events"],
+        "start_date": "2026-11-01",
+        "end_date": "2026-11-30",
+    }
+    assert len(await ask(src, "/calendar_events", default)) == 1
+    # Asking for the descriptions of assignment entries is the one thing that is not served.
+    wants = {**default, "excludes[]": ["child_events"]}
+    assert (await miss(src, "/calendar_events", wants)).code == SOURCE_UNAVAILABLE

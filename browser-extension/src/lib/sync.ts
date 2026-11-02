@@ -1,5 +1,5 @@
 import { expandPlan, jobKey, parsePlan, sortedCourseIds, type FetchJob } from './allowlist.ts';
-import { isDue } from './fetched.ts';
+import { isDue, overdueMs } from './fetched.ts';
 import type { FetchResult } from './canvas-fetch.ts';
 import type { Counts } from './state.ts';
 import { orderForUpload, splitUploads, type UploadResource } from './upload.ts';
@@ -16,6 +16,9 @@ export interface SyncInput {
   lastFetched?: Record<string, string>;
   // Course ids used by the previous successful run (ascending). A different set refetches per-course data.
   lastCourseIds?: number[];
+  // Most cold requests this run may make. Omitted for unbudgeted runs (Sync now, first sync,
+  // course-set change).
+  budget?: number;
 }
 
 export interface SyncDeps {
@@ -41,6 +44,7 @@ export interface Outcome {
   courseIds?: number[];
   courseSetChanged?: boolean;
   perCourseKeys?: string[];
+  timing?: { totalMs: number; slowest: { path: string; ms: number; bytes: number }[] };
 }
 
 class Stop extends Error {
@@ -63,6 +67,16 @@ const QUOTA_MESSAGE =
 const COURSES_MESSAGE =
   'You are enrolled in more courses than the portal accepts, so some of your data was not stored. The extension will not retry for an hour.';
 
+// Per-run timing: total duration and the five slowest resources, with ids stripped from paths.
+const timingOf = (start: number, results: FetchResult[]) => ({
+  totalMs: Date.now() - start,
+  slowest: results
+    .filter((r) => typeof r.ms === 'number')
+    .sort((a, b) => (b.ms ?? 0) - (a.ms ?? 0))
+    .slice(0, 5)
+    .map((r) => ({ path: r.path.replace(/\/\d+/g, '/:id'), ms: r.ms ?? 0, bytes: r.bytes ?? 0 })),
+});
+
 const SELF: FetchJob = { path: '/users/self', query: {}, paginate: false };
 
 function retryAfter(res: Response): number {
@@ -72,6 +86,9 @@ function retryAfter(res: Response): number {
 
 export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome> {
   const counts = zeroCounts();
+  const runStart = Date.now();
+  const allResults: FetchResult[] = [];
+  let budgetLeft = input.budget;
   const reasons: string[] = [];
   let quotaMessage = '';
   const fetchedKeys: string[] = [];
@@ -176,6 +193,7 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
           throw new Stop('canvas_unavailable', 'Could not read Canvas. Open a Canvas tab and try again.');
         }
         results.push(...out);
+        allResults.push(...out);
         return out;
       };
       const keyOf = jobKey;
@@ -186,13 +204,29 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
         j.path === '/users/self' ||
         j.path === '/courses' ||
         !!input.force ||
-        isDue(input.lastFetched?.[keyOf(j)], plan.coldIntervalHours, nowMs);
+        isDue(input.lastFetched?.[keyOf(j)], plan.coldIntervalHours, nowMs, keyOf(j));
+      const isCold = (j: FetchJob) => j.tier === 'cold' && j.path !== '/users/self' && j.path !== '/courses';
       const fresh = (j: FetchJob) => !prev || !prev.keys.has(keyOf(j));
       const newPlain = first.plain.filter(fresh);
-      const freshPlain = newPlain.filter(due);
-      counts.notDue = (counts.notDue ?? 0) + newPlain.length - freshPlain.length;
-      const plainResults = await read(freshPlain);
-      counts.planned += freshPlain.length;
+      // A hot resource with refreshMinutes is skipped on page-visit and alarm runs while its
+      // last fetch is newer than that. Sync now, the first sync (no budget) and a changed
+      // course set always fetch it. The profile and course lists are never skipped.
+      const refreshSkipped = (j: FetchJob) =>
+        !!j.refreshMinutes &&
+        !isCold(j) &&
+        j.path !== '/users/self' &&
+        j.path !== '/courses' &&
+        input.budget !== undefined &&
+        !input.force &&
+        !(courseSetChanged && !!j.expand) &&
+        !isDue(input.lastFetched?.[keyOf(j)], j.refreshMinutes / 60, nowMs);
+      // Stage 1: everything that is not cold. Cold plain resources join the per-course
+      // requests in stage 2 so the cold budget can choose among all of them.
+      const hotPlain = newPlain.filter((j) => !isCold(j));
+      const stage1 = hotPlain.filter((j) => !refreshSkipped(j));
+      counts.notDue = (counts.notDue ?? 0) + hotPlain.length - stage1.length;
+      const plainResults = await read(stage1);
+      counts.planned += stage1.length;
 
       let canvasUserId: number;
       let courseIds: number[] | null;
@@ -252,8 +286,27 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
         expandOfKey.set(keyOf(j), j.expand);
       }
       // A changed course set means the portal's expected rows changed: refetch all per-course data.
-      const freshCourse = newCourse.filter((j) => courseSetChanged || due(j));
-      counts.notDue = (counts.notDue ?? 0) + newCourse.length - freshCourse.length;
+      // Stage 2: hot per-course requests always run. Cold ones run when due, most overdue
+      // first, within the budget. A changed course set is exempt from the budget.
+      const candidates = [...newPlain.filter(isCold), ...newCourse];
+      const cold = candidates.filter(isCold);
+      const dueCold = cold.filter((j) => (courseSetChanged && !!j.expand) || due(j));
+      const exempt = dueCold.filter((j) => courseSetChanged && !!j.expand);
+      let rest = dueCold.filter((j) => !exempt.includes(j));
+      if (budgetLeft !== undefined && !input.force) {
+        const age = (j: FetchJob) => overdueMs(input.lastFetched?.[keyOf(j)], plan.coldIntervalHours, nowMs, keyOf(j));
+        rest = rest
+          .map((j, i) => ({ j, i, a: age(j) }))
+          .sort((x, y) => (x.a === y.a ? x.i - y.i : y.a - x.a))
+          .map((x) => x.j)
+          .slice(0, Math.max(0, budgetLeft));
+        budgetLeft -= rest.length;
+      }
+      const hotCourse = candidates.filter((j) => !isCold(j));
+      const hotDue = hotCourse.filter((j) => !refreshSkipped(j));
+      const freshCourse = [...hotDue, ...exempt, ...rest];
+      // Cold items that are not due, or were deferred by the budget, count as "not due yet".
+      counts.notDue = (counts.notDue ?? 0) + cold.length - exempt.length - rest.length + hotCourse.length - hotDue.length;
       counts.planned += freshCourse.length;
       await read(freshCourse);
 
@@ -271,6 +324,10 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
         }
         if (r.error) {
           counts.canvasErrors++;
+          // A response that cannot be read now (too many pages, a failed page, bad JSON) will
+          // not read on the next run either. Recording the attempt makes it wait one interval
+          // instead of taking the front of the cold budget on every run. Network errors retry.
+          if (r.error !== 'network') fetchedKeys.push(keyOf(r));
           continue;
         }
         if (r.status === null) {
@@ -300,7 +357,10 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
         Math.floor(maxBody * 0.75),
       );
       counts.skipped += oversized.length;
-      for (const r of oversized) skip(r.path, 'too large to upload');
+      for (const r of oversized) {
+        skip(r.path, 'too large to upload');
+        fetchedKeys.push(keyOf(r)); // as above: waits one interval before the next try
+      }
       for (const batch of batches) {
         const res = await portal('/api/v1/extension/snapshots', {
           method: 'POST',
@@ -343,11 +403,11 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
         try {
           const body = (await res.json()) as { accepted?: number; rejected?: unknown[] };
           counts.accepted += typeof body.accepted === 'number' ? body.accepted : 0;
-          // A fetch time is recorded only for resources the portal accepted, or held equal or
-          // better data for. Anything else is retried on the next run.
-          const notStored = new Set<string>();
+          // A fetch time is recorded for every resource the portal answered for, rejected ones
+          // too: its checks are deterministic, so an immediate retry gets the same answer, and a
+          // key with no time would take the front of the cold budget on every run. (Rejections
+          // name only the path, which calendar chunks share, so they cannot be told apart.)
           for (const r of Array.isArray(body.rejected) ? (body.rejected as { path?: unknown; reason?: unknown }[]) : []) {
-            if (r?.reason !== 'kept_stored_data' && r?.reason !== 'older_than_stored') notStored.add(typeof r?.path === 'string' ? r.path : '');
             const reason = typeof r?.reason === 'string' ? r.reason : 'unknown';
             const path = typeof r?.path === 'string' ? r.path : 'upload';
             if (reason === 'kept_stored_data') {
@@ -361,7 +421,7 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
               skip(path, 'more courses than the portal accepts');
             } else skip(path, `rejected by the portal (${reason.slice(0, 80)})`);
           }
-          for (const r of batch) if (!notStored.has(r.path)) fetchedKeys.push(keyOf(r));
+          for (const r of batch) fetchedKeys.push(keyOf(r));
         } catch {
           /* an unreadable acknowledgement is not fatal */
         }
@@ -398,6 +458,7 @@ export async function runSync(input: SyncInput, deps: SyncDeps): Promise<Outcome
       counts,
       skipReasons: reasons,
       fetchedKeys,
+      timing: timingOf(runStart, allResults),
       ...(planKeys ? { planKeys } : {}),
       ...(usedCourseIds ? { courseIds: usedCourseIds, courseSetChanged, perCourseKeys: [...perCourseKeys] } : {}),
     };

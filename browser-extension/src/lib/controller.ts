@@ -22,6 +22,7 @@ export const ALARM_MINUTES = 60;
 export const MIN_SYNC_GAP_MS = 10 * 60_000;
 const MIN_ATTEMPT_GAP_MS = 60_000;
 const TAB_DEBOUNCE_MS = 1500;
+export const COLD_BUDGET = 30;
 
 export interface ControllerEnv {
   fetch: typeof fetch;
@@ -166,7 +167,7 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
 
   async function record(trigger: Trigger, outcome: Outcome, previous: Record<string, string> | undefined) {
     const at = new Date(env.now()).toISOString();
-    const last: LastResult = { at, trigger, ok: outcome.ok, code: outcome.code, message: outcome.message, counts: outcome.counts, skipReasons: (outcome.skipReasons ?? []).slice(0, 10) };
+    const last: LastResult = { at, trigger, ok: outcome.ok, code: outcome.code, message: outcome.message, counts: outcome.counts, skipReasons: (outcome.skipReasons ?? []).slice(0, 10), ...(outcome.timing ? { timing: outcome.timing } : {}) };
     const patch: Record<string, unknown> = { lastResult: last, lastAttemptAt: at };
     if (outcome.ok) patch.lastSyncAt = at;
     if (outcome.fetchedKeys?.length || outcome.planKeys) {
@@ -210,6 +211,9 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
           probeFirst: trigger === 'alarm' && tabId === undefined,
           // Only "Sync now" refreshes cold resources that are not due.
           force: trigger === 'manual',
+          // Page visits and the alarm refresh at most 30 cold requests; the first sync after
+          // pairing (no lastSyncAt) is unbudgeted.
+          ...(trigger !== 'manual' && s.lastSyncAt ? { budget: COLD_BUDGET } : {}),
           lastFetched: s.lastFetchedAt ?? {},
           ...(s.lastCourseIds ? { lastCourseIds: s.lastCourseIds } : {}),
         },

@@ -438,3 +438,9 @@ async def test_a_forbidden_group_chunk_is_reported_not_silently_dropped(run: Run
     assert "Lecture" in text, "events of the courses are still listed"
     assert "group_31" in text and "Canvas refused access to this data (HTTP 403)" in text
     assert "school blocks" not in text
+
+
+async def test_the_calendar_prints_the_assignment_id_from_the_nested_object():
+    result = await call_tool("list_calendar_events", {})
+    text = "\n".join(getattr(block, "text", "") for block in result.content)
+    assert "[Assignment due]" in text and "Assignment ID: 1" in text

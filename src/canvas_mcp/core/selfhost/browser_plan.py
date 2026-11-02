@@ -21,8 +21,8 @@ ACCEPTED_PLAN_VERSIONS = frozenset({1, 2})
 COLD_INTERVAL_HOURS = 12
 SCHEMA_VERSION = 1
 MAX_PAGES = 50
-WINDOW_PAST_DAYS = 60
-WINDOW_FUTURE_DAYS = 120
+WINDOW_PAST_DAYS = 30
+WINDOW_FUTURE_DAYS = 90
 #: The longest date window an upload may carry (plan window plus slack).
 MAX_WINDOW_DAYS = 400
 MAX_RESOURCES_PER_UPLOAD = 600
@@ -41,16 +41,20 @@ ALLOWED_PATH = re.compile(
 COURSE_PLACEHOLDER = "{course_id}"
 USER_PLACEHOLDER = "{user_id}"
 
-_COURSE_INCLUDES = [
+#: What each ``/courses`` list carries is what the tools ask of that exact query:
+#: the unfiltered list resolves course codes (no includes); the plain active list
+#: serves the grade tools and, by id, ``/courses/{id}`` for the syllabus and the
+#: grading fields (the heavy ``syllabus_body`` lives only here); ``list_courses``
+#: asks teachers, term and the student count on ``state[]=available``;
+#: ``get_my_enrollments`` asks only the term.
+_GRADE_INCLUDES = [
     "current_grading_period_scores",
     "grading_scheme",
     "restrict_quantitative_data",
     "syllabus_body",
-    "teachers",
-    "term",
     "total_scores",
-    "total_students",
 ]
+_LISTING_INCLUDES = ["teachers", "term", "total_students"]
 
 _WINDOW = {"start_date": "{start}", "end_date": "{end}"}
 
@@ -60,6 +64,9 @@ EACH_COURSE = "eachCourse"
 COURSE_LIST = "courseList"
 #: Canvas caps ``context_codes[]`` on the calendar at ten.
 CONTEXT_CHUNK = 10
+#: How often the large, slow-changing hot feeds are refetched.
+FEED_REFRESH_MINUTES = 60
+CALENDAR_REFRESH_MINUTES = 30
 
 
 class Resource:
@@ -74,6 +81,7 @@ class Resource:
         chunk: int | None = None,
         needs_user: bool = False,
         course_source: bool = False,
+        refresh_minutes: int | None = None,
     ) -> None:
         self.path = path
         self.query = {k: _as_list(v) for k, v in (query or {}).items()}
@@ -86,6 +94,9 @@ class Resource:
         self.needs_user = needs_user
         #: Its course ids drive the per-course expansion (the active enrollments only).
         self.course_source = course_source
+        #: A hot resource is refetched only when its last successful fetch is older
+        #: than this many minutes (None: on every sync).
+        self.refresh_minutes = refresh_minutes
 
     @property
     def windowed(self) -> bool:
@@ -100,10 +111,19 @@ _EVENT_EXCLUDES = ["child_events"]
 
 
 def _course_events(kind: str, codes: list[str], **extra: Any) -> Resource:
+    # An assignment's calendar entry carries the assignment's whole description (the
+    # bulk of a calendar chunk). Its id is not numeric, so no tool reads one by id,
+    # and the list tools exclude descriptions by default: leave them out here.
+    excludes = [*_EVENT_EXCLUDES, "description"] if kind == "assignment" else _EVENT_EXCLUDES
     return Resource(
         "/calendar_events",
-        {"type": kind, "context_codes[]": codes, "excludes[]": _EVENT_EXCLUDES, **_WINDOW},
+        {"type": kind, "context_codes[]": codes, "excludes[]": excludes, **_WINDOW},
         paginate=True,
+        # Events change rarely and only in Canvas itself (writes are refused here), and
+        # due dates are also in the planner, which refreshes on every sync. The
+        # assignment entries nest the whole assignment object, which the tool reads
+        # (`Assignment ID`), so their content cannot be trimmed instead.
+        refresh_minutes=CALENDAR_REFRESH_MINUTES,
         **extra,
     )
 
@@ -116,14 +136,22 @@ RESOURCES: tuple[Resource, ...] = (
     Resource("/users/self/profile"),
     Resource("/users/self/todo", paginate=True),
     Resource("/users/self/groups", paginate=True),
-    Resource("/users/self/activity_stream", {"only_active_courses": "true"}, paginate=True),
     Resource(
-        "/users/self/activity_stream/summary", {"only_active_courses": "true"}, paginate=True
+        "/users/self/activity_stream",
+        {"only_active_courses": "true"},
+        paginate=True,
+        refresh_minutes=FEED_REFRESH_MINUTES,
     ),
-    Resource("/courses", {"include[]": _COURSE_INCLUDES}, paginate=True),
+    Resource(
+        "/users/self/activity_stream/summary",
+        {"only_active_courses": "true"},
+        paginate=True,
+        refresh_minutes=FEED_REFRESH_MINUTES,
+    ),
+    Resource("/courses", paginate=True),
     Resource(
         "/courses",
-        {"enrollment_state": "active", "include[]": _COURSE_INCLUDES},
+        {"enrollment_state": "active", "include[]": _GRADE_INCLUDES},
         paginate=True,
         course_source=True,
     ),
@@ -131,7 +159,7 @@ RESOURCES: tuple[Resource, ...] = (
         "/courses",
         {
             "enrollment_state": "active",
-            "include[]": _COURSE_INCLUDES,
+            "include[]": _LISTING_INCLUDES,
             "state[]": ["available"],
         },
         paginate=True,
@@ -335,6 +363,8 @@ def build_plan(
             entry["chunk"] = resource.chunk
         if resource.course_source:
             entry["courseSource"] = True
+        if resource.refresh_minutes is not None:
+            entry["refreshMinutes"] = resource.refresh_minutes
         resources.append(entry)
     return {
         "planVersion": PLAN_VERSION,
