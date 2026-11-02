@@ -155,10 +155,12 @@ jobs:
         # importorskip, so omitting it makes them skip silently in the one job
         # branch protection actually requires — passing green while the check
         # they encode is never run.
-        pip install pytest pytest-asyncio pyyaml respx
+        pip install pytest pytest-asyncio pytest-xdist pyyaml respx
 
+    # -n auto: one worker per runner core. Each test gets its own tmp_path, and on
+    # PostgreSQL its own database per worker (tests/dbbackend.py).
     - name: Run the test suite
-      run: pytest tests/ -q
+      run: pytest tests/ -q -n auto
 
   # The same full suite on Windows, where a local stdio server often runs and
   # where things Linux never exercises break: an open file cannot be deleted,
@@ -196,10 +198,10 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         python -m pip install -e ".[documents,selfhost,postgres]"
-        python -m pip install pytest pytest-asyncio pyyaml respx
+        python -m pip install pytest pytest-asyncio pytest-xdist pyyaml respx
 
     - name: Run the test suite
-      run: python -m pytest tests/ -q
+      run: python -m pytest tests/ -q -n auto
 
   # The same full suite on Linux, installed strictly from uv.lock instead of the
   # newest versions pyproject.toml allows. The matrix above answers "does the
@@ -256,7 +258,7 @@ jobs:
       run: uv sync --locked --extra documents --extra selfhost --extra postgres --group dev
 
     - name: Run the test suite
-      run: uv run --locked pytest tests/ -q
+      run: uv run --locked pytest tests/ -q -n auto
 
   # The self-hosted tests against a real PostgreSQL server. The default jobs above run
   # them on SQLite; this one runs EVERY store-backed test, the whole-server stacks and
@@ -322,7 +324,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         python -m pip install -e ".[documents,selfhost,postgres]"
-        python -m pip install pytest pytest-asyncio pyyaml respx
+        python -m pip install pytest pytest-asyncio pytest-xdist pyyaml respx
 
     - name: Verify account, reminder and migration paths before the full suite
       env:
@@ -341,14 +343,14 @@ jobs:
       run: >-
         uv run --locked pytest
         tests/selfhost tests/test_multiuser_e2e.py tests/test_fastmcp_compat.py
-        -q -p no:cacheprovider
+        -q -p no:cacheprovider -n auto
 
     - name: Run the latest-dependency self-hosted tests on PostgreSQL
       if: matrix.dependencies == 'latest'
       run: >-
         python -m pytest
         tests/selfhost tests/test_multiuser_e2e.py tests/test_fastmcp_compat.py
-        -q -p no:cacheprovider
+        -q -p no:cacheprovider -n auto
 
   # The server as a platform sees it: started on its own in legacy HTTP mode
   # (no platform, a placeholder Canvas URL that is never contacted, a dummy

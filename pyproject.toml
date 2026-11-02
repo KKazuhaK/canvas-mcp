@@ -198,4 +198,5 @@ dev = [
     "alembic>=1.19,<2",
     "psycopg[binary]>=3.3,<4",
     "joserfc>=1.7.2,<2",
+    "pytest-xdist>=3.8",
 ]

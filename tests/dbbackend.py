@@ -10,7 +10,10 @@ Environment:
   (``@pytest.mark.postgres``) next to the default SQLite run; they skip otherwise.
 
 The database named by the URL is scratch space: tests create and drop schemas in it
-(one schema per store path, ``public`` for whole-server stacks).
+(one schema per store path, ``public`` for whole-server stacks). Under pytest-xdist
+each worker gets its own database on the same server (``<name>_gw0``, ``<name>_gw1``,
+...), created on first use from ``template1``, because whole-server stacks reset
+``public``.
 """
 
 from __future__ import annotations
@@ -30,8 +33,27 @@ BACKEND_ENV = "CANVAS_MCP_TEST_BACKEND"
 URL_ENV = "CANVAS_MCP_TEST_DATABASE_URL"
 
 BACKEND = (os.environ.get(BACKEND_ENV) or "sqlite").strip().lower()
-PG_URL = (os.environ.get(URL_ENV) or "").strip()
+BASE_PG_URL = (os.environ.get(URL_ENV) or "").strip()
 IS_POSTGRES = BACKEND == "postgres"
+WORKER = os.environ.get("PYTEST_XDIST_WORKER", "")
+
+
+def _worker_url(url: str, worker: str) -> str:
+    if not url or not worker:
+        return url
+    from sqlalchemy.engine import make_url
+
+    parsed = make_url(url)
+    return parsed.set(database=f"{parsed.database}_{worker}").render_as_string(
+        hide_password=False
+    )
+
+
+PG_URL = _worker_url(BASE_PG_URL, WORKER)
+#: Why this worker's database could not be set up, when the backend is PostgreSQL. A
+#: worker that calls ``pytest.exit`` is only replaced by xdist and the run can still
+#: pass, so the ``fail_without_worker_database`` fixture fails every test instead.
+WORKER_ERROR: str | None = None
 
 _SCHEMAS: set[str] = set()
 _DATABASES: list[weakref.ref[Any]] = []
@@ -39,8 +61,21 @@ _DATABASES: list[weakref.ref[Any]] = []
 
 def require_backend() -> None:
     """Abort the whole run if PostgreSQL was requested but cannot be used."""
+    global PG_URL, WORKER_ERROR
     if BACKEND not in ("sqlite", "postgres"):
         pytest.exit(f"{BACKEND_ENV} must be 'sqlite' or 'postgres'", returncode=2)
+    if PG_URL != BASE_PG_URL:
+        try:
+            _create_worker_database()
+        except Exception as exc:  # noqa: BLE001 - report the failure class, never the URL
+            if IS_POSTGRES:
+                WORKER_ERROR = (
+                    f"{BACKEND_ENV}=postgres but worker {WORKER} could not create its "
+                    f"database ({type(exc).__name__}); the URL's user needs CREATEDB"
+                )
+                return
+            # Only the PostgreSQL-only tests use it: they skip, as without a URL.
+            PG_URL = ""
     if not IS_POSTGRES:
         return
     if not PG_URL:
@@ -70,6 +105,24 @@ def install_tracking() -> None:
         track_database(self)
 
     Database.__init__ = tracked  # type: ignore[method-assign]
+
+
+def _create_worker_database() -> None:
+    """Create this xdist worker's database if it is missing, connecting through the base URL."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+
+    name = make_url(PG_URL).database
+    engine = create_engine(BASE_PG_URL, isolation_level="AUTOCOMMIT")
+    try:
+        with engine.connect() as conn:
+            exists = conn.exec_driver_sql(
+                "SELECT 1 FROM pg_database WHERE datname = %(name)s", {"name": name}
+            ).first()
+            if exists is None:
+                conn.exec_driver_sql(f'CREATE DATABASE "{name}"')
+    finally:
+        engine.dispose()
 
 
 def pg_available() -> bool:
