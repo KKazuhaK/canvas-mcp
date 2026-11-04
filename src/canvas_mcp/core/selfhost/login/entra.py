@@ -31,9 +31,16 @@ def build_entra_provider(
     public_base_url: str,
     http: SafeHttp,
     parse_groups: bool,
+    always_select_account: bool = True,
     clock: Callable[[], float] = time.time,
 ) -> OidcLoginProvider:
-    """Use ID-token claims only; no custom Entra API scope or refresh token is requested."""
+    """Use ID-token claims only; no custom Entra API scope or refresh token is requested.
+
+    ``always_select_account`` sends ``prompt=select_account`` on every sign-in. Without it a
+    normal sign-in sends no ``prompt``: Entra then signs in silently when exactly one account
+    is signed in at Microsoft and shows its own picker otherwise. Reauthentication and linking
+    send ``prompt=login`` in that case, which forces Microsoft to ask again.
+    """
     issuer = entra_issuer(tenant_id)
     policy = EntraClaimsPolicy(tenant_id, client_id)
 
@@ -58,7 +65,7 @@ def build_entra_provider(
             accepted_issuers=frozenset({issuer}),
             stored_issuer=issuer,
             response_issuer=issuer,
-            always_prompt="select_account",
+            always_prompt="select_account" if always_select_account else None,
             extra_params={"response_mode": "query"},
             reduce=reduce,
         ),

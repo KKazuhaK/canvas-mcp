@@ -174,6 +174,9 @@ class SelfhostSettings:
     # Entra, ``tenant_id``, ``client_id`` and ``client_secret`` are empty strings.
     login_providers: LoginProvidersConfig = field(default_factory=LoginProvidersConfig)
     access_source: Mapping[str, str] | None = field(default=None, repr=False)
+    # Entra: ask Microsoft for its account picker (``prompt=select_account``) on every
+    # sign-in. Stored with the Entra registration; the default keeps the picker.
+    entra_always_select_account: bool = True
 
     mcp_path: ClassVar[str] = "/mcp"
 

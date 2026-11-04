@@ -248,7 +248,7 @@ describe('Admin accounts', () => {
     expect(alert).toHaveTextContent('Sign in again to continue')
     expect(screen.queryByText('Bob Example')).toBeNull()
     await user.click(within(alert).getByRole('button', { name: 'Sign in again' }))
-    expect(hardNavigate).toHaveBeenCalledWith('/auth/login?return_to=%2Faccount%2Fadmin')
+    expect(hardNavigate).toHaveBeenCalledWith('/auth/login?reauth=1&return_to=%2Faccount%2Fadmin')
   })
 })
 

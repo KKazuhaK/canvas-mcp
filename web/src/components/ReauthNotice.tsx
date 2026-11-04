@@ -6,7 +6,6 @@ import LoginRounded from '@mui/icons-material/LoginRounded'
 import { useTranslation } from 'react-i18next'
 import { useLocation } from 'react-router'
 import { LOGIN_PATH, signInUrl } from '@/api/endpoints'
-import { useProviders } from '@/query/hooks'
 import { hardNavigate } from '@/utils/navigate'
 import { SITE_BASE, sanitizeReturnTo } from '@/utils/returnTo'
 
@@ -17,16 +16,15 @@ import { SITE_BASE, sanitizeReturnTo } from '@/utils/returnTo'
  * throw away what the person was in the middle of, and a session that never counts
  * as fresh could loop.
  *
- * With several sign-in providers the trip asks for `reauth`, so the server's chooser stays
- * open for a person who is already signed in (Entra alone goes straight to the provider).
+ * The trip always asks for `reauth`. Without it the server may send a person whose session
+ * is still fresh straight back to `return_to`, and a stale one could loop on this notice.
+ * With several providers `reauth` also keeps the chooser open for a signed-in person.
  */
 export default function ReauthNotice() {
   const { t } = useTranslation()
   const location = useLocation()
   const here = `${SITE_BASE}${location.pathname === '/' ? '' : location.pathname}${location.search}`
   const returnTo = sanitizeReturnTo(here)
-  const providers = useProviders().data?.providers
-  const reauth = (providers?.length ?? 0) > 1
   return (
     <Alert
       severity="warning"
@@ -35,7 +33,7 @@ export default function ReauthNotice() {
       <AlertTitle>{t('errors:reauth_required_title')}</AlertTitle>
       <Stack spacing={2} sx={{ alignItems: 'flex-start' }}>
         <span>{t('errors:reauth_required')}</span>
-        <Button variant="contained" startIcon={<LoginRounded />} onClick={() => hardNavigate(signInUrl(LOGIN_PATH, { returnTo, reauth }))}>
+        <Button variant="contained" startIcon={<LoginRounded />} onClick={() => hardNavigate(signInUrl(LOGIN_PATH, { returnTo, reauth: true }))}>
           {t('common:actions.signInAgain')}
         </Button>
       </Stack>

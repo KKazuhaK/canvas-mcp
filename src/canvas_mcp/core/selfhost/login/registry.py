@@ -175,6 +175,7 @@ def build_login_runtime(
                 public_base_url=base,
                 http=http,
                 parse_groups=policy.has_group_rule(),
+                always_select_account=settings.entra_always_select_account,
                 clock=clock,
             )
         elif provider_id == PROVIDER_GOOGLE:
