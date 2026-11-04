@@ -22,6 +22,10 @@ await build({ ...common, entryPoints: [join(root, 'src/link.ts')], outfile: join
 
 await copyFile(join(root, 'src/popup/popup.html'), join(out, 'popup.html'));
 await copyFile(join(root, 'src/popup/popup.css'), join(out, 'popup.css'));
+await mkdir(join(out, 'icons'));
+for (const size of [16, 32, 48, 128]) {
+  await copyFile(join(root, `src/icons/icon-${size}.png`), join(out, `icons/icon-${size}.png`));
+}
 
 const manifest = JSON.parse(await readFile(join(root, 'src/manifest.json'), 'utf8'));
 // Release builds stamp the release version (x.y.z, from the v* tag) into the manifest.
@@ -38,8 +42,12 @@ if (target === 'firefox') {
     gecko: {
       id: process.env.CANVAS_SYNC_FIREFOX_ADDON_ID || 'canvas-mcp-sync@canvas-mcp.invalid',
       strict_min_version: '142.0',
-      // Course data (websiteContent) and the portal upload token (authenticationInfo) leave the page.
-      data_collection_permissions: { required: ['authenticationInfo', 'websiteContent'] },
+      // Course data (websiteContent), the profile's name and email (personallyIdentifyingInfo),
+      // Inbox previews in the activity stream (personalCommunications) and the portal upload
+      // token (authenticationInfo) leave the page.
+      data_collection_permissions: {
+        required: ['authenticationInfo', 'personallyIdentifyingInfo', 'personalCommunications', 'websiteContent'],
+      },
     },
   };
 }

@@ -27,8 +27,11 @@ This document is the contract between three parts: the Portal server
   401 or 403, the extension uploads that status and the Portal reports that the
   school blocks session API access. DOM parsing is out of scope until a real
   school needs it.
-- **Not synced in this version:** conversations, file contents, group members,
-  discussion entries written by other students.
+- **Not synced in this version:** the Inbox and discussion entry endpoints,
+  file contents, group members. The activity stream still carries Inbox
+  previews, other people's discussion posts and comments, and notifications,
+  and discussion topics carry their authors' text; `browser-extension/PRIVACY.md`
+  says so.
 
 Only users who reach the Portal through its own `/mcp` endpoint benefit, which
 includes MCPHub connecting to the Portal with personal OAuth. MCPHub's stdio

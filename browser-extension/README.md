@@ -23,6 +23,11 @@ npm run build:firefox   # Firefox 142 or newer      -> dist/firefox
 Set `CANVAS_SYNC_FIREFOX_ADDON_ID` before `build:firefox` to use your own
 Firefox add-on id.
 
+## Privacy
+
+[PRIVACY.md](PRIVACY.md) is the privacy policy linked from the store listings:
+what the extension reads, where it sends it, and what it keeps.
+
 ## Release builds
 
 Publishing a stable `v<x.y.z>` release runs
