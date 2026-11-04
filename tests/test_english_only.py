@@ -38,6 +38,7 @@ ENDONYM_ONLY_FILES = (
 # (4) Email message string tables, separate from their delivery implementation.
 TRANSLATION_FILES = {
     "src/canvas_mcp/core/selfhost/email_translations.py": "English and Chinese reminder email string tables only",
+    "browser-extension/PRIVACY.zh.md": "Chinese translation of the extension privacy policy for the store listings",
 }
 
 # (5) Tests that assert the Chinese rendering of the translations above.
