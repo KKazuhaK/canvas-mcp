@@ -132,6 +132,10 @@ export default function ProviderConfigurationForm({ provider, callbackUri, onSav
           <TextField fullWidth required label={t('admin:providerConfig.userRole')} value={text('required_role', 'Canvas.User')} disabled={busy} onChange={(event) => change('required_role', event.target.value)} />
           <TextField fullWidth required label={t('admin:providerConfig.ownerRole')} value={text('owner_role', 'Canvas.Owner')} disabled={busy} onChange={(event) => change('owner_role', event.target.value)} />
         </Stack>}
+        {provider.protocol === 'entra' && !installation && <Box>
+          <FormControlLabel control={<Switch checked={config.always_select_account !== false} disabled={busy} onChange={(_, value) => change('always_select_account', value)} />} label={t('admin:providerConfig.alwaysSelectAccount')} />
+          <Typography variant="caption" color="text.secondary" component="p">{t('admin:providerConfig.alwaysSelectAccountHelp')}</Typography>
+        </Box>}
         {provider.protocol === 'oidc' && <>
           <TextField required label={t('admin:providerConfig.scopes')} value={Array.isArray(config.scopes) ? config.scopes.join(' ') : 'openid email profile'} disabled={busy} onChange={(event) => change('scopes', event.target.value.split(/\s+/).filter(Boolean))} />
           <TextField select label={t('admin:providerConfig.tokenAuth')} value={text('token_auth_method')} disabled={busy} onChange={(event) => {

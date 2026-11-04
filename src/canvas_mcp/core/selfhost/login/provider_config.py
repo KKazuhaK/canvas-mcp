@@ -12,6 +12,10 @@ from typing import Any
 from ..accounts import OIDC_SLUG_RE
 from .config import env_prefix, parse_login_providers
 
+#: Entra only: whether every sign-in asks Microsoft to show its account picker
+#: (``prompt=select_account``). On by default; off sends no ``prompt`` on a normal sign-in.
+ENTRA_ALWAYS_SELECT_ACCOUNT = "always_select_account"
+
 
 class ProviderConfigurationError(ValueError):
     """A closed configuration error, without caller or database values."""
@@ -68,7 +72,8 @@ def validate_provider(
     secret = client_secret.strip() if isinstance(client_secret, str) else None
     common = {"client_id"}
     allowed = (
-        common | {"tenant_id", "required_role", "owner_role"}
+        common
+        | {"tenant_id", "required_role", "owner_role", ENTRA_ALWAYS_SELECT_ACCOUNT}
         if identifier == "entra"
         else common | {"issuer", "scopes", "token_auth_method", "userinfo"}
         if identifier.startswith("oidc:")
@@ -80,7 +85,7 @@ def validate_provider(
     if any(
         not isinstance(value, str)
         for key, value in values.items()
-        if key not in {"scopes", "userinfo"}
+        if key not in {"scopes", "userinfo", ENTRA_ALWAYS_SELECT_ACCOUNT}
     ):
         raise ProviderConfigurationError()
     values = {
@@ -104,6 +109,8 @@ def validate_provider(
             if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", values[name]):
                 raise ProviderConfigurationError()
         if values["required_role"] == values["owner_role"]:
+            raise ProviderConfigurationError()
+        if type(values.setdefault(ENTRA_ALWAYS_SELECT_ACCOUNT, True)) is not bool:
             raise ProviderConfigurationError()
     else:
         prefix = (

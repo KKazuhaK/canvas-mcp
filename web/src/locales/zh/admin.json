@@ -328,6 +328,8 @@
     "newSecret": "填写密钥值，而不是密钥标识。密钥将加密保存。",
     "userRole": "成员应用角色",
     "ownerRole": "管理员应用角色",
+    "alwaysSelectAccount": "始终显示 Microsoft 账户选择器",
+    "alwaysSelectAccountHelp": "开启时，每次登录都发送 prompt=select_account，重新验证也是（Microsoft 可能通过已有登录静默完成）。关闭时，普通登录不发送 prompt：若 Microsoft 中恰有一个已登录账户，将直接登录，否则由 Microsoft 显示选择器；敏感操作的重新验证和关联登录方式则发送 prompt=login，始终要求 Microsoft 重新登录。",
     "scopes": "OpenID Connect 权限范围",
     "tokenAuth": "Token 端点认证方式",
     "discovery": "使用服务商发现配置",

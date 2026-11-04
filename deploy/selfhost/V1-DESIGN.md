@@ -392,8 +392,8 @@ Nothing else is served. `/` stays a 404.
 
 | Methods | Path | Purpose |
 |---|---|---|
-| GET | `/auth/login` | Dispatcher. Validates `txn`, `return_to` and `reauth`. With one configured provider: 303 to its start, query kept. With several: 303 to `/account/sign-in?...`. With a `txn` that is not open for this browser: 303 to `/account/sign-in?notice=authorization_unavailable` (the person can still sign in; the request is dropped). |
-| GET | `/auth/login/{provider}` | Start, for `provider` in `entra`, `google`, `github`. Writes a `login_flow` record and sets `__Host-cmcp_flow`. |
+| GET | `/auth/login` | Dispatcher. Validates `txn`, `return_to` and `reauth`. With one configured provider: 303 to its start, query kept. With several: 303 to `/account/sign-in?...`. With a `txn` that is not open for this browser: 303 to `/account/sign-in?notice=authorization_unavailable` (the person can still sign in; the request is dropped). Without `txn` and without `reauth=1`, an active (not pending) session issued within the last 10 minutes (the step-up window) with a safe `return_to` is answered 303 to that path (`no-store`), with no provider round trip; any other session, and every `reauth=1` request, starts the ceremony. The same shortcut applies on `/auth/login/<provider>` (and `/auth/login/oidc/{slug}`), whichever provider is named. |
+| GET | `/auth/login/{provider}` | Start (with the shortcut above), for `provider` in `entra`, `google`, `github`. Writes a `login_flow` record and sets `__Host-cmcp_flow`. |
 | GET | `/auth/login/oidc/{slug}` | Start for a generic OIDC provider |
 | GET | `/auth/callback/{provider}` | The redirect URI registered at `entra`, `google` or `github` |
 | GET | `/auth/callback/oidc/{slug}` | The redirect URI of a generic provider |

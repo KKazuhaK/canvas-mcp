@@ -112,7 +112,7 @@ describe('WriteToolsView', () => {
     expect(alert).toHaveTextContent('Sign in again to continue')
     expect(alert).toHaveTextContent('last 10 minutes')
     await user.click(within(alert).getByRole('button', { name: 'Sign in again' }))
-    expect(hardNavigate).toHaveBeenCalledWith('/auth/login?return_to=%2Faccount%2Fwrite-tools')
+    expect(hardNavigate).toHaveBeenCalledWith('/auth/login?reauth=1&return_to=%2Faccount%2Fwrite-tools')
   })
 
   it('does not stack the browser leave-site prompt on the sign-in-again button, and says what is lost', async () => {

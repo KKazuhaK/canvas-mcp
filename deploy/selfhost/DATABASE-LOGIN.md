@@ -87,6 +87,14 @@ Disabling the last usable owner's sign-in method is refused atomically.
 A provider id already associated with identities cannot silently be rebound
 to a different issuer or client audience.
 
+A person whose account session is active (not pending) and was issued within
+the last ten minutes, and who opens `/auth/login/<provider>?return_to=/account/...`,
+is sent straight to that address (303, `Cache-Control: no-store`) without a
+provider round trip. Only the safe, same-origin `/account/...` paths that the
+sign-in already accepts are followed. Older or pending sessions, unsafe
+addresses and every request with `reauth=1` start the provider ceremony as
+before; the step-up "Sign in again" button always sends `reauth=1`.
+
 Provider runtime instances refresh by the committed database revision. A
 failed refresh fails closed; it never falls back to stale credentials or
 environment credentials. Enablement affects buttons, login, linking, cookie
