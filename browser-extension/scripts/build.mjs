@@ -24,6 +24,13 @@ await copyFile(join(root, 'src/popup/popup.html'), join(out, 'popup.html'));
 await copyFile(join(root, 'src/popup/popup.css'), join(out, 'popup.css'));
 
 const manifest = JSON.parse(await readFile(join(root, 'src/manifest.json'), 'utf8'));
+// Release builds stamp the release version (x.y.z, from the v* tag) into the manifest.
+if (process.env.EXTENSION_VERSION) {
+  if (!/^(0|[1-9]\d{0,4})(\.(0|[1-9]\d{0,4})){2}$/.test(process.env.EXTENSION_VERSION)) {
+    throw new Error(`EXTENSION_VERSION must be x.y.z, got ${process.env.EXTENSION_VERSION}`);
+  }
+  manifest.version = process.env.EXTENSION_VERSION;
+}
 if (target === 'firefox') {
   manifest.background = { scripts: ['background.js'] };
   delete manifest.minimum_chrome_version;

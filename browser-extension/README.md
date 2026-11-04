@@ -23,6 +23,24 @@ npm run build:firefox   # Firefox 142 or newer      -> dist/firefox
 Set `CANVAS_SYNC_FIREFOX_ADDON_ID` before `build:firefox` to use your own
 Firefox add-on id.
 
+## Release builds
+
+Publishing a stable `v<x.y.z>` release runs
+`.github/workflows/browser-extension-release.yml`, which attaches the Chrome and
+Firefox zips and this folder's source to the release and, when store
+credentials are configured, submits the version to the Chrome Web Store and
+Firefox Add-ons. To reproduce a release build exactly (Node 24):
+
+```sh
+cd browser-extension
+npm ci
+EXTENSION_VERSION=x.y.z npm run build
+EXTENSION_VERSION=x.y.z CANVAS_SYNC_FIREFOX_ADDON_ID=<gecko id> npm run build:firefox
+```
+
+`EXTENSION_VERSION` replaces the manifest version; `release-tools/` pins the
+`web-ext` used for Firefox submission.
+
 ## Load
 
 - Chrome / Edge: open `chrome://extensions`, enable Developer mode, choose
