@@ -25,7 +25,7 @@ Firefox add-on id.
 
 ## Privacy
 
-[PRIVACY.md](PRIVACY.md) is the privacy policy linked from the store listings:
+[PRIVACY.md](PRIVACY.md) (Chinese: [PRIVACY.zh.md](PRIVACY.zh.md)) is the privacy policy linked from the store listings:
 what the extension reads, where it sends it, and what it keeps.
 
 ## Release builds
