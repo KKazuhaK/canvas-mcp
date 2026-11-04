@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.5] — 2026-11-04
+
+### Added
+
+- **Store listing assets for the browser extension:** icons at 16, 32, 48 and 128 px, and a privacy policy (`browser-extension/PRIVACY.md`, Chinese in `PRIVACY.zh.md`) that says what the extension reads, including the Inbox previews and other people's posts in the Canvas activity stream, where it goes, what is kept and how it is deleted. The Firefox manifest also declares `personallyIdentifyingInfo` and `personalCommunications`.
+
 ## [1.14.4] — 2026-11-03
 
 ### Added

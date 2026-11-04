@@ -153,14 +153,15 @@ Canvas MCP provides **up to 127 tools** for interacting with Canvas LMS; the def
 
 The Canvas MCP Server bridges the gap between AI assistants and Canvas Learning Management System, providing role-specific workflows for students, educators, learning designers, and developers. Built on the Model Context Protocol (MCP), it is designed for MCP-compatible clients; setup and supported capabilities vary by client.
 
-## Latest Release: v1.14.4 (independent fork)
+## Latest Release: v1.14.5 (independent fork)
 
-**Released:** November 3, 2026 | **[Release notes](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.4)**
+**Released:** November 4, 2026 | **[Release notes](https://github.com/KKazuhaK/canvas-mcp/releases/tag/v1.14.5)**
 
 This fork release adds browser sync for schools that do not let students create
 Canvas access tokens: the Canvas MCP Sync extension reads the student's own
 Canvas data with the signed-in browser session and pushes it to the self-hosted
-Portal, which answers the read-only student tools from it. See the
+Portal, which answers the read-only student tools from it. v1.14.5 adds the
+extension's icons and privacy policy for the store listings. See the
 [changelog](CHANGELOG.md) and [browser-extension/README.md](browser-extension/README.md).
 
 ## Upstream v1.14.0 highlights
