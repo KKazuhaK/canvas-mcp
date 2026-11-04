@@ -1,0 +1,194 @@
+name: Browser extension release
+
+# Fork-only. When a stable release is published (the `released` event does not
+# fire for prereleases), build the browser extension for Chrome and Firefox with
+# the release version stamped into the manifest, attach both zips and the
+# source archive to the release, and, where store credentials are configured,
+# submit the new version to the Chrome Web Store and Firefox Add-ons.
+#
+# Store submission is opt-in, and the first listing in each store is created by
+# hand. After that:
+#   Chrome  variables CHROME_PUBLISHER_ID, CHROME_EXTENSION_ID
+#           secrets   CHROME_CLIENT_ID, CHROME_CLIENT_SECRET, CHROME_REFRESH_TOKEN
+#   Firefox variable  FIREFOX_ADDON_ID, the gecko id (`name@domain` or `{uuid}`),
+#                     not the AMO slug or number; it is also stamped into the
+#                     Firefox manifest
+#           secrets   AMO_JWT_ISSUER, AMO_JWT_SECRET
+# The Firefox zip on the release is unsigned; Firefox installs only the copy
+# signed by Add-ons.
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Existing stable release tag (e.g. v1.15.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-extension-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  # No write access here: npm dependencies run in this job.
+  build:
+    name: Build extension zips
+    if: github.repository == 'KKazuhaK/canvas-mcp'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - name: Derive version from the tag
+        id: v
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.event.release.tag_name }}
+        run: |
+          # Store versions are plain x.y.z with no leading zeros (stores also cap each part at 65535).
+          part='(0|[1-9][0-9]{0,4})'
+          if [[ ! "$TAG" =~ ^v(${part}\.${part}\.${part})$ ]]; then
+            echo "tag '$TAG' is not a stable v<x.y.z> release" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.v.outputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Test and build
+        working-directory: browser-extension
+        env:
+          EXTENSION_VERSION: ${{ steps.v.outputs.version }}
+          CANVAS_SYNC_FIREFOX_ADDON_ID: ${{ vars.FIREFOX_ADDON_ID }}
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
+          npm run build:firefox
+      - name: Zip
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          mkdir out
+          (cd browser-extension/dist/chrome && zip -qrX "$GITHUB_WORKSPACE/out/canvas-mcp-sync-chrome-${VERSION}.zip" .)
+          (cd browser-extension/dist/firefox && zip -qrX "$GITHUB_WORKSPACE/out/canvas-mcp-sync-firefox-${VERSION}.zip" .)
+          # Add-ons reviewers need the source of the bundled build.
+          git archive --format=zip -o "out/canvas-mcp-sync-source-${VERSION}.zip" "$TAG" browser-extension
+          ls -l out
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: extension-zips
+          path: out/*.zip
+          if-no-files-found: error
+
+  attach:
+    name: Attach zips to the release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: extension-zips
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: gh release upload "$TAG" ./*.zip --clobber -R "$GITHUB_REPOSITORY"
+
+  chrome-web-store:
+    name: Submit to Chrome Web Store
+    needs: build
+    if: vars.CHROME_EXTENSION_ID != '' && vars.CHROME_PUBLISHER_ID != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: extension-zips
+      - name: Upload and publish (Chrome Web Store API v2)
+        env:
+          ITEM: publishers/${{ vars.CHROME_PUBLISHER_ID }}/items/${{ vars.CHROME_EXTENSION_ID }}
+          CLIENT_ID: ${{ secrets.CHROME_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CHROME_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          api=https://chromewebstore.googleapis.com
+          if ! grant=$(curl -sS --fail-with-body https://oauth2.googleapis.com/token \
+            --data-urlencode client_id@<(printf %s "$CLIENT_ID") \
+            --data-urlencode client_secret@<(printf %s "$CLIENT_SECRET") \
+            --data-urlencode refresh_token@<(printf %s "$REFRESH_TOKEN") \
+            -d grant_type=refresh_token); then
+            echo "token request failed: $(echo "$grant" | jq -c '{error, error_description}' 2>/dev/null || echo "$grant")" >&2
+            exit 1
+          fi
+          token=$(echo "$grant" | jq -r '.access_token // empty')
+          if [ -z "$token" ]; then echo "no access token in the response; check the CHROME_* secrets" >&2; exit 1; fi
+          echo "::add-mask::$token"
+          auth=(-H "Authorization: Bearer $token")
+
+          upload=$(curl -sS --fail-with-body -X POST "${auth[@]}" -H "Content-Type: application/zip" \
+            --data-binary "@canvas-mcp-sync-chrome-${VERSION}.zip" "$api/upload/v2/${ITEM}:upload?uploadType=media")
+          echo "$upload"
+          state=$(echo "$upload" | jq -r .uploadState)
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [ "$state" = IN_PROGRESS ] || break
+            sleep 6
+            state=$(curl -sS --fail-with-body "${auth[@]}" "$api/v2/${ITEM}:fetchStatus" | jq -r '.lastAsyncUploadState // "IN_PROGRESS"')
+          done
+          if [ "$state" != SUCCEEDED ]; then echo "upload ended in state $state" >&2; exit 1; fi
+
+          publish=$(curl -sS --fail-with-body -X POST "${auth[@]}" -H "Content-Type: application/json" \
+            -d '{}' "$api/v2/${ITEM}:publish")
+          echo "$publish"
+          echo "$publish" | jq -e '.state | IN("PENDING_REVIEW", "STAGED", "PUBLISHED", "PUBLISHED_TO_TESTERS")' > /dev/null
+
+  firefox-add-ons:
+    name: Submit to Firefox Add-ons
+    needs: build
+    if: vars.FIREFOX_ADDON_ID != ''
+    runs-on: ubuntu-latest
+    steps:
+      # The tooling comes from the workflow's own commit, so a manual run for an
+      # older tag still finds it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: browser-extension/release-tools
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # web-ext and its dependencies come from the committed lockfile, with
+      # install scripts off, before any secret is in the environment.
+      - name: Install web-ext
+        working-directory: browser-extension/release-tools
+        run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: extension-zips
+          path: out
+      - name: Sign and submit (listed)
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
+          WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir firefox && unzip -q "out/canvas-mcp-sync-firefox-${VERSION}.zip" -d firefox
+          browser-extension/release-tools/node_modules/.bin/web-ext sign \
+            --source-dir firefox --artifacts-dir web-ext-artifacts \
+            --channel listed --approval-timeout 0 \
+            --upload-source-code "out/canvas-mcp-sync-source-${VERSION}.zip"

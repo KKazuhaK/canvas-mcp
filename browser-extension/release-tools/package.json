@@ -1,0 +1,8 @@
+{
+  "name": "canvas-mcp-sync-release-tools",
+  "private": true,
+  "description": "Pinned tooling for submitting the extension to Firefox Add-ons; installed only by the release workflow",
+  "devDependencies": {
+    "web-ext": "10.8.0"
+  }
+}

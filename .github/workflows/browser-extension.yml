@@ -6,7 +6,7 @@ on:
       - 'browser-extension/**'
       - '.github/workflows/browser-extension.yml'
   push:
-    branches: [main]
+    branches: [main, selfhost]
     paths:
       - 'browser-extension/**'
 
@@ -31,3 +31,6 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run build:firefox
+      - name: Release tooling lockfile installs
+        working-directory: browser-extension/release-tools
+        run: npm ci --ignore-scripts --dry-run
