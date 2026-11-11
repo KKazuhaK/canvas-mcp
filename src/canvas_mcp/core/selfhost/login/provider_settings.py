@@ -7,7 +7,7 @@ from dataclasses import replace
 from ..accounts import AccessRule, parse_access_settings
 from ..settings import SelfhostConfigError, SelfhostSettings
 from .config import GitHubConfig, GoogleConfig, LoginProvidersConfig, OidcConfig
-from .provider_config import ProviderConfigurationError
+from .provider_config import ENTRA_ALWAYS_SELECT_ACCOUNT, ProviderConfigurationError
 from .provider_store import ProviderSnapshot
 
 
@@ -21,6 +21,7 @@ def settings_from_database(
     tenant = client = secret = ""
     required = "Canvas.User"
     owner = "Canvas.Owner"
+    always_select_account = True
     for provider in snapshot.providers:
         values = provider.config
         if provider.id == "local":
@@ -33,6 +34,7 @@ def settings_from_database(
             secret = provider.client_secret
             required = str(values["required_role"])
             owner = str(values["owner_role"])
+            always_select_account = values.get(ENTRA_ALWAYS_SELECT_ACCOUNT, True) is not False
         elif provider.id == "google":
             google = GoogleConfig(str(values["client_id"]), provider.client_secret)
         elif provider.id == "github":
@@ -96,6 +98,7 @@ def settings_from_database(
         client_secret=secret,
         required_role=required,
         owner_role=owner,
+        entra_always_select_account=always_select_account,
         access_policy=policy,
         login_providers=LoginProvidersConfig(
             order=tuple(provider.id for provider in snapshot.providers),

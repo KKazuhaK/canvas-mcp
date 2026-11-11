@@ -80,6 +80,10 @@ describe('an owner and the connected apps of an account', () => {
     expect(await within(dialog).findByText('Sign in again to continue')).toBeInTheDocument()
     await user.click(within(dialog).getByRole('button', { name: 'Sign in again' }))
     expect(hardNavigate).toHaveBeenCalledTimes(1)
+    const target = new URL(String(vi.mocked(hardNavigate).mock.calls[0][0]), 'https://canvas.example.test')
+    expect(target.pathname).toBe('/auth/login')
+    expect(target.searchParams.get('reauth')).toBe('1')
+    expect(target.searchParams.get('return_to')).toMatch(/^\/account\//)
   })
 
   it('shows the closed message when the revoke is refused', async () => {

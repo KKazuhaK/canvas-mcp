@@ -328,6 +328,8 @@
     "newSecret": "Enter the secret value, not its identifier. It will be stored encrypted.",
     "userRole": "Member app role",
     "ownerRole": "Owner app role",
+    "alwaysSelectAccount": "Always show the Microsoft account picker",
+    "alwaysSelectAccountHelp": "With the picker on, every sign-in sends prompt=select_account, and re-authentication does too (Microsoft may complete it silently). When off, a normal sign-in sends no prompt: Microsoft signs in without asking if exactly one account is signed in there, and shows its own picker otherwise; re-authentication for a sensitive action and linking then send prompt=login and always ask Microsoft to sign in again.",
     "scopes": "OpenID Connect scopes",
     "tokenAuth": "Token endpoint authentication",
     "discovery": "Use provider discovery",

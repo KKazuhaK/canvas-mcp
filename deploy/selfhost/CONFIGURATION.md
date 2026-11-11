@@ -23,6 +23,16 @@ runtime and Docker acceptance gates are tracked in [V1-PROGRESS.md](V1-PROGRESS.
 - Provider credentials, enablement, button order and provider app-role names are
   database-owned. Client secrets are encrypted and write-only: a blank field
   keeps the saved value. Configuration takes effect on the next request.
+- Entra has one more option, **Always show the Microsoft account picker**
+  (`always_select_account`, on by default, which sends `prompt=select_account`).
+  Turn it off in Admin > Settings > Entra to send no `prompt` on a normal sign-in:
+  Microsoft then signs in without a click when exactly one account is signed in
+  at Microsoft, and shows its own picker otherwise. Turning it off also makes
+  re-authentication (step-up) and sign-in-method linking send `prompt=login`,
+  which forces Microsoft to ask again; with it on they send `select_account`. Google and generic OIDC have
+  no such option. The value is part of the Entra registration, so
+  `token_admin login-providers --configure` accepts `"always_select_account": false`
+  in its `config` object too.
 - Fresh installations use `/account/setup` with the private expiring operator
   code. Disabling providers does not reopen setup. Old environment adoption is
   explicit and isolated in the migration package; saved DB values always win.

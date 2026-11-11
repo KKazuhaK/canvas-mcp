@@ -668,6 +668,19 @@ class AccountCore:
             self._ua_key, agent.encode("utf-8", "replace"), hashlib.sha256
         ).hexdigest()[:16]
 
+    @staticmethod
+    def _has_sign_in(session: _Session | None) -> bool:
+        """A verified session that came from a real sign-in (``iat`` is 0 on an older cookie)."""
+        return session is not None and (session.pending or session.iat > 0)
+
+    def _fresh_active(self, session: _Session | None) -> bool:
+        """An active (not pending) session inside the step-up freshness window."""
+        return (
+            session is not None
+            and not session.pending
+            and self._signed_in_recently(session)
+        )
+
     async def _login_txn(
         self, request: Request
     ) -> tuple[str | None, str | None, Response | None]:
@@ -678,19 +691,29 @@ class AccountCore:
         at the end (``notice``). A person who is already signed in goes straight to the consent
         page for a live request, or to the account home with the notice, unless they asked for
         another account (``reauth=1``).
+
+        Without a request id, a person whose session is active (not pending) and was issued
+        within the step-up freshness window (:meth:`_signed_in_recently`) and who arrives with
+        a safe ``return_to`` (see :func:`sanitize_return_to`) goes straight there instead of
+        through the provider again. An older or pending session, and any request with
+        ``reauth=1``, still start the provider ceremony: that is how a step-up sign-in or a
+        newly granted role is picked up. No session is created or changed by the shortcut.
         """
         if "txn" not in request.query_params:
+            return_to = sanitize_return_to(request.query_params.get("return_to"))
+            if (
+                return_to is not None
+                and request.query_params.get("reauth") != "1"
+                and self._fresh_active(self._session_of(request))
+            ):
+                return None, None, self.redirect(return_to, 303)
             return None, None, None
         txn_id, notice = await self.resume_waiting(
             request, request.query_params.get("txn", "")
         )
         session = self._session_of(request)
         reauth = request.query_params.get("reauth") == "1"
-        signed_in = (
-            session is not None
-            and not reauth
-            and (session.pending or session.iat > 0)
-        )
+        signed_in = not reauth and self._has_sign_in(session)
         if txn_id is None:
             if signed_in:
                 return None, notice, self.redirect(_notice_landing(notice), 303)

@@ -77,11 +77,12 @@ class ExternalSignIn:
 
     async def _start(self, request: Request, *, provider: LoginProvider) -> Response:
         app = self.app
-        if self.rt.start_buckets[provider.id].take() > 0:
-            return app._provider_failure("rate_limited", 429, provider)
         txn_id, dropped, early = await app._login_txn(request)
         if early is not None:
             return early
+        # Only a request that really starts a ceremony spends the start budget.
+        if self.rt.start_buckets[provider.id].take() > 0:
+            return app._provider_failure("rate_limited", 429, provider)
         return_to = None
         if txn_id is None:
             return_to = web.sanitize_return_to(request.query_params.get("return_to"))

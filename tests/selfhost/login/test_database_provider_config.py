@@ -477,3 +477,57 @@ def test_changing_owner_role_requires_another_usable_owner_path(providers, db):
             client_secret=None,
         )
     assert revision(db) == old
+
+
+def test_entra_account_picker_defaults_on_and_is_stored_when_turned_off(providers, db):
+    save(providers, db)
+    assert providers.list_public()[0]["config"]["always_select_account"] is True
+    assert settings_from_database(
+        load_selfhost_settings(_env()), providers.load_snapshot()
+    ).entra_always_select_account is True
+    save(
+        providers,
+        db,
+        config={**CONFIG, "always_select_account": False},
+        client_secret=None,
+    )
+    assert providers.list_public()[0]["config"]["always_select_account"] is False
+    settings = settings_from_database(
+        load_selfhost_settings(_env()), providers.load_snapshot()
+    )
+    assert settings.entra_always_select_account is False
+
+
+def test_a_row_saved_before_the_setting_existed_keeps_the_picker(providers, db):
+    save(providers, db)
+    with db.write() as conn:
+        conn.execute(
+            update(s.login_providers).values(config=dict(CONFIG))
+        )
+    assert providers.list_public()[0]["config"]["always_select_account"] is True
+    assert settings_from_database(
+        load_selfhost_settings(_env()), providers.load_snapshot()
+    ).entra_always_select_account is True
+
+
+@pytest.mark.parametrize("value", ["false", 0, None, "", []])
+def test_entra_account_picker_must_be_a_boolean(providers, db, value):
+    with pytest.raises(ProviderConfigurationError):
+        save(providers, db, config={**CONFIG, "always_select_account": value})
+
+
+@pytest.mark.parametrize(
+    "identifier, config",
+    [
+        ("google", {"client_id": "123456-abc.apps.googleusercontent.com"}),
+        ("github", {"client_id": "Iv1.0123456789abcdef"}),
+        ("oidc:school", {"issuer": "https://idp.example.edu", "client_id": "school-client"}),
+    ],
+)
+def test_only_entra_has_an_account_picker_setting(identifier, config):
+    from canvas_mcp.core.selfhost.login.provider_config import validate_provider
+
+    secret = "s" * 20
+    assert validate_provider(identifier, config, secret).id == identifier
+    with pytest.raises(ProviderConfigurationError):
+        validate_provider(identifier, {**config, "always_select_account": False}, secret)

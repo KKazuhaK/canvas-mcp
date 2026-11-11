@@ -66,6 +66,20 @@ describe('Write-only sign-in provider credentials', () => {
     await waitFor(() => expect(save).toHaveBeenCalledWith({ config: provider.config, enabled: true, rank: 0, auto_link_email: true }))
     expect(screen.queryByRole('dialog')).toBeNull()
   })
+  it('offers the Entra account picker switch on by default and saves it off', async () => {
+    const user = userEvent.setup()
+    const save = vi.fn(async () => {})
+    renderWithQuery(<ProviderConfigurationForm provider={provider} callbackUri={callback} onSave={save} />)
+    const picker = screen.getByRole('switch', { name: 'Always show the Microsoft account picker' })
+    expect(picker).toBeChecked()
+    await user.click(picker)
+    await user.click(screen.getByRole('button', { name: 'Save sign-in configuration' }))
+    await waitFor(() => expect(save).toHaveBeenCalledWith({ config: { ...provider.config, always_select_account: false }, enabled: true, rank: 0, auto_link_email: false }))
+  })
+  it('does not offer the Entra account picker switch on other providers', () => {
+    renderWithQuery(<ProviderConfigurationForm provider={{ ...provider, id: 'google', protocol: 'google' }} callbackUri={callback} onSave={vi.fn(async () => {})} />)
+    expect(screen.queryByRole('switch', { name: 'Always show the Microsoft account picker' })).toBeNull()
+  })
   it('omits the saved secret from an ordinary edit', async () => {
     const user = userEvent.setup()
     const save = vi.fn(async () => {})

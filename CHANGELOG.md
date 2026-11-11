@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Optional silent Microsoft sign-in (self-hosted Portal).** Admin > Settings > Entra has a new switch, **Always show the Microsoft account picker**, on by default so nothing changes for existing installations. Turned off, a normal sign-in sends no `prompt`, and Microsoft signs the person in without a click when exactly one account is signed in there. Turning the switch off also makes re-authentication (step-up) and linking force Microsoft to ask again (`prompt=login`); with it on they send `select_account`, as before. The value is stored in the Entra registration (`always_select_account`), so no migration is needed. Google and generic OIDC are unchanged.
+
+### Changed
+
+- **A recently signed-in person who follows `/auth/login/<provider>?return_to=/account/...` is no longer sent through the provider again.** The sign-in redirects straight to a safe `return_to` (303, no-store) only when the session is active (not pending) and was issued within the last 10 minutes, the same window step-up uses. Older or pending sessions, unsafe addresses and `reauth=1` still start the provider ceremony. The "Sign in again" button now always sends `reauth=1`, so a step-up sign-in (and picking up a newly granted role) always reaches the provider, including with a single provider. As a result, the step-up of a single generic OIDC provider now sends `prompt=login`.
+
 ## [1.14.5] — 2026-11-04
 
 ### Added
