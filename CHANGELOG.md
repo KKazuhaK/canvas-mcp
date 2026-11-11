@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.6] — 2026-11-10
+
 ### Added
 
 - **Optional silent Microsoft sign-in (self-hosted Portal).** Admin > Settings > Entra has a new switch, **Always show the Microsoft account picker**, on by default so nothing changes for existing installations. Turned off, a normal sign-in sends no `prompt`, and Microsoft signs the person in without a click when exactly one account is signed in there. Turning the switch off also makes re-authentication (step-up) and linking force Microsoft to ask again (`prompt=login`); with it on they send `select_account`, as before. The value is stored in the Entra registration (`always_select_account`), so no migration is needed. Google and generic OIDC are unchanged.
