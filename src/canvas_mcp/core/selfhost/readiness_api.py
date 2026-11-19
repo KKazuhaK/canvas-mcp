@@ -34,6 +34,13 @@ from . import account_core as web
 from . import custody
 from .account_api import _JSON_HEADERS, _clean, _ts
 from .authz.server import MAX_ACCESS_TOKEN_CHARS
+from .browser_store import (
+    Binding,
+    BrowserSyncStore,
+    binding_in_use,
+    browser_windows,
+    token_usable_for_mcp,
+)
 from .db.errors import StoreUnavailable
 from .db.workers import run_store
 from .mcp_state import McpRead
@@ -51,15 +58,26 @@ logger = logging.getLogger("canvas_mcp.selfhost.readiness")
 
 READINESS_PATH = f"{API_PREFIX}/readiness"
 TOKEN_PAGE = f"{ACCOUNT_PREFIX}/token"
+BROWSER_PAGE = f"{ACCOUNT_PREFIX}/browser-extension"
 CONTRACT_VERSION = 1
 SET_UP_LABEL = "Set up Canvas token"
 REPLACE_LABEL = "Replace Canvas token"
+BROWSER_LABEL = "Open browser sync"
 
 _INVALID_SUMMARIES = {
     REASON_CANVAS_TOKEN_REJECTED: "Canvas rejected your saved token. Save a new one.",
     REASON_REVOKED_BY_ADMIN: "An administrator revoked your saved Canvas token. Save a new one.",
     REASON_DECRYPT_FAILED: "Your saved Canvas token could not be read. Save it again.",
 }
+
+
+def _ago(seconds: int) -> str:
+    minutes = max(0, seconds) // 60
+    if minutes < 60:
+        return f"{max(1, minutes)} min ago"
+    if minutes < 48 * 60:
+        return f"{minutes // 60} h ago"
+    return f"{minutes // 1440} days ago"
 
 
 def _bearer(request: Request) -> str | None:
@@ -76,8 +94,9 @@ def _bearer(request: Request) -> str | None:
 class ReadinessApi:
     """The readiness endpoint over one account application."""
 
-    def __init__(self, app: web.AccountCore) -> None:
+    def __init__(self, app: web.AccountCore, browser: BrowserSyncStore) -> None:
         self.app = app
+        self.browser = browser
 
     def routes(self) -> list[Route]:
         return [web.any_method_route(READINESS_PATH, self._endpoint)]
@@ -100,8 +119,8 @@ class ReadinessApi:
             {"WWW-Authenticate": 'Bearer realm="canvas-mcp"'},
         )
 
-    def _action(self, label: str) -> dict[str, str] | None:
-        url = self.app.base + TOKEN_PAGE
+    def _action(self, label: str, page: str) -> dict[str, str] | None:
+        url = self.app.base + page
         # The contract allows https only; a plain-http base (never a real deployment) offers no button.
         return {"label": label, "url": url} if url.startswith("https://") else None
 
@@ -111,6 +130,7 @@ class ReadinessApi:
         summary: str,
         *,
         action_label: str | None = None,
+        page: str = TOKEN_PAGE,
         expires_at: int | None = None,
     ) -> Response:
         body: dict[str, Any] = {
@@ -118,7 +138,7 @@ class ReadinessApi:
             "state": state,
             "summary": _clean(summary, 200),
         }
-        action = self._action(action_label) if action_label else None
+        action = self._action(action_label, page) if action_label else None
         if action is not None:
             body["action"] = action
         stamp = _ts(expires_at)
@@ -153,6 +173,36 @@ class ReadinessApi:
             logger.error("readiness request failed: %s", type(exc).__name__)
             return self._respond(500, {"error": {"code": "internal_error"}})
 
+    async def _browser_state(
+        self, binding: Binding, config: Any, now: int
+    ) -> Response:
+        """``/mcp`` answers from this binding's synced data: judge it by the rules /mcp applies."""
+        max_age, fresh = browser_windows(config)
+        stored = await run_store(self.browser.resources, binding.id)
+        if not stored:
+            return self._state(
+                "needs_setup",
+                "Browser sync is paired but no Canvas data has been uploaded yet. Open Canvas to sync.",
+                action_label=BROWSER_LABEL,
+                page=BROWSER_PAGE,
+            )
+        age = now - max(item.captured_at for item in stored)
+        if age > max_age:
+            return self._state(
+                "needs_setup",
+                f"Browser sync data is more than {max_age // 86400} days old and is not used. Open Canvas to refresh.",
+                action_label=BROWSER_LABEL,
+                page=BROWSER_PAGE,
+            )
+        if age > fresh:
+            return self._state(
+                "degraded",
+                f"Canvas data comes from browser sync, last updated {_ago(age)} \u2014 open Canvas to refresh",
+                action_label=BROWSER_LABEL,
+                page=BROWSER_PAGE,
+            )
+        return self._state("ready", "Canvas data comes from browser sync and is up to date.")
+
     async def _answer(self, read: McpRead) -> Response:
         status = snapshot_status(read)
         if status.disabled:
@@ -166,6 +216,18 @@ class ReadinessApi:
         if not status.active:
             return self._state("revoked", "Your access to this server is not active.")
 
+        config = await run_store(self.app.snapshots.get, read.snapshot.settings_revision)
+        now = int(self.app.clock())
+        # /mcp reads browser sync only when there is no usable token: ask the same code.
+        if not token_usable_for_mcp(
+            read.snapshot.credential_id, read.snapshot.credential_status
+        ):
+            binding = await binding_in_use(
+                self.browser, config, read.account_id, read.snapshot
+            )
+            if binding is not None:
+                return await self._browser_state(binding, config, now)
+
         info: EnrollmentInfo | None = await run_store(self.app.store.info, read.account_id)
         if info is None:
             return self._state(
@@ -173,8 +235,6 @@ class ReadinessApi:
                 "No Canvas token is saved yet. Save one to use the Canvas tools.",
                 action_label=SET_UP_LABEL,
             )
-        config = await run_store(self.app.snapshots.get, read.snapshot.settings_revision)
-        now = int(self.app.clock())
         # Only an expiry that Canvas itself reported counts, as on the account page.
         expiry = info.access_expires_at if info.expiry_source == "canvas" else None
 
@@ -221,6 +281,6 @@ class ReadinessApi:
         )
 
 
-def build_readiness_routes(app: web.AccountCore) -> list[Route]:
+def build_readiness_routes(app: web.AccountCore, browser: BrowserSyncStore) -> list[Route]:
     """The ``/api/v1/readiness`` route over an existing account application."""
-    return ReadinessApi(app).routes()
+    return ReadinessApi(app, browser).routes()

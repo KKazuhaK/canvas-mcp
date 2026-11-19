@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Self-hosted: `GET /api/v1/readiness` reports whether a person's Portal connection works (`ready`, `needs_setup`, `expiring`, `expired`, `revoked`), so a hub such as MCPHub no longer shows "Connected" for someone who never saved a Canvas token. It takes the same OAuth access token as `/mcp`, is read-only and never returns a token. See `deploy/selfhost/CONFIGURATION.md`, "Readiness endpoint".
+- Self-hosted: `GET /api/v1/readiness` reports whether a person's Portal connection works (`ready`, `needs_setup`, `expiring`, `expired`, `revoked`), so a hub such as MCPHub no longer shows "Connected" for someone who never saved a Canvas token. It takes the same OAuth access token as `/mcp`, is read-only and never returns a token. With no usable token it follows `/mcp` to browser sync: fresh data is `ready`, stale data `degraded`. See `deploy/selfhost/CONFIGURATION.md`, "Readiness endpoint".
 
 ## [1.14.9] — 2026-11-19
 

@@ -2812,6 +2812,6 @@ def build_api_routes(app: web.AccountCore) -> list[Route]:
     # The bearer-token routes go first: the API's catch-all would answer them not_found.
     return [
         *build_extension_routes(app, api.browser),
-        *build_readiness_routes(app),
+        *build_readiness_routes(app, api.browser),
         *api.routes(),
     ]

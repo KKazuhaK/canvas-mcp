@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from canvas_mcp.core.selfhost.authz.tokens import AccessTokenCodec
+from canvas_mcp.core.selfhost.browser_store import BrowserSyncStore, SnapshotItem
 from canvas_mcp.core.selfhost.token_store import (
     DISABLE_REASON_OPERATOR,
     OPERATOR,
@@ -192,6 +193,154 @@ class TestStates:
         )
         assert readiness(stack, bearer).status_code == 401
         assert stack.mcp_status(bearer) == 401
+
+
+BROWSER_PAGE = BASE + "/account/browser-extension"
+
+
+def sync_binding(
+    stack: Stack,
+    user: Any = ALICE,
+    *,
+    captured_ago: int | None = 600,
+    canvas_user_id: str = "1",
+) -> BrowserSyncStore:
+    """Pair the extension for ``user``; with ``captured_ago`` also upload one snapshot that old."""
+    store = BrowserSyncStore(stack.store.database, stack.store.keyring, clock=stack.clock)
+    code, _ = store.create_pairing_code(stack.account_of(user))
+    claimed = store.claim(code)
+    assert claimed is not None
+    _, binding_id = claimed
+    if captured_ago is not None:
+        accepted, rejected = store.save(
+            binding_id,
+            canvas_host=CANVAS_HOST,
+            canvas_user_id=canvas_user_id,
+            items=[
+                SnapshotItem(
+                    "/users/self",
+                    "/users/self",
+                    {},
+                    int(stack.clock()) - captured_ago,
+                    200,
+                    {"id": 1, "name": "Alice"},
+                )
+            ],
+        )
+        assert accepted == 1 and not rejected
+    return store
+
+
+def setting(stack: Stack, name: str) -> int:
+    return int(stack.runtime.snapshots.current.settings[name])
+
+
+class TestBrowserSync:
+    """/mcp answers from browser sync exactly when there is no usable token; readiness follows."""
+
+    def test_synced_data_without_a_token_is_ready(self, stack: Stack) -> None:
+        bearer = access_token(stack)  # signed in, no Canvas token
+        sync_binding(stack, captured_ago=600)
+        body = expect_state(readiness(stack, bearer), "ready")
+        assert "browser sync" in body["summary"].lower()
+        assert "action" not in body
+
+    def test_data_older_than_the_freshness_window_is_degraded(self, stack: Stack) -> None:
+        bearer = access_token(stack)
+        age = (setting(stack, "browser_sync.fresh_hours") + 2) * 3600
+        sync_binding(stack, captured_ago=age)
+        body = expect_state(readiness(stack, bearer), "degraded")
+        assert "browser sync" in body["summary"].lower()
+        assert "ago" in body["summary"] and "open Canvas to refresh" in body["summary"]
+        assert body["action"]["url"] == BROWSER_PAGE
+        assert len(body["summary"]) <= 200
+
+    def test_just_inside_the_freshness_window_is_ready(self, stack: Stack) -> None:
+        bearer = access_token(stack)
+        age = setting(stack, "browser_sync.fresh_hours") * 3600 - 60
+        sync_binding(stack, captured_ago=age)
+        expect_state(readiness(stack, bearer), "ready")
+
+    def test_data_older_than_the_maximum_age_is_not_used_so_needs_setup(
+        self, stack: Stack
+    ) -> None:
+        bearer = access_token(stack)
+        age = setting(stack, "browser_sync.max_age_days") * 86400 + 3600
+        sync_binding(stack, captured_ago=age)
+        body = expect_state(readiness(stack, bearer), "needs_setup")
+        assert body["action"]["url"] == BROWSER_PAGE
+
+    def test_a_binding_that_never_uploaded_is_needs_setup(self, stack: Stack) -> None:
+        bearer = access_token(stack)
+        sync_binding(stack, captured_ago=None)
+        expect_state(readiness(stack, bearer), "needs_setup")
+
+    def test_a_revoked_binding_is_needs_setup(self, stack: Stack) -> None:
+        bearer = access_token(stack)
+        store = sync_binding(stack, captured_ago=600)
+        expect_state(readiness(stack, bearer), "ready")
+        assert store.revoke_account(stack.account_of(ALICE))
+        body = expect_state(readiness(stack, bearer), "needs_setup")
+        assert body["action"]["url"] == ACTION_URL
+
+    def test_a_usable_token_wins_over_stale_sync(self, stack: Stack) -> None:
+        stack.enroll(ALICE)
+        bearer = access_token(stack)
+        age = (setting(stack, "browser_sync.fresh_hours") + 2) * 3600
+        sync_binding(stack, captured_ago=age)
+        body = expect_state(readiness(stack, bearer), "ready")
+        assert "browser sync" not in body["summary"].lower()
+
+    def test_an_expiring_token_still_reports_expiring_beside_fresh_sync(
+        self, stack: Stack
+    ) -> None:
+        bearer = access_token(stack)
+        enroll_with_expiry(stack, ALICE, int(stack.clock()) + 3600)
+        sync_binding(stack, captured_ago=600)
+        expect_state(readiness(stack, bearer), "expiring")
+
+    def test_a_rejected_token_falls_back_to_fresh_sync_as_mcp_does(
+        self, stack: Stack
+    ) -> None:
+        key = stack.enroll(ALICE)
+        bearer = access_token(stack)
+        stack.store.mark_invalid(key, reason=REASON_CANVAS_TOKEN_REJECTED)
+        sync_binding(stack, captured_ago=600)
+        expect_state(readiness(stack, bearer), "ready")
+
+    def test_a_rejected_token_and_no_sync_stays_revoked(self, stack: Stack) -> None:
+        key = stack.enroll(ALICE)
+        bearer = access_token(stack)
+        stack.store.mark_invalid(key, reason=REASON_CANVAS_TOKEN_REJECTED)
+        expect_state(readiness(stack, bearer), "revoked")
+
+    def test_a_browser_signed_in_as_someone_else_is_refused_like_mcp(
+        self, stack: Stack
+    ) -> None:
+        # The rejected token names Canvas user 1; /mcp refuses a browser of user 2.
+        key = stack.enroll(ALICE)
+        bearer = access_token(stack)
+        stack.store.mark_invalid(key, reason=REASON_CANVAS_TOKEN_REJECTED)
+        sync_binding(stack, captured_ago=600, canvas_user_id="2")
+        expect_state(readiness(stack, bearer), "revoked")
+
+    def test_sync_of_one_account_never_helps_another(self, stack: Stack) -> None:
+        stack.enroll(BOB)
+        access_token(stack, ALICE)
+        bob = access_token(stack, BOB)
+        sync_binding(stack, ALICE, captured_ago=600)
+        expect_state(readiness(stack, bob), "ready")  # Bob has his own token
+        alice = access_token(stack, ALICE)
+        expect_state(readiness(stack, alice), "ready")
+
+    def test_the_browser_decision_is_the_one_mcp_uses(self) -> None:
+        # Guard against a second copy of the rule: both callers go through one function.
+        import inspect
+
+        from canvas_mcp.core.selfhost import readiness_api, request_context
+
+        assert "browser_decision(" not in inspect.getsource(readiness_api)
+        assert "browser_decision(" not in inspect.getsource(request_context)
 
 
 class TestAccountIsolation:

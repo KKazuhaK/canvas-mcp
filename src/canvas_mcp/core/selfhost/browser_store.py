@@ -33,6 +33,9 @@ from .db import schema as s
 from .db.engine import Database
 from .db.sealed import SEALED, SealKeys
 from .db.types import new_id
+from .db.workers import run_store
+from .server_settings import SETTINGS
+from .token_store import STATUS_INVALID
 
 PAIRING_TTL_SECONDS = 300
 #: Per-binding quotas, so one browser cannot fill the database.
@@ -138,6 +141,55 @@ def browser_decision(
     if token_user_id is not None and token_user_id != binding_user_id:
         return False, "user_mismatch"
     return True, None
+
+
+def token_usable_for_mcp(credential_id: str | None, credential_status: str | None) -> bool:
+    """Whether ``/mcp`` answers from the account's Canvas token (browser sync is then never read).
+
+    A saved token that is not marked invalid is used even if Canvas would reject it, so
+    ``/mcp`` falls back to browser sync only for no token or an invalid one.
+    """
+    return credential_id is not None and credential_status != STATUS_INVALID
+
+
+async def binding_in_use(
+    store: BrowserSyncStore, config: Any, principal_key: str, snapshot: Any
+) -> Binding | None:
+    """The browser-sync binding ``/mcp`` would answer from for this account, or None.
+
+    The one place that decides it (the request middleware and the readiness endpoint both
+    call it): there is an active binding with a Canvas host, and :func:`browser_decision`
+    accepts it for a request without a usable token. ``snapshot`` is the account's
+    :class:`McpSnapshot`, ``config`` the settings snapshot the request runs under.
+    """
+    binding = await run_store(store.active_binding, principal_key)
+    if binding is None or binding.canvas_host is None:
+        return None
+    active, _ = browser_decision(
+        token_usable=False,
+        token_host=snapshot.canvas_host,
+        binding_host=binding.canvas_host,
+        school_offered=config.schools.resolve_stored(binding.canvas_host) is not None,
+        token_user_id=snapshot.canvas_user_id,
+        binding_user_id=binding.canvas_user_id,
+    )
+    return binding if active else None
+
+
+def browser_windows(config: Any) -> tuple[int, int]:
+    """``(max_age_seconds, fresh_seconds)`` of synced data: older than the first is not used,
+    older than the second carries a "may be out of date" note."""
+
+    def number(key: str) -> int:
+        try:
+            return int(config.settings[key])
+        except (KeyError, TypeError, ValueError):
+            return int(SETTINGS[key].default)
+
+    return (
+        number("browser_sync.max_age_days") * 86400,
+        number("browser_sync.fresh_hours") * 3600,
+    )
 
 
 def drives_the_plan(key: str) -> bool:

@@ -44,7 +44,12 @@ from .accounts import (
 )
 from .authz.fastmcp_compat import AuthenticatedUser
 from .browser_plan import resource_key
-from .browser_store import BrowserSyncStore, browser_decision
+from .browser_store import (
+    BrowserSyncStore,
+    binding_in_use,
+    browser_windows,
+    token_usable_for_mcp,
+)
 from .config_snapshot import CURRENT_CONFIG, ConfigSnapshots
 from .db.snapshots import McpSnapshot
 from .db.workers import run_store
@@ -365,8 +370,8 @@ class SelfhostRequestContextMiddleware:
         self, principal_key: str, snapshot: McpSnapshot
     ) -> bool:
         generation = snapshot.credential_generation
-        if (
-            snapshot.credential_id is None or snapshot.credential_status == STATUS_INVALID
+        if not token_usable_for_mcp(
+            snapshot.credential_id, snapshot.credential_status
         ) and await self._attach_browser_source(principal_key, snapshot):
             return True
         if snapshot.credential_id is None:
@@ -438,22 +443,11 @@ class SelfhostRequestContextMiddleware:
             return False
         store = self.browser
         try:
-            binding = await run_store(store.active_binding, principal_key)
+            binding = await binding_in_use(store, config, principal_key, snapshot)
         except Exception:  # noqa: BLE001 - fall back to the "no token" refusal
             log_error("browser binding unreadable", account=principal_key)
             return False
-        if binding is None or binding.canvas_host is None:
-            return False
-        active, _ = browser_decision(
-            token_usable=False,
-            token_host=snapshot.canvas_host,
-            binding_host=binding.canvas_host,
-            school_offered=config.schools.resolve_stored(binding.canvas_host)
-            is not None,
-            token_user_id=snapshot.canvas_user_id,
-            binding_user_id=binding.canvas_user_id,
-        )
-        if not active:
+        if binding is None:
             return False
         cache: dict[str, list[Any]] = {}
         plan_keys: list[frozenset[str]] = []
@@ -474,13 +468,14 @@ class SelfhostRequestContextMiddleware:
                 cache[path] = await run_store(current, path)
             return cache[path]
 
+        windows = browser_windows(config)
         set_browser_source(
             BrowserSource(
                 binding_id=binding.id,
                 canvas_host=binding.canvas_host,
                 load=load,
-                max_age_seconds=_setting(config, "browser_sync.max_age_days") * 86400,
-                fresh_seconds=_setting(config, "browser_sync.fresh_hours") * 3600,
+                max_age_seconds=windows[0],
+                fresh_seconds=windows[1],
             )
         )
         return True

@@ -319,13 +319,27 @@ The `200` body follows version 1 of the service readiness contract:
 
 | `state` | When |
 |---|---|
-| `needs_setup` | No Canvas token is saved; the saved token's custody notice is out of date; its school is no longer offered; or the account waits for approval (no action then). |
+| `needs_setup` | No Canvas token is saved and no usable browser sync; the saved token's custody notice is out of date; its school is no longer offered; or the account waits for approval (no action then). |
 | `expiring` | Canvas reported an expiry and it is within `notifications.token_reminder_days` (the same threshold as the reminder e-mails). `expires_at` is set. |
 | `expired` | Canvas reported an expiry and it has passed (unless an administrator revoked the token). |
 | `revoked` | The Portal marked the saved token invalid: Canvas rejected it, an administrator revoked it, or it could not be decrypted. |
 | `ready` | Anything else. `expires_at` is set when Canvas reported one. |
 
-`degraded` is not used. `action` is always an absolute `https` URL on the Portal's public
+**Browser sync.** The state follows the credential path `/mcp` would use. A saved token that is
+not marked invalid always wins, and the token states above apply. With no token, or an invalid
+one, and an active browser-sync binding that `/mcp` accepts (the same school and Canvas user
+checks), the data decides:
+
+| Newest synced data | `state` |
+|---|---|
+| within `browser_sync.fresh_hours` | `ready` |
+| older than that, within `browser_sync.max_age_days` | `degraded`, summary "Canvas data comes from browser sync, last updated X ago - open Canvas to refresh", action to `/account/browser-extension` |
+| older than `browser_sync.max_age_days` (`/mcp` does not use it), or nothing uploaded yet | `needs_setup`, action to `/account/browser-extension` |
+
+A revoked binding, or one `/mcp` refuses, counts as no binding: `needs_setup` (no token) or
+`revoked` (rejected token).
+
+`degraded` is used only for stale browser-sync data. `action` is always an absolute `https` URL on the Portal's public
 base address and is omitted when the person cannot fix the problem. `expires_at` is omitted
 when unknown. The answer comes from the Portal's own records: Canvas is not called on a
 request, so `revoked` appears after the Portal itself has seen Canvas reject the token (an MCP
