@@ -4,12 +4,19 @@ name: Browser extension release
 # fire for prereleases), build the browser extension for Chrome and Firefox with
 # the release version stamped into the manifest, attach both zips and the
 # source archive to the release, and, where store credentials are configured,
-# submit the new version to the Chrome Web Store and Firefox Add-ons.
+# submit the new version to the Chrome Web Store, Microsoft Edge Add-ons and
+# Firefox Add-ons.
 #
 # Store submission is opt-in, and the first listing in each store is created by
 # hand. After that:
 #   Chrome  variables CHROME_PUBLISHER_ID, CHROME_EXTENSION_ID
 #           secrets   CHROME_CLIENT_ID, CHROME_CLIENT_SECRET, CHROME_REFRESH_TOKEN
+#   Edge    variable  EDGE_PRODUCT_ID (Partner Center product id, a GUID); Edge
+#                     takes the Chrome zip as is
+#           secrets   EDGE_CLIENT_ID, EDGE_API_KEY (Partner Center > Publish API,
+#                     API v1.1; the key expires, renew it there)
+#                     Edge refuses a new submission while the previous one is
+#                     still in certification; re-run the job once it is done
 #   Firefox variable  FIREFOX_ADDON_ID, the gecko id (`name@domain` or `{uuid}`),
 #                     not the AMO slug or number; it is also stamped into the
 #                     Firefox manifest
@@ -154,6 +161,71 @@ jobs:
             -d '{}' "$api/v2/${ITEM}:publish")
           echo "$publish"
           echo "$publish" | jq -e '.state | IN("PENDING_REVIEW", "STAGED", "PUBLISHED", "PUBLISHED_TO_TESTERS")' > /dev/null
+
+  edge-add-ons:
+    name: Submit to Microsoft Edge Add-ons
+    needs: build
+    if: vars.EDGE_PRODUCT_ID != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: extension-zips
+      - name: Upload and publish (Edge Add-ons API v1.1)
+        env:
+          PRODUCT_ID: ${{ vars.EDGE_PRODUCT_ID }}
+          CLIENT_ID: ${{ secrets.EDGE_CLIENT_ID }}
+          API_KEY: ${{ secrets.EDGE_API_KEY }}
+          VERSION: ${{ needs.build.outputs.version }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CLIENT_ID" ] || [ -z "$API_KEY" ]; then echo "EDGE_CLIENT_ID and EDGE_API_KEY secrets are required" >&2; exit 1; fi
+          echo "::add-mask::$API_KEY"
+          api="https://api.addons.microsoftedge.microsoft.com/v1/products/${PRODUCT_ID}"
+          # The API key never appears on a command line: curl reads the headers from a file.
+          headers=$(mktemp)
+          printf 'Authorization: ApiKey %s\nX-ClientID: %s\n' "$API_KEY" "$CLIENT_ID" > "$headers"
+
+          # Both operations answer 202 with the operation id in the Location
+          # header (a bare id or a path ending in it), then are polled until they
+          # leave InProgress.
+          operation_id() {
+            local id
+            id=$(tr -d '\r' < "$1" | sed -n 's/^[Ll]ocation:[[:space:]]*//p' | tail -n 1)
+            id=${id%/}
+            id=${id##*/}
+            if [ -z "$id" ]; then echo "no Location header in the response" >&2; return 1; fi
+            printf %s "$id"
+          }
+          wait_for() {
+            local url=$1 body status
+            for _ in $(seq 1 30); do
+              sleep 10
+              if ! body=$(curl -sS --fail-with-body --retry 3 --retry-all-errors -H @"$headers" "$url"); then
+                echo "$body" >&2; return 1
+              fi
+              status=$(echo "$body" | jq -r '.status // "Unknown"')
+              [ "$status" = InProgress ] || break
+            done
+            echo "$body"
+            if [ "$status" != Succeeded ]; then echo "operation ended in state $status" >&2; return 1; fi
+          }
+
+          resp=$(mktemp) out=$(mktemp)
+          post() {
+            if ! curl -sS --fail-with-body -D "$resp" -o "$out" -X POST -H @"$headers" "$@"; then
+              cat "$out" >&2; echo >&2; return 1
+            fi
+          }
+          post -H "Content-Type: application/zip" --data-binary "@canvas-mcp-sync-chrome-${VERSION}.zip" "$api/submissions/draft/package"
+          upload=$(operation_id "$resp")
+          wait_for "$api/submissions/draft/package/operations/$upload"
+
+          notes=$(jq -cn --arg t "$TAG" '{notes: ("Release " + $t + ". Source: https://github.com/" + env.GITHUB_REPOSITORY + "/releases/tag/" + $t)}')
+          post -H "Content-Type: application/json" -d "$notes" "$api/submissions"
+          publish=$(operation_id "$resp")
+          wait_for "$api/submissions/operations/$publish"
 
   firefox-add-ons:
     name: Submit to Firefox Add-ons

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Microsoft Edge Add-ons submission for the browser extension.** A stable release now also uploads the Chrome zip to Edge Add-ons and submits it (Edge Add-ons API v1.1) once `EDGE_PRODUCT_ID`, `EDGE_CLIENT_ID` and `EDGE_API_KEY` are configured; until then the job is skipped, like the Chrome and Firefox ones.
+- `browser-extension/STORE-LISTING.md`: the text, permission justifications, data disclosures and reviewer notes to enter when each store listing is first created by hand.
+
+### Changed
+
+- The Firefox build's default add-on id is now `canvas-mcp-sync@mcp.kazuhahub.com` instead of the placeholder `canvas-mcp-sync@canvas-mcp.invalid`, so a release zip can be the first upload to Firefox Add-ons. `CANVAS_SYNC_FIREFOX_ADDON_ID` still overrides it.
+
 ## [1.14.6] — 2026-11-10
 
 ### Added

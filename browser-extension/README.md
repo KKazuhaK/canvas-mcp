@@ -21,7 +21,7 @@ npm run build:firefox   # Firefox 142 or newer      -> dist/firefox
 ```
 
 Set `CANVAS_SYNC_FIREFOX_ADDON_ID` before `build:firefox` to use your own
-Firefox add-on id.
+Firefox add-on id (default `canvas-mcp-sync@mcp.kazuhahub.com`, the listed one).
 
 ## Privacy
 
@@ -33,8 +33,9 @@ what the extension reads, where it sends it, and what it keeps.
 Publishing a stable `v<x.y.z>` release runs
 `.github/workflows/browser-extension-release.yml`, which attaches the Chrome and
 Firefox zips and this folder's source to the release and, when store
-credentials are configured, submits the version to the Chrome Web Store and
-Firefox Add-ons. To reproduce a release build exactly (Node 24):
+credentials are configured, submits the version to the Chrome Web Store,
+Microsoft Edge Add-ons and Firefox Add-ons. [STORE-LISTING.md](STORE-LISTING.md)
+has what to enter when each store listing is first created by hand. To reproduce a release build exactly (Node 24):
 
 ```sh
 cd browser-extension
