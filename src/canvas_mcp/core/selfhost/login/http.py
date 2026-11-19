@@ -17,9 +17,12 @@ header or a body, so a log line built from one cannot leak a secret.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import re
-from collections.abc import Mapping
+import socket
+import urllib.request
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -78,20 +81,36 @@ class HttpResult:
     headers: Mapping[str, str] = field(default_factory=dict)
 
 
-def check_url(url: str) -> str:
-    """The URL if it may be called, else :class:`UpstreamError` ``blocked_url``."""
+def is_loopback_host(host: str) -> bool:
+    """``localhost``, ``*.localhost`` and loopback IP literals (the only hosts plain http may name)."""
+    name = host.strip().strip("[]").lower().rstrip(".")
+    if name == "localhost" or name.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(name.split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def check_url(url: str, *, allow_loopback: bool = False) -> str:
+    """The URL if it may be called, else :class:`UpstreamError` ``blocked_url``.
+
+    ``allow_loopback`` (trusted token issuers only) also lets ``localhost`` and loopback
+    addresses through, over http as well as https, for local development.
+    """
     try:
         parts = urlsplit(url)
         host = parts.hostname
         parts.port  # noqa: B018 - raises ValueError for a malformed port
     except ValueError:
         raise UpstreamError("blocked_url") from None
+    local = allow_loopback and bool(host) and is_loopback_host(host or "")
     if (
-        parts.scheme.lower() != "https"
+        parts.scheme.lower() not in (("https", "http") if local else ("https",))
         or not host
         or "@" in parts.netloc
         or parts.fragment
-        or blocked_host(host)
+        or (blocked_host(host) and not local)
         or any(ch.isspace() for ch in url)
     ):
         raise UpstreamError("blocked_url")
@@ -133,8 +152,60 @@ def _is_json_media(content_type: str) -> bool:
     return media == "application/json" or media.endswith("+json")
 
 
+Resolver = Callable[[str, int], Awaitable[list[str]]]
+
+
+async def system_resolver(host: str, port: int) -> list[str]:
+    """Every address the system resolver gives for ``host`` (an empty list when it has none)."""
+    try:
+        infos = await anyio.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        return []
+    return [str(info[4][0]) for info in infos]
+
+
+def env_proxy_applies(url: str) -> bool:
+    """Whether the environment (``HTTPS_PROXY``, ``ALL_PROXY``, ``NO_PROXY``) sends ``url`` through a proxy.
+
+    Decided on the original host name, with the same source httpx reads (the standard library's
+    proxy settings), so ``NO_PROXY`` rules for a name keep working.
+    """
+    parts = urlsplit(url)
+    proxies = urllib.request.getproxies()
+    if not (proxies.get(parts.scheme) or proxies.get("all")):
+        return False
+    return not urllib.request.proxy_bypass(parts.hostname or "")
+
+
+def address_is_public(value: str) -> bool:
+    """True only for a globally routable unicast address (IPv4-mapped IPv6 judged as its IPv4)."""
+    try:
+        address = ipaddress.ip_address(value.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_global and not (
+        address.is_multicast
+        or address.is_reserved
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_unspecified
+        or address.is_private
+    )
+
+
 class SafeHttp:
-    """Outbound requests with the limits above. ``transport`` replaces the network (tests)."""
+    """Outbound requests with the limits above. ``transport`` replaces the network (tests).
+
+    ``allow_loopback`` is only for trusted token issuers on localhost (see :func:`check_url`).
+    Every other client resolves the host itself, refuses it if any address is not a public one
+    (loopback, private, link-local, unspecified, multicast, reserved; IPv4 and IPv6), and connects
+    to the vetted address, so a second DNS answer cannot swap it. Through an environment proxy
+    the address is still vetted here, but the request goes to the host name and the proxy
+    resolves it, so pinning cannot be enforced there. That runs for the real network
+    and whenever a ``resolver`` is given (tests); a client with only a ``transport`` is a test double.
+    """
 
     def __init__(
         self,
@@ -142,7 +213,11 @@ class SafeHttp:
         transport: httpx.AsyncBaseTransport | None = None,
         connect_timeout: float = CONNECT_TIMEOUT_S,
         total_timeout: float = TOTAL_TIMEOUT_S,
+        allow_loopback: bool = False,
+        resolver: Resolver | None = None,
     ) -> None:
+        self._allow_loopback = allow_loopback
+        self._resolver = resolver
         self._transport = transport
         self._connect_timeout = connect_timeout
         self._total_timeout = total_timeout
@@ -161,11 +236,14 @@ class SafeHttp:
     ) -> HttpResult:
         """One request. A status in ``ok_statuses`` is returned (its body parsed as JSON when it is
         a 200, and best-effort otherwise); any other status raises ``http_status``."""
-        check_url(url)
+        check_url(url, allow_loopback=self._allow_loopback)
+        proxied = env_proxy_applies(url)
+        pinned_url, pin_headers, extensions = await self._pin(url, pin=not proxied)
         sent = {
             "User-Agent": USER_AGENT,
             "Accept": "application/json",
             **(headers or {}),
+            **pin_headers,
         }
         if basic_auth is not None:
             # The caller form-encodes both parts first (RFC 6749 section 2.3.1).
@@ -175,6 +253,9 @@ class SafeHttp:
             with anyio.fail_after(self._total_timeout):
                 async with httpx.AsyncClient(
                     transport=self._transport,
+                    # A pinned request goes to an address: the environment's proxy rules were
+                    # decided for the host name above and must not apply a second time.
+                    trust_env=proxied,
                     follow_redirects=False,
                     timeout=httpx.Timeout(
                         self._total_timeout, connect=self._connect_timeout
@@ -182,9 +263,10 @@ class SafeHttp:
                 ) as client:
                     request = client.build_request(
                         method,
-                        url,
+                        pinned_url,
                         headers=sent,
                         data=dict(data) if data is not None else None,
+                        extensions=extensions,
                     )
                     response = await client.send(request, stream=True)
                     try:
@@ -221,6 +303,39 @@ class SafeHttp:
             except UpstreamError:
                 body = None
         return HttpResult(status, body, result_headers)
+
+    async def _pin(
+        self, url: str, *, pin: bool
+    ) -> tuple[str, dict[str, str], dict[str, Any]]:
+        """The address to connect to, with the Host header and TLS name of the real host.
+
+        Raises ``blocked_url`` when the host does not resolve or any answer is not public. With
+        ``pin`` False (a proxy applies) the addresses are vetted but the URL is left alone.
+        """
+        # Read now, not at construction: tests set the transport on a built client.
+        if self._allow_loopback or (
+            self._transport is not None and self._resolver is None
+        ):
+            return url, {}, {}
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        try:
+            ipaddress.ip_address(host.strip("[]"))
+        except ValueError:
+            addresses = await (self._resolver or system_resolver)(host, port)
+        else:
+            addresses = [host.strip("[]")]  # an address literal is vetted as it is
+        if not addresses or not all(address_is_public(a) for a in addresses):
+            raise UpstreamError("blocked_url")
+        chosen = addresses[0]
+        if not pin or chosen == host.strip("[]"):
+            return url, {}, {}
+        shown = f"[{chosen}]" if ":" in chosen else chosen
+        netloc = shown + (f":{parts.port}" if parts.port else "")
+        pinned = parts._replace(netloc=netloc).geturl()
+        host_header = host + (f":{parts.port}" if parts.port else "")
+        return pinned, {"Host": host_header}, {"sni_hostname": host}
 
     @staticmethod
     async def _read(response: httpx.Response, max_bytes: int) -> bytes:

@@ -31,6 +31,8 @@ See [Agent Skills](#-agent-skills) for the list. If your agent is Claude Code, t
 
 **Self-hosting for a small trusted group:** [`deploy/selfhost/README.md`](deploy/selfhost/README.md) (Docker, Microsoft Entra sign-in, with optional Google, GitHub and OpenID Connect sign-in via [`SELFHOST_LOGIN_PROVIDERS`](deploy/selfhost/README.md#sign-in-providers-google-github-oidc), one Canvas token per user; the data lives in a SQLite file by default, with optional PostgreSQL, see its [Database](deploy/selfhost/README.md#database) section).
 
+**Sign-in through a hub:** a self-hosted server can also accept access tokens from trusted external OAuth issuers (MCPHub, Entra, Keycloak) on `/mcp`, so a hub that already signed the person in can call Canvas for them with no second sign-in or consent; it is off until an operator adds an issuer, see [Trusted issuers](deploy/selfhost/CONFIGURATION.md#trusted-issuers).
+
 ## For AI Agents
 
 <!--

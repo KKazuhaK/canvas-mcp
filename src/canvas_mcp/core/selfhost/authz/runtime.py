@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 from ...logging import log_warning
 from ..db.workers import run_store
+from ..federation.service import FederationService
+from ..federation.store import FederationStore
 from ..pagination import DEFAULT_LIMIT, Page
 from ..settings import SelfhostSettings
 from ..token_store import Keyring, TokenStore
@@ -43,6 +45,8 @@ class AuthzRuntime:
     clock: Callable[[], float] = time.time
     #: The cookie that ties an authorization request to the browser that started it.
     binding_cookie: str = BINDING_COOKIE
+    #: Tokens of trusted external issuers (the list is empty unless the operator adds one).
+    federation: FederationService | None = None
 
     # -- what /account uses -------------------------------------------------------------------
 
@@ -129,6 +133,18 @@ def build_authz_runtime(
         issuer=issuer,
         audience=audience,
         clock=clock,
+        federation=FederationService(
+            FederationStore(
+                token_store.database,
+                api_scope=settings.api_scope,
+                audience=audience,
+                max_auth_age=authz.max_upstream_auth_age,
+                clock=clock,
+            ),
+            audience=audience,
+            policy=settings.access_policy,
+            clock=clock,
+        ),
     )
 
 

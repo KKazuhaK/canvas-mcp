@@ -69,6 +69,10 @@ _CREDENTIAL_CHANGED = (
     "Nothing was sent to Canvas for this call. Try again."
 )
 _IDENTITY_MISMATCH = "Identity check failed; reconnect the connector."
+_TOKEN_READ_ONLY = (
+    "This connection is read-only: the sign-in you came through did not grant the "
+    "write scope. Nothing was sent to Canvas for this call."
+)
 
 
 def _check_generation_in_process(error_type: type[Exception]) -> None:
@@ -180,6 +184,8 @@ class SelfhostCredentialGate(Middleware):
         prefs = get_request_tool_prefs()
         if prefs is not None and not prefs.readable:
             raise ToolError(prefs_unreadable_message())
+        if prefs is not None and prefs.read_only:
+            raise ToolError(_TOKEN_READ_ONLY)
         raise ToolError(write_tool_off_message(name, self._account_url))
 
     async def on_call_tool(

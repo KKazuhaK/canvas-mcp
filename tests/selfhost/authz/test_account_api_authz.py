@@ -43,6 +43,7 @@ GRANT_VIEW_KEYS = {
     "id",
     "client",
     "redirect_host",
+    "federated",
     "created_at",
     "last_used_at",
     "expires_at",
@@ -508,6 +509,7 @@ class TestMyGrants:
                 UUID_RE.fullmatch(grant["id"]) and grant["redirect_host"] == "claude.ai"
             )
             assert grant["created_at"] and grant["expires_at"]
+            assert grant["federated"] is None
         kinds = {grant["client"]["kind"]: grant["client"] for grant in grants}
         assert kinds["dcr"]["verified"] is False and kinds["dcr"]["host"] is None
         assert kinds["dcr"]["label"] == "Test app"

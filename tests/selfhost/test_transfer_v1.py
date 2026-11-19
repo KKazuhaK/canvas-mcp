@@ -232,6 +232,31 @@ def source(tmp_path):
                 expires_at=NOW + 300,
             )
         )
+        conn.execute(
+            insert(s.trusted_issuers).values(
+                issuer="https://hub.example.test",
+                name="Hub",
+                audience="https://canvas.example.test/mcp",
+                jwks_url=None,
+                algorithms="ES256 RS256",
+                require_typ_at_jwt=True,
+                subject_claim="mcphub_uid",
+                read_scope=None,
+                write_scope="canvas:write",
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        conn.execute(
+            insert(s.federated_identities).values(
+                issuer="https://hub.example.test",
+                claim="mcphub_uid",
+                subject="11111111-2222-3333-4444-555555555555",
+                account_id=account,
+                operator_linked=True,
+                created_at=NOW,
+            )
+        )
     try:
         yield store, path, ring, account, credential
     finally:

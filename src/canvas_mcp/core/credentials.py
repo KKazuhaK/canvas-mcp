@@ -105,6 +105,8 @@ class RequestToolPrefs:
 
     enabled: frozenset[str] = frozenset()
     readable: bool = True
+    #: A trusted issuer's token without its write scope: no write tool, whatever was switched on.
+    read_only: bool = False
 
 
 # Random per-process key: derives opaque cache keys from Canvas tokens in the

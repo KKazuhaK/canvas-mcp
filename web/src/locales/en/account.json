@@ -262,7 +262,8 @@
     "revokeLabel": "Revoke: {{name}}",
     "revokeTitle": "Disconnect {{name}}?",
     "revokeBody": "The app loses access on its next MCP request and has to ask for your approval again.",
-    "revoked": "App disconnected."
+    "revoked": "App disconnected.",
+    "viaIssuer": "via {{name}} — manage there"
   },
   "consent": {
     "title": "Connect this app to your account?",

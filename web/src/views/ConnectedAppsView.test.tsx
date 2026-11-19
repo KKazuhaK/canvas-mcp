@@ -172,6 +172,34 @@ describe('Connected apps', () => {
     expect(await screen.findByText('No apps are connected.')).toBeInTheDocument()
   })
 
+  it('shows a connection through a trusted issuer read-only, with no revoke button', async () => {
+    await renderApp('/connected-apps', 'local', () => {
+      scriptAdapter((request) => {
+        if (request.url === '/me') {
+          return { status: 200, data: meFixture() }
+        }
+        return {
+          status: 200,
+          data: {
+            grants: [
+              {
+                id: GRANT_1,
+                client: { kind: 'dcr', label: 'MCPHub', name: 'MCPHub', host: null, verified: false },
+                redirect_host: '',
+                federated: { issuer_name: 'MCPHub' },
+                created_at: '2026-01-01T00:00:00Z',
+                last_used_at: null,
+                expires_at: '2027-01-01T00:00:00Z',
+              },
+            ],
+          },
+        }
+      })
+    })
+    expect((await screen.findAllByText('via MCPHub — manage there')).length).toBeGreaterThan(0)
+    expect(screen.queryByRole('button', { name: /^Revoke:/ })).toBeNull()
+  })
+
   it('says so when no app is connected', async () => {
     await renderApp('/connected-apps', 'local', () => {
       scriptAdapter((request) =>

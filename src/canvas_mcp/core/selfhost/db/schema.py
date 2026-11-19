@@ -15,6 +15,7 @@ from sqlalchemy import (
     UniqueConstraint,
     false,
     text,
+    true,
 )
 
 from .types import Bytes, Epoch, Flag, JsonDoc, Key, Uuid
@@ -553,6 +554,70 @@ oauth_grants = Table(
     postgresql_with={"fillfactor": 90},
 )
 
+trusted_issuers = Table(
+    "trusted_issuers",
+    metadata,
+    Column("issuer", Key, primary_key=True),
+    Column("name", Text),
+    Column("audience", Text),
+    Column("jwks_url", Text),
+    Column("algorithms", Text, nullable=False),
+    Column("require_typ_at_jwt", Flag(), nullable=False, server_default=true()),
+    Column("subject_claim", Text, nullable=False, server_default=text("'sub'")),
+    Column("read_scope", Text),
+    Column("write_scope", Text),
+    Column("created_at", Epoch, nullable=False),
+    Column("updated_at", Epoch, nullable=False),
+    CheckConstraint("length(issuer) BETWEEN 1 AND 512", name="issuer"),
+    CheckConstraint("name IS NULL OR length(name) BETWEEN 1 AND 40", name="name"),
+    CheckConstraint(
+        "audience IS NULL OR length(audience) BETWEEN 1 AND 512", name="audience"
+    ),
+    CheckConstraint(
+        "jwks_url IS NULL OR length(jwks_url) BETWEEN 1 AND 2048", name="jwks_url"
+    ),
+    CheckConstraint("length(algorithms) BETWEEN 1 AND 80", name="algorithms"),
+    CheckConstraint("length(subject_claim) BETWEEN 1 AND 64", name="subject_claim"),
+    CheckConstraint(
+        "require_typ_at_jwt IN (0,1)", name="require_typ_at_jwt_boolean"
+    ).ddl_if(dialect="sqlite"),
+    info={"lifecycle": "durable"},
+    sqlite_strict=True,
+    sqlite_with_rowid=False,
+)
+
+# People who arrive with a token from a trusted external issuer. Their own namespace, keyed by the
+# issuer *and* the claim the subject was read from, so a subject can never be mistaken for a
+# sign-in identity (``external_identity_owners``) or for the value of another claim.
+federated_identities = Table(
+    "federated_identities",
+    metadata,
+    Column("issuer", Key, nullable=False),
+    Column("claim", Key, nullable=False),
+    Column("subject", Key, nullable=False),
+    Column(
+        "account_id",
+        Uuid(),
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("operator_linked", Flag(), nullable=False, server_default=false()),
+    Column("created_at", Epoch, nullable=False),
+    PrimaryKeyConstraint("issuer", "claim", "subject"),
+    CheckConstraint("length(issuer) BETWEEN 1 AND 512", name="issuer"),
+    CheckConstraint("length(claim) BETWEEN 1 AND 64", name="claim"),
+    CheckConstraint("length(subject) BETWEEN 1 AND 255", name="subject"),
+    CheckConstraint("length(account_id) = 36", name="account_id_uuid").ddl_if(
+        dialect="sqlite"
+    ),
+    CheckConstraint("operator_linked IN (0,1)", name="operator_linked_boolean").ddl_if(
+        dialect="sqlite"
+    ),
+    info={"lifecycle": "durable"},
+    sqlite_strict=True,
+    sqlite_with_rowid=False,
+)
+
 oauth_codes = Table(
     "oauth_codes",
     metadata,
@@ -790,6 +855,16 @@ Index(
     postgresql_where=oauth_grants.c.revoked_at.is_not(None),
     sqlite_where=oauth_grants.c.revoked_at.is_not(None),
 )
+# One federated grant (a trusted external issuer's tokens) per account and issuer.
+Index(
+    "uq_oauth_grants_federated",
+    oauth_grants.c.account_id,
+    oauth_grants.c.client_id,
+    unique=True,
+    postgresql_where=oauth_grants.c.client_id.like("federated:%"),
+    sqlite_where=oauth_grants.c.client_id.like("federated:%"),
+)
+Index("ix_federated_identities_account_id", federated_identities.c.account_id)
 Index("ix_oauth_codes_account_id", oauth_codes.c.account_id)
 Index("ix_oauth_codes_expires_at", oauth_codes.c.expires_at)
 Index(

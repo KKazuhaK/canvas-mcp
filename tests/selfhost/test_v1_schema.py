@@ -92,6 +92,8 @@ def test_current_tables_with_a_lifecycle_and_registered_ciphertexts():
         "extension_bindings",
         "extension_pairing_codes",
         "browser_snapshots",
+        "trusted_issuers",
+        "federated_identities",
         "login_providers",
         "canvas_schools",
         "accounts",
@@ -284,7 +286,7 @@ def test_sqlite_strict_and_autoincrement_options(connection):
             "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != 'canvas_mcp_alembic_version'"
         )
     ).all()
-    assert len(tables) == 29
+    assert len(tables) == 31
     for name, ddl in tables:
         assert "STRICT" in ddl, name
         if name in {"auth_events", "audit_log"}:
@@ -304,5 +306,7 @@ def test_sqlite_strict_and_autoincrement_options(connection):
             "external_identity_owners",
             "account_login_policy",
             "account_allowed_login_providers",
+            "trusted_issuers",
+            "federated_identities",
         }:
             assert "WITHOUT ROWID" in ddl, name
