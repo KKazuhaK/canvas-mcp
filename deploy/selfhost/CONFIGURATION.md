@@ -137,6 +137,11 @@ person does not sign in to Canvas MCP or approve anything again. The feature is
 off until you add an issuer: with none configured, `/mcp` accepts exactly the
 tokens this server issued itself, as before.
 
+Trusted issuers are listed after this server in `authorization_servers` of the
+protected-resource metadata (`/.well-known/oauth-protected-resource/mcp`), exactly as
+configured, because a hub looks for itself there before it issues a token for this
+resource. With none configured the document lists only this server, as before.
+
 **Choosing the checks.** A token whose issuer is this server goes to this
 server's own decoder, as always. Any other token goes to the trusted issuers,
 and only if at least one is configured. Everything below is checked in this

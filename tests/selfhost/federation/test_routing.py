@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from ..authz.stack import ALICE, AUDIENCE
+from canvas_mcp.core.selfhost.federation.config import build_issuer
+
+from ..authz.stack import ALICE, AUDIENCE, BASE
 from .issuer import FakeIssuer
 
 
@@ -89,3 +91,54 @@ class TestOnlyOnMcp:
             "/api/v1/extension/plan", headers={"Authorization": f"Bearer {token}"}
         )
         assert response.status_code in (401, 403)
+
+
+class TestProtectedResourceMetadata:
+    PATH = "/.well-known/oauth-protected-resource/mcp"
+
+    def _doc(self, hub):
+        return hub.stack.client.get(self.PATH)
+
+    def test_no_issuer_is_the_stock_document(self, hub):
+        from ..authz.stack import ISSUER
+
+        response = self._doc(hub)
+        assert response.json()["authorization_servers"] == [ISSUER]
+        assert response.headers["cache-control"] == "public, max-age=3600"
+
+    def test_issuers_are_listed_after_this_one_as_configured(self, hub):
+        from ..authz.stack import ISSUER
+
+        stock = self._doc(hub)
+        hub.federation.store.add_issuer(build_issuer("https://b.example/"))
+        hub.federation.store.add_issuer(build_issuer("https://a.example"))
+        hub.federation.reload()
+        response = self._doc(hub)
+        body = response.json()
+        assert body["authorization_servers"] == [
+            ISSUER,
+            "https://a.example",
+            "https://b.example/",
+        ]
+        assert {k: v for k, v in body.items() if k != "authorization_servers"} == {
+            k: v for k, v in stock.json().items() if k != "authorization_servers"
+        }
+        assert response.headers["cache-control"] == stock.headers["cache-control"]
+        assert int(response.headers["content-length"]) == len(response.content)
+        cors = hub.stack.client.get(self.PATH, headers={"Origin": BASE})
+        assert cors.headers["access-control-allow-origin"] == "*"
+
+    def test_one_issuer(self, hub):
+        from ..authz.stack import ISSUER
+
+        hub.trust()
+        servers = self._doc(hub).json()["authorization_servers"]
+        assert servers == [ISSUER, hub.issuer.issuer]
+
+    def test_removing_an_issuer_drops_it_after_the_ttl(self, hub):
+        hub.trust()
+        assert len(self._doc(hub).json()["authorization_servers"]) == 2
+        hub.federation.store.remove_issuer(hub.issuer.issuer)
+        assert len(self._doc(hub).json()["authorization_servers"]) == 2
+        hub.stack.clock.advance(11)
+        assert len(self._doc(hub).json()["authorization_servers"]) == 1

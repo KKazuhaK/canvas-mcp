@@ -11,8 +11,10 @@ where the stock ones do not fit a public-client, JWT-issuing server:
 ``POST /register``     the SDK's handler, with ``register_client`` doing the validation the SDK does not
 ``POST /revoke``       ours: the SDK's insists on a ``client_secret`` that a public client does not have
 
-``/.well-known/oauth-protected-resource/mcp`` is FastMCP's, unchanged (``authorization_servers``
-is the issuer). After the surgery the route table is compared with the one expected
+``/.well-known/oauth-protected-resource/mcp`` is FastMCP's route behind :class:`_ListTrustedIssuers`:
+with no trusted issuer the response is FastMCP's, untouched; otherwise ``authorization_servers`` is
+this issuer followed by each trusted issuer as configured (a hub only issues tokens for a resource
+that lists it). After the surgery the route table is compared with the one expected
 (:data:`EXPECTED_ROUTES`) and the server refuses to start on any difference.
 
 **One issuer string** (``https://host/``, the trailing slash included) is the metadata
@@ -28,6 +30,7 @@ page, and the code is created by :class:`~.consent.ConsentService`.
 
 from __future__ import annotations
 
+import json
 import re
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
@@ -192,6 +195,64 @@ def _cors(app: ASGIApp, methods: list[str]) -> ASGIApp:
         allow_methods=methods,
         allow_headers=["mcp-protocol-version"],
     )
+
+
+_PRM_PREFIX = "/.well-known/oauth-protected-resource"
+
+
+class _ListTrustedIssuers:
+    """FastMCP's protected-resource metadata app, with the trusted issuers listed after this one.
+
+    The list is read through the federation service, which caches it for a few seconds, so the
+    operator CLI (another process) is noticed soon. With no trusted issuer, or when the list
+    cannot be read, the inner response is passed through untouched.
+    """
+
+    def __init__(self, app: ASGIApp, authz: AuthzRuntime) -> None:
+        self.app = app
+        self.authz = authz
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        federation = self.authz.federation
+        if scope["type"] != "http" or scope["method"] != "GET" or federation is None:
+            await self.app(scope, receive, send)
+            return
+        try:
+            trusted = sorted({i.issuer for i in await federation.issuers()})
+        except StoreUnavailable:
+            trusted = []
+        if not trusted:
+            await self.app(scope, receive, send)
+            return
+        messages: list[Any] = []
+
+        async def capture(message: Any) -> None:
+            messages.append(message)
+
+        await self.app(scope, receive, capture)
+        start = next(m for m in messages if m["type"] == "http.response.start")
+        body = b"".join(
+            m.get("body", b"") for m in messages if m["type"] == "http.response.body"
+        )
+        try:
+            document = json.loads(body)
+            listed = document["authorization_servers"]
+            document["authorization_servers"] = listed + [
+                i for i in trusted if i not in listed
+            ]
+            body = json.dumps(
+                document, separators=(",", ":"), ensure_ascii=False
+            ).encode()
+        except (ValueError, KeyError, TypeError):
+            for message in messages:
+                await send(message)
+            return
+        headers = [
+            (k, v) for k, v in start["headers"] if k.lower() != b"content-length"
+        ]
+        headers.append((b"content-length", str(len(body)).encode()))
+        await send({**start, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
 
 
 class LocalAuthorizationServer(OAuthProvider):
@@ -582,6 +643,14 @@ class LocalAuthorizationServer(OAuthProvider):
                 out.append(self._token_route())
             elif path == "/revoke":
                 out.append(self._revoke_route())
+            elif isinstance(path, str) and path.startswith(_PRM_PREFIX):
+                out.append(
+                    Route(
+                        path,
+                        endpoint=_ListTrustedIssuers(route.endpoint, self.authz),
+                        methods=sorted(methods),
+                    )
+                )
             elif path == "/register":
                 out.append(
                     Route(
