@@ -505,19 +505,10 @@ class LocalAuthorizationServer(OAuthProvider):
                 return await self._load_federated_token(token)
             if not isinstance(token, str) or len(token) > MAX_ACCESS_TOKEN_CHARS:
                 return None
-            decoded = self.authz.codec.decode(token)
-            claims = decoded.claims
-            snapshot = await run_store(
-                self.authz.store.read_mcp_snapshot, claims["acct"], claims["grant"]
-            )
-            if (
-                snapshot is None
-                or snapshot.jwt_epoch != decoded.epoch
-                or snapshot.client_id != claims["client_id"]
-                or snapshot.revoked_at is not None
-                or snapshot.grant_expires_at <= int(self.authz.clock())
-            ):
+            verified = await self.authz.verify_access_token(token)
+            if verified is None:
                 return None
+            claims, snapshot = verified.claims, verified.snapshot
             result = AccessToken(
                 token=token,
                 client_id=claims["client_id"],

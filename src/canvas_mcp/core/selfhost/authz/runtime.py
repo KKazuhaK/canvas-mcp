@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ...logging import log_warning
 from ..db.workers import run_store
@@ -20,13 +20,22 @@ from .consent import ConsentService
 from .grants import GrantService
 from .models import REVOKE_ADMISSION_LOST, GrantRecord
 from .store import AuthzStore
-from .tokens import AccessTokenCodec
+from .tokens import AccessTokenCodec, AccessTokenInvalid
 from .transactions import BINDING_COOKIE, SqlLoginStateStore
 from .urls import audience_of, issuer_of
 
 if TYPE_CHECKING:
     from ..app import SelfhostRuntime
+    from ..db.snapshots import McpSnapshot
     from .server import LocalAuthorizationServer
+
+
+@dataclass(frozen=True)
+class VerifiedAccess:
+    """An access token of this server that passed every check, with the account's current standing."""
+
+    claims: dict[str, Any]
+    snapshot: McpSnapshot
 
 
 @dataclass
@@ -82,6 +91,34 @@ class AuthzRuntime:
 
     async def owner_revoke_grant(self, grant_id: str, actor_key: str) -> bool:
         return await self.grants.owner_revoke(grant_id, actor_key)
+
+    async def verify_access_token(self, token: str) -> VerifiedAccess | None:
+        """Verify one access token of this server; None when it is not valid.
+
+        The one definition of "a valid access token" for every endpoint that takes the
+        bearer token of an app (``/mcp`` and ``GET /api/v1/readiness``): the signature,
+        issuer, audience (the MCP resource URL, exactly), scope, lifetime and signing epoch
+        (:class:`AccessTokenCodec`), then the grant (present, not revoked, not expired,
+        same client) and the account, read in one database call. A database outage raises
+        :class:`StoreUnavailable`; the caller decides how to answer it.
+        """
+        try:
+            decoded = self.codec.decode(token)
+        except AccessTokenInvalid:
+            return None
+        claims = decoded.claims
+        snapshot = await run_store(
+            self.store.read_mcp_snapshot, claims["acct"], claims["grant"]
+        )
+        if (
+            snapshot is None
+            or snapshot.jwt_epoch != decoded.epoch
+            or snapshot.client_id != claims["client_id"]
+            or snapshot.revoked_at is not None
+            or snapshot.grant_expires_at <= int(self.clock())
+        ):
+            return None
+        return VerifiedAccess(claims, snapshot)
 
     def bump_jwt_epoch(self) -> int:
         """Invalidate existing access tokens on every instance at the next request."""

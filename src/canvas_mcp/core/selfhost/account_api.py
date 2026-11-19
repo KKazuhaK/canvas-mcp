@@ -2806,7 +2806,12 @@ class ApiApp:
 def build_api_routes(app: web.AccountCore) -> list[Route]:
     """The ``/api/v1`` routes over an existing account application."""
     from .browser_extension_api import build_extension_routes
+    from .readiness_api import build_readiness_routes
 
     api = ApiApp(app)
-    # The extension's routes go first: the API's catch-all would answer them not_found.
-    return [*build_extension_routes(app, api.browser), *api.routes()]
+    # The bearer-token routes go first: the API's catch-all would answer them not_found.
+    return [
+        *build_extension_routes(app, api.browser),
+        *build_readiness_routes(app),
+        *api.routes(),
+    ]

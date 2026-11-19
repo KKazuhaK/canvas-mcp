@@ -284,6 +284,54 @@ Register this server's `/mcp` as the resource (Entra: the API's application ID U
 Keycloak: an audience mapper) so that `aud` carries the audience you set. Only access
 tokens work: an ID token has the wrong audience and is refused.
 
+## Readiness endpoint
+
+`GET /api/v1/readiness` tells an integrating hub (for example MCPHub) whether a person's
+connection actually works. Signing in through the Portal's OAuth does not save a Canvas
+token, so "connected" is not "usable". The hub sends the access token it already uses for
+MCP calls; nothing else needs configuring, and the endpoint is always served.
+
+```
+GET /api/v1/readiness
+Accept: application/json
+Authorization: Bearer <the Portal-issued OAuth access token>
+```
+
+The token is checked by the same function that guards `/mcp`: signature, issuer, audience
+(the MCP URL), scope, lifetime, signing epoch, and a grant that is neither revoked nor
+expired. A missing, malformed, expired, revoked or wrong-audience token gets `401` with
+`{"error": {"code": "not_authenticated"}}` and a `WWW-Authenticate: Bearer` header. Cookies
+are never read. `POST` and the other methods get `405`; no CORS headers are sent. A database
+outage is `503`.
+
+The `200` body follows version 1 of the service readiness contract:
+
+```json
+{
+  "version": 1,
+  "state": "needs_setup",
+  "summary": "No Canvas token is saved yet. Save one to use the Canvas tools.",
+  "action": {"label": "Set up Canvas token", "url": "https://portal.example.edu/account/token"},
+  "expires_at": "2026-12-01T00:00:00Z",
+  "checked_at": "2026-11-19T10:00:00Z"
+}
+```
+
+| `state` | When |
+|---|---|
+| `needs_setup` | No Canvas token is saved; the saved token's custody notice is out of date; its school is no longer offered; or the account waits for approval (no action then). |
+| `expiring` | Canvas reported an expiry and it is within `notifications.token_reminder_days` (the same threshold as the reminder e-mails). `expires_at` is set. |
+| `expired` | Canvas reported an expiry and it has passed (unless an administrator revoked the token). |
+| `revoked` | The Portal marked the saved token invalid: Canvas rejected it, an administrator revoked it, or it could not be decrypted. |
+| `ready` | Anything else. `expires_at` is set when Canvas reported one. |
+
+`degraded` is not used. `action` is always an absolute `https` URL on the Portal's public
+base address and is omitted when the person cannot fix the problem. `expires_at` is omitted
+when unknown. The answer comes from the Portal's own records: Canvas is not called on a
+request, so `revoked` appears after the Portal itself has seen Canvas reject the token (an MCP
+call or a re-check). The response never contains a token or any part of one, and the request
+writes nothing. A disabled account has its grants revoked, so it gets `401`, as on `/mcp`.
+
 ## Runtime and migration boundaries
 
 Each authenticated MCP or browser request reads the committed configuration
