@@ -447,7 +447,7 @@ class SelfhostRequestContextMiddleware:
         except Exception:  # noqa: BLE001 - fall back to the "no token" refusal
             log_error("browser binding unreadable", account=principal_key)
             return False
-        if binding is None:
+        if binding is None or binding.canvas_host is None:
             return False
         cache: dict[str, list[Any]] = {}
         plan_keys: list[frozenset[str]] = []
