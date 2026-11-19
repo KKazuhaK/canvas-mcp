@@ -40,7 +40,7 @@ if (target === 'firefox') {
   delete manifest.minimum_chrome_version;
   manifest.browser_specific_settings = {
     gecko: {
-      id: process.env.CANVAS_SYNC_FIREFOX_ADDON_ID || 'canvas-mcp-sync@canvas-mcp.invalid',
+      id: process.env.CANVAS_SYNC_FIREFOX_ADDON_ID || 'canvas-mcp-sync@mcp.kazuhahub.com',
       strict_min_version: '142.0',
       // Course data (websiteContent), the profile's name and email (personallyIdentifyingInfo),
       // Inbox previews in the activity stream (personalCommunications) and the portal upload
