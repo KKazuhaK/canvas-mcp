@@ -7,9 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.9] — 2026-11-19
+
 ### Changed
 
 - **New browser extension icon.** Canvas MCP Sync now has a flat red icon: a white C-shaped sync arrow with three dots. It uses Canvas's brand red only, not the Instructure logo. `icon-store.svg` keeps the 16 px transparent padding the Chrome Web Store asks for and renders `icon-128.png`.
+
+### Fixed
+
+- Self-hosted: the protected-resource metadata lists configured trusted issuers after this server, so a hub such as MCPHub issues tokens for this resource.
+- Tests: the code-API sandbox test no longer picks up other runs' temporary scripts (Windows CI).
 
 ## [1.14.8] — 2026-11-19
 
