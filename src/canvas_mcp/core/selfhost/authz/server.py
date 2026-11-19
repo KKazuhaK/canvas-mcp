@@ -475,9 +475,7 @@ class LocalAuthorizationServer(OAuthProvider):
             # Raising here would let Starlette's server-error layer start a 500.
             MCP_UNAVAILABLE.set(True)
             return None
-        except (
-            Exception
-        ):  # noqa: BLE001 - fail closed on anything, including a database error
+        except Exception:  # noqa: BLE001 - fail closed on anything, including a database error
             return None
 
     async def _load_federated_token(self, token: str) -> AccessToken | None:

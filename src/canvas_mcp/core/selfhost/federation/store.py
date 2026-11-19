@@ -1,12 +1,16 @@
 """The database side of trusted issuers: the issuer list, links, accounts and federated grants.
 
-Request path (:meth:`FederationStore.resolve`): a verified ``(issuer, subject)`` is looked up in
-``external_identity_owners``. A known subject of an active account needs one read. An unknown
-subject gets an account under the admission policy exactly like a first sign-in (``open``,
-``rules`` with ``federated:any``, ``approval``), and an active account gets one *federated
+Request path (:meth:`FederationStore.resolve`): a verified ``(issuer, claim, subject)`` is looked
+up in ``federated_identities``, a namespace of its own (never a sign-in identity). Every request
+checks the account's standing and the *current* admission policy: an identity the operator linked
+is admitted, one that was made at its first token is admitted only while the policy (``open``,
+``rules`` with ``federated:any``, ``approval``) still admits it. An unknown subject gets an
+account under that policy exactly like a first sign-in, and an active account gets one *federated
 grant* per issuer so that the per-grant machinery (snapshot, usage, tool gate, Canvas token
-binding) works unchanged. Everything that writes runs in one serialised write transaction, so
-two first requests of the same person make one account and one grant.
+binding) works unchanged. The grant is not ended by disabling the account or by losing
+admission, because both are checked on every request; only an explicit revoke-grant, an unlink
+or removing the issuer ends it. Everything that writes runs in one serialised write
+transaction, so two first requests of the same person make one account and one grant.
 
 Accounts are never matched by e-mail address or name: only the operator's explicit ``link``.
 """
@@ -18,15 +22,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import and_, delete, insert, select, update
 from sqlalchemy.engine import Connection, Row
 
 from .. import accounts as acc
 from ..accounts import AccessPolicy, AccountFacts, DecisionFacts, Denied, ExternalClaims
-from ..authz.models import REVOKE_ACCOUNT_DISABLED
 from ..db import schema as s
 from ..db.engine import Database
-from ..db.repos import Repositories, _upsert_insert
+from ..db.repos import Repositories
 from ..db.types import new_id
 from ..token_store import (
     AUDIT_ACCOUNT_ACTIVATED,
@@ -35,10 +38,6 @@ from ..token_store import (
     SYSTEM_ACTOR,
 )
 from .config import GRANT_PREFIX, TrustedIssuer
-
-#: How long a federated grant lives, and when a request renews it.
-GRANT_TTL_S = 365 * 86400
-GRANT_RENEW_BEFORE_S = 30 * 86400
 
 AUDIT_ISSUER_ADDED = "trusted_issuer_added"
 AUDIT_ISSUER_REMOVED = "trusted_issuer_removed"
@@ -52,7 +51,7 @@ GRANT_ENDED_MESSAGE = (
 )
 
 _t = s.trusted_issuers
-_o = s.external_identity_owners
+_i = s.federated_identities
 _g = s.oauth_grants
 
 
@@ -92,6 +91,7 @@ class FederationStore:
         *,
         api_scope: str = "",
         audience: str = "",
+        max_auth_age: int = 14 * 86400,
         clock: Callable[[], float] = time.time,
     ) -> None:
         # ``api_scope`` and ``audience`` are what a new federated grant records; only the
@@ -100,6 +100,9 @@ class FederationStore:
         self._repos = Repositories(db.kind)
         self._api_scope = api_scope
         self._audience = audience
+        #: A grant lives as long as an upstream sign-in may (``max_upstream_auth_age``); a request
+        #: renews it in its second half. Admission is checked on every request regardless.
+        self._ttl = max(2, max_auth_age)
         self._clock = clock
 
     def _now(self) -> int:
@@ -172,29 +175,46 @@ class FederationStore:
     # -- links (operator) -----------------------------------------------------------------
 
     def link(self, account_id: str, issuer: str, subject: str) -> bool:
-        """Attach ``(issuer, subject)`` to an existing account. False if it already was."""
+        """Attach ``subject`` of ``issuer`` to an existing account. False if it already was."""
         now = self._now()
         with self._db.write() as conn:
-            if not conn.execute(
-                select(_t.c.issuer).where(_t.c.issuer == issuer)
-            ).first():
+            claim = conn.execute(
+                select(_t.c.subject_claim).where(_t.c.issuer == issuer)
+            ).scalar_one_or_none()
+            if claim is None:
                 raise LinkRefused("no such trusted issuer; add it first")
             if self._repos.accounts.get(conn, account_id) is None:
                 raise LinkRefused("no such account")
-            owner: str | None = conn.execute(
-                select(_o.c.account_id).where(
-                    _o.c.issuer == issuer, _o.c.subject == subject
+            row = conn.execute(
+                select(_i.c.account_id, _i.c.operator_linked).where(
+                    _i.c.issuer == issuer, _i.c.claim == claim, _i.c.subject == subject
                 )
-            ).scalar_one_or_none()
-            if owner == account_id:
-                return False
-            if owner is not None:
+            ).one_or_none()
+            if row is not None and row.account_id != account_id:
                 raise LinkRefused("this identity already belongs to another account")
-            conn.execute(
-                _upsert_insert(self._repos.dialect, _o)
-                .values(issuer=issuer, subject=subject, account_id=account_id)
-                .on_conflict_do_nothing(index_elements=[_o.c.issuer, _o.c.subject])
-            )
+            if row is not None and row.operator_linked:
+                return False
+            if row is None:
+                conn.execute(
+                    insert(_i).values(
+                        issuer=issuer,
+                        claim=claim,
+                        subject=subject,
+                        account_id=account_id,
+                        operator_linked=True,
+                        created_at=now,
+                    )
+                )
+            else:  # made at its first token, now explicitly the operator's
+                conn.execute(
+                    update(_i)
+                    .where(
+                        _i.c.issuer == issuer,
+                        _i.c.claim == claim,
+                        _i.c.subject == subject,
+                    )
+                    .values(operator_linked=True)
+                )
             self._audit(
                 conn,
                 OPERATOR_ACTOR,
@@ -206,54 +226,55 @@ class FederationStore:
             return True
 
     def unlink(self, issuer: str, subject: str) -> bool:
-        """Detach ``(issuer, subject)`` and delete its federated grant; sign-in links are not touched."""
+        """Detach ``subject`` of ``issuer`` and delete its federated grant."""
         now = self._now()
         with self._db.write() as conn:
-            owner: str | None = conn.execute(
-                select(_o.c.account_id).where(
-                    _o.c.issuer == issuer, _o.c.subject == subject
+            owners = {
+                r.account_id
+                for r in conn.execute(
+                    select(_i.c.account_id).where(
+                        _i.c.issuer == issuer, _i.c.subject == subject
+                    )
                 )
-            ).scalar_one_or_none()
-            if owner is None:
+            }
+            if not owners:
                 return False
-            if conn.execute(
-                select(s.external_identities.c.id).where(
-                    s.external_identities.c.issuer == issuer,
-                    s.external_identities.c.subject == subject,
-                )
-            ).first():
-                raise LinkRefused(
-                    "this identity is also a sign-in method; remove it with unlink-identity"
-                )
             conn.execute(
-                delete(_o).where(_o.c.issuer == issuer, _o.c.subject == subject)
+                delete(_i).where(_i.c.issuer == issuer, _i.c.subject == subject)
             )
-            conn.execute(
-                delete(_g).where(
-                    _g.c.account_id == owner, _g.c.client_id == GRANT_PREFIX + issuer
+            for owner in owners:
+                conn.execute(
+                    delete(_g).where(
+                        _g.c.account_id == owner,
+                        _g.c.client_id == GRANT_PREFIX + issuer,
+                    )
                 )
-            )
-            self._audit(
-                conn,
-                OPERATOR_ACTOR,
-                AUDIT_FEDERATED_UNLINKED,
-                issuer,
-                now,
-                account_id=owner,
-            )
+                self._audit(
+                    conn,
+                    OPERATOR_ACTOR,
+                    AUDIT_FEDERATED_UNLINKED,
+                    issuer,
+                    now,
+                    account_id=owner,
+                )
             return True
 
-    def links(self, account_id: str | None = None) -> list[tuple[str, str, str]]:
-        """``(account, issuer, subject)`` of every link to a configured trusted issuer."""
+    def links(self, account_id: str | None = None) -> list[tuple[str, str, str, str]]:
+        """``(account, issuer, subject, "linked"|"created")`` for each trusted issuer's current claim."""
         stmt = (
-            select(_o.c.account_id, _o.c.issuer, _o.c.subject)
-            .join(_t, _t.c.issuer == _o.c.issuer)
-            .order_by(_o.c.issuer, _o.c.subject)
+            select(_i.c.account_id, _i.c.issuer, _i.c.subject, _i.c.operator_linked)
+            .join(
+                _t, and_(_t.c.issuer == _i.c.issuer, _t.c.subject_claim == _i.c.claim)
+            )
+            .order_by(_i.c.issuer, _i.c.subject)
         )
         if account_id is not None:
-            stmt = stmt.where(_o.c.account_id == account_id)
+            stmt = stmt.where(_i.c.account_id == account_id)
         with self._db.read() as conn:
-            return [(r[0], r[1], r[2]) for r in conn.execute(stmt)]
+            return [
+                (r[0], r[1], r[2], "linked" if r[3] else "created")
+                for r in conn.execute(stmt)
+            ]
 
     # -- the request path -----------------------------------------------------------------
 
@@ -272,47 +293,58 @@ class FederationStore:
         with self._db.read() as conn:
             known = self._known(conn, issuer, subject)
         if known is not None:
-            account, grant = known
-            if account.status == acc.STATUS_DISABLED:
-                return acc.denied(acc.DENY_ACCESS_DISABLED)
-            if account.status == acc.STATUS_PENDING:
-                facts = AccountFacts(account.status, admitted_via=account.admitted_via)
-                decision = acc.decide(
-                    facts, verdict, policy, DecisionFacts(), "sign_in"
-                )
-                if not decision.activate:
-                    return acc.denied(acc.DENY_PENDING_APPROVAL)
-            elif grant is not None:
-                if grant.revoked_at is not None:
-                    if grant.revoked_reason != REVOKE_ACCOUNT_DISABLED:
-                        return Denied(DENY_GRANT_ENDED, GRANT_ENDED_MESSAGE)
-                elif grant.expires_at - now > GRANT_RENEW_BEFORE_S:
-                    return Resolved(account.id, grant.id)
+            account, linked, grant = known
+            refusal, activate = self._standing(account, linked, verdict, policy)
+            if refusal is not None:
+                return refusal
+            if (
+                not activate
+                and grant is not None
+                and grant.revoked_at is None
+                and grant.expires_at - now > self._ttl // 2
+            ):
+                return Resolved(account.id, grant.id)
         return self._admit(issuer, subject, ext, verdict, policy)
+
+    @staticmethod
+    def _standing(
+        account: Any, linked: bool, verdict: acc.Verdict, policy: AccessPolicy
+    ) -> tuple[Denied | None, bool]:
+        """``(refusal, activate)``: may this existing account be served now, under today's policy?"""
+        if account.status == acc.STATUS_DISABLED:
+            return acc.denied(acc.DENY_ACCESS_DISABLED), False
+        facts = AccountFacts(account.status, admitted_via=account.admitted_via)
+        if account.status == acc.STATUS_PENDING:
+            decision = acc.decide(facts, verdict, policy, DecisionFacts(), "sign_in")
+            if not decision.activate:
+                return acc.denied(acc.DENY_PENDING_APPROVAL), False
+            return None, True
+        if not linked and not acc.link_admissible(facts, verdict, policy):
+            return Denied(acc.DENY_ACCESS_DENIED, acc.NEUTRAL_ACCESS_DENIED), False
+        return None, False
 
     def _known(
         self, conn: Connection, issuer: TrustedIssuer, subject: str
-    ) -> tuple[Any, Any] | None:
-        account_id: str | None = conn.execute(
-            select(_o.c.account_id).where(
-                _o.c.issuer == issuer.issuer, _o.c.subject == subject
-            )
-        ).scalar_one_or_none()
-        if account_id is None:
-            return None
-        account = self._repos.accounts.get(conn, account_id)
-        if (
-            account is None
-        ):  # pragma: no cover - the owner row cascades with its account
-            return None
-        grant = conn.execute(
-            select(
-                _g.c.id, _g.c.revoked_at, _g.c.revoked_reason, _g.c.expires_at
-            ).where(
-                _g.c.account_id == account_id, _g.c.client_id == issuer.grant_client_id
+    ) -> tuple[Any, bool, Any] | None:
+        row = conn.execute(
+            select(_i.c.account_id, _i.c.operator_linked).where(
+                _i.c.issuer == issuer.issuer,
+                _i.c.claim == issuer.subject_claim,
+                _i.c.subject == subject,
             )
         ).one_or_none()
-        return account, grant
+        if row is None:
+            return None
+        account = self._repos.accounts.get(conn, row.account_id)
+        if account is None:  # pragma: no cover - the identity cascades with its account
+            return None
+        grant = conn.execute(
+            select(_g.c.id, _g.c.revoked_at, _g.c.expires_at).where(
+                _g.c.account_id == row.account_id,
+                _g.c.client_id == issuer.grant_client_id,
+            )
+        ).one_or_none()
+        return account, bool(row.operator_linked), grant
 
     def _admit(
         self,
@@ -325,12 +357,14 @@ class FederationStore:
         now = self._now()
         repos = self._repos
         with self._db.write() as conn:
-            account_id: str | None = conn.execute(
-                select(_o.c.account_id).where(
-                    _o.c.issuer == issuer.issuer, _o.c.subject == subject
+            row = conn.execute(
+                select(_i.c.account_id, _i.c.operator_linked).where(
+                    _i.c.issuer == issuer.issuer,
+                    _i.c.claim == issuer.subject_claim,
+                    _i.c.subject == subject,
                 )
-            ).scalar_one_or_none()
-            if account_id is None:
+            ).one_or_none()
+            if row is None:
                 decision = acc.decide(
                     None,
                     verdict,
@@ -343,24 +377,26 @@ class FederationStore:
                     if refusal.code == acc.DENY_ACCESS_DENIED:
                         return Denied(refusal.code, acc.NEUTRAL_ACCESS_DENIED)
                     return refusal
-                account_id = self._create_account(conn, ext, decision, now)
+                account_id = self._create_account(conn, issuer, ext, decision, now)
                 if decision.outcome == "pending":
                     return acc.denied(acc.DENY_PENDING_APPROVAL)
             else:
-                row = repos.accounts.get(conn, account_id, for_update=True)
-                assert row is not None
-                if row.status == acc.STATUS_DISABLED:
-                    return acc.denied(acc.DENY_ACCESS_DISABLED)
-                if row.status == acc.STATUS_PENDING:
+                account_id = row.account_id
+                account = repos.accounts.get(conn, account_id, for_update=True)
+                assert account is not None
+                standing, activate = self._standing(
+                    account, bool(row.operator_linked), verdict, policy
+                )
+                if standing is not None:
+                    return standing
+                if activate:
                     decision = acc.decide(
-                        AccountFacts(row.status, admitted_via=row.admitted_via),
+                        AccountFacts(account.status, admitted_via=account.admitted_via),
                         verdict,
                         policy,
                         DecisionFacts(),
                         "sign_in",
                     )
-                    if not decision.activate:
-                        return acc.denied(acc.DENY_PENDING_APPROVAL)
                     repos.accounts.activate(
                         conn,
                         account_id,
@@ -383,11 +419,15 @@ class FederationStore:
             return Resolved(account_id, grant)
 
     def _create_account(
-        self, conn: Connection, ext: ExternalClaims, decision: acc.Decision, now: int
+        self,
+        conn: Connection,
+        issuer: TrustedIssuer,
+        ext: ExternalClaims,
+        decision: acc.Decision,
+        now: int,
     ) -> str:
         account_id = new_id()
-        repos = self._repos
-        repos.accounts.insert(
+        self._repos.accounts.insert(
             conn,
             account_id=account_id,
             status=decision.create_status or acc.STATUS_ACTIVE,
@@ -398,8 +438,13 @@ class FederationStore:
             now=now,
         )
         conn.execute(
-            insert(_o).values(
-                issuer=ext.issuer, subject=ext.subject, account_id=account_id
+            insert(_i).values(
+                issuer=issuer.issuer,
+                claim=issuer.subject_claim,
+                subject=ext.subject,
+                account_id=account_id,
+                operator_linked=False,
+                created_at=now,
             )
         )
         self._audit(
@@ -422,33 +467,18 @@ class FederationStore:
     ) -> str | None:
         """The one federated grant of this account and issuer; None when it was ended."""
         row = conn.execute(
-            select(
-                _g.c.id, _g.c.revoked_at, _g.c.revoked_reason, _g.c.expires_at
-            ).where(
+            select(_g.c.id, _g.c.revoked_at, _g.c.expires_at).where(
                 _g.c.account_id == account_id, _g.c.client_id == issuer.grant_client_id
             )
         ).one_or_none()
         if row is not None:
             if row.revoked_at is not None:
-                # Disabling the account ended its grants; enabling it again restores the
-                # federated one (the person has nothing to reconnect). Any other end stays.
-                if row.revoked_reason != REVOKE_ACCOUNT_DISABLED:
-                    return None
+                return None  # an explicit revoke-grant is final
+            if row.expires_at - now <= self._ttl // 2:
                 conn.execute(
                     update(_g)
                     .where(_g.c.id == row.id)
-                    .values(
-                        revoked_at=None,
-                        revoked_reason=None,
-                        revoked_by=None,
-                        expires_at=now + GRANT_TTL_S,
-                    )
-                )
-            elif row.expires_at - now <= GRANT_RENEW_BEFORE_S:
-                conn.execute(
-                    update(_g)
-                    .where(_g.c.id == row.id)
-                    .values(expires_at=now + GRANT_TTL_S)
+                    .values(expires_at=now + self._ttl, upstream_auth_at=now)
                 )
             return str(row.id)
         grant_id = new_id()
@@ -467,7 +497,7 @@ class FederationStore:
             created_at=now,
             last_used_at=now,
             upstream_auth_at=now,
-            expires_at=now + GRANT_TTL_S,
+            expires_at=now + self._ttl,
         )
         self._audit(
             conn,

@@ -413,6 +413,7 @@ def test_offline_upgrade_contains_frozen_ddl_and_no_legacy_tables(dialect):
         "extension_pairing_codes",
         "browser_snapshots",
         "trusted_issuers",
+        "federated_identities",
     }:
         assert "CREATE TABLE " + table + " " in sql
     assert "canvas_mcp_alembic_version" in sql and "0001_v1_baseline" in sql

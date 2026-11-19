@@ -64,9 +64,7 @@ class AuthzRuntime:
             return await self.grants.revoke_all_for_account(
                 account_key, REVOKE_ADMISSION_LOST
             )
-        except (
-            Exception
-        ):  # noqa: BLE001 - the refusal of the sign-in must not turn into an error page
+        except Exception:  # noqa: BLE001 - the refusal of the sign-in must not turn into an error page
             log_warning("oauth_admission_lost", reason="revocation_failed")
             return 0
 
@@ -140,6 +138,7 @@ def build_authz_runtime(
                 token_store.database,
                 api_scope=settings.api_scope,
                 audience=audience,
+                max_auth_age=authz.max_upstream_auth_age,
                 clock=clock,
             ),
             audience=audience,

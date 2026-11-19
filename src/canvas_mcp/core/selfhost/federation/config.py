@@ -63,6 +63,11 @@ class TrustedIssuer:
         return (urlsplit(self.issuer).hostname or self.issuer)[:MAX_NAME]
 
     @property
+    def is_loopback(self) -> bool:
+        """Only an issuer that is itself on localhost may be reached on localhost."""
+        return is_loopback_host(urlsplit(self.issuer).hostname or "")
+
+    @property
     def grant_client_id(self) -> str:
         return GRANT_PREFIX + self.issuer
 
@@ -141,6 +146,11 @@ def build_issuer(
             raise IssuerConfigError("audience must be printable text without spaces")
     if jwks_url is not None:
         _url(jwks_url, "jwks_url")
+        local_issuer = is_loopback_host(urlsplit(issuer).hostname or "")
+        if is_loopback_host(urlsplit(jwks_url).hostname or "") and not local_issuer:
+            raise IssuerConfigError(
+                "jwks_url may be on localhost only for a localhost issuer"
+            )
     claim = subject_claim or DEFAULT_SUBJECT_CLAIM
     if not _CLAIM_NAME.fullmatch(claim):
         raise IssuerConfigError("subject_claim is not a plain claim name")

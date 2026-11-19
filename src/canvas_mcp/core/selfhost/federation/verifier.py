@@ -20,6 +20,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 from ..login.http import CAP_DISCOVERY, SafeHttp, UpstreamError, check_url
 from ..login.idtoken import IdTokenRejected, peek_header
@@ -94,6 +95,15 @@ def peek_issuer(token: str) -> str | None:
     return issuer if isinstance(issuer, str) else None
 
 
+def _origin(url: str) -> tuple[str, str, int | None] | None:
+    try:
+        parts = urlsplit(url)
+        port = parts.port or {"https": 443, "http": 80}.get(parts.scheme)
+        return parts.scheme, (parts.hostname or "").lower(), port
+    except ValueError:
+        return None
+
+
 def _number(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
@@ -144,7 +154,12 @@ class _IssuerKeys:
                 jwks_uri = body.get("jwks_uri")
                 if body.get("issuer") != issuer.issuer or not isinstance(jwks_uri, str):
                     raise TokenRejected("metadata")
-                check_url(jwks_uri, allow_loopback=True)
+                # The metadata is the issuer's own word: its keys live on the issuer's own
+                # origin (an operator who needs another address sets --jwks-url), and never
+                # on localhost unless the issuer itself is.
+                if _origin(jwks_uri) != _origin(issuer.issuer):
+                    raise TokenRejected("metadata")
+                check_url(jwks_uri, allow_loopback=issuer.is_loopback)
             except (UpstreamError, TokenRejected):
                 self._backoff_until = now + METADATA_FAILURE_BACKOFF_S
                 return self._stale_or_fail(now)
@@ -167,17 +182,22 @@ class TokenVerifier:
         http: SafeHttp,
         *,
         default_audience: str,
+        loopback_http: SafeHttp | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.http = http
+        #: The only client that may call localhost; used for an issuer that is on localhost.
+        self.loopback_http = loopback_http or SafeHttp(allow_loopback=True)
         self.default_audience = default_audience
         self._clock = clock
         self._keys: dict[str, _IssuerKeys] = {}
 
-    def _keys_of(self, issuer: str) -> _IssuerKeys:
+    def _keys_of(self, trusted: TrustedIssuer) -> _IssuerKeys:
+        issuer = trusted.issuer
+        http = self.loopback_http if trusted.is_loopback else self.http
         keys = self._keys.get(issuer)
         if keys is None:
-            keys = self._keys[issuer] = _IssuerKeys(self.http, self._clock)
+            keys = self._keys[issuer] = _IssuerKeys(http, self._clock)
         return keys
 
     def forget_except(self, issuers: set[str]) -> None:
@@ -209,7 +229,7 @@ class TokenVerifier:
         kid = header.get("kid")
         if kid is not None and not isinstance(kid, str):
             raise TokenRejected("key")
-        keys = self._keys_of(issuer.issuer)
+        keys = self._keys_of(issuer)
         uri = await keys.uri(issuer)
         await keys.jwks.ensure(uri, kid)
         key = keys.jwks.lookup(kid, alg)

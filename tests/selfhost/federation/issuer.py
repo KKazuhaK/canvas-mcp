@@ -10,6 +10,7 @@ import base64
 import json
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from joserfc import jwt
@@ -40,6 +41,7 @@ class FakeIssuer:
         self.keys: dict[str, ECKey] = {}
         self.add_key("k1")
         self.metadata_issuer = issuer
+        self.jwks_uri = f"{issuer}/jwks.json"
         self.log: list[str] = []
         self.transport = httpx.MockTransport(self._handle)
 
@@ -65,15 +67,15 @@ class FakeIssuer:
                 200,
                 json={
                     "issuer": self.metadata_issuer,
-                    "jwks_uri": f"{self.issuer}/jwks.json",
+                    "jwks_uri": self.jwks_uri,
                 },
             )
-        if request.url.path == "/jwks.json":
+        if request.url.path == urlsplit(self.jwks_uri).path:
             return httpx.Response(200, json=self.jwks())
         return httpx.Response(404)
 
-    def fetches(self, path: str = "/jwks.json") -> int:
-        return self.log.count(path)
+    def fetches(self, path: str | None = None) -> int:
+        return self.log.count(path or urlsplit(self.jwks_uri).path)
 
     # -- tokens -----------------------------------------------------------------------------
 

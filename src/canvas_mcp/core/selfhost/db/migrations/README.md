@@ -11,7 +11,7 @@ Canvas snapshots, all deleted with their account. It does not raise the
 compatibility floor; an older image ignores the new tables.
 
 `0008_trusted_issuers` is an additive revision for trusted external token issuers:
-the `trusted_issuers` table and a partial unique index that allows one federated
+the `trusted_issuers` and `federated_identities` tables and a partial unique index that allows one federated
 grant per account and issuer (a grant whose `client_id` starts with `federated:`).
 It does not raise the compatibility floor; an older image ignores the table.
 

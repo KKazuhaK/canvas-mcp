@@ -2,7 +2,18 @@
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy import CheckConstraint, Column, Table, Text, text, true
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    ForeignKey,
+    Index,
+    PrimaryKeyConstraint,
+    Table,
+    Text,
+    false,
+    text,
+    true,
+)
 from sqlalchemy.dialects import postgresql, sqlite
 
 revision = "0008_trusted_issuers"
@@ -70,9 +81,48 @@ trusted_issuers = Table(
 )
 
 
+def Uuid() -> sa.types.TypeEngine:
+    return sa.Text().with_variant(postgresql.UUID(as_uuid=False), "postgresql")
+
+
+# Referenced durable parent already exists in the preceding graph.
+Table("accounts", metadata, Column("id", Uuid(), primary_key=True))
+
+federated_identities = Table(
+    "federated_identities",
+    metadata,
+    Column("issuer", Key, nullable=False),
+    Column("claim", Key, nullable=False),
+    Column("subject", Key, nullable=False),
+    Column(
+        "account_id",
+        Uuid(),
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("operator_linked", Flag(), nullable=False, server_default=false()),
+    Column("created_at", Epoch, nullable=False),
+    PrimaryKeyConstraint("issuer", "claim", "subject"),
+    CheckConstraint("length(issuer) BETWEEN 1 AND 512", name="issuer"),
+    CheckConstraint("length(claim) BETWEEN 1 AND 64", name="claim"),
+    CheckConstraint("length(subject) BETWEEN 1 AND 255", name="subject"),
+    CheckConstraint("length(account_id) = 36", name="account_id_uuid").ddl_if(
+        dialect="sqlite"
+    ),
+    CheckConstraint("operator_linked IN (0,1)", name="operator_linked_boolean").ddl_if(
+        dialect="sqlite"
+    ),
+    info={"lifecycle": "durable"},
+    sqlite_strict=True,
+    sqlite_with_rowid=False,
+)
+Index("ix_federated_identities_account_id", federated_identities.c.account_id)
+
+
 def upgrade() -> None:
     connection = op.get_bind()
     trusted_issuers.create(connection)
+    federated_identities.create(connection)
     op.create_index(
         "uq_oauth_grants_federated",
         "oauth_grants",

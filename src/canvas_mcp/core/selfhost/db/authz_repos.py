@@ -306,10 +306,19 @@ class SqlGrantRepo:
     def revoke_for_account(
         self, conn: Connection, account_id: str, *, reason: str, by: str, now: int
     ) -> int:
-        """Revoke every live grant of an account; returns how many."""
+        """Revoke every live grant of an account; returns how many.
+
+        A federated grant (a trusted issuer's token) is left alone: its account standing and
+        admission are checked on every request, and only an explicit revoke-grant, an unlink or
+        removing the issuer ends it for good.
+        """
         stmt = (
             update(_g)
-            .where(_g.c.account_id == account_id, _g.c.revoked_at.is_(None))
+            .where(
+                _g.c.account_id == account_id,
+                _g.c.revoked_at.is_(None),
+                ~_g.c.client_id.like("federated:%"),
+            )
             .values(revoked_at=now, revoked_reason=reason, revoked_by=_by(by))
         )
         return int(conn.execute(stmt).rowcount or 0)

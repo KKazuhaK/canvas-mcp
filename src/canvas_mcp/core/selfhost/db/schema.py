@@ -586,6 +586,38 @@ trusted_issuers = Table(
     sqlite_with_rowid=False,
 )
 
+# People who arrive with a token from a trusted external issuer. Their own namespace, keyed by the
+# issuer *and* the claim the subject was read from, so a subject can never be mistaken for a
+# sign-in identity (``external_identity_owners``) or for the value of another claim.
+federated_identities = Table(
+    "federated_identities",
+    metadata,
+    Column("issuer", Key, nullable=False),
+    Column("claim", Key, nullable=False),
+    Column("subject", Key, nullable=False),
+    Column(
+        "account_id",
+        Uuid(),
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("operator_linked", Flag(), nullable=False, server_default=false()),
+    Column("created_at", Epoch, nullable=False),
+    PrimaryKeyConstraint("issuer", "claim", "subject"),
+    CheckConstraint("length(issuer) BETWEEN 1 AND 512", name="issuer"),
+    CheckConstraint("length(claim) BETWEEN 1 AND 64", name="claim"),
+    CheckConstraint("length(subject) BETWEEN 1 AND 255", name="subject"),
+    CheckConstraint("length(account_id) = 36", name="account_id_uuid").ddl_if(
+        dialect="sqlite"
+    ),
+    CheckConstraint("operator_linked IN (0,1)", name="operator_linked_boolean").ddl_if(
+        dialect="sqlite"
+    ),
+    info={"lifecycle": "durable"},
+    sqlite_strict=True,
+    sqlite_with_rowid=False,
+)
+
 oauth_codes = Table(
     "oauth_codes",
     metadata,
@@ -832,6 +864,7 @@ Index(
     postgresql_where=oauth_grants.c.client_id.like("federated:%"),
     sqlite_where=oauth_grants.c.client_id.like("federated:%"),
 )
+Index("ix_federated_identities_account_id", federated_identities.c.account_id)
 Index("ix_oauth_codes_account_id", oauth_codes.c.account_id)
 Index("ix_oauth_codes_expires_at", oauth_codes.c.expires_at)
 Index(

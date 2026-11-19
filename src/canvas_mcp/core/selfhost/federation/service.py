@@ -46,7 +46,7 @@ class FederationService:
     ) -> None:
         self.store = store
         self.policy = policy
-        self.http = http or SafeHttp(allow_loopback=True)
+        self.http = http or SafeHttp()
         self.verifier = TokenVerifier(self.http, default_audience=audience, clock=clock)
         self._clock = clock
         self._issuers: list[TrustedIssuer] = []

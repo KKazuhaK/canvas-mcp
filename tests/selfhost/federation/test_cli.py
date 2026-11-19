@@ -98,7 +98,7 @@ class TestLinks:
         assert run(capsys, "link-federated", *args) == (0, "linked\n", "")
         assert run(capsys, "link-federated", *args) == (0, "already linked\n", "")
         code, out, _ = run(capsys, "trusted-issuers", "links")
-        assert out == f"{account}\t{HUB}\thub-1\n"
+        assert out == f"{account}\t{HUB}\thub-1\tlinked\n"
         assert run(capsys, "trusted-issuers", "links", "--account", other)[1] == ""
         # Another account cannot take the same subject.
         code, _, err = run(
@@ -176,4 +176,7 @@ class TestLinks:
             run(capsys, "trusted-issuers", "links")[1] == ""
         )  # not shown without the issuer
         run(capsys, "trusted-issuers", "add", HUB)
-        assert run(capsys, "trusted-issuers", "links")[1] == f"{account}\t{HUB}\ts\n"
+        assert (
+            run(capsys, "trusted-issuers", "links")[1]
+            == f"{account}\t{HUB}\ts\tlinked\n"
+        )

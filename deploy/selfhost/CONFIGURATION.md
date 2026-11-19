@@ -155,8 +155,9 @@ RFC 8414 metadata at `/.well-known/oauth-authorization-server`, whose `issuer`
 must equal the configured one character for character, or from `--jwks-url`.
 Keys are cached for an hour. A token naming a key the cache does not know makes
 the server fetch the key set again, at most once a minute per issuer, so
-invented key ids cannot make it hammer the issuer. Addresses must be https;
-`localhost` may use plain http for development.
+invented key ids cannot make it hammer the issuer. Addresses must be https. The key set found through the metadata must be on the
+issuer's own address (use `--jwks-url` for anything else). Plain http and `localhost`
+are allowed only when the issuer itself is on `localhost`, for development.
 
 **Claims.** `iss` must equal the issuer string exactly (a trailing slash
 counts). `aud` must contain the audience, by default this server's own
@@ -166,8 +167,12 @@ be expired. `nbf` and `iat`, when present, may be at most 60 seconds in the futu
 **Who the person is.** The person is the pair (issuer, subject). The subject
 is the claim named by `--subject-claim` (default `sub`); it must be present and a
 non-empty string. There is no fallback to another claim: if the configured claim
-is missing, the token is refused. A hub that gives each person a stable id of its
-own should name that claim, because `sub` may be per-client or per-session there.
+is missing, the token is refused. A hub that gives each person a stable id of
+its own should name that claim, because `sub` may be per-client or per-session there.
+The claim must be immutable and not editable by the person: MCPHub's stable id claim
+is, `preferred_username` and `email` are not. Identities of an issuer live in a
+namespace of their own, keyed by issuer, claim and subject, so they can only reach an
+account through a first token or `link-federated`, never by matching a sign-in identity.
 
 **Accounts.** A subject you have not seen before gets an account under the same
 admission policy as a first sign-in (`ACCESS_POLICY` is `open`, `rules` or
@@ -175,7 +180,9 @@ admission policy as a first sign-in (`ACCESS_POLICY` is `open`, `rules` or
 one, and so does `rules` with `ACCESS_FALLBACK=approval` when no rule matches.
 `rules` admits the issuer's people only if a rule says so: add `federated:any` to
 `ACCESS_RULES` (for example `ACCESS_RULES=entra:role:Canvas.User,federated:any`);
-without it the people of a trusted issuer are refused unless you link them. A pending
+without it the people of a trusted issuer are refused unless you link them. The admission policy is checked again on every request: a person
+made by a first token who the policy no longer admits is refused, while a person you
+linked stays admitted. A pending
 or disabled account is refused on `/mcp` with a message that says so, and nothing
 about the person is matched by e-mail address or name: an existing account is only
 ever attached by an operator, with `link-federated`. An account made this way has no
@@ -186,9 +193,11 @@ a Canvas token, for instance) should be linked to the account they sign in with.
 connection (a "federated grant") so that last-use tracking, the write-tool
 switches and the Canvas token binding work as for any app. The person sees it under
 Connected apps as "via NAME — manage there" and cannot end it from there; the
-issuer is where it is managed. Disabling the account stops it at once, and enabling
-it again restores it. Ending it with `revoke-grant` (or an owner doing so) is final:
-to restore it, unlink the person and link them again.
+issuer is where it is managed. Disabling the account stops it at once (the account's standing is checked on every
+request, so the connection itself is left alone), and enabling it again restores it.
+The connection lasts as long as an upstream sign-in may (`max_upstream_auth_age`) and
+is renewed by use. Ending it with `revoke-grant` (or an owner doing so) is final: to
+restore it, unlink the person and link them again.
 
 **Scopes only narrow.** `--read-scope` names a scope the token must carry (`scope`
 or `scp`); without it the token is refused. `--write-scope` names the scope write

@@ -68,7 +68,10 @@ def test_bad_configuration_is_refused(kwargs):
 def test_http_is_allowed_for_localhost_only():
     for host in ("http://localhost:8080", "http://127.0.0.1:9000", "http://[::1]:9000"):
         assert build_issuer(host).issuer == host
-    build_issuer("https://hub.example.test", jwks_url="http://localhost:1/jwks")
+    build_issuer("http://localhost:9", jwks_url="http://localhost:1/jwks")
+    # Localhost is only for an issuer that is itself on localhost.
+    with pytest.raises(IssuerConfigError, match="localhost issuer"):
+        build_issuer("https://hub.example.test", jwks_url="http://localhost:1/jwks")
     with pytest.raises(IssuerConfigError):
         build_issuer("http://192.168.1.5:8080")
 

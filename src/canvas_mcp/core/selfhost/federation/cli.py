@@ -160,6 +160,6 @@ def run(args: argparse.Namespace, token_store: TokenStore) -> int:
         return EXIT_OK
     if args.account is not None and not _UUID_RE.fullmatch(args.account):
         return _err("--account must be a canonical account UUID")
-    for account, issuer_name, subject in store.links(args.account):
-        print("\t".join([account, issuer_name, subject]))
+    for account, issuer_name, subject, kind in store.links(args.account):
+        print("\t".join([account, issuer_name, subject, kind]))
     return EXIT_OK

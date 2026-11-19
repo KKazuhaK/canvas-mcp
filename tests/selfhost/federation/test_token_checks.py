@@ -162,11 +162,13 @@ def test_the_subject_claim_is_required_and_never_replaced(open_hub):
     from sqlalchemy import text
 
     with open_hub.stack.store.database.read() as conn:
-        subjects = [
-            r[0]
-            for r in conn.execute(text("SELECT subject FROM external_identity_owners"))
+        rows = [
+            tuple(r)
+            for r in conn.execute(
+                text("SELECT claim, subject FROM federated_identities")
+            )
         ]
-    assert subjects == ["u-42"]
+    assert rows == [("mcphub_uid", "u-42")]
 
 
 def test_the_default_subject_claim_is_sub(trusted):
