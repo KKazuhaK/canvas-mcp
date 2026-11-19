@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.7] — 2026-11-18
+
 ### Added
 
 - **Microsoft Edge Add-ons submission for the browser extension.** A stable release now also uploads the Chrome zip to Edge Add-ons and submits it (Edge Add-ons API v1.1) once `EDGE_PRODUCT_ID`, `EDGE_CLIENT_ID` and `EDGE_API_KEY` are configured; until then the job is skipped, like the Chrome and Firefox ones.
