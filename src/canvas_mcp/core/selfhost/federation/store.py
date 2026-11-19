@@ -31,6 +31,7 @@ from ..db import schema as s
 from ..db.engine import Database
 from ..db.repos import Repositories
 from ..db.types import new_id
+from ..login.account_policy import method_allowed
 from ..token_store import (
     AUDIT_ACCOUNT_ACTIVATED,
     AUDIT_ACCOUNT_CREATED,
@@ -46,6 +47,11 @@ AUDIT_FEDERATED_UNLINKED = "federated_identity_unlinked"
 AUDIT_FEDERATED_GRANT = "federated_grant_created"
 
 DENY_GRANT_ENDED = "federated_grant_ended"
+DENY_METHOD = "federated_method_not_allowed"
+METHOD_MESSAGE = (
+    "This account is limited to other sign-in methods, so access through a connected hub "
+    "is not allowed. Ask the server owner."
+)
 GRANT_ENDED_MESSAGE = (
     "This connection was ended by a server administrator. Ask them to restore it."
 )
@@ -178,7 +184,7 @@ class FederationStore:
         """Attach ``subject`` of ``issuer`` to an existing account. False if it already was."""
         now = self._now()
         with self._db.write() as conn:
-            claim = conn.execute(
+            claim: str | None = conn.execute(
                 select(_t.c.subject_claim).where(_t.c.issuer == issuer)
             ).scalar_one_or_none()
             if claim is None:
@@ -293,8 +299,10 @@ class FederationStore:
         with self._db.read() as conn:
             known = self._known(conn, issuer, subject)
         if known is not None:
-            account, linked, grant = known
-            refusal, activate = self._standing(account, linked, verdict, policy)
+            account, linked, grant, method_ok = known
+            refusal, activate = self._standing(
+                account, linked, verdict, policy, method_ok
+            )
             if refusal is not None:
                 return refusal
             if (
@@ -308,11 +316,17 @@ class FederationStore:
 
     @staticmethod
     def _standing(
-        account: Any, linked: bool, verdict: acc.Verdict, policy: AccessPolicy
+        account: Any,
+        linked: bool,
+        verdict: acc.Verdict,
+        policy: AccessPolicy,
+        method_ok: bool,
     ) -> tuple[Denied | None, bool]:
         """``(refusal, activate)``: may this existing account be served now, under today's policy?"""
         if account.status == acc.STATUS_DISABLED:
             return acc.denied(acc.DENY_ACCESS_DISABLED), False
+        if not method_ok:
+            return Denied(DENY_METHOD, METHOD_MESSAGE), False
         facts = AccountFacts(account.status, admitted_via=account.admitted_via)
         if account.status == acc.STATUS_PENDING:
             decision = acc.decide(facts, verdict, policy, DecisionFacts(), "sign_in")
@@ -325,7 +339,7 @@ class FederationStore:
 
     def _known(
         self, conn: Connection, issuer: TrustedIssuer, subject: str
-    ) -> tuple[Any, bool, Any] | None:
+    ) -> tuple[Any, bool, Any, bool] | None:
         row = conn.execute(
             select(_i.c.account_id, _i.c.operator_linked).where(
                 _i.c.issuer == issuer.issuer,
@@ -344,7 +358,12 @@ class FederationStore:
                 _g.c.client_id == issuer.grant_client_id,
             )
         ).one_or_none()
-        return account, bool(row.operator_linked), grant
+        return (
+            account,
+            bool(row.operator_linked),
+            grant,
+            method_allowed(conn, row.account_id, acc.PROVIDER_FEDERATED),
+        )
 
     def _admit(
         self,
@@ -385,7 +404,11 @@ class FederationStore:
                 account = repos.accounts.get(conn, account_id, for_update=True)
                 assert account is not None
                 standing, activate = self._standing(
-                    account, bool(row.operator_linked), verdict, policy
+                    account,
+                    bool(row.operator_linked),
+                    verdict,
+                    policy,
+                    method_allowed(conn, account_id, acc.PROVIDER_FEDERATED),
                 )
                 if standing is not None:
                     return standing

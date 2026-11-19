@@ -181,3 +181,73 @@ class TestOwnNamespace:
         open_hub.trust(subject_claim="sub")
         assert open_hub.status(open_hub.issuer.mint(sub="42")) == 200
         assert len(open_hub.accounts()) == 2 and first in open_hub.accounts()
+
+
+class TestExpiredGrant:
+    def test_an_idle_grant_can_still_be_listed_and_ended_for_good(self, open_hub):
+        import argparse
+
+        from canvas_mcp.core.selfhost import token_admin
+
+        open_hub.trust()
+        assert open_hub.status(open_hub.issuer.mint()) == 200
+        (account,) = open_hub.accounts()
+        # Idle for longer than the grant lives: it has expired but was not ended.
+        with open_hub.stack.store.database.write() as conn:
+            conn.execute(
+                text(
+                    "UPDATE oauth_grants SET expires_at = 1 WHERE client_id LIKE 'federated:%'"
+                )
+            )
+        authz = open_hub.stack.authz.store
+        listed = list(authz.iter_grants(account_key=account))
+        assert [g.client_id for g in listed] == ["federated:" + ISSUER]
+        assert (
+            token_admin._grant_state(listed[0], int(open_hub.stack.clock()))
+            == "expired"
+        )
+        # The operator command finds it and ends it.
+        args = argparse.Namespace(
+            command="revoke-grant", grant_id=None, account=account
+        )
+        assert token_admin._run_grants(args, open_hub.stack.store) == 0
+        assert grant_row(open_hub).revoked_at is not None
+        # A token now is refused: use does not bring an ended grant back.
+        assert "ended by a server administrator" in refusal_of(
+            open_hub.call(open_hub.issuer.mint())
+        )
+
+    def test_an_idle_grant_is_renewed_by_use_when_nobody_ended_it(self, open_hub):
+        open_hub.trust()
+        assert open_hub.status(open_hub.issuer.mint()) == 200
+        with open_hub.stack.store.database.write() as conn:
+            conn.execute(
+                text(
+                    "UPDATE oauth_grants SET expires_at = 1 WHERE client_id LIKE 'federated:%'"
+                )
+            )
+        assert open_hub.status(open_hub.issuer.mint()) == 200
+        assert grant_row(open_hub).expires_at > int(open_hub.stack.clock())
+
+
+class TestSignInMethodPolicy:
+    def test_an_account_locked_to_another_sign_in_method_refuses_the_hub(
+        self, open_hub
+    ):
+        from canvas_mcp.core.selfhost.login.account_policy import apply_sso_lock
+
+        open_hub.trust()
+        alice = open_hub.stack.enroll(ALICE)
+        open_hub.federation.store.link(alice, ISSUER, "hub-alice")
+        token = open_hub.issuer.mint(sub="hub-alice")
+        assert open_hub.status(token) == 200
+        with open_hub.stack.store.database.write() as conn:
+            apply_sso_lock(
+                conn, alice, "entra"
+            )  # lock_first_sso: Entra is her one SSO method
+        assert "limited to other sign-in methods" in refusal_of(open_hub.call(token))
+        with open_hub.stack.store.database.write() as conn:
+            conn.execute(
+                text("UPDATE account_login_policy SET sso_lock_provider = NULL")
+            )
+        assert open_hub.status(token) == 200

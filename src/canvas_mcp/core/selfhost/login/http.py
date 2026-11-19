@@ -20,7 +20,8 @@ import base64
 import ipaddress
 import json
 import re
-from collections.abc import Mapping
+import socket
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -150,10 +151,45 @@ def _is_json_media(content_type: str) -> bool:
     return media == "application/json" or media.endswith("+json")
 
 
+Resolver = Callable[[str, int], Awaitable[list[str]]]
+
+
+async def system_resolver(host: str, port: int) -> list[str]:
+    """Every address the system resolver gives for ``host`` (an empty list when it has none)."""
+    try:
+        infos = await anyio.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        return []
+    return [str(info[4][0]) for info in infos]
+
+
+def address_is_public(value: str) -> bool:
+    """True only for a globally routable unicast address (IPv4-mapped IPv6 judged as its IPv4)."""
+    try:
+        address = ipaddress.ip_address(value.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_global and not (
+        address.is_multicast
+        or address.is_reserved
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_unspecified
+        or address.is_private
+    )
+
+
 class SafeHttp:
     """Outbound requests with the limits above. ``transport`` replaces the network (tests).
 
-    ``allow_loopback`` is only for trusted token issuers (see :func:`check_url`)."""
+    ``allow_loopback`` is only for trusted token issuers on localhost (see :func:`check_url`).
+    Every other client resolves the host itself, refuses it if any address is not a public one
+    (loopback, private, link-local, unspecified, multicast, reserved; IPv4 and IPv6), and connects
+    to the vetted address, so a second DNS answer cannot swap it. That runs for the real network
+    and whenever a ``resolver`` is given (tests); a client with only a ``transport`` is a test double.
+    """
 
     def __init__(
         self,
@@ -162,8 +198,10 @@ class SafeHttp:
         connect_timeout: float = CONNECT_TIMEOUT_S,
         total_timeout: float = TOTAL_TIMEOUT_S,
         allow_loopback: bool = False,
+        resolver: Resolver | None = None,
     ) -> None:
         self._allow_loopback = allow_loopback
+        self._resolver = resolver
         self._transport = transport
         self._connect_timeout = connect_timeout
         self._total_timeout = total_timeout
@@ -183,10 +221,12 @@ class SafeHttp:
         """One request. A status in ``ok_statuses`` is returned (its body parsed as JSON when it is
         a 200, and best-effort otherwise); any other status raises ``http_status``."""
         check_url(url, allow_loopback=self._allow_loopback)
+        pinned_url, pin_headers, extensions = await self._pin(url)
         sent = {
             "User-Agent": USER_AGENT,
             "Accept": "application/json",
             **(headers or {}),
+            **pin_headers,
         }
         if basic_auth is not None:
             # The caller form-encodes both parts first (RFC 6749 section 2.3.1).
@@ -203,9 +243,10 @@ class SafeHttp:
                 ) as client:
                     request = client.build_request(
                         method,
-                        url,
+                        pinned_url,
                         headers=sent,
                         data=dict(data) if data is not None else None,
+                        extensions=extensions,
                     )
                     response = await client.send(request, stream=True)
                     try:
@@ -242,6 +283,36 @@ class SafeHttp:
             except UpstreamError:
                 body = None
         return HttpResult(status, body, result_headers)
+
+    async def _pin(self, url: str) -> tuple[str, dict[str, str], dict[str, Any]]:
+        """The address to connect to, with the Host header and TLS name of the real host.
+
+        Raises ``blocked_url`` when the host does not resolve or any answer is not public.
+        """
+        # Read now, not at construction: tests set the transport on a built client.
+        if self._allow_loopback or (
+            self._transport is not None and self._resolver is None
+        ):
+            return url, {}, {}
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        try:
+            ipaddress.ip_address(host.strip("[]"))
+        except ValueError:
+            addresses = await (self._resolver or system_resolver)(host, port)
+        else:
+            addresses = [host.strip("[]")]  # an address literal is vetted as it is
+        if not addresses or not all(address_is_public(a) for a in addresses):
+            raise UpstreamError("blocked_url")
+        chosen = addresses[0]
+        if chosen == host.strip("[]"):
+            return url, {}, {}
+        shown = f"[{chosen}]" if ":" in chosen else chosen
+        netloc = shown + (f":{parts.port}" if parts.port else "")
+        pinned = parts._replace(netloc=netloc).geturl()
+        host_header = host + (f":{parts.port}" if parts.port else "")
+        return pinned, {"Host": host_header}, {"sni_hostname": host}
 
     @staticmethod
     async def _read(response: httpx.Response, max_bytes: int) -> bytes:

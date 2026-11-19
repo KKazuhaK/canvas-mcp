@@ -354,7 +354,12 @@ class SqlGrantRepo:
         if account_id is not None:
             stmt = stmt.where(_g.c.account_id == account_id)
         if not include_inactive:
-            stmt = stmt.where(_g.c.revoked_at.is_(None), _g.c.expires_at > now)
+            # A federated grant is renewed by use, so an expired one that was not ended is still
+            # live to the operator: it is listed (as expired) and can be revoked for good.
+            stmt = stmt.where(
+                _g.c.revoked_at.is_(None),
+                or_(_g.c.expires_at > now, _g.c.client_id.like("federated:%")),
+            )
         if before_id is not None:
             stmt = stmt.where(_g.c.id < before_id)
         stmt = stmt.order_by(_g.c.id.desc()).limit(limit)
