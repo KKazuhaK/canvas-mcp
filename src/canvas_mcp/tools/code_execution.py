@@ -25,6 +25,10 @@ from ..core.validation import validate_params
 
 # Environment variable allowlist for subprocess execution.
 # Only these keys are passed through from the host environment.
+# Scripts and guards written beside the API for one run carry this prefix, so
+# anything that lists the API's modules can tell them from the real ones.
+TEMP_SCRIPT_PREFIX = "_run_"
+
 _SAFE_ENV_KEYS = frozenset({
     "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
     "NODE_PATH", "NODE_OPTIONS", "NODE_ENV",
@@ -256,6 +260,7 @@ if (typeof globalThis.fetch === 'function') {{
     guard_file = tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
+        prefix=TEMP_SCRIPT_PREFIX,
         suffix=".cjs",
         dir=directory,
         delete=False
@@ -743,6 +748,7 @@ def register_code_execution_tools(mcp: FastMCP) -> None:
             with tempfile.NamedTemporaryFile(
                 mode='w',
                 encoding="utf-8",
+                prefix=TEMP_SCRIPT_PREFIX,
                 suffix='.ts',
                 dir=code_api_dir,
                 delete=False

@@ -23,6 +23,7 @@ from fastmcp import FastMCP
 from canvas_mcp.core.config import reset_config
 from canvas_mcp.tools import code_execution
 from canvas_mcp.tools.code_execution import (
+    TEMP_SCRIPT_PREFIX,
     _build_sandboxed_node_command,
     _find_sandbox_node,
     _node_runtime,
@@ -169,6 +170,10 @@ async def test_every_code_api_module_loads_in_the_sandbox(execute) -> None:
     modules = sorted(
         "./" + path.relative_to(CODE_API_DIR).with_suffix(".js").as_posix()
         for path in CODE_API_DIR.rglob("*.ts")
+        # Other tests' scripts (and xdist workers') are written beside the API
+        # for the length of one run; they are not part of it and can vanish
+        # between this listing and the import.
+        if not path.name.startswith(TEMP_SCRIPT_PREFIX)
     )
     assert len(modules) > 10, modules
     result = await execute(code=f"""
