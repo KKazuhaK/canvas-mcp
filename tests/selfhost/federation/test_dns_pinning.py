@@ -153,3 +153,89 @@ def test_a_trusted_issuer_whose_name_resolves_inside_is_never_fetched(open_hub):
     open_hub.federation.http._resolver = inside
     assert open_hub.status(open_hub.issuer.mint()) == 401
     assert open_hub.issuer.log == [] and open_hub.accounts() == []
+
+
+PROXY_ENV = (
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "NO_PROXY",
+    "no_proxy",
+)
+
+
+@pytest.fixture
+def proxy_env(monkeypatch):
+    for name in PROXY_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+    def set_env(**values):
+        for name, value in values.items():
+            monkeypatch.setenv(name, value)
+
+    return set_env
+
+
+@pytest.mark.asyncio
+async def test_through_an_environment_proxy_the_request_keeps_the_host_name(proxy_env):
+    proxy_env(HTTPS_PROXY="http://proxy.example.test:3128")
+    http, seen, lookups = client([PUBLIC])
+    await http.get_json("https://hub.example.test/jwks", max_bytes=1000)
+    # Resolved and vetted here, but sent by name: the proxy resolves, and TLS names the host.
+    assert lookups == [("hub.example.test", 443)]
+    assert seen[0].url.host == "hub.example.test"
+    assert "sni_hostname" not in seen[0].extensions
+
+
+@pytest.mark.asyncio
+async def test_through_a_proxy_a_non_public_address_is_still_refused(proxy_env):
+    proxy_env(HTTPS_PROXY="http://proxy.example.test:3128")
+    http, seen, _ = client(["10.0.0.5"])
+    with pytest.raises(UpstreamError):
+        await http.get_json("https://hub.example.test/jwks", max_bytes=1000)
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_no_proxy_host_is_pinned_even_with_a_proxy_configured(proxy_env):
+    proxy_env(HTTPS_PROXY="http://proxy.example.test:3128", NO_PROXY="example.test")
+    http, seen, _ = client([PUBLIC])
+    await http.get_json("https://hub.example.test/jwks", max_bytes=1000)
+    assert seen[0].url.host == PUBLIC
+    assert seen[0].extensions["sni_hostname"] == "hub.example.test"
+
+
+@pytest.mark.asyncio
+async def test_a_proxy_for_another_scheme_does_not_apply(proxy_env):
+    proxy_env(HTTP_PROXY="http://proxy.example.test:3128")
+    http, seen, _ = client([PUBLIC])
+    await http.get_json("https://hub.example.test/jwks", max_bytes=1000)
+    assert seen[0].url.host == PUBLIC
+
+
+def test_pinned_requests_do_not_read_the_environment_proxy(monkeypatch, proxy_env):
+    # The unproxied path builds its client with trust_env=False, so a proxy variable that
+    # matches the address (not the name) cannot capture the pinned connection.
+    import httpx as real_httpx
+
+    built: list[dict] = []
+    original = real_httpx.AsyncClient
+
+    class Spy(original):  # type: ignore[misc, valid-type]
+        def __init__(self, **kwargs):
+            built.append(kwargs)
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr("canvas_mcp.core.selfhost.login.http.httpx.AsyncClient", Spy)
+    import anyio
+
+    http, _, _ = client([PUBLIC])
+
+    async def run():
+        await http.get_json("https://hub.example.test/jwks", max_bytes=1000)
+
+    anyio.run(run)
+    assert built and built[0]["trust_env"] is False

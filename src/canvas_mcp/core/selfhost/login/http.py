@@ -21,6 +21,7 @@ import ipaddress
 import json
 import re
 import socket
+import urllib.request
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -163,6 +164,19 @@ async def system_resolver(host: str, port: int) -> list[str]:
     return [str(info[4][0]) for info in infos]
 
 
+def env_proxy_applies(url: str) -> bool:
+    """Whether the environment (``HTTPS_PROXY``, ``ALL_PROXY``, ``NO_PROXY``) sends ``url`` through a proxy.
+
+    Decided on the original host name, with the same source httpx reads (the standard library's
+    proxy settings), so ``NO_PROXY`` rules for a name keep working.
+    """
+    parts = urlsplit(url)
+    proxies = urllib.request.getproxies()
+    if not (proxies.get(parts.scheme) or proxies.get("all")):
+        return False
+    return not urllib.request.proxy_bypass(parts.hostname or "")
+
+
 def address_is_public(value: str) -> bool:
     """True only for a globally routable unicast address (IPv4-mapped IPv6 judged as its IPv4)."""
     try:
@@ -187,7 +201,9 @@ class SafeHttp:
     ``allow_loopback`` is only for trusted token issuers on localhost (see :func:`check_url`).
     Every other client resolves the host itself, refuses it if any address is not a public one
     (loopback, private, link-local, unspecified, multicast, reserved; IPv4 and IPv6), and connects
-    to the vetted address, so a second DNS answer cannot swap it. That runs for the real network
+    to the vetted address, so a second DNS answer cannot swap it. Through an environment proxy
+    the address is still vetted here, but the request goes to the host name and the proxy
+    resolves it, so pinning cannot be enforced there. That runs for the real network
     and whenever a ``resolver`` is given (tests); a client with only a ``transport`` is a test double.
     """
 
@@ -221,7 +237,8 @@ class SafeHttp:
         """One request. A status in ``ok_statuses`` is returned (its body parsed as JSON when it is
         a 200, and best-effort otherwise); any other status raises ``http_status``."""
         check_url(url, allow_loopback=self._allow_loopback)
-        pinned_url, pin_headers, extensions = await self._pin(url)
+        proxied = env_proxy_applies(url)
+        pinned_url, pin_headers, extensions = await self._pin(url, pin=not proxied)
         sent = {
             "User-Agent": USER_AGENT,
             "Accept": "application/json",
@@ -236,6 +253,9 @@ class SafeHttp:
             with anyio.fail_after(self._total_timeout):
                 async with httpx.AsyncClient(
                     transport=self._transport,
+                    # A pinned request goes to an address: the environment's proxy rules were
+                    # decided for the host name above and must not apply a second time.
+                    trust_env=proxied,
                     follow_redirects=False,
                     timeout=httpx.Timeout(
                         self._total_timeout, connect=self._connect_timeout
@@ -284,10 +304,13 @@ class SafeHttp:
                 body = None
         return HttpResult(status, body, result_headers)
 
-    async def _pin(self, url: str) -> tuple[str, dict[str, str], dict[str, Any]]:
+    async def _pin(
+        self, url: str, *, pin: bool
+    ) -> tuple[str, dict[str, str], dict[str, Any]]:
         """The address to connect to, with the Host header and TLS name of the real host.
 
-        Raises ``blocked_url`` when the host does not resolve or any answer is not public.
+        Raises ``blocked_url`` when the host does not resolve or any answer is not public. With
+        ``pin`` False (a proxy applies) the addresses are vetted but the URL is left alone.
         """
         # Read now, not at construction: tests set the transport on a built client.
         if self._allow_loopback or (
@@ -306,7 +329,7 @@ class SafeHttp:
         if not addresses or not all(address_is_public(a) for a in addresses):
             raise UpstreamError("blocked_url")
         chosen = addresses[0]
-        if chosen == host.strip("[]"):
+        if not pin or chosen == host.strip("[]"):
             return url, {}, {}
         shown = f"[{chosen}]" if ":" in chosen else chosen
         netloc = shown + (f":{parts.port}" if parts.port else "")
