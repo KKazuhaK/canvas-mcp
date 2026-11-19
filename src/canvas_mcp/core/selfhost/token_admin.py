@@ -215,6 +215,9 @@ def _build_parser() -> argparse.ArgumentParser:
     from .config_cli import register
 
     register(sub)
+    from .federation.cli import register as register_federation
+
+    register_federation(sub)
     return parser
 
 
@@ -974,6 +977,10 @@ def main(argv: list[str] | None = None) -> int:
                 except (ValueError, SettingsConflict, SchoolRemovalConfirmation) as exc:
                     print("error: " + refusal(exc), file=sys.stderr)
                     return EXIT_CONFIG
+            if args.command in {"trusted-issuers", "link-federated", "unlink-federated"}:
+                from .federation.cli import run as run_federation
+
+                return run_federation(args, store)
             if args.command == "access":
                 return _access(store)
             return _run(args, store)

@@ -296,6 +296,8 @@ class SqlGrantRepo:
                 _g.c.id == grant_id,
                 _g.c.account_id == account_id,
                 _g.c.revoked_at.is_(None),
+                # A federated grant is managed where the person signs in, not here.
+                ~_g.c.client_id.like("federated:%"),
             )
             .values(revoked_at=now, revoked_reason=reason, revoked_by=_by(by))
         )

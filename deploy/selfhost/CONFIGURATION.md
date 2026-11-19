@@ -129,6 +129,147 @@ as the panel, with an `operator` actor. They do not require IdP credentials:
 provider names use the provider set last recorded by a server. On a fresh
 database, start the server once to record that set before renaming providers.
 
+## Trusted issuers
+
+A trusted issuer is an external OAuth server, such as a hub that signs people in,
+whose access tokens this server accepts on `/mcp` on the person's behalf. The
+person does not sign in to Canvas MCP or approve anything again. The feature is
+off until you add an issuer: with none configured, `/mcp` accepts exactly the
+tokens this server issued itself, as before.
+
+**Choosing the checks.** A token whose issuer is this server goes to this
+server's own decoder, as always. Any other token goes to the trusted issuers,
+and only if at least one is configured. Everything below is checked in this
+order, and the first failure refuses the token with a plain 401:
+the size (8 KiB at most); the header (the algorithm must be on the issuer's
+list, the type must be `at+jwt` unless you relax it, and a header that points
+at keys, `jku`, `jwk` or `x5u`, is refused); the signature; the issuer; the
+audience; the times; the subject.
+
+**Algorithms and keys.** Only asymmetric algorithms can be configured
+(default `ES256`, `RS256`, `PS256` and `EdDSA`). `none` and `HS256`/`HS384`/`HS512`
+are refused when you add the issuer and again on every token, because a token
+signed with the issuer's public key used as a shared secret is the classic
+forgery. The signing keys come from the issuer's key set, found through its
+RFC 8414 metadata at `/.well-known/oauth-authorization-server`, whose `issuer`
+must equal the configured one character for character, or from `--jwks-url`.
+Keys are cached for an hour. A token naming a key the cache does not know makes
+the server fetch the key set again, at most once a minute per issuer, so
+invented key ids cannot make it hammer the issuer. Addresses must be https;
+`localhost` may use plain http for development.
+
+**Claims.** `iss` must equal the issuer string exactly (a trailing slash
+counts). `aud` must contain the audience, by default this server's own
+`/mcp` URL (`--audience` changes it). `exp` is required and the token must not
+be expired. `nbf` and `iat`, when present, may be at most 60 seconds in the future.
+
+**Who the person is.** The person is the pair (issuer, subject). The subject
+is the claim named by `--subject-claim` (default `sub`); it must be present and a
+non-empty string. There is no fallback to another claim: if the configured claim
+is missing, the token is refused. A hub that gives each person a stable id of its
+own should name that claim, because `sub` may be per-client or per-session there.
+
+**Accounts.** A subject you have not seen before gets an account under the same
+admission policy as a first sign-in (`ACCESS_POLICY` is `open`, `rules` or
+`approval`, with `ACCESS_RULES` and `ACCESS_FALLBACK`). `open` creates an active account. `approval` creates a pending
+one, and so does `rules` with `ACCESS_FALLBACK=approval` when no rule matches.
+`rules` admits the issuer's people only if a rule says so: add `federated:any` to
+`ACCESS_RULES` (for example `ACCESS_RULES=entra:role:Canvas.User,federated:any`);
+without it the people of a trusted issuer are refused unless you link them. A pending
+or disabled account is refused on `/mcp` with a message that says so, and nothing
+about the person is matched by e-mail address or name: an existing account is only
+ever attached by an operator, with `link-federated`. An account made this way has no
+sign-in method of its own, so a person who needs to open the account page (to bind
+a Canvas token, for instance) should be linked to the account they sign in with.
+
+**The connection.** The first token of an account through an issuer creates one
+connection (a "federated grant") so that last-use tracking, the write-tool
+switches and the Canvas token binding work as for any app. The person sees it under
+Connected apps as "via NAME — manage there" and cannot end it from there; the
+issuer is where it is managed. Disabling the account stops it at once, and enabling
+it again restores it. Ending it with `revoke-grant` (or an owner doing so) is final:
+to restore it, unlink the person and link them again.
+
+**Scopes only narrow.** `--read-scope` names a scope the token must carry (`scope`
+or `scp`); without it the token is refused. `--write-scope` names the scope write
+tools need; a token without it can only use read tools, whatever the person switched
+on at the account page. Neither can add anything: write tools still need the
+person's own switch and the operator's `ALLOWED_WRITE_TOOLS`.
+
+**Only on `/mcp`.** These tokens are never a web session and are refused on `/api`,
+the account pages and the browser-extension endpoints, which all keep their own
+credentials.
+
+**No Canvas token yet.** A person who has not bound a Canvas token gets, from every
+tool, the usual "no Canvas access token is enrolled" message with the address of the
+account page where it is bound.
+
+Commands, run in the server's environment like the others:
+
+```sh
+python -m canvas_mcp.core.selfhost.token_admin trusted-issuers add ISSUER \
+  [--name NAME] [--audience AUD] [--jwks-url URL] [--algorithms ES256,RS256] \
+  [--allow-typ-jwt] [--subject-claim CLAIM] [--read-scope S] [--write-scope S]
+python -m canvas_mcp.core.selfhost.token_admin trusted-issuers list
+python -m canvas_mcp.core.selfhost.token_admin trusted-issuers links [--account UUID]
+python -m canvas_mcp.core.selfhost.token_admin trusted-issuers remove ISSUER
+python -m canvas_mcp.core.selfhost.token_admin link-federated --account UUID --issuer ISSUER --subject SUBJECT
+python -m canvas_mcp.core.selfhost.token_admin unlink-federated --issuer ISSUER --subject SUBJECT
+```
+
+A running server notices a change within about ten seconds. `remove` deletes the
+issuer's connections but keeps the links, so adding the issuer back restores people
+on their own accounts. `unlink-federated` deletes that person's connection; a sign-in
+method is never removed by it (use `unlink-identity` for those).
+
+### Recipe: MCPHub
+
+In MCPHub, let it sign the person in for this server. The names below follow MCPHub's
+own configuration; check them against its documentation.
+
+1. Set this server's public address (`PUBLIC_BASE_URL`), so that the `/mcp` address is
+   fixed, for example `https://canvas.example.edu/mcp`.
+2. In MCPHub add an `oauthServer.externalResources` entry whose `resource` is exactly
+   that `/mcp` address, with `allowedClients` including MCPHub's personal OAuth
+   client, and the scopes you want to grant.
+3. Add the server in MCPHub as `streamable-http`, with `oauth.identityMode: personal`
+   and `url` equal to that same resource.
+4. Trust MCPHub here. MCPHub is adding a stable per-person id claim (`mcphub_uid`);
+   use it as the subject, because `sub` is not a stable person id there:
+
+   ```sh
+   python -m canvas_mcp.core.selfhost.token_admin trusted-issuers add https://mcphub.example.edu \
+     --name MCPHub --subject-claim mcphub_uid
+   ```
+
+   If MCPHub's tokens carry scopes you want to honour, add `--read-scope` and
+   `--write-scope`. Until MCPHub issues `mcphub_uid`, do not add the issuer: tokens
+   without the configured claim are refused.
+5. Pick how people get accounts (see Accounts above), or link existing ones with
+   `link-federated`.
+
+### Recipe: Microsoft Entra or Keycloak
+
+These issue ID-style `typ: JWT` access tokens, so relax the type check, and name the
+key set, because they publish OpenID Connect rather than RFC 8414 metadata:
+
+```sh
+# Entra (v2.0 tokens): issuer https://login.microsoftonline.com/<tenant id>/v2.0
+python -m canvas_mcp.core.selfhost.token_admin trusted-issuers add \
+  https://login.microsoftonline.com/TENANT_ID/v2.0 --name Entra --allow-typ-jwt \
+  --audience API_APP_ID_OR_URI --jwks-url https://login.microsoftonline.com/TENANT_ID/discovery/v2.0/keys \
+  --subject-claim oid
+
+# Keycloak: issuer https://keycloak.example.edu/realms/REALM
+python -m canvas_mcp.core.selfhost.token_admin trusted-issuers add \
+  https://keycloak.example.edu/realms/REALM --name Keycloak --allow-typ-jwt \
+  --audience canvas-mcp --jwks-url https://keycloak.example.edu/realms/REALM/protocol/openid-connect/certs
+```
+
+Register this server's `/mcp` as the resource (Entra: the API's application ID URI;
+Keycloak: an audience mapper) so that `aud` carries the audience you set. Only access
+tokens work: an ID token has the wrong audience and is refused.
+
 ## Runtime and migration boundaries
 
 Each authenticated MCP or browser request reads the committed configuration

@@ -262,7 +262,8 @@
     "revokeLabel": "断开：{{name}}",
     "revokeTitle": "断开 {{name}}？",
     "revokeBody": "该应用的下一次 MCP 请求即会被拒绝，之后需要重新征得你的同意。",
-    "revoked": "已断开该应用。"
+    "revoked": "已断开该应用。",
+    "viaIssuer": "通过 {{name}} 连接，请在那里管理"
   },
   "consent": {
     "title": "要把这个应用连接到你的账户吗？",

@@ -40,7 +40,7 @@ from .config_snapshot import CURRENT_CONFIG
 from .db.errors import StoreUnavailable
 from .limits import InMemoryTokenBucket, RateLimiters, build_rate_limiters
 from .maintenance import MAINTENANCE_INTERVAL_SECONDS, Maintenance, MaintenanceScheduler
-from .mcp_state import MCP_READ, MCP_UNAVAILABLE
+from .mcp_state import MCP_READ, MCP_REFUSED, MCP_UNAVAILABLE
 from .routes import API_PREFIX
 
 REGISTER_PATH = "/register"
@@ -109,6 +109,7 @@ class SelfhostEdgeGuard:
         config_marker = CURRENT_CONFIG.set(None)
         marker = MCP_READ.set(None)
         unavailable_marker = MCP_UNAVAILABLE.set(False)
+        refused_marker = MCP_REFUSED.set(None)
         started = False
 
         async def record_send(message: Message) -> None:
@@ -127,6 +128,7 @@ class SelfhostEdgeGuard:
             CURRENT_CONFIG.reset(config_marker)
             MCP_READ.reset(marker)
             MCP_UNAVAILABLE.reset(unavailable_marker)
+            MCP_REFUSED.reset(refused_marker)
 
     async def _dispatch(self, scope: Scope, receive: Receive, send: Send) -> None:
         scope_type = scope["type"]

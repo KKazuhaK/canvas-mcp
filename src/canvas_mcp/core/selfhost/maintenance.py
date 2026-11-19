@@ -9,7 +9,17 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, cast
 
-from sqlalchemy import and_, delete, exists, false, insert, select, text, tuple_
+from sqlalchemy import (
+    and_,
+    delete,
+    exists,
+    false,
+    insert,
+    or_,
+    select,
+    text,
+    tuple_,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -137,14 +147,24 @@ class MaintenanceRunner:
             (
                 "revoked_grants",
                 s.oauth_grants,
-                s.oauth_grants.c.revoked_at < now - 30 * DAY,
+                and_(
+                    s.oauth_grants.c.revoked_at < now - 30 * DAY,
+                    # A federated grant the operator ended stays as the record of that decision.
+                    ~s.oauth_grants.c.client_id.like("federated:%"),
+                ),
                 s.oauth_grants.c.revoked_at,
                 200,
             ),
             (
                 "expired_grants",
                 s.oauth_grants,
-                s.oauth_grants.c.expires_at < now - 30 * DAY,
+                and_(
+                    s.oauth_grants.c.expires_at < now - 30 * DAY,
+                    or_(
+                        s.oauth_grants.c.revoked_at.is_(None),
+                        ~s.oauth_grants.c.client_id.like("federated:%"),
+                    ),
+                ),
                 s.oauth_grants.c.expires_at,
                 200,
             ),

@@ -34,7 +34,14 @@ function GrantRow({
     >
       <AppIdentity client={grant.client} />
       <Typography variant="caption" color="text.secondary">
-        {t('admin:apps.returnsTo')} <code>{grant.redirect_host || '–'}</code> · {t('admin:apps.connected')}{' '}
+        {grant.federated ? (
+          t('account:apps.viaIssuer', { name: grant.federated.issuer_name })
+        ) : (
+          <>
+            {t('admin:apps.returnsTo')} <code>{grant.redirect_host || '–'}</code>
+          </>
+        )}{' '}
+        · {t('admin:apps.connected')}{' '}
         <TimeText iso={grant.created_at} /> · {t('admin:apps.lastUsed')}{' '}
         <TimeText iso={grant.last_used_at} fallback={t('account:apps.never')} />
       </Typography>

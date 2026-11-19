@@ -17,6 +17,7 @@ header or a body, so a log line built from one cannot leak a secret.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import re
 from collections.abc import Mapping
@@ -78,20 +79,36 @@ class HttpResult:
     headers: Mapping[str, str] = field(default_factory=dict)
 
 
-def check_url(url: str) -> str:
-    """The URL if it may be called, else :class:`UpstreamError` ``blocked_url``."""
+def is_loopback_host(host: str) -> bool:
+    """``localhost``, ``*.localhost`` and loopback IP literals (the only hosts plain http may name)."""
+    name = host.strip().strip("[]").lower().rstrip(".")
+    if name == "localhost" or name.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(name.split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def check_url(url: str, *, allow_loopback: bool = False) -> str:
+    """The URL if it may be called, else :class:`UpstreamError` ``blocked_url``.
+
+    ``allow_loopback`` (trusted token issuers only) also lets ``localhost`` and loopback
+    addresses through, over http as well as https, for local development.
+    """
     try:
         parts = urlsplit(url)
         host = parts.hostname
         parts.port  # noqa: B018 - raises ValueError for a malformed port
     except ValueError:
         raise UpstreamError("blocked_url") from None
+    local = allow_loopback and bool(host) and is_loopback_host(host or "")
     if (
-        parts.scheme.lower() != "https"
+        parts.scheme.lower() not in (("https", "http") if local else ("https",))
         or not host
         or "@" in parts.netloc
         or parts.fragment
-        or blocked_host(host)
+        or (blocked_host(host) and not local)
         or any(ch.isspace() for ch in url)
     ):
         raise UpstreamError("blocked_url")
@@ -134,7 +151,9 @@ def _is_json_media(content_type: str) -> bool:
 
 
 class SafeHttp:
-    """Outbound requests with the limits above. ``transport`` replaces the network (tests)."""
+    """Outbound requests with the limits above. ``transport`` replaces the network (tests).
+
+    ``allow_loopback`` is only for trusted token issuers (see :func:`check_url`)."""
 
     def __init__(
         self,
@@ -142,7 +161,9 @@ class SafeHttp:
         transport: httpx.AsyncBaseTransport | None = None,
         connect_timeout: float = CONNECT_TIMEOUT_S,
         total_timeout: float = TOTAL_TIMEOUT_S,
+        allow_loopback: bool = False,
     ) -> None:
+        self._allow_loopback = allow_loopback
         self._transport = transport
         self._connect_timeout = connect_timeout
         self._total_timeout = total_timeout
@@ -161,7 +182,7 @@ class SafeHttp:
     ) -> HttpResult:
         """One request. A status in ``ok_statuses`` is returned (its body parsed as JSON when it is
         a 200, and best-effort otherwise); any other status raises ``http_status``."""
-        check_url(url)
+        check_url(url, allow_loopback=self._allow_loopback)
         sent = {
             "User-Agent": USER_AGENT,
             "Accept": "application/json",

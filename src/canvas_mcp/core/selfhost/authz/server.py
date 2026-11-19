@@ -53,7 +53,10 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from ...logging import log_info, log_warning
 from ..db.errors import StoreUnavailable
 from ..db.workers import run_store
-from ..mcp_state import MCP_READ, MCP_UNAVAILABLE, McpRead
+from ..federation.service import Accepted, Refused
+from ..federation.verifier import MAX_TOKEN_CHARS as MAX_FEDERATED_TOKEN_CHARS
+from ..federation.verifier import peek_issuer
+from ..mcp_state import MCP_READ, MCP_REFUSED, MCP_UNAVAILABLE, McpRead
 from ..settings import SelfhostConfigError, SelfhostSettings
 from . import fastmcp_compat as compat
 from .clients import (
@@ -433,7 +436,12 @@ class LocalAuthorizationServer(OAuthProvider):
         """Verify first, then read current standing once. Database outages remain 503."""
         MCP_READ.set(None)
         MCP_UNAVAILABLE.set(False)
+        MCP_REFUSED.set(None)
         try:
+            named = peek_issuer(token)
+            if named is not None and named != self.issuer:
+                # Not one of ours: a trusted external issuer's token, or nothing.
+                return await self._load_federated_token(token)
             if not isinstance(token, str) or len(token) > MAX_ACCESS_TOKEN_CHARS:
                 return None
             decoded = self.authz.codec.decode(token)
@@ -467,8 +475,63 @@ class LocalAuthorizationServer(OAuthProvider):
             # Raising here would let Starlette's server-error layer start a 500.
             MCP_UNAVAILABLE.set(True)
             return None
-        except Exception:  # noqa: BLE001 - fail closed on anything, including a database error
+        except (
+            Exception
+        ):  # noqa: BLE001 - fail closed on anything, including a database error
             return None
+
+    async def _load_federated_token(self, token: str) -> AccessToken | None:
+        """A token of a trusted external issuer, valid on /mcp only (this method is the only entry).
+
+        The result carries the claims of an access token of this server (its own account and
+        grant), so everything after it (account standing, Canvas token, tool gate) is unchanged.
+        """
+        federation = self.authz.federation
+        if federation is None or len(token) > MAX_FEDERATED_TOKEN_CHARS:
+            return None
+        if not await federation.issuers():
+            return None
+        outcome = await federation.authenticate(token)
+        if outcome is None:
+            return None
+        if isinstance(outcome, Refused):
+            MCP_REFUSED.set(outcome.message)
+            return None
+        assert isinstance(outcome, Accepted)
+        account, grant = outcome.resolved.account_id, outcome.resolved.grant_id
+        snapshot = await run_store(self.authz.store.read_mcp_snapshot, account, grant)
+        now = int(self.authz.clock())
+        if (
+            snapshot is None
+            or snapshot.revoked_at is not None
+            or snapshot.grant_expires_at <= now
+        ):
+            return None
+        claims = {
+            "iss": self.issuer,
+            "aud": self.audience,
+            "sub": account,
+            "acct": account,
+            "client_id": snapshot.client_id,
+            "scope": self.scope,
+            "iat": now,
+            "exp": outcome.verified.expires_at,
+            "jti": "federated",
+            "grant": grant,
+            "token_use": "access",
+            "federated": True,
+            "write_allowed": outcome.verified.write_allowed,
+        }
+        MCP_READ.set(McpRead(account, grant, snapshot))
+        return AccessToken(
+            token=token,
+            client_id=snapshot.client_id,
+            scopes=[self.scope],
+            expires_at=outcome.verified.expires_at,
+            resource=self.audience,
+            subject=account,
+            claims=claims,
+        )
 
     # -- 9. revocation ------------------------------------------------------------------------
 
@@ -476,6 +539,8 @@ class LocalAuthorizationServer(OAuthProvider):
         if isinstance(token, LocalRefreshToken):
             await self.authz.grants.revoke_by_client(token.grant_id)
             return
+        if (getattr(token, "claims", None) or {}).get("federated"):
+            return  # a trusted issuer's token is not ours to revoke; its grant is managed by the operator
         grant = (getattr(token, "claims", None) or {}).get("grant")
         if isinstance(grant, str):
             await self.authz.grants.revoke_by_client(grant)

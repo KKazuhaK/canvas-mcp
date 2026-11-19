@@ -429,6 +429,8 @@ export interface Grant {
   id: string
   client: AppClient
   redirect_host: string
+  /** Set when the connection comes through a trusted external issuer: shown read-only. */
+  federated?: { issuer_name: string } | null
   created_at: string | null
   last_used_at: string | null
   expires_at: string | null

@@ -78,19 +78,24 @@ export default function ConnectedAppsView() {
       key: 'actions',
       header: t('account:apps.columns.actions'),
       actions: true,
-      render: (g) => (
-        <Button
-          size="small"
-          color="error"
-          aria-label={t('account:apps.revokeLabel', { name: appName(g, unnamed) })}
-          onClick={() => {
-            revoke.reset()
-            setTarget(g)
-          }}
-        >
-          {t('account:apps.revoke')}
-        </Button>
-      ),
+      render: (g) =>
+        g.federated ? (
+          <Typography variant="body2" color="text.secondary">
+            {t('account:apps.viaIssuer', { name: g.federated.issuer_name })}
+          </Typography>
+        ) : (
+          <Button
+            size="small"
+            color="error"
+            aria-label={t('account:apps.revokeLabel', { name: appName(g, unnamed) })}
+            onClick={() => {
+              revoke.reset()
+              setTarget(g)
+            }}
+          >
+            {t('account:apps.revoke')}
+          </Button>
+        ),
     },
   ]
 

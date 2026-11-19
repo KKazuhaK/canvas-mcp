@@ -2491,6 +2491,10 @@ class ApiApp:
                 "verified": verified,
             },
             "redirect_host": _clean(grant.redirect_host, 253),
+            # A connection through a trusted external issuer: shown read-only, managed there.
+            "federated": {"issuer_name": name}
+            if grant.client_id.startswith("federated:")
+            else None,
             "created_at": _ts(grant.created_at),
             "last_used_at": _ts(grant.last_used_at),
             "expires_at": _ts(grant.expires_at),

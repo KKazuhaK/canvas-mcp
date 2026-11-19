@@ -57,6 +57,9 @@ PROVIDER_GOOGLE = "google"
 PROVIDER_GITHUB = "github"
 #: Generic OpenID Connect providers are ``oidc:<slug>``.
 PROVIDER_OIDC_PREFIX = "oidc:"
+#: People who arrive with a token from a trusted external issuer (``trusted-issuers``). Not a
+#: sign-in provider: the only rule it takes is ``federated:any``.
+PROVIDER_FEDERATED = "federated"
 ENTRA_ISSUER_PREFIX = "https://login.microsoftonline.com/"
 GOOGLE_ISSUER = "https://accounts.google.com"
 GITHUB_ISSUER = "https://github.com"
@@ -511,6 +514,12 @@ def parse_rule(
     provider, sep, rest = entry.partition(":")
     if not sep or not provider:
         return "is not '<provider>:<kind>:<value>'"
+    if provider == PROVIDER_FEDERATED:
+        if owner:
+            return f"names federated: {_OWNER_ONLY_ENTRA}"
+        if rest != "any":
+            return "needs exactly federated:any"
+        return AccessRule(PROVIDER_FEDERATED, "any", "")
     if provider not in _KNOWN_PROVIDERS:
         return "has an unknown provider prefix"
     provider_id = provider

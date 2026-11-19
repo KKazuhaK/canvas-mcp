@@ -53,6 +53,10 @@ def revision_graph(tmp_path, monkeypatch):
         source / "versions/0007_browser_sync.py",
         directory / "versions/0007_browser_sync.py",
     )
+    shutil.copyfile(
+        source / "versions/0008_trusted_issuers.py",
+        directory / "versions/0008_trusted_issuers.py",
+    )
     migrate._script.cache_clear()
 
     def add(
@@ -61,7 +65,7 @@ def revision_graph(tmp_path, monkeypatch):
         contract=False,
         non_transactional=False,
         revision="0002_policy",
-        down="0007_browser_sync",
+        down="0008_trusted_issuers",
     ):
         script = f"""from alembic import op
 import sqlalchemy as sa
@@ -126,7 +130,7 @@ def test_contract_automatically_backs_up_and_preserves_strict_rowid_indexes_and_
         )
         assert backup.execute(
             "SELECT version_num FROM canvas_mcp_alembic_version"
-        ).fetchone() == ("0007_browser_sync",)
+        ).fetchone() == ("0008_trusted_issuers",)
         assert "obsolete" in {
             row[1] for row in backup.execute("PRAGMA table_info(audit_log)")
         }
@@ -221,7 +225,7 @@ def test_floor_policy_failure_rolls_back_ddl_and_revision(
             conn.exec_driver_sql(
                 "SELECT version_num FROM canvas_mcp_alembic_version"
             ).scalar_one()
-            == "0007_browser_sync"
+            == "0008_trusted_issuers"
         )
 
 
@@ -336,7 +340,7 @@ def test_nontransactional_plan_refuses_atomic_modes_before_any_revision(
             conn.exec_driver_sql(
                 "SELECT version_num FROM canvas_mcp_alembic_version"
             ).scalar_one()
-            == "0007_browser_sync"
+            == "0008_trusted_issuers"
         )
 
 

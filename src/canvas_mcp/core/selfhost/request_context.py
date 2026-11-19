@@ -48,7 +48,7 @@ from .browser_store import BrowserSyncStore, browser_decision
 from .config_snapshot import CURRENT_CONFIG, ConfigSnapshots
 from .db.snapshots import McpSnapshot
 from .db.workers import run_store
-from .mcp_state import MCP_READ, MCP_UNAVAILABLE, McpRead
+from .mcp_state import MCP_READ, MCP_REFUSED, MCP_UNAVAILABLE, McpRead
 from .principal_access import access_unavailable_message, snapshot_status
 from .server_settings import SETTINGS
 from .settings import COURSE_STATE_PER_PRINCIPAL, COURSE_STATE_REQUEST_LOCAL
@@ -263,6 +263,10 @@ class SelfhostRequestContextMiddleware:
             if MCP_UNAVAILABLE.get():
                 await _send_json(send, 503, access_unavailable_message())
                 return
+            refused = MCP_REFUSED.get()
+            if refused is not None:
+                await _send_json(send, 403, refused)
+                return
             user = scope.get("user")
             if not isinstance(user, AuthenticatedUser):
                 # Not authenticated: FastMCP's RequireAuthMiddleware answers
@@ -314,9 +318,11 @@ class SelfhostRequestContextMiddleware:
             if not await self._attach_canvas_credentials(principal.key, snapshot):
                 await _send_json(send, 503, unreadable_token_message(self.account_url))
                 return
-            set_request_tool_prefs(
-                await self._load_tool_prefs(principal.key, snapshot.write_tools_version)
-            )
+            prefs = await self._load_tool_prefs(principal.key, snapshot.write_tools_version)
+            if claims.get("federated") is True and claims.get("write_allowed") is not True:
+                # The trusted issuer's write scope is missing from the token: read tools only.
+                prefs = RequestToolPrefs(read_only=True)
+            set_request_tool_prefs(prefs)
             await self.app(scope, receive, send)
             try:
                 await self._touch_usage(read)

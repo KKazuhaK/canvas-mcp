@@ -21,3 +21,5 @@ MCP_READ: ContextVar[McpRead | None] = ContextVar("selfhost_mcp_read", default=N
 MCP_UNAVAILABLE: ContextVar[bool] = ContextVar(
     "selfhost_mcp_unavailable", default=False
 )
+#: A verified external token whose person the server does not admit: the message to answer with.
+MCP_REFUSED: ContextVar[str | None] = ContextVar("selfhost_mcp_refused", default=None)
