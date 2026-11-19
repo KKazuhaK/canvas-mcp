@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **New browser extension icon.** Canvas MCP Sync now has a flat red icon: a white C-shaped sync arrow with three dots. It uses Canvas's brand red only, not the Instructure logo. `icon-store.svg` keeps the 16 px transparent padding the Chrome Web Store asks for and renders `icon-128.png`.
+
 ## [1.14.8] — 2026-11-19
 
 ### Added
