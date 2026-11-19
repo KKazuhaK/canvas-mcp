@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.8] — 2026-11-19
+
+### Added
+
+- Self-hosted: `/mcp` accepts access tokens from configured trusted OAuth issuers (RFC 9068), so a hub such as MCPHub can call Canvas MCP for a signed-in user without a second sign-in. Managed with `token_admin trusted-issuers`, `link-federated` and `unlink-federated`; off unless an issuer is configured. See `deploy/selfhost/CONFIGURATION.md`, "Trusted issuers".
+
+### Security
+
+- Self-hosted: outbound requests to login providers and trusted issuers refuse non-public addresses and are pinned to the vetted address (unless an environment proxy applies).
+
 ## [1.14.7] — 2026-11-18
 
 ### Added
