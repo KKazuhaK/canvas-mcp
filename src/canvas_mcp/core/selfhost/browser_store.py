@@ -22,6 +22,7 @@ from sqlalchemy import and_, delete, func, insert, select, update
 from sqlalchemy.engine import Connection
 
 from ..browser_source import BrowserSnapshot
+from ..credentials import BrowserSource
 from .browser_plan import (
     course_source_keys,
     expected_resources,
@@ -33,6 +34,9 @@ from .db import schema as s
 from .db.engine import Database
 from .db.sealed import SEALED, SealKeys
 from .db.types import new_id
+from .db.workers import run_store
+from .server_settings import SETTINGS
+from .token_store import STATUS_INVALID
 
 PAIRING_TTL_SECONDS = 300
 #: Per-binding quotas, so one browser cannot fill the database.
@@ -138,6 +142,106 @@ def browser_decision(
     if token_user_id is not None and token_user_id != binding_user_id:
         return False, "user_mismatch"
     return True, None
+
+
+def token_usable_for_mcp(credential_id: str | None, credential_status: str | None) -> bool:
+    """Whether ``/mcp`` answers from the account's Canvas token (browser sync is then never read).
+
+    A saved token that is not marked invalid is used even if Canvas would reject it, so
+    ``/mcp`` falls back to browser sync only for no token or an invalid one.
+    """
+    return credential_id is not None and credential_status != STATUS_INVALID
+
+
+def decide_binding(
+    binding: Binding,
+    *,
+    token_usable: bool,
+    token_host: str | None,
+    token_user_id: str | None,
+    schools: Any,
+) -> tuple[bool, str | None]:
+    """:func:`browser_decision` for one stored binding: the only call site of the rule.
+
+    ``schools`` is the settings snapshot's school policy (``resolve_stored``).
+    """
+    return browser_decision(
+        token_usable=token_usable,
+        token_host=token_host,
+        binding_host=binding.canvas_host,
+        school_offered=schools.resolve_stored(binding.canvas_host) is not None,
+        token_user_id=token_user_id,
+        binding_user_id=binding.canvas_user_id,
+    )
+
+
+def binding_accepted(binding: Binding, config: Any, snapshot: Any) -> bool:
+    """Whether ``/mcp`` answers from ``binding`` for a request without a usable token.
+
+    The request middleware and the readiness endpoint both ask this. ``snapshot`` is the
+    account's :class:`McpSnapshot` (its credential, if any, is an unusable one here) and
+    ``config`` the settings snapshot the request runs under.
+    """
+    active, _ = decide_binding(
+        binding,
+        token_usable=False,
+        token_host=snapshot.canvas_host,
+        token_user_id=snapshot.canvas_user_id,
+        schools=config.schools,
+    )
+    return active
+
+
+def browser_source_for(
+    store: BrowserSyncStore, binding: Binding, config: Any
+) -> BrowserSource:
+    """The data source ``/mcp`` gives a tool call that is answered from this binding.
+
+    Only rows whose key the binding's current plan can hold are ever served: a stale row
+    (say one naming a course that is now unpublished) is not. Loads are cached per source.
+    """
+    assert binding.canvas_host is not None
+    cache: dict[str, list[Any]] = {}
+    plan_keys: list[frozenset[str]] = []
+
+    def current(path: str) -> list[Any]:
+        if not plan_keys:
+            plan_keys.append(store.expected_keys(binding.id, binding.canvas_user_id))
+        return [
+            snap
+            for snap in store.load_path(binding.id, path)
+            if resource_key(snap.path, snap.query) in plan_keys[0]
+        ]
+
+    async def load(path: str) -> list[Any]:
+        if path not in cache:
+            cache[path] = await run_store(current, path)
+        return cache[path]
+
+    max_age, fresh = browser_windows(config)
+    return BrowserSource(
+        binding_id=binding.id,
+        canvas_host=binding.canvas_host,
+        load=load,
+        max_age_seconds=max_age,
+        fresh_seconds=fresh,
+    )
+
+
+def browser_windows(config: Any) -> tuple[int, int]:
+    """``(max_age_seconds, fresh_seconds)`` of synced data: older than the first is not used,
+    older than the second carries a "may be out of date" note."""
+
+    def number(key: str) -> int:
+        try:
+            return int(config.settings[key])
+        except (KeyError, TypeError, ValueError):
+            return int(SETTINGS[key].default)
+
+    return (
+        number("browser_sync.max_age_days") * 86400,
+        number("browser_sync.fresh_hours") * 3600,
+    )
 
 
 def drives_the_plan(key: str) -> bool:

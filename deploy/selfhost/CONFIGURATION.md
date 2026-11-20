@@ -284,6 +284,103 @@ Register this server's `/mcp` as the resource (Entra: the API's application ID U
 Keycloak: an audience mapper) so that `aud` carries the audience you set. Only access
 tokens work: an ID token has the wrong audience and is refused.
 
+## Readiness endpoint
+
+`GET /api/v1/readiness` tells an integrating hub (for example MCPHub) whether a person's
+connection actually works. Signing in through the Portal's OAuth does not save a Canvas
+token, so "connected" is not "usable". The hub sends the access token it already uses for
+MCP calls; nothing else needs configuring, and the endpoint is always served. The rule is
+that every answer agrees with what `/mcp` would do for the same account at that moment.
+
+```
+GET /api/v1/readiness
+Accept: application/json
+Authorization: Bearer <the access token the hub uses for /mcp>
+```
+
+**Authentication is `/mcp`'s own.** The route sits behind the same bearer authentication, so it
+accepts exactly the tokens `/mcp` accepts: the Portal's own access tokens and the tokens of a
+[trusted issuer](#trusted-issuers) such as MCPHub, with the same checks (signature, audience,
+scope, lifetime, signing epoch, a grant that is neither revoked nor expired) and the same account
+resolution. A missing or invalid token, or one `/mcp` would not accept, is `401` with
+`{"error": {"code": "not_authenticated"}}` and a `WWW-Authenticate: Bearer` header. A valid token
+of a person the server does not admit, or of an account that is pending or disabled, is `403`
+(`forbidden`, `pending_approval`, `access_disabled`), as on `/mcp`. Cookies are never read.
+Other methods get `405`; no CORS headers are sent. A database outage is `503`.
+
+The `200` body follows version 1 of the service readiness contract:
+
+```json
+{
+  "version": 1,
+  "state": "needs_setup",
+  "summary": "No Canvas token is saved yet. Save one to use the Canvas tools.",
+  "action": {"label": "Set up Canvas token", "url": "https://portal.example.edu/account/token"},
+  "expires_at": "2026-12-01T00:00:00Z",
+  "checked_at": "2026-11-19T10:00:00Z"
+}
+```
+
+**How the state is chosen.** `/mcp` uses a saved Canvas token unless there is none or it is marked
+invalid; only then does it answer from browser sync, and only when the binding is accepted (a
+Canvas school this server offers, the same school and the same Canvas user as the invalid token,
+if any). Readiness asks the same code.
+
+With a usable saved token:
+
+| `state` | When |
+|---|---|
+| `needs_setup` | The token's school is no longer offered, or its custody notice is out of date (`/mcp` refuses tool calls until it is fixed). |
+| `expiring` | Canvas reported an expiry and it is within `notifications.token_reminder_days` (the reminder e-mail threshold). `expires_at` is set. |
+| `expired` | Canvas reported an expiry and it has passed (unless an administrator revoked the token). |
+| `revoked` | The Portal marked the token invalid (Canvas rejected it, an administrator revoked it), or `/mcp` could not read it: the credential generation does not match or it does not decrypt. Readiness only looks; it never marks anything. |
+| `ready` | Anything else. `expires_at` is set when Canvas reported one. |
+
+With no saved token (or an invalid one) and no accepted binding: `needs_setup` for no token,
+`revoked` for an invalid one.
+
+With no usable token and an accepted browser-sync binding, the binding's stored data is judged by
+the matching, age and status rules a tool call meets, for the two reads every student tool depends
+on (the student's own profile and the active course list), using only rows that belong to the
+binding's plan:
+
+| What `/mcp` would do | `state` |
+|---|---|
+| Serve both, oldest copy served within `browser_sync.fresh_hours` | `ready` |
+| Serve both, oldest copy served older than that | `degraded`: "Canvas data comes from browser sync, last updated X ago - open Canvas to refresh" |
+| Refuse: every copy is older than `browser_sync.max_age_days` | `expired` |
+| Refuse: Canvas answered the extension 401 or 403 (a school that blocks session access, or a signed-out browser) | `revoked` |
+| Refuse: another error status, or nothing uploaded for these reads | `needs_setup` |
+
+Browser-sync answers carry an action to `/account/browser-extension`; token answers to
+`/account/token`. An action is an absolute `https` URL on the Portal's public base address; with a
+plain-http base address (never a real deployment) none is sent and the log says so once. The
+`summary` never refers to a button. `expires_at` is omitted when unknown, and the response never
+contains a token or any part of one.
+
+**Side effects.** The endpoint itself writes nothing and never calls Canvas. Authentication is
+`/mcp`'s, with the same side effects: the first call with a trusted issuer's token creates the
+account and grant, activates a pending account and renews the grant, exactly as an `/mcp` call
+does. A call with the Portal's own token changes nothing.
+
+**Deliberate differences from `/mcp`.** Everything above agrees with what `/mcp` does, except:
+
+- A token past an expiry Canvas reported is `expired`; `/mcp` would still try it until Canvas
+  rejects it.
+- A database outage while reading the browser binding is `503` (the hub shows "unknown"); `/mcp`
+  would fall back to the token path. Any other failure reading the binding falls back, as `/mcp`
+  does.
+
+Refusals `/mcp` also makes (`403` for a person not admitted, a pending or disabled account, `503`
+for an unavailable store) carry the same message as `/mcp` in `error.message`, next to the stable
+`error.code`.
+
+The answer comes from the Portal's own records, so
+`revoked` for a token appears after the Portal itself has seen Canvas reject it (an MCP call or a
+re-check), and an expired token that Canvas does not report an expiry for stays `ready`. One
+authenticated database read serves the whole token path (the same read `/mcp` makes); the browser-sync
+path adds the binding and its stored rows, as a tool call does.
+
 ## Runtime and migration boundaries
 
 Each authenticated MCP or browser request reads the committed configuration

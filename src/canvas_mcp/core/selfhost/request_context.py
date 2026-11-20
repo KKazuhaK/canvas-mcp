@@ -10,7 +10,6 @@ from typing import Any, Protocol
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..credentials import (
-    BrowserSource,
     RequestCredentials,
     RequestPrincipal,
     RequestTokenState,
@@ -43,14 +42,17 @@ from .accounts import (
     valid_account_key,
 )
 from .authz.fastmcp_compat import AuthenticatedUser
-from .browser_plan import resource_key
-from .browser_store import BrowserSyncStore, browser_decision
+from .browser_store import (
+    BrowserSyncStore,
+    binding_accepted,
+    browser_source_for,
+    token_usable_for_mcp,
+)
 from .config_snapshot import CURRENT_CONFIG, ConfigSnapshots
 from .db.snapshots import McpSnapshot
 from .db.workers import run_store
 from .mcp_state import MCP_READ, MCP_REFUSED, MCP_UNAVAILABLE, McpRead
 from .principal_access import access_unavailable_message, snapshot_status
-from .server_settings import SETTINGS
 from .settings import COURSE_STATE_PER_PRINCIPAL, COURSE_STATE_REQUEST_LOCAL
 from .token_store import (
     REASON_DECRYPT_FAILED,
@@ -199,14 +201,6 @@ async def _send_json(send: Send, status: int, message: str) -> None:
         }
     )
     await send({"type": "http.response.body", "body": body})
-
-
-def _setting(config: Any, key: str) -> int:
-    """An integer server setting; its default when the snapshot does not carry it."""
-    try:
-        return int(config.settings[key])
-    except (KeyError, TypeError, ValueError):
-        return int(SETTINGS[key].default)
 
 
 def _is_mcp_path(path: str, mcp_path: str) -> bool:
@@ -365,8 +359,8 @@ class SelfhostRequestContextMiddleware:
         self, principal_key: str, snapshot: McpSnapshot
     ) -> bool:
         generation = snapshot.credential_generation
-        if (
-            snapshot.credential_id is None or snapshot.credential_status == STATUS_INVALID
+        if not token_usable_for_mcp(
+            snapshot.credential_id, snapshot.credential_status
         ) and await self._attach_browser_source(principal_key, snapshot):
             return True
         if snapshot.credential_id is None:
@@ -444,45 +438,9 @@ class SelfhostRequestContextMiddleware:
             return False
         if binding is None or binding.canvas_host is None:
             return False
-        active, _ = browser_decision(
-            token_usable=False,
-            token_host=snapshot.canvas_host,
-            binding_host=binding.canvas_host,
-            school_offered=config.schools.resolve_stored(binding.canvas_host)
-            is not None,
-            token_user_id=snapshot.canvas_user_id,
-            binding_user_id=binding.canvas_user_id,
-        )
-        if not active:
+        if not binding_accepted(binding, config, snapshot):
             return False
-        cache: dict[str, list[Any]] = {}
-        plan_keys: list[frozenset[str]] = []
-
-        def current(path: str) -> list[Any]:
-            # Only rows whose key the binding's current plan can hold are ever served:
-            # a stale chunk (say one naming a course that is now unpublished) is not.
-            if not plan_keys:
-                plan_keys.append(store.expected_keys(binding.id, binding.canvas_user_id))
-            return [
-                snap
-                for snap in store.load_path(binding.id, path)
-                if resource_key(snap.path, snap.query) in plan_keys[0]
-            ]
-
-        async def load(path: str) -> list[Any]:
-            if path not in cache:
-                cache[path] = await run_store(current, path)
-            return cache[path]
-
-        set_browser_source(
-            BrowserSource(
-                binding_id=binding.id,
-                canvas_host=binding.canvas_host,
-                load=load,
-                max_age_seconds=_setting(config, "browser_sync.max_age_days") * 86400,
-                fresh_seconds=_setting(config, "browser_sync.fresh_hours") * 3600,
-            )
-        )
+        set_browser_source(browser_source_for(store, binding, config))
         return True
 
     @staticmethod

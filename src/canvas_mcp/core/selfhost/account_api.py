@@ -84,7 +84,7 @@ from canvas_mcp.core.selfhost.tool_prefs import (
 from canvas_mcp.core.tool_policy import TOOL_EFFECTS, Effect
 
 from . import custody
-from .browser_store import BrowserSyncStore, browser_decision
+from .browser_store import BrowserSyncStore, decide_binding, token_usable_for_mcp
 from .build_info import build_info
 from .config_snapshot import CURRENT_CONFIG
 from .config_store import ConfigStore, SchoolRemovalConfirmation
@@ -2766,15 +2766,13 @@ class ApiApp:
             return self._ok({"binding": None})
         stored = await run_store(self.browser.resources, binding.id)
         info = await run_store(self.app.store.info, session.acct)
-        usable = info is not None and info.status != STATUS_INVALID
-        active, reason = browser_decision(
-            token_usable=usable,
+        active, reason = decide_binding(
+            binding,
+            token_usable=info is not None
+            and token_usable_for_mcp(info.credential_id or None, info.status),
             token_host=info.canvas_host if info is not None else None,
-            binding_host=binding.canvas_host,
-            school_offered=self.app.schools.resolve_stored(binding.canvas_host)
-            is not None,
             token_user_id=info.canvas_user_id if info is not None else None,
-            binding_user_id=binding.canvas_user_id,
+            schools=self.app.schools,
         )
         return self._ok(
             {
@@ -2806,7 +2804,12 @@ class ApiApp:
 def build_api_routes(app: web.AccountCore) -> list[Route]:
     """The ``/api/v1`` routes over an existing account application."""
     from .browser_extension_api import build_extension_routes
+    from .readiness_api import build_readiness_routes
 
     api = ApiApp(app)
-    # The extension's routes go first: the API's catch-all would answer them not_found.
-    return [*build_extension_routes(app, api.browser), *api.routes()]
+    # The bearer-token routes go first: the API's catch-all would answer them not_found.
+    return [
+        *build_extension_routes(app, api.browser),
+        *build_readiness_routes(app, api.browser),
+        *api.routes(),
+    ]

@@ -188,6 +188,8 @@ class TestRouteTables:
                 (),
             )
         )
+        # The readiness endpoint answers every method itself (405 for all but GET).
+        expected["/api/v1/readiness"] = ()
         for path, _endpoints in ApiApp(core).route_table():
             expected[path] = ()
         assert table == {

@@ -36,6 +36,9 @@ class McpSnapshot:
     custody_notice_version: int | None
     jwt_epoch: int
     settings_revision: int
+    #: How the credential's expiry was learned (``canvas`` is the only trusted source) and when.
+    expiry_source: str | None = None
+    access_expires_at: int | None = None
 
 
 @dataclass(frozen=True)
@@ -52,7 +55,8 @@ SELECT g.client_id, a.display_name, a.status, a.role, a.session_epoch, a.credent
        c.id AS credential_id, c.canvas_host, c.kind, c.generation, c.key_id, c.nonce, c.ciphertext,
        c.status AS credential_status, c.invalid_reason, c.updated_at AS credential_updated_at,
        c.last_used_at AS credential_used_at, c.last_verified_at,
-       c.canvas_user_id, c.custody_notice_version, s.jwt_epoch, s.settings_revision
+       c.canvas_user_id, c.custody_notice_version, c.expiry_source, c.access_expires_at,
+       s.jwt_epoch, s.settings_revision
 FROM oauth_grants g
 JOIN accounts a ON a.id = g.account_id
 LEFT JOIN canvas_credentials c ON c.account_id = a.id AND c.is_primary
