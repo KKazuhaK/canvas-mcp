@@ -12,6 +12,7 @@ from canvas_mcp.core.selfhost.custody import CustodyAcknowledgement
 
 from ..authz.stack import AUDIENCE, CANVAS_HOST
 from .issuer import FakeIssuer
+from .test_accounts import refusal_of
 
 PATH = "/api/v1/readiness"
 
@@ -115,6 +116,11 @@ def test_a_verified_person_the_server_does_not_admit_is_403_like_mcp(hub):
     response = readiness(hub, token)
     assert response.status_code == 403
     assert "state" not in response.text
+    # The very message /mcp refuses with.
+    assert response.json()["error"] == {
+        "code": "forbidden",
+        "message": refusal_of(hub.call(token)),
+    }
     assert hub.accounts() == []
 
 

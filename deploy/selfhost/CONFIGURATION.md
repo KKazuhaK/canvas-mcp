@@ -346,8 +346,8 @@ binding's plan:
 
 | What `/mcp` would do | `state` |
 |---|---|
-| Serve both, newest copy within `browser_sync.fresh_hours` | `ready` |
-| Serve both, oldest copy older than that | `degraded`: "Canvas data comes from browser sync, last updated X ago - open Canvas to refresh" |
+| Serve both, oldest copy served within `browser_sync.fresh_hours` | `ready` |
+| Serve both, oldest copy served older than that | `degraded`: "Canvas data comes from browser sync, last updated X ago - open Canvas to refresh" |
 | Refuse: every copy is older than `browser_sync.max_age_days` | `expired` |
 | Refuse: Canvas answered the extension 401 or 403 (a school that blocks session access, or a signed-out browser) | `revoked` |
 | Refuse: another error status, or nothing uploaded for these reads | `needs_setup` |
@@ -358,7 +358,24 @@ plain-http base address (never a real deployment) none is sent and the log says 
 `summary` never refers to a button. `expires_at` is omitted when unknown, and the response never
 contains a token or any part of one.
 
-The answer comes from the Portal's own records: Canvas is not called, and nothing is written, so
+**Side effects.** The endpoint itself writes nothing and never calls Canvas. Authentication is
+`/mcp`'s, with the same side effects: the first call with a trusted issuer's token creates the
+account and grant, activates a pending account and renews the grant, exactly as an `/mcp` call
+does. A call with the Portal's own token changes nothing.
+
+**Deliberate differences from `/mcp`.** Everything above agrees with what `/mcp` does, except:
+
+- A token past an expiry Canvas reported is `expired`; `/mcp` would still try it until Canvas
+  rejects it.
+- A database outage while reading the browser binding is `503` (the hub shows "unknown"); `/mcp`
+  would fall back to the token path. Any other failure reading the binding falls back, as `/mcp`
+  does.
+
+Refusals `/mcp` also makes (`403` for a person not admitted, a pending or disabled account, `503`
+for an unavailable store) carry the same message as `/mcp` in `error.message`, next to the stable
+`error.code`.
+
+The answer comes from the Portal's own records, so
 `revoked` for a token appears after the Portal itself has seen Canvas reject it (an MCP call or a
 re-check), and an expired token that Canvas does not report an expiry for stays `ready`. One
 authenticated database read serves the whole token path (the same read `/mcp` makes); the browser-sync

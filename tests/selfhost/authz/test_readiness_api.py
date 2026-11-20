@@ -681,8 +681,10 @@ class TestAgreesWithMcp:
         )
         response = readiness(stack, bearer)
         assert response.status_code == 403
-        assert response.json() == {"error": {"code": code}}
-        assert stack.rpc(bearer, "tools/list").status_code == 403
+        refused = stack.rpc(bearer, "tools/list")
+        assert refused.status_code == 403
+        # The code is stable; the message is the one /mcp refuses with.
+        assert response.json() == {"error": {"code": code, "message": refused.json()["error"]}}
 
 
 class TestTokenChecksMatchMcp:
@@ -717,7 +719,10 @@ class TestTokenChecksMatchMcp:
         assert stack.mcp_status(bearer) == 503
         response = readiness(stack, bearer)
         assert response.status_code == 503
-        assert response.json() == {"error": {"code": "token_store_unavailable"}}
+        unavailable = stack.rpc(bearer, "tools/list")
+        assert response.json() == {
+            "error": {"code": "token_store_unavailable", "message": unavailable.json()["error"]}
+        }
 
     def test_options_with_a_valid_bearer_is_405(self, stack: Stack) -> None:
         bearer = access_token(stack)

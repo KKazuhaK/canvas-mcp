@@ -20,8 +20,11 @@ same account right now.
   wins; with none (or an invalid one) browser sync is used when ``/mcp`` would accept the
   binding, and its stored data is judged by the matching, age and status rules a tool call
   meets (:func:`probe_core`).
-* Read-only. Nothing is written and Canvas is never called. The saved token is decrypted
-  only to find out whether ``/mcp`` could read it; the plaintext is dropped at once.
+* The endpoint itself writes nothing and never calls Canvas. Authentication has the side
+  effects it has on ``/mcp``: the bearer middleware of a federated (trusted issuer) token
+  creates the account and grant on first use, activates a pending account and renews the
+  grant, exactly as a call to ``/mcp`` would. The saved token is decrypted only to find out
+  whether ``/mcp`` could read it; the plaintext is dropped at once.
 * The body carries no token, no part of one, and nothing about another account. No CORS
   headers are sent and ``OPTIONS`` is not served.
 """
@@ -55,7 +58,8 @@ from .db.errors import StoreUnavailable
 from .db.snapshots import McpSnapshot
 from .db.workers import run_store
 from .mcp_state import MCP_READ, MCP_REFUSED, MCP_UNAVAILABLE, McpRead
-from .request_context import LocalClaimsResolver
+from .principal_access import access_unavailable_message
+from .request_context import _NO_CLAIMS_MESSAGE, LocalClaimsResolver
 from .routes import ACCOUNT_PREFIX, API_PREFIX
 from .token_store import (
     REASON_CANVAS_TOKEN_REJECTED,
@@ -119,8 +123,24 @@ class ReadinessApi:
             headers={**_JSON_HEADERS, **(headers or {})},
         )
 
-    def _error(self, status: int, code: str, headers: Mapping[str, str] | None = None) -> Response:
-        return self._respond(status, {"error": {"code": code}}, headers)
+    def _error(
+        self,
+        status: int,
+        code: str,
+        headers: Mapping[str, str] | None = None,
+        message: str | None = None,
+    ) -> Response:
+        """``{"error": {"code", "message"?}}``. A refusal ``/mcp`` also makes carries the
+        message ``/mcp`` gives, so a hub can show the same words."""
+        error: dict[str, str] = {"code": code}
+        if message is not None:
+            error["message"] = message
+        return self._respond(status, {"error": error}, headers)
+
+    def _unavailable(self) -> Response:
+        return self._error(
+            503, "token_store_unavailable", message=access_unavailable_message()
+        )
 
     def _unauthorized(self) -> Response:
         return self._error(401, "not_authenticated", {"WWW-Authenticate": 'Bearer realm="canvas-mcp"'})
@@ -169,27 +189,34 @@ class ReadinessApi:
     async def _endpoint(self, request: Request) -> Response:
         try:
             if request.method != "GET":
-                return self._error(405, "method_not_allowed", {"Allow": "GET"})
+                return self._error(
+                    405, "method_not_allowed", {"Allow": "GET"}, "Only GET is supported."
+                )
             # What /mcp's middleware checks first, in the same order.
             if MCP_UNAVAILABLE.get():
-                return self._error(503, "token_store_unavailable")
-            if MCP_REFUSED.get() is not None:
-                return self._error(403, "forbidden")
+                return self._unavailable()
+            refused = MCP_REFUSED.get()
+            if refused is not None:
+                return self._error(403, "forbidden", message=refused)
             user = request.scope.get("user")
             if not isinstance(user, AuthenticatedUser):
                 return self._unauthorized()
             claims = getattr(user.access_token, "claims", None)
             if not isinstance(claims, Mapping):
-                return self._error(403, "forbidden")
+                return self._error(403, "forbidden", message=_NO_CLAIMS_MESSAGE)
             resolved = self.identity.resolve_request(claims)
             if isinstance(resolved, Denied):
-                return self._error(403, _DENIED_CODES.get(resolved.code, "forbidden"))
+                return self._error(
+                    403,
+                    _DENIED_CODES.get(resolved.code, "forbidden"),
+                    message=resolved.message,
+                )
             read = MCP_READ.get()
             if read is None or read.account_id != resolved.key:
-                return self._error(503, "token_store_unavailable")
+                return self._unavailable()
             return await self._answer(read)
         except (StoreUnavailable, web._StoreUnavailable):
-            return self._error(503, "token_store_unavailable")
+            return self._unavailable()
         except Exception as exc:  # noqa: BLE001 - never leak details
             logger.error("readiness request failed: %s", type(exc).__name__)
             return self._error(500, "internal_error")
@@ -199,7 +226,7 @@ class ReadinessApi:
         try:
             config = await run_store(self.app.snapshots.get, snapshot.settings_revision)
         except Exception:  # noqa: BLE001 - /mcp answers 503 for any failure here
-            return self._error(503, "token_store_unavailable")
+            return self._unavailable()
         now = int(self.app.clock())
 
         # /mcp reads browser sync only when there is no usable token: ask the same code.
