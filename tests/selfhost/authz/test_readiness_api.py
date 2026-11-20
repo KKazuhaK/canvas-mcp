@@ -15,7 +15,9 @@ from urllib.parse import urlsplit
 import httpx
 import pytest
 
+from canvas_mcp.core.selfhost import browser_plan
 from canvas_mcp.core.selfhost.authz.tokens import AccessTokenCodec
+from canvas_mcp.core.selfhost.browser_plan import resource_key
 from canvas_mcp.core.selfhost.browser_store import BrowserSyncStore, SnapshotItem
 from canvas_mcp.core.selfhost.token_store import (
     DISABLE_REASON_OPERATOR,
@@ -212,22 +214,23 @@ def sync_binding(
     assert claimed is not None
     _, binding_id = claimed
     if captured_ago is not None:
+        captured = int(stack.clock()) - captured_ago
+        courses_query = dict(browser_plan.RESOURCES[7].query)
+        items = [
+            SnapshotItem(resource_key("/users/self", {}), "/users/self", {}, captured, 200, {"id": 1}),
+            SnapshotItem(
+                resource_key("/courses", courses_query),
+                "/courses",
+                courses_query,
+                captured,
+                200,
+                [{"id": 101, "name": "Course 101", "course_code": "C101"}],
+            ),
+        ]
         accepted, rejected = store.save(
-            binding_id,
-            canvas_host=CANVAS_HOST,
-            canvas_user_id=canvas_user_id,
-            items=[
-                SnapshotItem(
-                    "/users/self",
-                    "/users/self",
-                    {},
-                    int(stack.clock()) - captured_ago,
-                    200,
-                    {"id": 1, "name": "Alice"},
-                )
-            ],
+            binding_id, canvas_host=CANVAS_HOST, canvas_user_id=canvas_user_id, items=items
         )
-        assert accepted == 1 and not rejected
+        assert accepted == 2 and not rejected
     return store
 
 
@@ -261,13 +264,13 @@ class TestBrowserSync:
         sync_binding(stack, captured_ago=age)
         expect_state(readiness(stack, bearer), "ready")
 
-    def test_data_older_than_the_maximum_age_is_not_used_so_needs_setup(
+    def test_data_older_than_the_maximum_age_is_not_used_so_expired(
         self, stack: Stack
     ) -> None:
         bearer = access_token(stack)
         age = setting(stack, "browser_sync.max_age_days") * 86400 + 3600
         sync_binding(stack, captured_ago=age)
-        body = expect_state(readiness(stack, bearer), "needs_setup")
+        body = expect_state(readiness(stack, bearer), "expired")
         assert body["action"]["url"] == BROWSER_PAGE
 
     def test_a_binding_that_never_uploaded_is_needs_setup(self, stack: Stack) -> None:
@@ -333,14 +336,38 @@ class TestBrowserSync:
         alice = access_token(stack, ALICE)
         expect_state(readiness(stack, alice), "ready")
 
-    def test_the_browser_decision_is_the_one_mcp_uses(self) -> None:
-        # Guard against a second copy of the rule: both callers go through one function.
-        import inspect
+    def test_the_token_versus_browser_rule_has_one_home(self) -> None:
+        """No module but ``browser_store`` spells the rule: the middleware, the account API
+        and the readiness endpoint all go through its functions."""
+        import pathlib
+        import re
 
-        from canvas_mcp.core.selfhost import readiness_api, request_context
+        import canvas_mcp
 
-        assert "browser_decision(" not in inspect.getsource(readiness_api)
-        assert "browser_decision(" not in inspect.getsource(request_context)
+        root = pathlib.Path(canvas_mcp.__file__).resolve().parent
+        owners: dict[str, set[str]] = {}
+        for path in root.rglob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            for name in ("browser_decision(", "max_age_days", "fresh_hours"):
+                if name in text:
+                    owners.setdefault(name, set()).add(path.name)
+        assert owners["browser_decision("] == {"browser_store.py"}
+        # The windows are named in the settings table and read in one place.
+        assert owners["max_age_days"] == {"browser_store.py", "server_settings.py"}
+        assert owners["fresh_hours"] == {"browser_store.py", "server_settings.py"}
+        users = {
+            path.name
+            for path in root.rglob("*.py")
+            if re.search(
+                r"\b(binding_accepted|decide_binding)\(", path.read_text(encoding="utf-8")
+            )
+        }
+        assert users == {
+            "browser_store.py",
+            "request_context.py",
+            "readiness_api.py",
+            "account_api.py",
+        }
 
 
 class TestAccountIsolation:
@@ -536,3 +563,239 @@ class TestNoSecrets:
         monkeypatch.setattr(core, "default_canvas_whoami", boom, raising=False)
         monkeypatch.setattr(httpx.AsyncClient, "send", boom)
         expect_state(readiness(stack, bearer), "ready")
+
+
+# -- readiness agrees with what /mcp does ------------------------------------------------
+
+
+def mcp_works(stack: Stack, bearer: str) -> bool:
+    """Whether a tool call on /mcp is let through to the tool (no refusal of any kind)."""
+    response = stack.rpc(
+        bearer, "tools/call", {"name": "list_courses", "arguments": {}}
+    )
+    if response.status_code != 200:
+        return False
+    text = response.text
+    if response.headers["content-type"].startswith("text/event-stream"):
+        text = [
+            line[5:].strip() for line in text.splitlines() if line.startswith("data:")
+        ][-1]
+    payload = json.loads(text)
+    return "error" not in payload and not payload["result"].get("isError")
+
+
+def run_sql(stack: Stack, statement: str, **params: Any) -> None:
+    from sqlalchemy import text
+
+    with stack.store.database.write() as conn:
+        conn.execute(text(statement), params)
+
+
+class TestAgreesWithMcp:
+    def test_ready_means_mcp_lets_the_call_through(self, stack: Stack) -> None:
+        stack.enroll(ALICE)
+        bearer = access_token(stack)
+        expect_state(readiness(stack, bearer), "ready")
+        assert mcp_works(stack, bearer)
+
+    def test_needs_setup_means_mcp_refuses(self, stack: Stack) -> None:
+        bearer = access_token(stack)
+        expect_state(readiness(stack, bearer), "needs_setup")
+        assert not mcp_works(stack, bearer)
+
+    def test_a_rejected_token_means_mcp_refuses(self, stack: Stack) -> None:
+        key = stack.enroll(ALICE)
+        bearer = access_token(stack)
+        stack.store.mark_invalid(key, reason=REASON_CANVAS_TOKEN_REJECTED)
+        expect_state(readiness(stack, bearer), "revoked")
+        assert not mcp_works(stack, bearer)
+
+    def test_a_school_that_is_no_longer_offered(self, stack: Stack) -> None:
+        bearer = access_token(stack)
+        stack.store.put(
+            principal_key=stack.account_of(ALICE),
+            api_token=ALICE.canvas_token,
+            canvas_user_id="1",
+            canvas_user_name=ALICE.name,
+            canvas_host="gone.example.test",
+            custody=CustodyAcknowledgement(1, int(stack.clock())),
+        )
+        body = expect_state(readiness(stack, bearer), "needs_setup")
+        assert "school" in body["summary"].lower()
+        assert not mcp_works(stack, bearer)
+
+    def test_an_outdated_custody_notice(
+        self, stack: Stack, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from canvas_mcp.core.selfhost import custody
+
+        stack.enroll(ALICE)
+        bearer = access_token(stack)
+        assert mcp_works(stack, bearer)
+        monkeypatch.setattr(custody, "CUSTODY_NOTICE_VERSION", custody.CUSTODY_NOTICE_VERSION + 1)
+        expect_state(readiness(stack, bearer), "needs_setup")
+        assert not mcp_works(stack, bearer)
+
+    def test_a_stored_token_that_cannot_be_decrypted_is_revoked(self, stack: Stack) -> None:
+        stack.enroll(ALICE)
+        bearer = access_token(stack)
+        from sqlalchemy import text
+
+        with stack.store.database.write() as conn:
+            sealed = bytes(
+                conn.execute(text("SELECT ciphertext FROM canvas_credentials")).scalar_one()
+            )
+            conn.execute(
+                text("UPDATE canvas_credentials SET ciphertext = :c"),
+                {"c": sealed[:-1] + bytes([sealed[-1] ^ 1])},
+            )
+        body = expect_state(readiness(stack, bearer), "revoked")
+        assert "read" in body["summary"].lower()
+        assert body["action"]["url"] == ACTION_URL
+        # The readiness call is side-effect free: it did not mark the credential invalid.
+        assert stack.store.info(stack.account_of(ALICE)).status == "active"
+        assert not mcp_works(stack, bearer)
+
+    def test_a_generation_mismatch_is_revoked(self, stack: Stack) -> None:
+        stack.enroll(ALICE)
+        bearer = access_token(stack)
+        run_sql(stack, "UPDATE accounts SET credential_generation = credential_generation + 5")
+        expect_state(readiness(stack, bearer), "revoked")
+        assert not mcp_works(stack, bearer)
+
+    @pytest.mark.parametrize(
+        ("status", "code"), [("pending", "pending_approval"), ("disabled", "access_disabled")]
+    )
+    def test_an_account_that_is_not_active_is_refused_like_mcp(
+        self, stack: Stack, status: str, code: str
+    ) -> None:
+        # Disabling normally revokes the grants; these rows model the window before that lands.
+        stack.enroll(ALICE)
+        bearer = access_token(stack)
+        run_sql(
+            stack,
+            "UPDATE accounts SET status = :s, disabled_at = :at, disabled_reason = :why",
+            s=status,
+            at=int(stack.clock()) if status == "disabled" else None,
+            why="operator_disabled" if status == "disabled" else None,
+        )
+        response = readiness(stack, bearer)
+        assert response.status_code == 403
+        assert response.json() == {"error": {"code": code}}
+        assert stack.rpc(bearer, "tools/list").status_code == 403
+
+
+class TestTokenChecksMatchMcp:
+    def test_an_epoch_bump_invalidates_the_token_on_both(self, stack: Stack) -> None:
+        stack.enroll(ALICE)
+        bearer = access_token(stack)
+        expect_state(readiness(stack, bearer), "ready")
+        stack.authz.bump_jwt_epoch()
+        assert readiness(stack, bearer).status_code == 401
+        assert stack.mcp_status(bearer) == 401
+
+    def test_a_grant_of_another_client_invalidates_the_token_on_both(
+        self, stack: Stack
+    ) -> None:
+        stack.enroll(ALICE)
+        bearer = access_token(stack)
+        run_sql(stack, "UPDATE oauth_grants SET client_id = 'someone-else'")
+        assert readiness(stack, bearer).status_code == 401
+        assert stack.mcp_status(bearer) == 401
+
+    def test_a_store_outage_is_503_on_both(
+        self, stack: Stack, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from canvas_mcp.core.selfhost.db.errors import StoreUnavailable
+
+        bearer = access_token(stack)
+
+        def down(*args: Any, **kwargs: Any) -> Any:
+            raise StoreUnavailable("down")
+
+        monkeypatch.setattr(stack.authz.store, "read_mcp_snapshot", down)
+        assert stack.mcp_status(bearer) == 503
+        response = readiness(stack, bearer)
+        assert response.status_code == 503
+        assert response.json() == {"error": {"code": "token_store_unavailable"}}
+
+    def test_options_with_a_valid_bearer_is_405(self, stack: Stack) -> None:
+        bearer = access_token(stack)
+        response = stack.client.options(
+            PATH, headers={"Authorization": f"Bearer {bearer}"}
+        )
+        assert response.status_code == 405
+        assert "access-control-allow-origin" not in response.headers
+
+
+class TestBrowserBindingErrors:
+    def test_an_unreadable_binding_falls_back_to_the_token_path_like_mcp(
+        self, stack: Stack, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bearer = access_token(stack)  # no token: browser sync would be consulted
+
+        def broken(self: Any, account_id: str) -> Any:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(BrowserSyncStore, "active_binding", broken)
+        expect_state(readiness(stack, bearer), "needs_setup")
+        assert not mcp_works(stack, bearer)
+
+    def test_a_store_outage_while_reading_the_binding_is_503(
+        self, stack: Stack, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from canvas_mcp.core.selfhost.db.errors import StoreUnavailable
+
+        bearer = access_token(stack)
+
+        def down(self: Any, account_id: str) -> Any:
+            raise StoreUnavailable("down")
+
+        monkeypatch.setattr(BrowserSyncStore, "active_binding", down)
+        assert readiness(stack, bearer).status_code == 503
+
+
+class TestReads:
+    def test_a_call_reads_the_account_once(self, stack: Stack) -> None:
+        """One authenticated read serves the token check and every state: no second lookup."""
+        from sqlalchemy import event
+
+        stack.enroll(ALICE)
+        bearer = access_token(stack)
+        expect_state(readiness(stack, bearer), "ready")  # warm the settings snapshot
+        statements: list[str] = []
+
+        def record(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+            statements.append(statement)
+
+        engine = stack.store.database._engine
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            expect_state(readiness(stack, bearer), "ready")
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        selects = [s for s in statements if s.lstrip().upper().startswith("SELECT")]
+        # The one authenticated read (grant, account, credential): the same one /mcp makes.
+        assert len(selects) == 1 and "canvas_credentials" in selects[0], statements
+
+
+class TestPlainHttpBase:
+    def test_no_action_is_offered_and_the_log_says_so_once(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+        from types import SimpleNamespace
+
+        from canvas_mcp.core.selfhost.readiness_api import ReadinessApi
+
+        api = ReadinessApi.__new__(ReadinessApi)
+        api.app = SimpleNamespace(base="http://portal.example.test", clock=lambda: 1_800_000_000)  # type: ignore[assignment]
+        api._warned_plain_http = False
+        with caplog.at_level(logging.WARNING, logger="canvas_mcp.selfhost.readiness"):
+            first = json.loads(api._state("needs_setup", "No Canvas token is saved yet.", action_label="Set up").body)
+            second = json.loads(api._state("revoked", "Canvas rejected it.", action_label="Replace").body)
+        assert "action" not in first and "action" not in second
+        warnings = [r for r in caplog.records if "not https" in r.getMessage()]
+        assert len(warnings) == 1
+        for summary in (first["summary"], second["summary"]):
+            assert "click" not in summary.lower() and "button" not in summary.lower()

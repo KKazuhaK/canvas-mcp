@@ -3,17 +3,25 @@
 An integrating hub (MCPHub) may be signed in through the Portal's OAuth without the
 person ever saving a Canvas token. It asks this endpoint, with the very access token it
 uses for MCP calls, and gets one of the states of the service readiness contract
-(version 1): ``ready``, ``needs_setup``, ``expiring``, ``expired`` or ``revoked``.
-(``degraded`` is never sent: the Portal has no partly-working state.)
+(version 1): ``ready``, ``needs_setup``, ``degraded``, ``expiring``, ``expired`` or
+``revoked``. The rule is that every answer agrees with what ``/mcp`` would do for the
+same account right now.
 
-* Authentication is the bearer access token only, verified by
-  :meth:`AuthzRuntime.verify_access_token`, the same function that guards ``/mcp``
-  (signature, issuer, audience, scope, lifetime, signing epoch, grant not revoked, account
-  present). Cookies are never read, so a browser session is no credential here. Missing or
-  invalid: 401 with no detail.
-* Read-only. The answer comes from the Portal's own records (the saved credential and the
-  Canvas verdict the Portal already stored); Canvas is never called, nothing is written
-  and no use timestamp is touched.
+* Authentication is not done here. The route sits behind FastMCP's own bearer
+  authentication, the one in front of ``/mcp``, so exactly the tokens ``/mcp`` accepts are
+  accepted: the Portal's own access tokens and those of a trusted external issuer (MCPHub),
+  with the same checks (signature, audience, scope, lifetime, signing epoch, a live grant)
+  and the same account resolution. The handler reads that outcome (``scope["user"]``,
+  ``MCP_READ``) and so makes no verification or account read of its own. No token or a
+  token ``/mcp`` would not accept is 401; a verified person the server does not admit is
+  403, as on ``/mcp``. Cookies are never read.
+* The state is derived from the one authenticated read of the account (grant, account and
+  primary credential, :class:`McpSnapshot`), in the order ``/mcp`` decides: a usable token
+  wins; with none (or an invalid one) browser sync is used when ``/mcp`` would accept the
+  binding, and its stored data is judged by the matching, age and status rules a tool call
+  meets (:func:`probe_core`).
+* Read-only. Nothing is written and Canvas is never called. The saved token is decrypted
+  only to find out whether ``/mcp`` could read it; the plaintext is dropped at once.
 * The body carries no token, no part of one, and nothing about another account. No CORS
   headers are sent and ``OPTIONS`` is not served.
 """
@@ -30,28 +38,30 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
+from ..browser_source import probe_core
 from . import account_core as web
 from . import custody
 from .account_api import _JSON_HEADERS, _clean, _ts
-from .authz.server import MAX_ACCESS_TOKEN_CHARS
+from .accounts import DENY_ACCESS_DISABLED, DENY_PENDING_APPROVAL, Denied
+from .authz.fastmcp_compat import AuthenticatedUser
 from .browser_store import (
     Binding,
     BrowserSyncStore,
-    binding_in_use,
-    browser_windows,
+    binding_accepted,
+    browser_source_for,
     token_usable_for_mcp,
 )
 from .db.errors import StoreUnavailable
+from .db.snapshots import McpSnapshot
 from .db.workers import run_store
-from .mcp_state import McpRead
-from .principal_access import snapshot_status
+from .mcp_state import MCP_READ, MCP_REFUSED, MCP_UNAVAILABLE, McpRead
+from .request_context import LocalClaimsResolver
 from .routes import ACCOUNT_PREFIX, API_PREFIX
 from .token_store import (
     REASON_CANVAS_TOKEN_REJECTED,
     REASON_DECRYPT_FAILED,
     REASON_REVOKED_BY_ADMIN,
     STATUS_INVALID,
-    EnrollmentInfo,
 )
 
 logger = logging.getLogger("canvas_mcp.selfhost.readiness")
@@ -69,6 +79,10 @@ _INVALID_SUMMARIES = {
     REASON_REVOKED_BY_ADMIN: "An administrator revoked your saved Canvas token. Save a new one.",
     REASON_DECRYPT_FAILED: "Your saved Canvas token could not be read. Save it again.",
 }
+_DENIED_CODES = {
+    DENY_ACCESS_DISABLED: "access_disabled",
+    DENY_PENDING_APPROVAL: "pending_approval",
+}
 
 
 def _ago(seconds: int) -> str:
@@ -80,23 +94,14 @@ def _ago(seconds: int) -> str:
     return f"{minutes // 1440} days ago"
 
 
-def _bearer(request: Request) -> str | None:
-    """The token of a well-formed ``Authorization: Bearer <token>`` header, else None."""
-    header = request.headers.get("authorization", "")
-    scheme, _, token = header.partition(" ")
-    if scheme.lower() != "bearer" or not token or token != token.strip():
-        return None
-    if " " in token or len(token) > MAX_ACCESS_TOKEN_CHARS:
-        return None
-    return token
-
-
 class ReadinessApi:
     """The readiness endpoint over one account application."""
 
     def __init__(self, app: web.AccountCore, browser: BrowserSyncStore) -> None:
         self.app = app
         self.browser = browser
+        self.identity = LocalClaimsResolver(app.authz.issuer)
+        self._warned_plain_http = False
 
     def routes(self) -> list[Route]:
         return [web.any_method_route(READINESS_PATH, self._endpoint)]
@@ -109,20 +114,30 @@ class ReadinessApi:
     ) -> Response:
         body = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
         return Response(
-            body.encode("utf-8"), status_code=status, headers={**_JSON_HEADERS, **(headers or {})}
+            body.encode("utf-8"),
+            status_code=status,
+            headers={**_JSON_HEADERS, **(headers or {})},
         )
+
+    def _error(self, status: int, code: str, headers: Mapping[str, str] | None = None) -> Response:
+        return self._respond(status, {"error": {"code": code}}, headers)
 
     def _unauthorized(self) -> Response:
-        return self._respond(
-            401,
-            {"error": {"code": "not_authenticated"}},
-            {"WWW-Authenticate": 'Bearer realm="canvas-mcp"'},
-        )
+        return self._error(401, "not_authenticated", {"WWW-Authenticate": 'Bearer realm="canvas-mcp"'})
 
     def _action(self, label: str, page: str) -> dict[str, str] | None:
+        """A button on the Portal's public address. The contract allows https only: a plain
+        http base (never a real deployment) offers none, and says so once in the log. The
+        summaries never refer to a button, so they stay true without it."""
         url = self.app.base + page
-        # The contract allows https only; a plain-http base (never a real deployment) offers no button.
-        return {"label": label, "url": url} if url.startswith("https://") else None
+        if url.startswith("https://"):
+            return {"label": label, "url": url}
+        if not self._warned_plain_http:
+            self._warned_plain_http = True
+            logger.warning(
+                "PUBLIC_BASE_URL is not https: readiness answers carry no action link"
+            )
+        return None
 
     def _state(
         self,
@@ -154,94 +169,77 @@ class ReadinessApi:
     async def _endpoint(self, request: Request) -> Response:
         try:
             if request.method != "GET":
-                return self._respond(
-                    405, {"error": {"code": "method_not_allowed"}}, {"Allow": "GET"}
-                )
-            token = _bearer(request)
-            if token is None:
+                return self._error(405, "method_not_allowed", {"Allow": "GET"})
+            # What /mcp's middleware checks first, in the same order.
+            if MCP_UNAVAILABLE.get():
+                return self._error(503, "token_store_unavailable")
+            if MCP_REFUSED.get() is not None:
+                return self._error(403, "forbidden")
+            user = request.scope.get("user")
+            if not isinstance(user, AuthenticatedUser):
                 return self._unauthorized()
-            verified = await self.app.authz.verify_access_token(token)
-            if verified is None or verified.claims.get("federated"):
-                return self._unauthorized()
-            read = McpRead(
-                verified.claims["acct"], verified.claims["grant"], verified.snapshot
-            )
+            claims = getattr(user.access_token, "claims", None)
+            if not isinstance(claims, Mapping):
+                return self._error(403, "forbidden")
+            resolved = self.identity.resolve_request(claims)
+            if isinstance(resolved, Denied):
+                return self._error(403, _DENIED_CODES.get(resolved.code, "forbidden"))
+            read = MCP_READ.get()
+            if read is None or read.account_id != resolved.key:
+                return self._error(503, "token_store_unavailable")
             return await self._answer(read)
         except (StoreUnavailable, web._StoreUnavailable):
-            return self._respond(503, {"error": {"code": "token_store_unavailable"}})
+            return self._error(503, "token_store_unavailable")
         except Exception as exc:  # noqa: BLE001 - never leak details
             logger.error("readiness request failed: %s", type(exc).__name__)
-            return self._respond(500, {"error": {"code": "internal_error"}})
-
-    async def _browser_state(
-        self, binding: Binding, config: Any, now: int
-    ) -> Response:
-        """``/mcp`` answers from this binding's synced data: judge it by the rules /mcp applies."""
-        max_age, fresh = browser_windows(config)
-        stored = await run_store(self.browser.resources, binding.id)
-        if not stored:
-            return self._state(
-                "needs_setup",
-                "Browser sync is paired but no Canvas data has been uploaded yet. Open Canvas to sync.",
-                action_label=BROWSER_LABEL,
-                page=BROWSER_PAGE,
-            )
-        age = now - max(item.captured_at for item in stored)
-        if age > max_age:
-            return self._state(
-                "needs_setup",
-                f"Browser sync data is more than {max_age // 86400} days old and is not used. Open Canvas to refresh.",
-                action_label=BROWSER_LABEL,
-                page=BROWSER_PAGE,
-            )
-        if age > fresh:
-            return self._state(
-                "degraded",
-                f"Canvas data comes from browser sync, last updated {_ago(age)} \u2014 open Canvas to refresh",
-                action_label=BROWSER_LABEL,
-                page=BROWSER_PAGE,
-            )
-        return self._state("ready", "Canvas data comes from browser sync and is up to date.")
+            return self._error(500, "internal_error")
 
     async def _answer(self, read: McpRead) -> Response:
-        status = snapshot_status(read)
-        if status.disabled:
-            return self._state(
-                "revoked", "Your access to this server was disabled by an administrator."
-            )
-        if status.pending:
-            return self._state(
-                "needs_setup", "Your account is waiting for approval by the server owner."
-            )
-        if not status.active:
-            return self._state("revoked", "Your access to this server is not active.")
-
-        config = await run_store(self.app.snapshots.get, read.snapshot.settings_revision)
+        snapshot = read.snapshot
+        try:
+            config = await run_store(self.app.snapshots.get, snapshot.settings_revision)
+        except Exception:  # noqa: BLE001 - /mcp answers 503 for any failure here
+            return self._error(503, "token_store_unavailable")
         now = int(self.app.clock())
-        # /mcp reads browser sync only when there is no usable token: ask the same code.
-        if not token_usable_for_mcp(
-            read.snapshot.credential_id, read.snapshot.credential_status
-        ):
-            binding = await binding_in_use(
-                self.browser, config, read.account_id, read.snapshot
-            )
-            if binding is not None:
-                return await self._browser_state(binding, config, now)
 
-        info: EnrollmentInfo | None = await run_store(self.app.store.info, read.account_id)
-        if info is None:
+        # /mcp reads browser sync only when there is no usable token: ask the same code.
+        if not token_usable_for_mcp(snapshot.credential_id, snapshot.credential_status):
+            binding = await self._binding(read.account_id)
+            if binding is not None and binding_accepted(binding, config, snapshot):
+                return await self._browser_state(binding, config, now)
+        return self._token_state(read.account_id, snapshot, config, now)
+
+    async def _binding(self, account_id: str) -> Binding | None:
+        """The account's active binding. A failure other than an outage reads as none, as in
+        ``/mcp``, which then falls back to the token's own answer."""
+        try:
+            binding = await run_store(self.browser.active_binding, account_id)
+        except StoreUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.error("browser binding unreadable: %s", type(exc).__name__)
+            return None
+        return binding if binding is not None and binding.canvas_host is not None else None
+
+    # -- the Canvas token -------------------------------------------------------------
+
+    def _token_state(
+        self, account_id: str, snapshot: McpSnapshot, config: Any, now: int
+    ) -> Response:
+        if snapshot.credential_id is None:
             return self._state(
                 "needs_setup",
                 "No Canvas token is saved yet. Save one to use the Canvas tools.",
                 action_label=SET_UP_LABEL,
             )
         # Only an expiry that Canvas itself reported counts, as on the account page.
-        expiry = info.access_expires_at if info.expiry_source == "canvas" else None
-
+        expiry = (
+            snapshot.access_expires_at if snapshot.expiry_source == "canvas" else None
+        )
         if (
             expiry is not None
             and expiry <= now
-            and info.invalid_reason != REASON_REVOKED_BY_ADMIN
+            and snapshot.invalid_reason != REASON_REVOKED_BY_ADMIN
         ):
             return self._state(
                 "expired",
@@ -249,22 +247,31 @@ class ReadinessApi:
                 action_label=REPLACE_LABEL,
                 expires_at=expiry,
             )
-        if info.status == STATUS_INVALID:
+        if snapshot.credential_status == STATUS_INVALID:
             summary = _INVALID_SUMMARIES.get(
-                info.invalid_reason or "", "Your saved Canvas token no longer works. Save a new one."
+                snapshot.invalid_reason or "",
+                "Your saved Canvas token no longer works. Save a new one.",
             )
             return self._state("revoked", summary, action_label=REPLACE_LABEL)
-        if info.custody_notice_version < custody.CUSTODY_NOTICE_VERSION:
+        # The checks /mcp makes before it uses a token, in its order.
+        if config.schools.resolve_stored(snapshot.canvas_host) is None:
+            return self._state(
+                "needs_setup",
+                "Your Canvas school is no longer offered on this server.",
+                action_label=SET_UP_LABEL,
+            )
+        if (
+            snapshot.custody_notice_version is None
+            or snapshot.custody_notice_version < custody.CUSTODY_NOTICE_VERSION
+        ):
             return self._state(
                 "needs_setup",
                 "Accept the token storage notice to use the Canvas tools.",
                 action_label=SET_UP_LABEL,
             )
-        if config.schools.resolve_stored(info.canvas_host) is None:
+        if not self._readable(account_id, snapshot):
             return self._state(
-                "needs_setup",
-                "Your Canvas school is no longer offered on this server.",
-                action_label=SET_UP_LABEL,
+                "revoked", _INVALID_SUMMARIES[REASON_DECRYPT_FAILED], action_label=REPLACE_LABEL
             )
         days = int(config.settings["notifications.token_reminder_days"])
         if expiry is not None and expiry - now <= days * 86400:
@@ -278,6 +285,68 @@ class ReadinessApi:
             "ready",
             "Your Canvas token is saved and Canvas has not rejected it.",
             expires_at=expiry,
+        )
+
+    def _readable(self, account_id: str, snapshot: McpSnapshot) -> bool:
+        """Whether ``/mcp`` could use the stored token: same generation, and it decrypts.
+
+        ``/mcp`` marks a token it cannot read as invalid; this only looks.
+        """
+        if snapshot.generation != snapshot.credential_generation:
+            return False
+        try:
+            self.app.store.decrypt_snapshot(account_id, snapshot)
+        except Exception:  # noqa: BLE001 - any failure means /mcp cannot read it either
+            return False
+        return True
+
+    # -- browser sync -------------------------------------------------------------------
+
+    async def _browser_state(self, binding: Binding, config: Any, now: int) -> Response:
+        """``/mcp`` answers from this binding: judge the data by what a tool call would meet."""
+        source = browser_source_for(self.browser, binding, config)
+        core = await probe_core(source, now=now)
+        miss = core.miss
+        if miss is None:
+            age = 0 if core.oldest is None else now - core.oldest
+            if age > source.fresh_seconds:
+                return self._state(
+                    "degraded",
+                    f"Canvas data comes from browser sync, last updated {_ago(age)} — open Canvas to refresh",
+                    action_label=BROWSER_LABEL,
+                    page=BROWSER_PAGE,
+                )
+            return self._state(
+                "ready", "Canvas data comes from browser sync and is up to date."
+            )
+        if miss.kind == "expired":
+            days = max(1, source.max_age_seconds // 86400)
+            return self._state(
+                "expired",
+                f"Browser sync data is more than {days} days old and is not used. Open Canvas to refresh.",
+                action_label=BROWSER_LABEL,
+                page=BROWSER_PAGE,
+            )
+        if miss.kind == "status":
+            status = miss.stored_status
+            if status in (401, 403):
+                return self._state(
+                    "revoked",
+                    f"Canvas refused the browser sync data (HTTP {status}). Sign in to Canvas in your browser, then sync again.",
+                    action_label=BROWSER_LABEL,
+                    page=BROWSER_PAGE,
+                )
+            return self._state(
+                "needs_setup",
+                f"Canvas could not provide data to browser sync (HTTP {status}). Open Canvas to sync again.",
+                action_label=BROWSER_LABEL,
+                page=BROWSER_PAGE,
+            )
+        return self._state(
+            "needs_setup",
+            "Browser sync has not uploaded your Canvas data yet. Open Canvas to sync.",
+            action_label=BROWSER_LABEL,
+            page=BROWSER_PAGE,
         )
 
 

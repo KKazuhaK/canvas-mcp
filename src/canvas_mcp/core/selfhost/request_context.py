@@ -10,7 +10,6 @@ from typing import Any, Protocol
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..credentials import (
-    BrowserSource,
     RequestCredentials,
     RequestPrincipal,
     RequestTokenState,
@@ -43,11 +42,10 @@ from .accounts import (
     valid_account_key,
 )
 from .authz.fastmcp_compat import AuthenticatedUser
-from .browser_plan import resource_key
 from .browser_store import (
     BrowserSyncStore,
-    binding_in_use,
-    browser_windows,
+    binding_accepted,
+    browser_source_for,
     token_usable_for_mcp,
 )
 from .config_snapshot import CURRENT_CONFIG, ConfigSnapshots
@@ -55,7 +53,6 @@ from .db.snapshots import McpSnapshot
 from .db.workers import run_store
 from .mcp_state import MCP_READ, MCP_REFUSED, MCP_UNAVAILABLE, McpRead
 from .principal_access import access_unavailable_message, snapshot_status
-from .server_settings import SETTINGS
 from .settings import COURSE_STATE_PER_PRINCIPAL, COURSE_STATE_REQUEST_LOCAL
 from .token_store import (
     REASON_DECRYPT_FAILED,
@@ -204,14 +201,6 @@ async def _send_json(send: Send, status: int, message: str) -> None:
         }
     )
     await send({"type": "http.response.body", "body": body})
-
-
-def _setting(config: Any, key: str) -> int:
-    """An integer server setting; its default when the snapshot does not carry it."""
-    try:
-        return int(config.settings[key])
-    except (KeyError, TypeError, ValueError):
-        return int(SETTINGS[key].default)
 
 
 def _is_mcp_path(path: str, mcp_path: str) -> bool:
@@ -443,41 +432,15 @@ class SelfhostRequestContextMiddleware:
             return False
         store = self.browser
         try:
-            binding = await binding_in_use(store, config, principal_key, snapshot)
+            binding = await run_store(store.active_binding, principal_key)
         except Exception:  # noqa: BLE001 - fall back to the "no token" refusal
             log_error("browser binding unreadable", account=principal_key)
             return False
         if binding is None or binding.canvas_host is None:
             return False
-        cache: dict[str, list[Any]] = {}
-        plan_keys: list[frozenset[str]] = []
-
-        def current(path: str) -> list[Any]:
-            # Only rows whose key the binding's current plan can hold are ever served:
-            # a stale chunk (say one naming a course that is now unpublished) is not.
-            if not plan_keys:
-                plan_keys.append(store.expected_keys(binding.id, binding.canvas_user_id))
-            return [
-                snap
-                for snap in store.load_path(binding.id, path)
-                if resource_key(snap.path, snap.query) in plan_keys[0]
-            ]
-
-        async def load(path: str) -> list[Any]:
-            if path not in cache:
-                cache[path] = await run_store(current, path)
-            return cache[path]
-
-        windows = browser_windows(config)
-        set_browser_source(
-            BrowserSource(
-                binding_id=binding.id,
-                canvas_host=binding.canvas_host,
-                load=load,
-                max_age_seconds=windows[0],
-                fresh_seconds=windows[1],
-            )
-        )
+        if not binding_accepted(binding, config, snapshot):
+            return False
+        set_browser_source(browser_source_for(store, binding, config))
         return True
 
     @staticmethod

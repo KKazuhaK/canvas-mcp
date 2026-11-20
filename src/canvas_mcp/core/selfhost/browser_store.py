@@ -22,6 +22,7 @@ from sqlalchemy import and_, delete, func, insert, select, update
 from sqlalchemy.engine import Connection
 
 from ..browser_source import BrowserSnapshot
+from ..credentials import BrowserSource
 from .browser_plan import (
     course_source_keys,
     expected_resources,
@@ -152,28 +153,79 @@ def token_usable_for_mcp(credential_id: str | None, credential_status: str | Non
     return credential_id is not None and credential_status != STATUS_INVALID
 
 
-async def binding_in_use(
-    store: BrowserSyncStore, config: Any, principal_key: str, snapshot: Any
-) -> Binding | None:
-    """The browser-sync binding ``/mcp`` would answer from for this account, or None.
+def decide_binding(
+    binding: Binding,
+    *,
+    token_usable: bool,
+    token_host: str | None,
+    token_user_id: str | None,
+    schools: Any,
+) -> tuple[bool, str | None]:
+    """:func:`browser_decision` for one stored binding: the only call site of the rule.
 
-    The one place that decides it (the request middleware and the readiness endpoint both
-    call it): there is an active binding with a Canvas host, and :func:`browser_decision`
-    accepts it for a request without a usable token. ``snapshot`` is the account's
-    :class:`McpSnapshot`, ``config`` the settings snapshot the request runs under.
+    ``schools`` is the settings snapshot's school policy (``resolve_stored``).
     """
-    binding = await run_store(store.active_binding, principal_key)
-    if binding is None or binding.canvas_host is None:
-        return None
-    active, _ = browser_decision(
-        token_usable=False,
-        token_host=snapshot.canvas_host,
+    return browser_decision(
+        token_usable=token_usable,
+        token_host=token_host,
         binding_host=binding.canvas_host,
-        school_offered=config.schools.resolve_stored(binding.canvas_host) is not None,
-        token_user_id=snapshot.canvas_user_id,
+        school_offered=schools.resolve_stored(binding.canvas_host) is not None,
+        token_user_id=token_user_id,
         binding_user_id=binding.canvas_user_id,
     )
-    return binding if active else None
+
+
+def binding_accepted(binding: Binding, config: Any, snapshot: Any) -> bool:
+    """Whether ``/mcp`` answers from ``binding`` for a request without a usable token.
+
+    The request middleware and the readiness endpoint both ask this. ``snapshot`` is the
+    account's :class:`McpSnapshot` (its credential, if any, is an unusable one here) and
+    ``config`` the settings snapshot the request runs under.
+    """
+    active, _ = decide_binding(
+        binding,
+        token_usable=False,
+        token_host=snapshot.canvas_host,
+        token_user_id=snapshot.canvas_user_id,
+        schools=config.schools,
+    )
+    return active
+
+
+def browser_source_for(
+    store: BrowserSyncStore, binding: Binding, config: Any
+) -> BrowserSource:
+    """The data source ``/mcp`` gives a tool call that is answered from this binding.
+
+    Only rows whose key the binding's current plan can hold are ever served: a stale row
+    (say one naming a course that is now unpublished) is not. Loads are cached per source.
+    """
+    assert binding.canvas_host is not None
+    cache: dict[str, list[Any]] = {}
+    plan_keys: list[frozenset[str]] = []
+
+    def current(path: str) -> list[Any]:
+        if not plan_keys:
+            plan_keys.append(store.expected_keys(binding.id, binding.canvas_user_id))
+        return [
+            snap
+            for snap in store.load_path(binding.id, path)
+            if resource_key(snap.path, snap.query) in plan_keys[0]
+        ]
+
+    async def load(path: str) -> list[Any]:
+        if path not in cache:
+            cache[path] = await run_store(current, path)
+        return cache[path]
+
+    max_age, fresh = browser_windows(config)
+    return BrowserSource(
+        binding_id=binding.id,
+        canvas_host=binding.canvas_host,
+        load=load,
+        max_age_seconds=max_age,
+        fresh_seconds=fresh,
+    )
 
 
 def browser_windows(config: Any) -> tuple[int, int]:

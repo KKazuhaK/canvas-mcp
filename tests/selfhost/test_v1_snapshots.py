@@ -24,6 +24,12 @@ def state(tmp_path):
     transaction = db.write if IS_POSTGRES else lambda: sqlite_migration(db)
     with transaction() as conn:
         baseline_v1.create(conn, now=100)
+        # The baseline predates the hot read's newest column (migration 0005).
+        conn.execute(
+            text(
+                "ALTER TABLE canvas_credentials ADD COLUMN expiry_source TEXT NOT NULL DEFAULT 'manual'"
+            )
+        )
         account_id, other_id, grant_id, credential_id = [new_id() for _ in range(4)]
         for identifier in (account_id, other_id):
             conn.execute(

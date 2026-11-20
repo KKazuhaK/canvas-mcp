@@ -75,12 +75,23 @@ class BrowserSnapshot:
 class BrowserMiss(Exception):
     """The request cannot be answered from browser data."""
 
-    def __init__(self, code: str, message: str, *, stored_status: int | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        stored_status: int | None = None,
+        kind: str = "unavailable",
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         #: Set when the miss is a Canvas status stored for the data asked for.
         self.stored_status = stored_status
+        #: Why: ``expired`` (every stored copy is older than ``max_age_seconds``), ``status``
+        #: (Canvas answered the extension with an error) or ``unavailable`` (not synced, or
+        #: nothing that provably answers the call).
+        self.kind = kind
 
 
 # -- freshness -------------------------------------------------------------------------
@@ -389,6 +400,7 @@ def _usable(snapshots: Sequence[BrowserSnapshot], source: BrowserSource, now: fl
             SOURCE_UNAVAILABLE,
             f"The data synced from your browser is more than {days} days old, so it "
             "was not used. Open Canvas in the browser with the extension installed to refresh it.",
+            kind="expired",
         )
     return fresh
 
@@ -403,6 +415,7 @@ def _status_miss(snapshot: BrowserSnapshot) -> BrowserMiss:
             else "It is not available to browser sync."
         ),
         stored_status=snapshot.status,
+        kind="status",
     )
 
 
@@ -440,6 +453,7 @@ async def answer_get(
                 SOURCE_UNAVAILABLE,
                 f"Canvas refused access to this data (HTTP {miss.stored_status}).",
                 stored_status=miss.stored_status,
+                kind="status",
             ) from None
         raise
     finally:
@@ -574,6 +588,35 @@ def _answer_object(
         "That item was not found in the data synced by the browser extension. "
         "It may be new; open Canvas in the browser to sync again.",
     )
+
+
+#: The two reads every student tool depends on: the student's own profile (does the browser
+#: session work at all) and the active course list (what every per-course read expands from).
+CORE_READS: tuple[tuple[str, Mapping[str, Any] | None], ...] = (
+    ("/users/self", None),
+    ("/courses", {"enrollment_state": "active"}),
+)
+
+
+@dataclass(frozen=True)
+class CoreRead:
+    """Whether ``answer_get`` would serve the core reads, and from how old a copy."""
+
+    #: None when both were served; otherwise the first refusal, exactly as a tool would see it.
+    miss: BrowserMiss | None
+    #: The oldest ``captured_at`` of the snapshots served (None when there was a miss).
+    oldest: int | None
+
+
+async def probe_core(source: BrowserSource, *, now: float | None = None) -> CoreRead:
+    """Run the core reads through the same matching, age and status rules a tool call meets."""
+    with capture_freshness() as used:
+        for endpoint, params in CORE_READS:
+            try:
+                await answer_get(source, endpoint, params, now=now)
+            except BrowserMiss as miss:
+                return CoreRead(miss, None)
+    return CoreRead(None, min(used) if used else None)
 
 
 def refusal_for(method: str, api_root: str) -> BrowserMiss | None:

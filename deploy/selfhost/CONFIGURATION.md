@@ -289,20 +289,24 @@ tokens work: an ID token has the wrong audience and is refused.
 `GET /api/v1/readiness` tells an integrating hub (for example MCPHub) whether a person's
 connection actually works. Signing in through the Portal's OAuth does not save a Canvas
 token, so "connected" is not "usable". The hub sends the access token it already uses for
-MCP calls; nothing else needs configuring, and the endpoint is always served.
+MCP calls; nothing else needs configuring, and the endpoint is always served. The rule is
+that every answer agrees with what `/mcp` would do for the same account at that moment.
 
 ```
 GET /api/v1/readiness
 Accept: application/json
-Authorization: Bearer <the Portal-issued OAuth access token>
+Authorization: Bearer <the access token the hub uses for /mcp>
 ```
 
-The token is checked by the same function that guards `/mcp`: signature, issuer, audience
-(the MCP URL), scope, lifetime, signing epoch, and a grant that is neither revoked nor
-expired. A missing, malformed, expired, revoked or wrong-audience token gets `401` with
-`{"error": {"code": "not_authenticated"}}` and a `WWW-Authenticate: Bearer` header. Cookies
-are never read. `POST` and the other methods get `405`; no CORS headers are sent. A database
-outage is `503`.
+**Authentication is `/mcp`'s own.** The route sits behind the same bearer authentication, so it
+accepts exactly the tokens `/mcp` accepts: the Portal's own access tokens and the tokens of a
+[trusted issuer](#trusted-issuers) such as MCPHub, with the same checks (signature, audience,
+scope, lifetime, signing epoch, a grant that is neither revoked nor expired) and the same account
+resolution. A missing or invalid token, or one `/mcp` would not accept, is `401` with
+`{"error": {"code": "not_authenticated"}}` and a `WWW-Authenticate: Bearer` header. A valid token
+of a person the server does not admit, or of an account that is pending or disabled, is `403`
+(`forbidden`, `pending_approval`, `access_disabled`), as on `/mcp`. Cookies are never read.
+Other methods get `405`; no CORS headers are sent. A database outage is `503`.
 
 The `200` body follows version 1 of the service readiness contract:
 
@@ -317,34 +321,48 @@ The `200` body follows version 1 of the service readiness contract:
 }
 ```
 
+**How the state is chosen.** `/mcp` uses a saved Canvas token unless there is none or it is marked
+invalid; only then does it answer from browser sync, and only when the binding is accepted (a
+Canvas school this server offers, the same school and the same Canvas user as the invalid token,
+if any). Readiness asks the same code.
+
+With a usable saved token:
+
 | `state` | When |
 |---|---|
-| `needs_setup` | No Canvas token is saved and no usable browser sync; the saved token's custody notice is out of date; its school is no longer offered; or the account waits for approval (no action then). |
-| `expiring` | Canvas reported an expiry and it is within `notifications.token_reminder_days` (the same threshold as the reminder e-mails). `expires_at` is set. |
+| `needs_setup` | The token's school is no longer offered, or its custody notice is out of date (`/mcp` refuses tool calls until it is fixed). |
+| `expiring` | Canvas reported an expiry and it is within `notifications.token_reminder_days` (the reminder e-mail threshold). `expires_at` is set. |
 | `expired` | Canvas reported an expiry and it has passed (unless an administrator revoked the token). |
-| `revoked` | The Portal marked the saved token invalid: Canvas rejected it, an administrator revoked it, or it could not be decrypted. |
+| `revoked` | The Portal marked the token invalid (Canvas rejected it, an administrator revoked it), or `/mcp` could not read it: the credential generation does not match or it does not decrypt. Readiness only looks; it never marks anything. |
 | `ready` | Anything else. `expires_at` is set when Canvas reported one. |
 
-**Browser sync.** The state follows the credential path `/mcp` would use. A saved token that is
-not marked invalid always wins, and the token states above apply. With no token, or an invalid
-one, and an active browser-sync binding that `/mcp` accepts (the same school and Canvas user
-checks), the data decides:
+With no saved token (or an invalid one) and no accepted binding: `needs_setup` for no token,
+`revoked` for an invalid one.
 
-| Newest synced data | `state` |
+With no usable token and an accepted browser-sync binding, the binding's stored data is judged by
+the matching, age and status rules a tool call meets, for the two reads every student tool depends
+on (the student's own profile and the active course list), using only rows that belong to the
+binding's plan:
+
+| What `/mcp` would do | `state` |
 |---|---|
-| within `browser_sync.fresh_hours` | `ready` |
-| older than that, within `browser_sync.max_age_days` | `degraded`, summary "Canvas data comes from browser sync, last updated X ago - open Canvas to refresh", action to `/account/browser-extension` |
-| older than `browser_sync.max_age_days` (`/mcp` does not use it), or nothing uploaded yet | `needs_setup`, action to `/account/browser-extension` |
+| Serve both, newest copy within `browser_sync.fresh_hours` | `ready` |
+| Serve both, oldest copy older than that | `degraded`: "Canvas data comes from browser sync, last updated X ago - open Canvas to refresh" |
+| Refuse: every copy is older than `browser_sync.max_age_days` | `expired` |
+| Refuse: Canvas answered the extension 401 or 403 (a school that blocks session access, or a signed-out browser) | `revoked` |
+| Refuse: another error status, or nothing uploaded for these reads | `needs_setup` |
 
-A revoked binding, or one `/mcp` refuses, counts as no binding: `needs_setup` (no token) or
-`revoked` (rejected token).
+Browser-sync answers carry an action to `/account/browser-extension`; token answers to
+`/account/token`. An action is an absolute `https` URL on the Portal's public base address; with a
+plain-http base address (never a real deployment) none is sent and the log says so once. The
+`summary` never refers to a button. `expires_at` is omitted when unknown, and the response never
+contains a token or any part of one.
 
-`degraded` is used only for stale browser-sync data. `action` is always an absolute `https` URL on the Portal's public
-base address and is omitted when the person cannot fix the problem. `expires_at` is omitted
-when unknown. The answer comes from the Portal's own records: Canvas is not called on a
-request, so `revoked` appears after the Portal itself has seen Canvas reject the token (an MCP
-call or a re-check). The response never contains a token or any part of one, and the request
-writes nothing. A disabled account has its grants revoked, so it gets `401`, as on `/mcp`.
+The answer comes from the Portal's own records: Canvas is not called, and nothing is written, so
+`revoked` for a token appears after the Portal itself has seen Canvas reject it (an MCP call or a
+re-check), and an expired token that Canvas does not report an expiry for stays `ready`. One
+authenticated database read serves the whole token path (the same read `/mcp` makes); the browser-sync
+path adds the binding and its stored rows, as a tool call does.
 
 ## Runtime and migration boundaries
 
