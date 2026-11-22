@@ -3,6 +3,7 @@ import { hostPattern, looksLikeCanvas, parseOrigin } from '../lib/origin.ts';
 import { PAIRING_PATH } from '../lib/pairing.ts';
 import { describeStatus } from '../lib/status.ts';
 import { readState, type Stored, type StorageArea } from '../lib/state.ts';
+import { remindHours } from '../lib/reminder.ts';
 
 declare const browser: typeof chrome | undefined;
 const api: typeof chrome = typeof browser !== 'undefined' ? browser : chrome;
@@ -178,6 +179,19 @@ $('disconnect-btn').addEventListener('click', (ev) =>
     say('message', res.message ?? 'Disconnected.');
   }),
 );
+
+// The reminder age: set here or on the reminder page; a new choice clears any snooze.
+async function showReminderChoice() {
+  const chosen = String(remindHours((await readState(storage)).remindAfterHours));
+  for (const option of Array.from($<HTMLSelectElement>('remind-after').options)) option.selected = option.value === chosen;
+}
+$<HTMLSelectElement>('remind-after').addEventListener('change', async () => {
+  const hours = remindHours(Number($<HTMLSelectElement>('remind-after').value));
+  await storage.set({ remindAfterHours: hours });
+  await storage.remove('snoozeUntil');
+  say('message', hours ? 'Reminder saved.' : 'Reminders are off.');
+});
+void showReminderChoice();
 
 api.storage.onChanged.addListener(() => void render());
 void render();

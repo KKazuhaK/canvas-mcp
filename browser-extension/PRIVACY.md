@@ -39,7 +39,9 @@ When a Canvas page finishes loading (at most once every 10 minutes after a
 successful sync, or once a minute while syncs are failing), every 30 minutes in
 the background and once shortly after the browser starts, when you open the
 Portal's browser-extension page with data more than an hour old, and when you
-press **Sync now** (in the popup or on that page).
+press **Sync now** (in the popup or on that page). When the data is older than
+the age you choose, the extension opens its own reminder page; it never opens
+Canvas by itself.
 
 ## What it sends, and where
 

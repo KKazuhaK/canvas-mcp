@@ -28,3 +28,7 @@ summary { cursor: pointer; margin-top: 8px; color: var(--accent); }
 .hint { margin: 0 0 4px; color: var(--muted); font-size: 13px; }
 #manual-connect label { margin-top: 8px; }
 #manual-connect .hint { margin-top: 8px; font-size: 12px; }
+body.page { width: auto; max-width: 560px; margin: 40px auto; }
+body.page h2 { margin-top: 20px; }
+select { padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: inherit; font: inherit; }
+.remind-row { margin-top: 10px; }

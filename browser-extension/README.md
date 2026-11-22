@@ -73,7 +73,10 @@ EXTENSION_VERSION=x.y.z CANVAS_SYNC_FIREFOX_ADDON_ID=<gecko id> npm run build:fi
    a minute after the browser starts if Canvas is signed in, when you open the
    Portal's browser-extension page with data more than an hour old, and when
    you press **Sync now** (in the popup or on that page). The extension never
-   opens background tabs.
+   opens background tabs, and never opens Canvas by itself: when background
+   sync cannot run (for example while you are signed out of Canvas) and the data
+   is older than the age you choose (1 day by default, 3 days, 1 week or never),
+   it opens a reminder page with a button to open Canvas, or to snooze.
 
 **Disconnect** revokes the upload token at the Portal (which deletes the stored
 snapshots) and clears everything stored in the browser.
