@@ -1,14 +1,33 @@
 name: Browser extension release
 
-# Fork-only. When a stable release is published (the `released` event does not
-# fire for prereleases), build the browser extension for Chrome and Firefox with
-# the release version stamped into the manifest, attach both zips and the
-# source archive to the release, and, where store credentials are configured,
-# submit the new version to the Chrome Web Store, Microsoft Edge Add-ons and
-# Firefox Add-ons.
+# Fork-only. Builds the browser extension for Chrome and Firefox, attaches both
+# zips and the source archive to a GitHub release and, where a store is
+# configured, submits the build to the Chrome Web Store, Microsoft Edge Add-ons
+# and Firefox Add-ons. The extension's version is the `version` in
+# browser-extension/src/manifest.json, separate from the server version; asset
+# names carry it.
 #
-# Store submission is opt-in, and the first listing in each store is created by
-# hand. After that:
+# Runs on:
+#   - a push to selfhost that changes browser-extension/src/manifest.json. If
+#     the release extension-v<manifest version> does not exist yet, the
+#     workflow builds the extension, creates that release (never marked Latest)
+#     and submits it to the configured stores. The tag does not match v*, so it
+#     deploys nothing and publishes nothing to PyPI or the MCP Registry.
+#     Shipping an extension update is: bump the version in
+#     browser-extension/src/manifest.json and merge. A manifest change that
+#     keeps the version does nothing.
+#   - a stable release (the `released` event does not fire for prereleases):
+#     builds and attaches the zips. A server release (v*) does not submit to the
+#     stores, since its extension version was released already; an
+#     extension-v* release published by hand does.
+#   - a manual run for an existing tag; submit_to_stores also submits it (use
+#     this to retry a store, or to submit a version a server release carried).
+#
+# The "Check store configuration" job writes a summary of which stores are
+# configured and fails when a store is half configured. Store submission skips
+# cleanly until configured. A store refuses a version it already has. The first
+# listing in each store is created by hand; browser-extension/STORE-PUBLISHING.md
+# walks through it and the credentials. After that:
 #   Chrome  variables CHROME_PUBLISHER_ID, CHROME_EXTENSION_ID
 #           secrets   CHROME_CLIENT_ID, CHROME_CLIENT_SECRET, CHROME_REFRESH_TOKEN
 #   Edge    variable  EDGE_PRODUCT_ID (Partner Center product id, a GUID); Edge
@@ -24,48 +43,115 @@ name: Browser extension release
 # The Firefox zip on the release is unsigned; Firefox installs only the copy
 # signed by Add-ons.
 on:
+  push:
+    branches: [selfhost]
+    paths: ['browser-extension/src/manifest.json']
   release:
     types: [released]
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Existing stable release tag (e.g. v1.15.0)'
+        description: 'Existing release tag to (re)build the extension for, e.g. v1.15.0 or extension-v1.15.1'
         required: true
         type: string
+      submit_to_stores:
+        description: 'Also submit to the configured stores'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: browser-extension-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.event.release.tag_name }}
+  group: browser-extension-release-${{ github.event_name == 'push' && 'push' || (github.event_name == 'workflow_dispatch' && inputs.tag_name || github.event.release.tag_name) }}
   cancel-in-progress: false
 
 jobs:
-  # No write access here: npm dependencies run in this job.
-  build:
-    name: Build extension zips
+  resolve:
+    name: Resolve the release
     if: github.repository == 'KKazuhaK/canvas-mcp'
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.v.outputs.tag }}
-      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.r.outputs.tag }}
+      ref: ${{ steps.r.outputs.ref }}
+      version: ${{ steps.r.outputs.version }}
+      create: ${{ steps.r.outputs.create }}
+      submit: ${{ steps.r.outputs.submit }}
+      skip: ${{ steps.r.outputs.skip }}
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.event.release.tag_name }}
     steps:
-      - name: Derive version from the tag
-        id: v
-        env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.event.release.tag_name }}
-        run: |
-          # Store versions are plain x.y.z with no leading zeros (stores also cap each part at 65535).
-          part='(0|[1-9][0-9]{0,4})'
-          if [[ ! "$TAG" =~ ^v(${part}\.${part}\.${part})$ ]]; then
-            echo "tag '$TAG' is not a stable v<x.y.z> release" >&2
-            exit 1
-          fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ steps.v.outputs.tag }}
+          ref: ${{ github.event_name == 'push' && github.sha || format('refs/tags/{0}', env.TAG) }}
+          persist-credentials: false
+          sparse-checkout: browser-extension/src/manifest.json
+          sparse-checkout-cone-mode: false
+      - name: Read the extension version and pick the release
+        id: r
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+          SUBMIT_INPUT: ${{ inputs.submit_to_stores }}
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version browser-extension/src/manifest.json)"
+          # Store versions are plain x.y.z with no leading zeros (stores also cap each part at 65535).
+          part='(0|[1-9][0-9]{0,4})'
+          if [[ ! "$version" =~ ^${part}\.${part}\.${part}$ ]]; then
+            echo "browser-extension/src/manifest.json version '$version' is not x.y.z" >&2
+            exit 1
+          fi
+          create=false submit=false skip=false
+          case "$EVENT" in
+            push)
+              tag="extension-v$version" ref="$GITHUB_SHA"
+              if out=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .ref 2>&1); then
+                echo "::notice::$tag already exists: extension $version is released, nothing to do. Bump browser-extension/src/manifest.json to release a new version."
+                skip=true
+              elif [[ "$out" == *"Not Found"* ]]; then
+                create=true submit=true
+              else
+                echo "could not look up tag $tag: $out" >&2
+                exit 1
+              fi
+              ;;
+            release)
+              tag="$TAG" ref="refs/tags/$TAG"
+              if [[ "$TAG" == extension-v* && "$PRERELEASE" != true ]]; then submit=true; fi
+              ;;
+            workflow_dispatch)
+              tag="$TAG" ref="refs/tags/$TAG"
+              if [ "$SUBMIT_INPUT" = true ]; then submit=true; fi
+              ;;
+          esac
+          {
+            echo "tag=$tag"
+            echo "ref=$ref"
+            echo "version=$version"
+            echo "create=$create"
+            echo "submit=$submit"
+            echo "skip=$skip"
+          } >> "$GITHUB_OUTPUT"
+          echo "extension $version, release $tag (create: $create, submit to stores: $submit)"
+
+  # No write access here: npm dependencies run in this job.
+  build:
+    name: Build extension zips
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ needs.resolve.outputs.tag }}
+      version: ${{ needs.resolve.outputs.version }}
+      create: ${{ needs.resolve.outputs.create }}
+      submit: ${{ needs.resolve.outputs.submit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -73,7 +159,6 @@ jobs:
       - name: Test and build
         working-directory: browser-extension
         env:
-          EXTENSION_VERSION: ${{ steps.v.outputs.version }}
           CANVAS_SYNC_FIREFOX_ADDON_ID: ${{ vars.FIREFOX_ADDON_ID }}
         run: |
           npm ci
@@ -83,14 +168,16 @@ jobs:
           npm run build:firefox
       - name: Zip
         env:
-          VERSION: ${{ steps.v.outputs.version }}
-          TAG: ${{ steps.v.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
+          set -euo pipefail
+          built=$(jq -r .version browser-extension/dist/chrome/manifest.json)
+          if [ "$built" != "$VERSION" ]; then echo "built version $built is not the manifest version $VERSION" >&2; exit 1; fi
           mkdir out
           (cd browser-extension/dist/chrome && zip -qrX "$GITHUB_WORKSPACE/out/canvas-mcp-sync-chrome-${VERSION}.zip" .)
           (cd browser-extension/dist/firefox && zip -qrX "$GITHUB_WORKSPACE/out/canvas-mcp-sync-firefox-${VERSION}.zip" .)
           # Add-ons reviewers need the source of the bundled build.
-          git archive --format=zip -o "out/canvas-mcp-sync-source-${VERSION}.zip" "$TAG" browser-extension
+          git archive --format=zip -o "out/canvas-mcp-sync-source-${VERSION}.zip" HEAD browser-extension
           ls -l out
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -108,16 +195,108 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: extension-zips
+      - name: Create the extension release
+        if: needs.build.outputs.create == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          notes="Canvas MCP Sync ${VERSION}, the browser extension only, built from ${GITHUB_SHA}. The server, its PyPI package and the hosted deployment are unchanged: see the latest v* release for those."
+          # Created with the workflow token, so it starts no other workflow.
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "Canvas MCP Sync $VERSION" \
+            --notes "$notes" --latest=false -R "$GITHUB_REPOSITORY"
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.build.outputs.tag }}
         run: gh release upload "$TAG" ./*.zip --clobber -R "$GITHUB_REPOSITORY"
 
+  # Reports which stores are set up. Only whether a secret is set reaches this
+  # job, never its value.
+  stores:
+    name: Check store configuration
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      chrome: ${{ steps.check.outputs.chrome }}
+      edge: ${{ steps.check.outputs.edge }}
+      firefox: ${{ steps.check.outputs.firefox }}
+    steps:
+      - name: Check variables and secrets
+        id: check
+        env:
+          SUBMIT: ${{ needs.resolve.outputs.submit }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          CHROME_PUBLISHER_ID: ${{ vars.CHROME_PUBLISHER_ID }}
+          CHROME_EXTENSION_ID: ${{ vars.CHROME_EXTENSION_ID }}
+          CHROME_CLIENT_ID: ${{ secrets.CHROME_CLIENT_ID != '' }}
+          CHROME_CLIENT_SECRET: ${{ secrets.CHROME_CLIENT_SECRET != '' }}
+          CHROME_REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN != '' }}
+          EDGE_PRODUCT_ID: ${{ vars.EDGE_PRODUCT_ID }}
+          EDGE_CLIENT_ID: ${{ secrets.EDGE_CLIENT_ID != '' }}
+          EDGE_API_KEY: ${{ secrets.EDGE_API_KEY != '' }}
+          FIREFOX_ADDON_ID: ${{ vars.FIREFOX_ADDON_ID }}
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER != '' }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET != '' }}
+        run: |
+          set -euo pipefail
+          failed=0
+          rows=()
+          # check <output> <store> "<variables>" "<secrets>"; variables hold
+          # values, secrets hold true/false.
+          check() {
+            local key=$1 store=$2 vars=$3 secrets=$4 name set=() unset=() missing=() status
+            for name in $vars; do if [ -n "${!name:-}" ]; then set+=("$name"); else unset+=("$name"); fi; done
+            for name in $secrets; do [ "${!name:-}" = true ] || missing+=("$name"); done
+            if [ "${#set[@]}" -eq 0 ]; then
+              status="not configured (skipped)"
+              local nsecrets; nsecrets=$(wc -w <<< "$secrets")
+              if [ "${#missing[@]}" -lt "$nsecrets" ]; then
+                status+="; secrets are set but variable ${unset[*]} is not"
+                echo "::warning title=$store::secrets are set but variable ${unset[*]} is not, so $store is skipped"
+              fi
+              echo "$key=false" >> "$GITHUB_OUTPUT"
+            elif [ "${#unset[@]}" -gt 0 ] || [ "${#missing[@]}" -gt 0 ]; then
+              missing=("${unset[@]}" "${missing[@]}")
+              status="misconfigured: missing ${missing[*]}"
+              echo "::error title=$store::$store is half configured. Missing: ${missing[*]}"
+              failed=1
+              echo "$key=false" >> "$GITHUB_OUTPUT"
+            else
+              status="ready"
+              echo "$key=true" >> "$GITHUB_OUTPUT"
+            fi
+            rows+=("| $store | $status |")
+          }
+          check chrome "Chrome Web Store" "CHROME_PUBLISHER_ID CHROME_EXTENSION_ID" "CHROME_CLIENT_ID CHROME_CLIENT_SECRET CHROME_REFRESH_TOKEN"
+          check edge "Microsoft Edge Add-ons" "EDGE_PRODUCT_ID" "EDGE_CLIENT_ID EDGE_API_KEY"
+          check firefox "Firefox Add-ons" "FIREFOX_ADDON_ID" "AMO_JWT_ISSUER AMO_JWT_SECRET"
+          if [ "$SUBMIT" = true ]; then
+            run="$TAG is submitted to every ready store."
+          else
+            run="$TAG is not submitted to the stores in this run (a server release, or a manual run without submit_to_stores)."
+          fi
+          {
+            echo "### Browser stores"
+            echo
+            echo "| Store | Status |"
+            echo "| --- | --- |"
+            printf '%s\n' "${rows[@]}"
+            echo
+            echo "$run Setup: browser-extension/STORE-PUBLISHING.md."
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$GITHUB_STEP_SUMMARY"
+          exit "$failed"
+
   chrome-web-store:
     name: Submit to Chrome Web Store
-    needs: build
-    if: vars.CHROME_EXTENSION_ID != '' && vars.CHROME_PUBLISHER_ID != ''
+    needs: [build, stores]
+    if: >-
+      !cancelled() && needs.build.result == 'success' &&
+      needs.build.outputs.submit == 'true' && needs.stores.outputs.chrome == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -164,8 +343,10 @@ jobs:
 
   edge-add-ons:
     name: Submit to Microsoft Edge Add-ons
-    needs: build
-    if: vars.EDGE_PRODUCT_ID != ''
+    needs: [build, stores]
+    if: >-
+      !cancelled() && needs.build.result == 'success' &&
+      needs.build.outputs.submit == 'true' && needs.stores.outputs.edge == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -229,8 +410,10 @@ jobs:
 
   firefox-add-ons:
     name: Submit to Firefox Add-ons
-    needs: build
-    if: vars.FIREFOX_ADDON_ID != ''
+    needs: [build, stores]
+    if: >-
+      !cancelled() && needs.build.result == 'success' &&
+      needs.build.outputs.submit == 'true' && needs.stores.outputs.firefox == 'true'
     runs-on: ubuntu-latest
     steps:
       # The tooling comes from the workflow's own commit, so a manual run for an
