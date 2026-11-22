@@ -68,9 +68,12 @@ EXTENSION_VERSION=x.y.z CANVAS_SYNC_FIREFOX_ADDON_ID=<gecko id> npm run build:fi
    **Another portal, or a pairing code**. The browser asks you to allow access to
    that address only. Chrome closes the popup while it asks; the extension keeps
    the request and finishes it once you allow, so nothing has to be entered again.
-4. Sync happens when a Canvas page finishes loading (at most every 10 minutes),
-   hourly if Canvas is already open and signed in, and when you press
-   **Sync now**. The extension never opens background tabs.
+4. Sync happens right after pairing or choosing the Canvas site, when a Canvas
+   page finishes loading (at most every 10 minutes), every 30 minutes and once
+   a minute after the browser starts if Canvas is signed in, when you open the
+   Portal's browser-extension page with data more than an hour old, and when
+   you press **Sync now** (in the popup or on that page). The extension never
+   opens background tabs.
 
 **Disconnect** revokes the upload token at the Portal (which deletes the stored
 snapshots) and clears everything stored in the browser.

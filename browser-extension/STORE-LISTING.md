@@ -83,7 +83,7 @@ Firefox: Other (no education category).
 | Permission | Justification |
 | --- | --- |
 | `storage` | Keeps the Portal and Canvas addresses, the Portal upload token and the last sync status on this device. |
-| `alarms` | Runs the hourly background sync. |
+| `alarms` | Runs the background sync every 30 minutes, and once shortly after the browser starts. |
 | `scripting` | Runs the read-only Canvas API requests inside the user's open Canvas tab, and reads the one-time pairing code from the Portal tab the user opened to pair. |
 | `activeTab` | Reads the address of the tab the popup is opened from, to fill in the user's Canvas address. |
 | Host permission and content script (`https://canvas.mcp.kazuhahub.com/*`) | The default Canvas MCP Portal. A small bridge script there lets the Portal's own "Connect this browser" button hand the extension a one-time pairing code; it reads nothing else on the page. The extension uploads snapshots to this Portal. |

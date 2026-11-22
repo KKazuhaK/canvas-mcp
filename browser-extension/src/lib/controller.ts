@@ -20,7 +20,11 @@ import {
 import { runSync, type Outcome } from './sync.ts';
 
 export const ALARM_NAME = 'canvas-sync';
-export const ALARM_MINUTES = 60;
+export const ALARM_MINUTES = 30;
+/** The first periodic sync runs this soon after the alarm is created (pairing, install). */
+export const FIRST_ALARM_MINUTES = 1;
+/** One sync shortly after the browser starts. */
+export const STARTUP_ALARM = 'canvas-startup-sync';
 export const MIN_SYNC_GAP_MS = 10 * 60_000;
 const MIN_ATTEMPT_GAP_MS = 60_000;
 const TAB_DEBOUNCE_MS = 1500;
@@ -49,7 +53,7 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
     if (!api.alarms) return;
     const s = await readState(storage);
     if (isConnected(s)) {
-      if (!(await api.alarms.get(ALARM_NAME))) await api.alarms.create(ALARM_NAME, { delayInMinutes: ALARM_MINUTES, periodInMinutes: ALARM_MINUTES });
+      if (!(await api.alarms.get(ALARM_NAME))) await api.alarms.create(ALARM_NAME, { delayInMinutes: FIRST_ALARM_MINUTES, periodInMinutes: ALARM_MINUTES });
     } else {
       await api.alarms.clear(ALARM_NAME);
     }
@@ -174,6 +178,15 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
     } finally {
       claiming = false;
     }
+  }
+
+  async function bridgeSync(message: { force?: unknown }) {
+    const s = await readState(storage);
+    if (!isConnected(s) || s.portalOrigin !== env.defaultPortal) throw new UserError('not_connected', 'Connect this browser first.');
+    // A click on the page refreshes everything, like Sync now in the popup; opening the page only
+    // syncs what is due, like a Canvas page visit.
+    const outcome = await runSyncOnce(message.force === true ? 'manual' : 'tab');
+    return { ok: outcome.ok, error: outcome.ok ? undefined : outcome.message, counts: outcome.counts };
   }
 
   async function onInstalled(details: { reason?: string } | undefined) {
@@ -350,11 +363,18 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
   async function handleMessage(message: any, sender: SenderLike) {
     const type = message?.type;
     if (type === 'canvas.pair.claim') return handleClaim(message, sender);
-    if (type === 'canvas.bridge.status' || type === 'canvas.bridge.claim') {
+    if (type === 'canvas.bridge.status' || type === 'canvas.bridge.claim' || type === 'canvas.bridge.sync') {
       if (!isBridgeSender(sender)) throw new UserError('refused', 'Request refused.');
       if (type === 'canvas.bridge.claim') return bridgeClaim(message);
+      if (type === 'canvas.bridge.sync') return bridgeSync(message);
       const s = await readState(storage);
-      return { ok: true, connected: isConnected(s) && s.portalOrigin === env.defaultPortal, canvasOrigin: s.canvasOrigin ?? null };
+      return {
+        ok: true,
+        connected: isConnected(s) && s.portalOrigin === env.defaultPortal,
+        canvasOrigin: s.canvasOrigin ?? null,
+        lastSyncAt: s.lastSyncAt ?? null,
+        lastError: s.lastResult && !s.lastResult.ok ? s.lastResult.message : null,
+      };
     }
     if (typeof type !== 'string' || !isPopupSender(sender, api.runtime.id, popupUrl())) {
       throw new UserError('refused', 'Request refused.');
@@ -398,11 +418,23 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
   }
 
   async function onAlarm(alarm: { name: string }) {
+    if (alarm.name === STARTUP_ALARM) {
+      // A recent sync (from the previous session) is fresh enough.
+      const s = await readState(storage);
+      if (s.lastSyncAt && env.now() - Date.parse(s.lastSyncAt) < MIN_SYNC_GAP_MS) return;
+      await runSyncOnce('alarm');
+      return;
+    }
     if (alarm.name !== ALARM_NAME) return;
     await runSyncOnce('alarm');
   }
 
-  return { handleMessage, onTabUpdated, onAlarm, ensureAlarm, runSyncOnce, disconnect, resumeIntent, onInstalled };
+  async function onStartup() {
+    await ensureAlarm();
+    if (api.alarms && isConnected(await readState(storage))) await api.alarms.create(STARTUP_ALARM, { delayInMinutes: FIRST_ALARM_MINUTES });
+  }
+
+  return { handleMessage, onTabUpdated, onAlarm, onStartup, ensureAlarm, runSyncOnce, disconnect, resumeIntent, onInstalled };
 }
 
 export type { Stored };

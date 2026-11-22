@@ -14,14 +14,22 @@ declare const browser: typeof chrome | undefined;
     window.postMessage({ channel: BRIDGE_CHANNEL, from: 'extension', ...message }, location.origin);
   const version = api.runtime.getManifest().version;
   let claiming = false;
+  let syncing = false;
   const announce = async () => {
-    let status: { connected?: boolean; canvasOrigin?: string } | undefined;
+    let status: { connected?: boolean; canvasOrigin?: string; lastSyncAt?: string | null; lastError?: string | null } | undefined;
     try {
       status = (await api.runtime.sendMessage({ type: 'canvas.bridge.status' })) as typeof status;
     } catch {
       /* the service worker wakes on the next message */
     }
-    post({ type: 'ready', version, connected: !!status?.connected, canvasOrigin: status?.canvasOrigin ?? null });
+    post({
+      type: 'ready',
+      version,
+      connected: !!status?.connected,
+      canvasOrigin: status?.canvasOrigin ?? null,
+      lastSyncAt: status?.lastSyncAt ?? null,
+      lastError: status?.lastError ?? null,
+    });
   };
   window.addEventListener('message', (event) => {
     if (event.source !== window || event.origin !== location.origin) return;
@@ -29,6 +37,22 @@ declare const browser: typeof chrome | undefined;
     if (!data || data.channel !== BRIDGE_CHANNEL || data.from !== 'page') return;
     if (data.type === 'hello') {
       void announce();
+      return;
+    }
+    if (data.type === 'sync') {
+      if (syncing) return;
+      syncing = true;
+      api.runtime
+        .sendMessage({ type: 'canvas.bridge.sync', force: data.force === true })
+        .then(
+          (r: { ok?: boolean; error?: string; counts?: { accepted?: number } } | undefined) =>
+            post({ type: 'synced', ok: !!r?.ok, error: r?.ok ? '' : (r?.error ?? 'Sync failed.'), updated: r?.counts?.accepted ?? 0 }),
+          () => post({ type: 'synced', ok: false, error: 'Could not reach the extension. Reload this page and try again.', updated: 0 }),
+        )
+        .finally(() => {
+          syncing = false;
+          void announce();
+        });
       return;
     }
     if (data.type !== 'connect' || typeof data.code !== 'string' || claiming) return;

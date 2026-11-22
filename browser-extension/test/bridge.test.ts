@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createController } from '../src/lib/controller.ts';
+import { ALARM_MINUTES, ALARM_NAME, STARTUP_ALARM, createController } from '../src/lib/controller.ts';
 import { looksLikeCanvas } from '../src/lib/origin.ts';
 import { CANVAS, EXT_ID, POPUP_URL, PORTAL, TOKEN, jsonResponse, makeChrome } from './helpers.ts';
 
@@ -38,7 +38,7 @@ test('bridge: only the default portal page, in the top frame, may pair or read t
   assert.deepEqual(s.requests, []);
   const none = createController(makeChrome().api, { fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
   await assert.rejects(none.handleMessage({ type: 'canvas.bridge.status' }, page), /refused/);
-  assert.deepEqual(await s.c.handleMessage({ type: 'canvas.bridge.status' }, page), { ok: true, connected: false, canvasOrigin: null });
+  assert.deepEqual(await s.c.handleMessage({ type: 'canvas.bridge.status' }, page), { ok: true, connected: false, canvasOrigin: null, lastSyncAt: null, lastError: null });
 });
 
 test('bridge: a suggested Canvas site with access is saved and the first sync starts at once', async () => {
@@ -51,7 +51,10 @@ test('bridge: a suggested Canvas site with access is saved and the first sync st
   await new Promise((r) => setTimeout(r, 0));
   // The sync asks the portal for its plan right away instead of waiting for a Canvas page visit.
   assert.ok(s.requests.some((u) => u.startsWith(`${PORTAL}/api/v1/extension/plan`)), s.requests.join('\n'));
-  assert.deepEqual(await s.c.handleMessage({ type: 'canvas.bridge.status' }, page), { ok: true, connected: true, canvasOrigin: CANVAS });
+  assert.deepEqual(
+    { ...(await s.c.handleMessage({ type: 'canvas.bridge.status' }, page)), lastSyncAt: undefined, lastError: undefined },
+    { ok: true, connected: true, canvasOrigin: CANVAS, lastSyncAt: undefined, lastError: undefined },
+  );
 });
 
 test('bridge: without Canvas access the popup opens in a tab to ask for it with one click', async () => {
@@ -108,4 +111,50 @@ test('only Canvas-looking https tabs are offered as the Canvas site', () => {
   assert.equal(looksLikeCanvas('https://www.google.com/'), false);
   assert.equal(looksLikeCanvas('http://school.instructure.com/'), false);
   assert.equal(looksLikeCanvas('chrome://extensions'), false);
+});
+
+test('sync now from the page: only the default portal page, only once connected there', async () => {
+  const s = setup({ permissions: [`${CANVAS}/*`] });
+  await assert.rejects(s.c.handleMessage({ type: 'canvas.bridge.sync' }, { ...page, url: 'https://evil.example/' }), /refused/);
+  await assert.rejects(s.c.handleMessage({ type: 'canvas.bridge.sync' }, page), /Connect this browser first/);
+  s.storage.data.portalOrigin = 'https://other-portal.example';
+  s.storage.data.uploadToken = TOKEN;
+  await assert.rejects(s.c.handleMessage({ type: 'canvas.bridge.sync' }, page), /Connect this browser first/);
+  Object.assign(s.storage.data, { portalOrigin: PORTAL, canvasOrigin: CANVAS });
+  const before = s.requests.length;
+  const r = (await s.c.handleMessage({ type: 'canvas.bridge.sync', force: true }, page)) as { ok: boolean; error?: string };
+  // The stand-in portal answers 500 to the plan, so the run fails, but it did ask the portal.
+  assert.equal(r.ok, false);
+  assert.ok(r.error);
+  assert.ok(s.requests.slice(before).some((u) => u.startsWith(`${PORTAL}/api/v1/extension/plan`)));
+  assert.equal((s.storage.data.lastResult as { trigger: string }).trigger, 'manual');
+});
+
+test('the periodic sync starts a minute after connecting and repeats every 30 minutes', async () => {
+  const s = setup({ storage: { portalOrigin: PORTAL, uploadToken: TOKEN } });
+  await s.c.ensureAlarm();
+  assert.deepEqual(s.alarms.get(ALARM_NAME), { delayInMinutes: 1, periodInMinutes: 30 });
+  assert.equal(ALARM_MINUTES, 30);
+});
+
+test('a browser start syncs once a minute later, unless the last sync is recent', async () => {
+  const stale = setup({
+    storage: { portalOrigin: PORTAL, uploadToken: TOKEN, canvasOrigin: CANVAS, lastSyncAt: new Date(NOW - 3 * 3600_000).toISOString() },
+    permissions: [`${CANVAS}/*`],
+    // An open Canvas tab: the run goes straight to the portal's plan instead of probing Canvas first.
+    tabs: [{ id: 1, url: `${CANVAS}/courses`, status: 'complete' }],
+  });
+  await stale.c.onStartup();
+  assert.deepEqual(stale.alarms.get(STARTUP_ALARM), { delayInMinutes: 1 });
+  await stale.c.onAlarm({ name: STARTUP_ALARM });
+  assert.ok(stale.requests.some((u) => u.startsWith(`${PORTAL}/api/v1/extension/`)), stale.requests.join('\n'));
+  const fresh = setup({
+    storage: { portalOrigin: PORTAL, uploadToken: TOKEN, canvasOrigin: CANVAS, lastSyncAt: new Date(NOW - 60_000).toISOString() },
+    permissions: [`${CANVAS}/*`],
+  });
+  await fresh.c.onAlarm({ name: STARTUP_ALARM });
+  assert.deepEqual(fresh.requests, []);
+  const signedOut = setup();
+  await signedOut.c.onStartup();
+  assert.equal(signedOut.alarms.get(STARTUP_ALARM), undefined);
 });
