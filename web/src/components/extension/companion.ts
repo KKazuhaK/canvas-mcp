@@ -14,6 +14,8 @@ export interface Companion {
   status: 'detecting' | 'absent' | 'present'
   /** Whether this browser's extension is paired with this portal. */
   connected: boolean
+  /** The person chose this portal in the extension's popup: the page should pair by itself. */
+  pending: boolean
   /** When this browser last synced successfully (ISO 8601), as the extension reports it. */
   lastSyncAt: string | null
   /** Why this browser's last sync failed, if it did. */
@@ -55,7 +57,7 @@ export function useCompanion(): {
   connect: (code: string, canvasOrigin: string | null) => Promise<ConnectResult>
   sync: (force: boolean) => Promise<SyncResult>
 } {
-  const [companion, setCompanion] = useState<Companion>({ status: 'detecting', connected: false, lastSyncAt: null, lastError: null })
+  const [companion, setCompanion] = useState<Companion>({ status: 'detecting', connected: false, pending: false, lastSyncAt: null, lastError: null })
   const waiting = useRef<((result: ConnectResult) => void) | null>(null)
   const syncing = useRef<((result: SyncResult) => void) | null>(null)
 
@@ -67,6 +69,7 @@ export function useCompanion(): {
         setCompanion({
           status: 'present',
           connected: data.connected === true,
+          pending: data.pending === true,
           lastSyncAt: typeof data.lastSyncAt === 'string' ? data.lastSyncAt : null,
           lastError: typeof data.lastError === 'string' ? data.lastError : null,
         })

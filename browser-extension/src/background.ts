@@ -1,5 +1,4 @@
 import { createController } from './lib/controller.ts';
-import { DEFAULT_PORTAL } from './lib/defaults.ts';
 import { UserError } from './lib/errors.ts';
 
 declare const browser: typeof chrome | undefined;
@@ -13,7 +12,6 @@ const controller = createController(api, {
   fetch: (input, init) => fetch(input, init),
   now: () => Date.now(),
   randomBytes: (n) => crypto.getRandomValues(new Uint8Array(n)),
-  defaultPortal: DEFAULT_PORTAL,
 });
 
 // Listeners are registered synchronously so a restarted service worker receives the event that woke it.

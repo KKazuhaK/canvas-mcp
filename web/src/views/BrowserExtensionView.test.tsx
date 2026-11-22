@@ -263,7 +263,7 @@ describe('Browser extension: manual code', () => {
 })
 
 /** Stands in for the extension's page bridge: answers this page's messages on the shared channel. */
-function fakeExtension(opts: { connected?: boolean; result?: Record<string, unknown>; silent?: boolean; synced?: Record<string, unknown> } = {}) {
+function fakeExtension(opts: { connected?: boolean; pending?: boolean; result?: Record<string, unknown>; silent?: boolean; synced?: Record<string, unknown> } = {}) {
   const fromPage: Record<string, unknown>[] = []
   const reply = (message: Record<string, unknown>) =>
     window.dispatchEvent(
@@ -273,7 +273,7 @@ function fakeExtension(opts: { connected?: boolean; result?: Record<string, unkn
     const data = event.data as Record<string, unknown> | null
     if (!data || data.channel !== 'canvas-companion' || data.from !== 'page') return
     fromPage.push(data)
-    if (data.type === 'hello') reply({ type: 'ready', version: '0.1.0', connected: !!opts.connected })
+    if (data.type === 'hello') reply({ type: 'ready', version: '0.1.0', connected: !!opts.connected, pending: !!opts.pending })
     if (data.type === 'connect' && !opts.silent) reply({ type: 'result', ok: true, ...opts.result })
     if (data.type === 'sync') reply({ type: 'synced', ok: true, updated: 4, ...opts.synced })
   }
@@ -294,6 +294,18 @@ describe('Browser extension: one click from this page', () => {
       // The code went to the extension only.
       expect(document.body.innerHTML).not.toContain(CODE)
       expect(screen.getByRole('button', { name: 'Show pairing code' })).toBeInTheDocument()
+    } finally {
+      ext.stop()
+    }
+  })
+
+  it('pairs by itself when the person chose this portal in the extension popup', async () => {
+    const ext = fakeExtension({ pending: true })
+    try {
+      const { seen } = await open('/browser-extension')
+      expect(await screen.findByText('This browser is connected. The first sync has started.')).toBeInTheDocument()
+      expect(pairingCalls(seen)).toHaveLength(1)
+      expect(ext.fromPage.filter((m) => m.type === 'connect')).toHaveLength(1)
     } finally {
       ext.stop()
     }
@@ -332,7 +344,7 @@ describe('Browser extension: one click from this page', () => {
 
   it('asks to install the extension when none answers, and keeps the code fallback', async () => {
     await open('/browser-extension')
-    expect(await screen.findByText(/The extension was not found in this browser/, {}, { timeout: 3000 })).toBeInTheDocument()
+    expect(await screen.findByText(/isn't connected to this page yet/, {}, { timeout: 3000 })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Connect this browser' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Show pairing code' })).toBeInTheDocument()
   })
@@ -342,7 +354,7 @@ describe('Browser extension: one click from this page', () => {
     window.dispatchEvent(
       new MessageEvent('message', { data: { channel: 'canvas-companion', from: 'extension', type: 'ready', connected: false }, origin: 'https://evil.example', source: window }),
     )
-    expect(await screen.findByText(/The extension was not found in this browser/, {}, { timeout: 3000 })).toBeInTheDocument()
+    expect(await screen.findByText(/isn't connected to this page yet/, {}, { timeout: 3000 })).toBeInTheDocument()
   })
 })
 

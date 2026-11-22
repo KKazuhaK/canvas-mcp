@@ -33,6 +33,7 @@ export function makeChrome(opts: MockOpts = {}) {
   const storage = makeStorage(opts.storage);
   const created: any[] = [];
   const injected: any[] = [];
+  const registered: any[] = [];
   const alarms = new Map<string, any>();
   const tabs = [...(opts.tabs ?? [])];
   const granted = new Set(opts.permissions ?? []);
@@ -66,9 +67,16 @@ export function makeChrome(opts: MockOpts = {}) {
         injected.push(d);
         return opts.executeScript ? opts.executeScript(d) : [{ result: undefined }];
       },
+      registerContentScripts: async (list: any[]) => void registered.push(...list),
+      unregisterContentScripts: async ({ ids }: { ids: string[] }) => {
+        for (const id of ids) {
+          const i = registered.findIndex((r) => r.id === id);
+          if (i >= 0) registered.splice(i, 1);
+        }
+      },
     },
   };
-  return { api: api as any, storage, created, injected, alarms, tabs, granted };
+  return { api: api as any, storage, created, injected, alarms, tabs, granted, registered };
 }
 
 export function jsonResponse(body: unknown, init: { status?: number; headers?: Record<string, string>; url?: string; redirected?: boolean } = {}) {

@@ -1,4 +1,3 @@
-import { DEFAULT_PORTAL } from '../lib/defaults.ts';
 import { hostPattern, looksLikeCanvas, parseOrigin } from '../lib/origin.ts';
 import { PAIRING_PATH } from '../lib/pairing.ts';
 import { describeStatus } from '../lib/status.ts';
@@ -50,10 +49,7 @@ async function render() {
   }
   // Connected: the connect section stays out of the way; Disconnect is the way to switch portals.
   $('connect').hidden = view.connected;
-  if (s.portalOrigin && s.portalOrigin !== DEFAULT_PORTAL && !$<HTMLInputElement>('portal').value) {
-    $<HTMLInputElement>('portal').value = s.portalOrigin;
-    $<HTMLDetailsElement>('manual-connect').open = true;
-  }
+  if (s.portalOrigin && !$<HTMLInputElement>('portal').value) $<HTMLInputElement>('portal').value = s.portalOrigin;
   $('canvas').hidden = !view.connected && !s.canvasOrigin;
   const canvasInput = $<HTMLInputElement>('canvas-origin');
   const canvasButton = $<HTMLButtonElement>('canvas-btn');
@@ -77,7 +73,7 @@ async function render() {
 async function prefillFromActiveTab(input: HTMLInputElement) {
   try {
     const [tab] = await api.tabs.query({ active: true, currentWindow: true });
-    if (tab?.url && !input.value && looksLikeCanvas(tab.url, DEFAULT_PORTAL)) input.value = parseOrigin(new URL(tab.url).origin);
+    if (tab?.url && !input.value && looksLikeCanvas(tab.url, pagePortal?.origin ?? '')) input.value = parseOrigin(new URL(tab.url).origin);
   } catch {
     /* not a usable page */
   }
@@ -126,14 +122,30 @@ async function withAccess(origin: string, intent: Record<string, unknown>) {
   if (!res.ok) throw new Error(res.error);
 }
 
-$('open-portal').addEventListener('click', (ev) =>
+// Opened on a portal's browser-extension page: offer that portal, so nothing has to be typed.
+let pagePortal: { origin: string; tabId: number } | null = null;
+async function detectPagePortal() {
+  try {
+    const [tab] = await api.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.url || tab.id === undefined) return;
+    const u = new URL(tab.url);
+    if (u.pathname.replace(/\/$/, '') !== PAIRING_PATH) return;
+    pagePortal = { origin: parseOrigin(u.origin, 'portal address'), tabId: tab.id };
+    $('page-actions').hidden = false;
+    $<HTMLDetailsElement>('manual-connect').open = false;
+    $('connect-page').textContent = `Connect to ${u.host}`;
+    $('connect-hint').textContent = `You are on the browser-extension page of ${u.host}. Allow access once, and the page finishes pairing.`;
+  } catch {
+    /* not a page the popup can read */
+  }
+}
+void detectPagePortal();
+
+$('connect-page').addEventListener('click', (ev) =>
   guarded(ev.currentTarget as HTMLButtonElement, async () => {
-    if (!DEFAULT_PORTAL) {
-      $<HTMLDetailsElement>('manual-connect').open = true;
-      throw new Error('Enter your portal address below.');
-    }
-    await api.tabs.create({ url: `${DEFAULT_PORTAL}${PAIRING_PATH}` });
-    window.close();
+    if (!pagePortal) throw new Error('Enter your portal address below.');
+    await withAccess(pagePortal.origin, { type: 'page', portalOrigin: pagePortal.origin, tabId: pagePortal.tabId });
+    say('message', 'Finish on the portal page; it pairs this browser by itself. This popup can be closed.');
   }),
 );
 
@@ -147,7 +159,7 @@ $('connect-btn').addEventListener('click', (ev) =>
 
 $('pair-btn').addEventListener('click', (ev) =>
   guarded(ev.currentTarget as HTMLButtonElement, async () => {
-    const portalOrigin = parseOrigin($<HTMLInputElement>('portal').value.trim() || DEFAULT_PORTAL, 'portal address');
+    const portalOrigin = parseOrigin($<HTMLInputElement>('portal').value.trim(), 'portal address');
     const code = $<HTMLInputElement>('code').value.trim();
     await withAccess(portalOrigin, { type: 'pair.manual', portalOrigin, code });
     $<HTMLInputElement>('code').value = '';

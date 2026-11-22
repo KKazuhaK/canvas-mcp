@@ -41,6 +41,7 @@ export default function ExtensionPairingCard({ state }: { state: string | null }
   const { companion, connect } = useCompanion()
   type Link = { kind: 'idle' } | { kind: 'busy' } | { kind: 'linked' } | { kind: 'needsCanvasAccess' } | { kind: 'error'; message: string }
   const [link, setLink] = useState<Link>({ kind: 'idle' })
+  const autoStarted = useRef(false)
 
   // One click: a fresh code goes straight to this browser's extension, never onto the screen.
   async function connectBrowser() {
@@ -55,6 +56,16 @@ export default function ExtensionPairingCard({ state }: { state: string | null }
       setLink({ kind: 'idle' }) // the request error is shown by ErrorNotice
     }
   }
+  // The person chose this portal in the extension's popup: pair without another click.
+  useEffect(() => {
+    if (state !== null || autoStarted.current) return
+    if (companion.status !== 'present' || !companion.pending || companion.connected) return
+    autoStarted.current = true
+    void connectBrowser()
+    // connectBrowser is recreated each render; the ref makes this run once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companion.status, companion.pending, companion.connected, state])
+
 
   function request() {
     setExpired(false)
