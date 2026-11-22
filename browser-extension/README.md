@@ -62,15 +62,16 @@ overrides it for a local build; `release-tools/` pins the
 
 ## Use
 
-1. Installing the extension opens the default Portal's `/account/browser-extension`
-   page (the popup's **Open the portal to connect** does the same). Sign in and
-   press **Connect this browser**: the page hands the extension a one-time
-   pairing code and the Canvas address it knows for your account.
+1. Sign in to your Portal, open its `/account/browser-extension` page and click
+   the extension's icon there. Press **Connect to <your portal>** and allow
+   access to that one site; the page then hands the extension a one-time pairing
+   code and the Canvas address it knows for your account, by itself. No Portal
+   is built in.
 2. If the extension may already read that Canvas site, it saves it and starts the
    first sync right away. Otherwise a tab opens with one button to allow access
    to that site only (a web page cannot ask for site access itself).
-3. Another Portal, or a pairing code typed by hand: open the popup and expand
-   **Another portal, or a pairing code**. The browser asks you to allow access to
+3. From anywhere else, or with a pairing code typed by hand: open the popup and
+   use **Portal address, or a pairing code**. The browser asks you to allow access to
    that address only. Chrome closes the popup while it asks; the extension keeps
    the request and finishes it once you allow, so nothing has to be entered again.
 4. Sync happens right after pairing or choosing the Canvas site, when a Canvas
@@ -88,12 +89,15 @@ snapshots) and clears everything stored in the browser.
 
 ## How pairing works
 
-From the default Portal's page: a bridge script, declared in the manifest for
-that Portal only, lets the page see that the extension is installed. When the
-person clicks **Connect this browser**, the page asks the Portal for a pairing
-code and posts it to the bridge (same window and origin only); the background
-script accepts it only from a top-frame tab on that Portal, then claims it as
-below. The bridge never reads anything else on the page.
+From the Portal's page: the popup, opened on a Portal's browser-extension page,
+offers that Portal. Once the person allows access to it, the extension registers
+a bridge script for that origin's `/account/*` pages at runtime
+(`scripting.registerContentScripts`) and injects it into the open tab. The page
+sees the extension, asks the Portal for a pairing code and posts it to the
+bridge (same window and origin only); the background script accepts it only
+from a top-frame tab on that Portal, then claims it as below. The bridge stays
+registered for the paired Portal (for Sync now on its page) and is removed on
+Disconnect. It never reads anything else on the page.
 
 From the popup (any Portal): the popup generates a random 32-byte `state`, valid for 10 minutes, and opens
 `<portal>/account/browser-extension#extension-auth=<state>`. A small script is
@@ -131,9 +135,8 @@ What is never touched:
   to same-site requests; uploads are made with credentials omitted.
 - Conversations and inbox messages, file contents, grades of other students,
   group members, and anything outside the allowlist.
-- Any site other than the Portal and Canvas addresses you approved. The only
-  static host permission is the default Portal, where the pairing bridge runs;
-  there is no `tabs` permission and no remote code.
+- Any site other than the Portal and Canvas addresses you approved. There are no
+  static host permissions, no `tabs` permission and no remote code.
 
-Permissions: `storage`, `alarms`, `scripting`, `activeTab`, host access to the
-default Portal, and optional host access requested one origin at a time.
+Permissions: `storage`, `alarms`, `scripting`, `activeTab`, and optional host
+access requested one origin at a time.

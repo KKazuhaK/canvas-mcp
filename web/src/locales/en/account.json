@@ -382,7 +382,7 @@
       "reconnectBrowser": "Reconnect this browser",
       "browserDetected": "The Canvas MCP Sync extension is installed in this browser. Connect it with one click; it sets itself up and starts syncing.",
       "browserConnected": "This browser's extension is connected to your account.",
-      "installFirst": "The extension was not found in this browser. Install Canvas MCP Sync, then come back to this page and connect it with one click.",
+      "installFirst": "The extension isn't connected to this page yet. Install Canvas MCP Sync, then click its icon in the browser toolbar on this page and allow access; the page finishes pairing by itself.",
       "linked": "This browser is connected. The first sync has started.",
       "needsCanvasAccess": "Almost done: the extension opened a tab. Allow it to read your Canvas site there, and syncing starts.",
       "noAnswer": "The extension did not answer. Reload this page and try again.",

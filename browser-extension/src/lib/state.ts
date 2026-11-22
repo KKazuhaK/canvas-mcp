@@ -55,10 +55,13 @@ export interface Stored {
   remindAfterHours?: number;
   /** No reminder before this time (epoch ms). */
   snoozeUntil?: number;
+  /** The portal whose pages may talk to the extension (see the controller's registerBridge). */
+  bridgeOrigin?: string;
 }
 
 export type Intent =
   | { type: 'pair.start'; portalOrigin: string; at: number }
+  | { type: 'page'; portalOrigin: string; tabId?: number; at: number }
   | { type: 'pair.manual'; portalOrigin: string; code: string; at: number }
   | { type: 'canvas.set'; canvasOrigin: string; at: number };
 
@@ -80,6 +83,7 @@ export const STORAGE_KEYS: (keyof Stored)[] = [
   'connectedAt',
   'remindAfterHours',
   'snoozeUntil',
+  'bridgeOrigin',
 ];
 
 export interface StorageArea {

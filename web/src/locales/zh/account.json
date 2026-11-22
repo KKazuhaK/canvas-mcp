@@ -382,7 +382,7 @@
       "reconnectBrowser": "重新连接此浏览器",
       "browserDetected": "已在此浏览器中检测到 Canvas MCP Sync 扩展。点一下即可连接，扩展会自动完成配置并开始同步。",
       "browserConnected": "此浏览器的扩展已连接到你的账户。",
-      "installFirst": "未在此浏览器中检测到扩展。请先安装 Canvas MCP Sync，再回到此页面一键连接。",
+      "installFirst": "扩展还没连上这个页面。请先安装 Canvas MCP Sync，然后在这个页面点浏览器工具栏里的扩展图标，按提示允许访问，页面会自动完成配对。",
       "linked": "此浏览器已连接，第一次同步已开始。",
       "needsCanvasAccess": "就差一步：扩展打开了一个新标签页，请在那里允许它读取你的 Canvas 站点，随后即开始同步。",
       "noAnswer": "扩展没有响应。请刷新此页面后重试。",

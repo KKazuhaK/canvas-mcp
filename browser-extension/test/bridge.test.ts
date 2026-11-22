@@ -9,8 +9,9 @@ const popup = { id: EXT_ID, url: POPUP_URL };
 const page = { id: EXT_ID, tab: { id: 5 }, frameId: 0, url: `${PORTAL}/account/browser-extension` };
 const CODE = 'ABCD-EFGH-JKLM';
 
-function setup(chromeOpts: Parameters<typeof makeChrome>[0] = {}) {
-  const m = makeChrome(chromeOpts);
+function setup(chromeOpts: Parameters<typeof makeChrome>[0] = {}, { chosen = true } = {}) {
+  // By default the person already chose this portal (its page bridge is registered).
+  const m = makeChrome({ ...chromeOpts, storage: { ...(chosen ? { bridgeOrigin: PORTAL } : {}), ...chromeOpts.storage } });
   const requests: string[] = [];
   const fetchFn = (async (input: any) => {
     const url = String(input);
@@ -19,11 +20,11 @@ function setup(chromeOpts: Parameters<typeof makeChrome>[0] = {}) {
     if (url.endsWith('/extension/capabilities')) return jsonResponse({ browserSync: 1 });
     return jsonResponse({}, { status: 500 });
   }) as typeof fetch;
-  const c = createController(m.api, { fetch: fetchFn, now: () => NOW, randomBytes: (n) => new Uint8Array(n).fill(2), defaultPortal: PORTAL });
+  const c = createController(m.api, { fetch: fetchFn, now: () => NOW, randomBytes: (n) => new Uint8Array(n).fill(2) });
   return { ...m, c, requests };
 }
 
-test('bridge: only the default portal page, in the top frame, may pair or read the status', async () => {
+test('bridge: only the chosen portal page, in the top frame, may pair or read the status', async () => {
   const s = setup();
   for (const sender of [
     { ...page, url: 'https://evil.example/account/browser-extension' },
@@ -36,9 +37,39 @@ test('bridge: only the default portal page, in the top frame, may pair or read t
     await assert.rejects(s.c.handleMessage({ type: 'canvas.bridge.status' }, sender), /refused/);
   }
   assert.deepEqual(s.requests, []);
-  const none = createController(makeChrome().api, { fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
-  await assert.rejects(none.handleMessage({ type: 'canvas.bridge.status' }, page), /refused/);
-  assert.deepEqual(await s.c.handleMessage({ type: 'canvas.bridge.status' }, page), { ok: true, connected: false, canvasOrigin: null, lastSyncAt: null, lastError: null });
+  // No portal is built in: until the person chooses one, no page may talk to the extension.
+  const none = setup({}, { chosen: false });
+  await assert.rejects(none.c.handleMessage({ type: 'canvas.bridge.status' }, page), /refused/);
+  assert.deepEqual(await s.c.handleMessage({ type: 'canvas.bridge.status' }, page), {
+    ok: true,
+    connected: false,
+    pending: true,
+    canvasOrigin: null,
+    lastSyncAt: null,
+    lastError: null,
+  });
+});
+
+test('connecting from the portal page: the popup choice registers the bridge there, and forgetting removes it', async () => {
+  const s = setup({ permissions: [`${PORTAL}/*`] }, { chosen: false });
+  s.storage.data.pendingIntent = { type: 'page', portalOrigin: PORTAL, tabId: 5, at: NOW };
+  assert.deepEqual(await s.c.resumeIntent(), { ok: true });
+  assert.equal(s.storage.data.bridgeOrigin, PORTAL);
+  assert.deepEqual(s.registered, [
+    { id: 'canvas-portal-bridge', matches: [`${PORTAL}/account/*`], js: ['bridge.js'], runAt: 'document_idle', persistAcrossSessions: true },
+  ]);
+  assert.deepEqual(s.injected.at(-1), { target: { tabId: 5 }, files: ['bridge.js'] });
+  // The page pairs by itself, through the bridge.
+  assert.deepEqual(await s.c.handleMessage({ type: 'canvas.bridge.claim', code: CODE }, page), { ok: true, needsCanvasAccess: true });
+  assert.equal(s.storage.data.portalOrigin, PORTAL);
+  await s.c.handleMessage({ type: 'canvas.disconnect' }, popup);
+  assert.deepEqual(s.registered, []);
+  assert.equal(s.storage.data.bridgeOrigin, undefined);
+  // Without access to the portal the request does nothing.
+  const denied = setup({}, { chosen: false });
+  denied.storage.data.pendingIntent = { type: 'page', portalOrigin: PORTAL, tabId: 5, at: NOW };
+  assert.equal((await denied.c.resumeIntent()).ok, false);
+  assert.deepEqual(denied.registered, []);
 });
 
 test('bridge: a suggested Canvas site with access is saved and the first sync starts at once', async () => {
@@ -53,7 +84,7 @@ test('bridge: a suggested Canvas site with access is saved and the first sync st
   assert.ok(s.requests.some((u) => u.startsWith(`${PORTAL}/api/v1/extension/plan`)), s.requests.join('\n'));
   assert.deepEqual(
     { ...(await s.c.handleMessage({ type: 'canvas.bridge.status' }, page)), lastSyncAt: undefined, lastError: undefined },
-    { ok: true, connected: true, canvasOrigin: CANVAS, lastSyncAt: undefined, lastError: undefined },
+    { ok: true, connected: true, pending: false, canvasOrigin: CANVAS, lastSyncAt: undefined, lastError: undefined },
   );
 });
 
@@ -97,11 +128,11 @@ test('intent: an expired request or one without access does nothing and says why
   await assert.rejects(denied.c.handleMessage({ type: 'canvas.intent.resume' }, page), /refused/);
 });
 
-test('install opens the portal pairing page; an update does not', async () => {
+test('installing opens no page: no portal is built in', async () => {
   const s = setup();
-  await s.c.onInstalled({ reason: 'update' });
   await s.c.onInstalled({ reason: 'install' });
-  assert.deepEqual(s.created.map((t) => t.url), [`${PORTAL}/account/browser-extension`]);
+  await s.c.onInstalled({ reason: 'update' });
+  assert.deepEqual(s.created, []);
 });
 
 test('only Canvas-looking https tabs are offered as the Canvas site', () => {
@@ -113,7 +144,7 @@ test('only Canvas-looking https tabs are offered as the Canvas site', () => {
   assert.equal(looksLikeCanvas('chrome://extensions'), false);
 });
 
-test('sync now from the page: only the default portal page, only once connected there', async () => {
+test('sync now from the page: only the chosen portal page, only once connected there', async () => {
   const s = setup({ permissions: [`${CANVAS}/*`] });
   await assert.rejects(s.c.handleMessage({ type: 'canvas.bridge.sync' }, { ...page, url: 'https://evil.example/' }), /refused/);
   await assert.rejects(s.c.handleMessage({ type: 'canvas.bridge.sync' }, page), /Connect this browser first/);

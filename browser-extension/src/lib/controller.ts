@@ -35,8 +35,6 @@ export interface ControllerEnv {
   fetch: typeof fetch;
   now(): number;
   randomBytes(n: number): Uint8Array;
-  /** The portal whose page may pair this browser through the page bridge (see bridge.ts). */
-  defaultPortal?: string;
 }
 
 type Trigger = 'tab' | 'alarm' | 'manual';
@@ -72,6 +70,7 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
     const token = await claimCode(env.fetch, portalOrigin, code);
     await saveConnection(storage, portalOrigin, token);
     await storage.remove('notice');
+    await registerBridge(portalOrigin).catch(() => {});
     await ensureAlarm();
     await syncSoon();
   }
@@ -94,16 +93,46 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
     await syncSoon();
   }
 
-  // The default portal's page, in a top-level tab of this browser.
-  function isBridgeSender(sender: SenderLike): boolean {
-    if (!env.defaultPortal || sender.id !== api.runtime.id || sender.tab?.id === undefined) return false;
-    if (sender.frameId !== undefined && sender.frameId !== 0) return false;
-    return sameOrigin(sender.url, env.defaultPortal);
+  const BRIDGE_ID = 'canvas-portal-bridge';
+  /**
+   * The page bridge runs only on the portal the person chose: the one they paired, or the one they
+   * asked to connect from the popup. No portal is built in; the script is registered at runtime for
+   * that one origin, after the person allowed access to it.
+   */
+  async function registerBridge(origin: string | null) {
+    if (origin) await storage.set({ bridgeOrigin: origin });
+    else await storage.remove('bridgeOrigin');
+    const scripting = api.scripting as typeof api.scripting | undefined;
+    if (!scripting?.registerContentScripts) return;
+    try {
+      await scripting.unregisterContentScripts({ ids: [BRIDGE_ID] });
+    } catch {
+      /* not registered yet */
+    }
+    if (origin) {
+      await scripting.registerContentScripts([
+        { id: BRIDGE_ID, matches: [`${hostPattern(origin).replace(/\*$/, '')}account/*`], js: ['bridge.js'], runAt: 'document_idle', persistAcrossSessions: true },
+      ]);
+    }
+  }
+
+  // Registered scripts do not survive every update: put the bridge back for the saved portal.
+  async function restoreBridge() {
+    const { bridgeOrigin } = await readState(storage);
+    if (bridgeOrigin && (await hasPermission(bridgeOrigin))) await registerBridge(bridgeOrigin);
+  }
+
+  // The chosen portal's page, in a top-level tab of this browser: its origin, or null.
+  async function bridgeSenderOrigin(sender: SenderLike): Promise<string | null> {
+    if (sender.id !== api.runtime.id || sender.tab?.id === undefined) return null;
+    if (sender.frameId !== undefined && sender.frameId !== 0) return null;
+    const { bridgeOrigin } = await readState(storage);
+    return bridgeOrigin && sameOrigin(sender.url, bridgeOrigin) ? bridgeOrigin : null;
   }
 
   // Pairing handed over by the portal page. Canvas access cannot be asked for from a web page, so
   // when the suggested Canvas site is not allowed yet the popup opens in a tab to ask with one click.
-  async function bridgeClaim(message: { code?: unknown; canvasOrigin?: unknown }) {
+  async function bridgeClaim(portalOrigin: string, message: { code?: unknown; canvasOrigin?: unknown }) {
     const code = typeof message.code === 'string' ? message.code.trim() : '';
     if (!CODE_RE.test(code)) throw new UserError('invalid_code', 'The page sent an invalid pairing code. Reload it and try again.');
     if (claiming) throw new UserError('busy', 'Pairing is already in progress.');
@@ -115,7 +144,7 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
     }
     claiming = true;
     try {
-      await claimAndStore(env.defaultPortal!, code);
+      await claimAndStore(portalOrigin, code);
     } finally {
       claiming = false;
     }
@@ -152,6 +181,13 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
         }
         const portalOrigin = parseOrigin(intent.portalOrigin, 'portal address');
         if (intent.type === 'pair.start') return await startPairing(portalOrigin);
+        if (intent.type === 'page') {
+          // The person is on this portal's pairing page: let it talk to the extension and finish there.
+          if (!(await hasPermission(portalOrigin))) throw new UserError('no_permission', 'Allow the extension to access the portal address first.');
+          await registerBridge(portalOrigin);
+          if (typeof intent.tabId === 'number') await api.scripting.executeScript({ target: { tabId: intent.tabId }, files: ['bridge.js'] });
+          return { ok: true };
+        }
         if (intent.type === 'pair.manual') {
           await manualPair(portalOrigin, intent.code);
           return { ok: true };
@@ -181,19 +217,18 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
     }
   }
 
-  async function bridgeSync(message: { force?: unknown }) {
+  async function bridgeSync(portalOrigin: string, message: { force?: unknown }) {
     const s = await readState(storage);
-    if (!isConnected(s) || s.portalOrigin !== env.defaultPortal) throw new UserError('not_connected', 'Connect this browser first.');
+    if (!isConnected(s) || s.portalOrigin !== portalOrigin) throw new UserError('not_connected', 'Connect this browser first.');
     // A click on the page refreshes everything, like Sync now in the popup; opening the page only
     // syncs what is due, like a Canvas page visit.
     const outcome = await runSyncOnce(message.force === true ? 'manual' : 'tab');
     return { ok: outcome.ok, error: outcome.ok ? undefined : outcome.message, counts: outcome.counts };
   }
 
-  async function onInstalled(details: { reason?: string } | undefined) {
+  async function onInstalled(_details: { reason?: string } | undefined) {
     await ensureAlarm();
-    // A new installation opens the portal's pairing page, where one click connects this browser.
-    if (details?.reason === 'install' && env.defaultPortal) await api.tabs.create({ url: `${env.defaultPortal}${PAIRING_PATH}` });
+    await restoreBridge();
   }
 
   async function injectLink(tabId: number, url: string | undefined) {
@@ -270,6 +305,7 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
         remote = false;
       }
     }
+    await registerBridge(null).catch(() => {});
     await clearAll(storage);
     await api.alarms?.clear(ALARM_NAME);
     return {
@@ -370,13 +406,16 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
     const type = message?.type;
     if (type === 'canvas.pair.claim') return handleClaim(message, sender);
     if (type === 'canvas.bridge.status' || type === 'canvas.bridge.claim' || type === 'canvas.bridge.sync') {
-      if (!isBridgeSender(sender)) throw new UserError('refused', 'Request refused.');
-      if (type === 'canvas.bridge.claim') return bridgeClaim(message);
-      if (type === 'canvas.bridge.sync') return bridgeSync(message);
+      const origin = await bridgeSenderOrigin(sender);
+      if (!origin) throw new UserError('refused', 'Request refused.');
+      if (type === 'canvas.bridge.claim') return bridgeClaim(origin, message);
+      if (type === 'canvas.bridge.sync') return bridgeSync(origin, message);
       const s = await readState(storage);
       return {
         ok: true,
-        connected: isConnected(s) && s.portalOrigin === env.defaultPortal,
+        connected: isConnected(s) && s.portalOrigin === origin,
+        // Not connected here yet means the person chose this portal in the popup: the page pairs by itself.
+        pending: !(isConnected(s) && s.portalOrigin === origin),
         canvasOrigin: s.canvasOrigin ?? null,
         lastSyncAt: s.lastSyncAt ?? null,
         lastError: s.lastResult && !s.lastResult.ok ? s.lastResult.message : null,
@@ -460,6 +499,7 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
 
   async function onStartup() {
     await ensureAlarm();
+    await restoreBridge().catch(() => {});
     if (api.alarms && isConnected(await readState(storage))) await api.alarms.create(STARTUP_ALARM, { delayInMinutes: FIRST_ALARM_MINUTES });
   }
 

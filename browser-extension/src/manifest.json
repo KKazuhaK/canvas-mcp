@@ -16,9 +16,6 @@
     "scripting",
     "activeTab"
   ],
-  "host_permissions": [
-    "https://canvas.mcp.kazuhahub.com/*"
-  ],
   "optional_host_permissions": [
     "https://*/*",
     "http://localhost/*",
@@ -28,17 +25,6 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "content_scripts": [
-    {
-      "matches": [
-        "https://canvas.mcp.kazuhahub.com/*"
-      ],
-      "js": [
-        "bridge.js"
-      ],
-      "run_at": "document_idle"
-    }
-  ],
   "action": {
     "default_title": "Canvas MCP Sync",
     "default_icon": {
