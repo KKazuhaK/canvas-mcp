@@ -7,10 +7,12 @@ from dataclasses import dataclass
 
 from sqlalchemy import Connection, false, func, or_, select
 
-from ..accounts import ExternalClaims
+from ..accounts import PROVIDER_FEDERATED, ExternalClaims
 from ..db import schema as s
 
 POLICY_KEY = "login.account_policy"
+#: Methods the SSO lock does not govern: the local password and a trusted hub.
+_NOT_SSO_LOCKED = frozenset({"local", PROVIDER_FEDERATED})
 _UPN = re.compile(r"[a-z0-9][a-z0-9.@_+-]{2,253}")
 
 
@@ -99,7 +101,14 @@ def method_allowed(
     if allowed is not None and provider_id not in allowed:
         return False
     locked = account["sso_lock_provider"]
-    if provider_id != "local" and locked is not None and provider_id != locked:
+    # The SSO lock picks one external sign-in provider. Local passwords and a
+    # trusted hub's federated connection are not SSO providers, so only the
+    # provider allowlist above can exclude them.
+    if (
+        provider_id not in _NOT_SSO_LOCKED
+        and locked is not None
+        and provider_id != locked
+    ):
         return False
     multiple = (
         policy.allow_multiple

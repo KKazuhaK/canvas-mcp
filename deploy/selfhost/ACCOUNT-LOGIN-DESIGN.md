@@ -58,7 +58,10 @@ matrix. Existing provider enablement is still authoritative.
 Account policy stores an optional multi-link override, an inherited or explicit
 provider allowlist, the selected SSO lock and an exemption from automatically
 reapplying that lock. The SSO lock concerns external methods; local password
-access is independently controlled by the provider allowlist. Admin unlock
+access is independently controlled by the provider allowlist. A trusted hub's
+federated connection is not an SSO method, so the lock does not refuse it; an
+account with a provider allowlist always refuses the hub, because the allowlist
+cannot name it. Admin unlock
 clears only the SSO lock, permits explicit additional linking and exempts that
 account from immediate relocking. It retains the original external identity,
 does not create another identity and emits an audit row.

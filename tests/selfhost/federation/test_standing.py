@@ -231,9 +231,10 @@ class TestExpiredGrant:
 
 
 class TestSignInMethodPolicy:
-    def test_an_account_locked_to_another_sign_in_method_refuses_the_hub(
-        self, open_hub
-    ):
+    def test_an_sso_lock_does_not_refuse_the_hub(self, open_hub):
+        # lock_first_sso locks every account to its first SSO method. That lock
+        # chooses between sign-in providers; a trusted hub is a connection the
+        # owner set up, not a sign-in provider, so the lock must not refuse it.
         from canvas_mcp.core.selfhost.login.account_policy import apply_sso_lock
 
         open_hub.trust()
@@ -245,9 +246,35 @@ class TestSignInMethodPolicy:
             apply_sso_lock(
                 conn, alice, "entra"
             )  # lock_first_sso: Entra is her one SSO method
+        assert open_hub.status(token) == 200
+
+    def test_an_account_restricted_to_other_sign_in_methods_refuses_the_hub(
+        self, open_hub
+    ):
+        open_hub.trust()
+        alice = open_hub.stack.enroll(ALICE)
+        open_hub.federation.store.link(alice, ISSUER, "hub-alice")
+        token = open_hub.issuer.mint(sub="hub-alice")
+        assert open_hub.status(token) == 200
+        with open_hub.stack.store.database.write() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO account_login_policy (account_id, restrict_providers)"
+                    " VALUES (:a, :t)"
+                ),
+                {"a": alice, "t": True},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO account_allowed_login_providers (account_id, provider_id)"
+                    " VALUES (:a, 'entra')"
+                ),
+                {"a": alice},
+            )
         assert "limited to other sign-in methods" in refusal_of(open_hub.call(token))
         with open_hub.stack.store.database.write() as conn:
             conn.execute(
-                text("UPDATE account_login_policy SET sso_lock_provider = NULL")
+                text("UPDATE account_login_policy SET restrict_providers = :f"),
+                {"f": False},
             )
         assert open_hub.status(token) == 200
