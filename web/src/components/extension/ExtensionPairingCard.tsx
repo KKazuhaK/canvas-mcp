@@ -9,6 +9,7 @@ import type { ExtensionPairing } from '@/api/types'
 import CopyField from '@/components/CopyField'
 import ErrorNotice from '@/components/ErrorNotice'
 import { useCreateExtensionPairing } from '@/query/hooks'
+import { useCompanion } from './companion'
 
 /** The state the extension put in the URL hash: base64url, 16 to 128 characters. Anything else is ignored. */
 const STATE_PATTERN = /^[A-Za-z0-9_-]{16,128}$/
@@ -36,7 +37,24 @@ export default function ExtensionPairingCard({ state }: { state: string | null }
   const [expired, setExpired] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const requestedFor = useRef<string | null>(null)
-  const { mutate, reset } = create
+  const { mutate, mutateAsync, reset } = create
+  const { companion, connect } = useCompanion()
+  type Link = { kind: 'idle' } | { kind: 'busy' } | { kind: 'linked' } | { kind: 'needsCanvasAccess' } | { kind: 'error'; message: string }
+  const [link, setLink] = useState<Link>({ kind: 'idle' })
+
+  // One click: a fresh code goes straight to this browser's extension, never onto the screen.
+  async function connectBrowser() {
+    setLink({ kind: 'busy' })
+    try {
+      const result = await mutateAsync(undefined)
+      const answer = await connect(result.code, result.canvasOrigin ?? null)
+      reset() // the code is spent or useless now; drop it from the mutation's result
+      if (!answer.ok) setLink({ kind: 'error', message: answer.error ?? t('account:extension.pairing.noAnswer') })
+      else setLink({ kind: answer.needsCanvasAccess ? 'needsCanvasAccess' : 'linked' })
+    } catch {
+      setLink({ kind: 'idle' }) // the request error is shown by ErrorNotice
+    }
+  }
 
   function request() {
     setExpired(false)
@@ -81,7 +99,45 @@ export default function ExtensionPairingCard({ state }: { state: string | null }
         {state !== null ? (
           <Typography color="text.secondary">{t('account:extension.pairing.fromExtension')}</Typography>
         ) : (
-          <Typography color="text.secondary">{t('account:extension.pairing.manualHelp')}</Typography>
+          <>
+            {companion.status === 'present' ? (
+              <Box sx={{ display: 'grid', gap: 1, justifyItems: 'start' }}>
+                <Typography>
+                  {t(
+                    companion.connected && link.kind !== 'linked'
+                      ? 'account:extension.pairing.browserConnected'
+                      : 'account:extension.pairing.browserDetected',
+                  )}
+                </Typography>
+                <Button
+                  variant={companion.connected ? 'outlined' : 'contained'}
+                  onClick={() => void connectBrowser()}
+                  disabled={link.kind === 'busy' || create.isPending}
+                >
+                  {t(companion.connected ? 'account:extension.pairing.reconnectBrowser' : 'account:extension.pairing.connectBrowser')}
+                </Button>
+                {link.kind === 'linked' || link.kind === 'needsCanvasAccess' ? (
+                  <Typography role="status" sx={{ fontWeight: 600 }} color={link.kind === 'linked' ? 'success.main' : 'text.primary'}>
+                    {t(link.kind === 'linked' ? 'account:extension.pairing.linked' : 'account:extension.pairing.needsCanvasAccess')}
+                  </Typography>
+                ) : null}
+                {link.kind === 'error' ? (
+                  <Typography role="alert" color="error">
+                    {link.message}
+                  </Typography>
+                ) : null}
+              </Box>
+            ) : null}
+            {companion.status === 'absent' ? (
+              <Typography>{t('account:extension.pairing.installFirst')}</Typography>
+            ) : null}
+            {companion.status === 'present' ? (
+              <Typography variant="h3" component="h3" sx={{ mt: 1 }}>
+                {t('account:extension.pairing.orCode')}
+              </Typography>
+            ) : null}
+            <Typography color="text.secondary">{t('account:extension.pairing.manualHelp')}</Typography>
+          </>
         )}
         {create.isError ? <ErrorNotice error={create.error} onRetry={request} /> : null}
         {pairing ? (
@@ -111,7 +167,7 @@ export default function ExtensionPairingCard({ state }: { state: string | null }
         ) : null}
         {!pairing && !(state !== null && !expired && !create.isError) ? (
           <Box>
-            <Button variant="outlined" onClick={request} disabled={create.isPending}>
+            <Button variant="outlined" onClick={request} disabled={create.isPending || link.kind === 'busy'}>
               {t(state !== null ? 'account:extension.pairing.again' : 'account:extension.pairing.show')}
             </Button>
           </Box>

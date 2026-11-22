@@ -44,6 +44,7 @@ import json
 import logging
 import math
 import re
+import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -2756,7 +2757,31 @@ class ApiApp:
         if not self.pairing_limiter.allow((session.acct,)):
             raise _Fail("rate_limited", {"retry_after_s": 600})
         code, expires = await run_store(self.browser.create_pairing_code, session.acct)
-        return self._ok({"code": code, "expiresAt": _ts(expires)})
+        info = await run_store(self.app.store.info, session.acct)
+        return self._ok(
+            {
+                "code": code,
+                "expiresAt": _ts(expires),
+                "canvasOrigin": self._extension_canvas_origin(info),
+            }
+        )
+
+    def _extension_canvas_origin(self, info: Any) -> str | None:
+        """The Canvas site the extension should read for this account, as an https origin.
+
+        The account's enrolled school if the server still offers it, otherwise the server's only
+        school; None when neither is known (the person then chooses the site in the extension).
+        Only a hint: the extension still needs the person's permission to read the site.
+        """
+        policy = self.app.schools
+        school = policy.resolve_stored(info.canvas_host) if info is not None else None
+        school = school or policy.sole_school
+        if school is None:
+            return None
+        parsed = urllib.parse.urlsplit(school.api_url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            return None
+        return f"https://{parsed.netloc.rsplit('@', 1)[-1]}"
 
     async def extension_status(self, ctx: _Ctx) -> Response:
         session = ctx.session

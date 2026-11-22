@@ -25,6 +25,7 @@ from canvas_mcp.core.selfhost.browser_store import (
 from canvas_mcp.core.selfhost.db import schema as s
 from canvas_mcp.core.selfhost.db.sealed import SEALED
 from canvas_mcp.core.selfhost.maintenance import MaintenanceRunner
+from canvas_mcp.core.selfhost.schools import School, SchoolPolicy
 from canvas_mcp.core.selfhost.token_store import OPERATOR
 
 from .account_fixture import (
@@ -37,6 +38,7 @@ from .account_fixture import (
     Harness,
     _display_in_utc,  # noqa: F401 - autouse fixture: timestamps render in UTC
     build_harness,
+    make_cfg,
     put_row,
     sign_in,
 )
@@ -186,9 +188,24 @@ def test_a_pairing_code_expires_after_five_minutes(rig: Rig):
 def test_the_pairing_response_names_its_expiry(rig: Rig):
     response = rig.api.post("/me/extension/pairing", None)
     body = response.json()
-    assert set(body) == {"code", "expiresAt"}
+    assert set(body) == {"code", "expiresAt", "canvasOrigin"}
     assert body["expiresAt"] == iso(rig.h.now + 300)
     assert len(body["code"]) == 14 and body["code"].count("-") == 2
+
+
+def test_the_pairing_response_suggests_the_canvas_site_for_the_extension(tmp_path: pathlib.Path):
+    # The server's only school is suggested before the account has chosen one...
+    rig = Rig(build_harness(tmp_path / "sole"))
+    assert sign_in(rig.h).status_code == 303
+    assert rig.api.post("/me/extension/pairing", None).json()["canvasOrigin"] == "https://" + CANVAS_HOST
+    # ...and an enrolled school the server still offers wins over it.
+    other = School("canvas.other.edu", "https://canvas.other.edu/api/v1", "Other")
+    two = make_cfg(schools=SchoolPolicy((School(CANVAS_HOST, f"https://{CANVAS_HOST}/api/v1", "Canvas"), other), False))
+    enrolled = Rig(build_harness(tmp_path / "two", cfg=two))
+    assert sign_in(enrolled.h).status_code == 303
+    assert enrolled.api.post("/me/extension/pairing", None).json()["canvasOrigin"] is None
+    put_row(enrolled.h.store, OID, token=CANVAS_TOKEN, name="Ada", canvas_host="canvas.other.edu")
+    assert enrolled.api.post("/me/extension/pairing", None).json()["canvasOrigin"] == "https://canvas.other.edu"
 
 
 def test_a_new_code_replaces_the_earlier_unclaimed_one(rig: Rig):

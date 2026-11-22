@@ -70,7 +70,7 @@ async function open(path: string, script: Script = {}) {
         return reply
       }
       if (request.url === '/me/extension/pairing') {
-        return script.pairing ?? { status: 200, data: { code: CODE, expiresAt: script.expiresAt ?? inMinutes(5) } }
+        return script.pairing ?? { status: 200, data: { code: CODE, expiresAt: script.expiresAt ?? inMinutes(5), canvasOrigin: 'https://canvas.example.edu' } }
       }
       return { status: 404, data: errorBody('not_found') }
     })
@@ -259,6 +259,89 @@ describe('Browser extension: manual code', () => {
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     await user.click(screen.getByRole('button', { name: 'Copy pairing code' }))
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(CODE))
+  })
+})
+
+/** Stands in for the extension's page bridge: answers this page's messages on the shared channel. */
+function fakeExtension(opts: { connected?: boolean; result?: Record<string, unknown>; silent?: boolean } = {}) {
+  const fromPage: Record<string, unknown>[] = []
+  const reply = (message: Record<string, unknown>) =>
+    window.dispatchEvent(
+      new MessageEvent('message', { data: { channel: 'canvas-companion', from: 'extension', ...message }, origin: window.location.origin, source: window }),
+    )
+  const onMessage = (event: MessageEvent) => {
+    const data = event.data as Record<string, unknown> | null
+    if (!data || data.channel !== 'canvas-companion' || data.from !== 'page') return
+    fromPage.push(data)
+    if (data.type === 'hello') reply({ type: 'ready', version: '0.1.0', connected: !!opts.connected })
+    if (data.type === 'connect' && !opts.silent) reply({ type: 'result', ok: true, ...opts.result })
+  }
+  window.addEventListener('message', onMessage)
+  return { fromPage, stop: () => window.removeEventListener('message', onMessage) }
+}
+
+describe('Browser extension: one click from this page', () => {
+  it('connects the installed extension without showing a code, passing the Canvas site along', async () => {
+    const user = userEvent.setup()
+    const ext = fakeExtension()
+    try {
+      const { seen } = await open('/browser-extension')
+      await user.click(await screen.findByRole('button', { name: 'Connect this browser' }))
+      expect(await screen.findByText('This browser is connected. The first sync has started.')).toBeInTheDocument()
+      expect(pairingCalls(seen)).toHaveLength(1)
+      expect(ext.fromPage.find((m) => m.type === 'connect')).toMatchObject({ code: CODE, canvasOrigin: 'https://canvas.example.edu' })
+      // The code went to the extension only.
+      expect(document.body.innerHTML).not.toContain(CODE)
+      expect(screen.getByRole('button', { name: 'Show pairing code' })).toBeInTheDocument()
+    } finally {
+      ext.stop()
+    }
+  })
+
+  it('says when the extension still needs access to the Canvas site, and shows its errors', async () => {
+    const user = userEvent.setup()
+    const ext = fakeExtension({ result: { needsCanvasAccess: true } })
+    try {
+      await open('/browser-extension')
+      await user.click(await screen.findByRole('button', { name: 'Connect this browser' }))
+      expect(await screen.findByText(/the extension opened a tab/)).toBeInTheDocument()
+    } finally {
+      ext.stop()
+    }
+    const failing = fakeExtension({ result: { ok: false, error: 'That pairing code is invalid.' } })
+    try {
+      await open('/browser-extension')
+      await user.click((await screen.findAllByRole('button', { name: 'Connect this browser' })).at(-1)!)
+      expect(await screen.findByRole('alert')).toHaveTextContent('That pairing code is invalid.')
+    } finally {
+      failing.stop()
+    }
+  })
+
+  it('offers reconnecting when this browser is already connected', async () => {
+    const ext = fakeExtension({ connected: true })
+    try {
+      await open('/browser-extension')
+      expect(await screen.findByRole('button', { name: 'Reconnect this browser' })).toBeInTheDocument()
+      expect(screen.getByText("This browser's extension is connected to your account.")).toBeInTheDocument()
+    } finally {
+      ext.stop()
+    }
+  })
+
+  it('asks to install the extension when none answers, and keeps the code fallback', async () => {
+    await open('/browser-extension')
+    expect(await screen.findByText(/The extension was not found in this browser/, {}, { timeout: 3000 })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Connect this browser' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Show pairing code' })).toBeInTheDocument()
+  })
+
+  it('ignores messages that do not come from this page', async () => {
+    await open('/browser-extension')
+    window.dispatchEvent(
+      new MessageEvent('message', { data: { channel: 'canvas-companion', from: 'extension', type: 'ready', connected: false }, origin: 'https://evil.example', source: window }),
+    )
+    expect(await screen.findByText(/The extension was not found in this browser/, {}, { timeout: 3000 })).toBeInTheDocument()
   })
 })
 
