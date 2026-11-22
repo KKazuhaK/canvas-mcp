@@ -1,9 +1,10 @@
 import { runFetches, type FetchResult } from './canvas-fetch.ts';
 import type { FetchJob } from './allowlist.ts';
+import { INTENT_TTL_MS } from './defaults.ts';
 import { UserError } from './errors.ts';
 import { hostPattern, parseOrigin, sameOrigin } from './origin.ts';
 import { updateFetched } from './fetched.ts';
-import { claimCode, mayInject, newPairing, pairingUrl, validateClaim } from './pairing.ts';
+import { PAIRING_PATH, claimCode, mayInject, newPairing, pairingUrl, validateClaim } from './pairing.ts';
 import { isPopupSender, type SenderLike } from './senders.ts';
 import {
   CODE_RE,
@@ -12,6 +13,7 @@ import {
   markDisconnected,
   readState,
   saveConnection,
+  type Intent,
   type LastResult,
   type Stored,
 } from './state.ts';
@@ -28,6 +30,8 @@ export interface ControllerEnv {
   fetch: typeof fetch;
   now(): number;
   randomBytes(n: number): Uint8Array;
+  /** The portal whose page may pair this browser through the page bridge (see bridge.ts). */
+  defaultPortal?: string;
 }
 
 type Trigger = 'tab' | 'alarm' | 'manual';
@@ -62,7 +66,120 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
   async function claimAndStore(portalOrigin: string, code: string) {
     const token = await claimCode(env.fetch, portalOrigin, code);
     await saveConnection(storage, portalOrigin, token);
+    await storage.remove('notice');
     await ensureAlarm();
+    await syncSoon();
+  }
+
+  // The first sync after connecting (or choosing the Canvas site) runs now instead of waiting
+  // for the next Canvas page visit or the hourly alarm.
+  async function syncSoon() {
+    const s = await readState(storage);
+    if (!isConnected(s) || !s.canvasOrigin || !(await hasPermission(s.canvasOrigin))) return;
+    void runSyncOnce('tab').catch(() => {});
+  }
+
+  async function setCanvas(canvasOrigin: string) {
+    if (!(await hasPermission(canvasOrigin))) throw new UserError('no_permission', 'Allow the extension to access this Canvas site first.');
+    const s = await readState(storage);
+    await storage.set({ canvasOrigin });
+    await storage.remove(['suggestedCanvasOrigin', 'notice']);
+    // A different school starts from a clean sync history.
+    if (s.canvasOrigin && s.canvasOrigin !== canvasOrigin) await storage.remove(['lastSyncAt', 'lastAttemptAt', 'lastResult', 'lastFetchedAt', 'lastCourseIds']);
+    await syncSoon();
+  }
+
+  // The default portal's page, in a top-level tab of this browser.
+  function isBridgeSender(sender: SenderLike): boolean {
+    if (!env.defaultPortal || sender.id !== api.runtime.id || sender.tab?.id === undefined) return false;
+    if (sender.frameId !== undefined && sender.frameId !== 0) return false;
+    return sameOrigin(sender.url, env.defaultPortal);
+  }
+
+  // Pairing handed over by the portal page. Canvas access cannot be asked for from a web page, so
+  // when the suggested Canvas site is not allowed yet the popup opens in a tab to ask with one click.
+  async function bridgeClaim(message: { code?: unknown; canvasOrigin?: unknown }) {
+    const code = typeof message.code === 'string' ? message.code.trim() : '';
+    if (!CODE_RE.test(code)) throw new UserError('invalid_code', 'The page sent an invalid pairing code. Reload it and try again.');
+    if (claiming) throw new UserError('busy', 'Pairing is already in progress.');
+    let suggested: string | undefined;
+    try {
+      suggested = message.canvasOrigin == null ? undefined : parseOrigin(message.canvasOrigin, 'Canvas address');
+    } catch {
+      suggested = undefined;
+    }
+    claiming = true;
+    try {
+      await claimAndStore(env.defaultPortal!, code);
+    } finally {
+      claiming = false;
+    }
+    const s = await readState(storage);
+    const canvas = s.canvasOrigin ?? suggested;
+    if (canvas && (await hasPermission(canvas))) {
+      if (canvas !== s.canvasOrigin) await setCanvas(canvas);
+      return { ok: true };
+    }
+    if (suggested) await storage.set({ suggestedCanvasOrigin: suggested });
+    await api.tabs.create({ url: `${popupUrl()}?setup=canvas` });
+    return { ok: true, needsCanvasAccess: true };
+  }
+
+  let resuming: Promise<{ ok: boolean; error?: string }> | undefined;
+  /**
+   * Finishes what the popup started before the browser asked for site access. Chrome closes the
+   * popup while that prompt is open, so the popup saves its request first and this finishes it once
+   * access is granted: from the popup if it survived, or from permissions.onAdded.
+   */
+  function resumeIntent() {
+    if (resuming) return resuming;
+    resuming = (async () => {
+      const { pendingIntent: intent } = (await storage.get('pendingIntent')) as { pendingIntent?: Intent };
+      if (!intent) return { ok: true };
+      await storage.remove(['pendingIntent', 'notice']);
+      try {
+        if (typeof intent.at !== 'number' || env.now() - intent.at > INTENT_TTL_MS) {
+          throw new UserError('expired', 'That request expired. Try again from the popup.');
+        }
+        if (intent.type === 'canvas.set') {
+          await setCanvas(parseOrigin(intent.canvasOrigin, 'Canvas address'));
+          return { ok: true };
+        }
+        const portalOrigin = parseOrigin(intent.portalOrigin, 'portal address');
+        if (intent.type === 'pair.start') return await startPairing(portalOrigin);
+        if (intent.type === 'pair.manual') {
+          await manualPair(portalOrigin, intent.code);
+          return { ok: true };
+        }
+        throw new UserError('unknown', 'Unknown request.');
+      } catch (e) {
+        const message = e instanceof UserError ? e.message : 'Something went wrong. Please try again.';
+        await storage.set({ notice: message });
+        return { ok: false, error: message };
+      }
+    })().finally(() => {
+      resuming = undefined;
+    });
+    return resuming;
+  }
+
+  async function manualPair(portalOrigin: string, rawCode: unknown) {
+    const code = typeof rawCode === 'string' ? rawCode.trim() : '';
+    if (!CODE_RE.test(code)) throw new UserError('invalid_code', 'Enter the pairing code shown on your portal page.');
+    if (!(await hasPermission(portalOrigin))) throw new UserError('no_permission', 'Allow the extension to access the portal address first.');
+    if (claiming) throw new UserError('busy', 'Pairing is already in progress.');
+    claiming = true;
+    try {
+      await claimAndStore(portalOrigin, code);
+    } finally {
+      claiming = false;
+    }
+  }
+
+  async function onInstalled(details: { reason?: string } | undefined) {
+    await ensureAlarm();
+    // A new installation opens the portal's pairing page, where one click connects this browser.
+    if (details?.reason === 'install' && env.defaultPortal) await api.tabs.create({ url: `${env.defaultPortal}${PAIRING_PATH}` });
   }
 
   async function injectLink(tabId: number, url: string | undefined) {
@@ -233,34 +350,26 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
   async function handleMessage(message: any, sender: SenderLike) {
     const type = message?.type;
     if (type === 'canvas.pair.claim') return handleClaim(message, sender);
+    if (type === 'canvas.bridge.status' || type === 'canvas.bridge.claim') {
+      if (!isBridgeSender(sender)) throw new UserError('refused', 'Request refused.');
+      if (type === 'canvas.bridge.claim') return bridgeClaim(message);
+      const s = await readState(storage);
+      return { ok: true, connected: isConnected(s) && s.portalOrigin === env.defaultPortal, canvasOrigin: s.canvasOrigin ?? null };
+    }
     if (typeof type !== 'string' || !isPopupSender(sender, api.runtime.id, popupUrl())) {
       throw new UserError('refused', 'Request refused.');
     }
     switch (type) {
       case 'canvas.pair.start':
         return startPairing(message.portalOrigin);
-      case 'canvas.pair.manual': {
-        const portalOrigin = parseOrigin(message.portalOrigin, 'portal address');
-        const code = typeof message.code === 'string' ? message.code.trim() : '';
-        if (!CODE_RE.test(code)) throw new UserError('invalid_code', 'Enter the pairing code shown on your portal page.');
-        if (claiming) throw new UserError('busy', 'Pairing is already in progress.');
-        claiming = true;
-        try {
-          await claimAndStore(portalOrigin, code);
-        } finally {
-          claiming = false;
-        }
+      case 'canvas.pair.manual':
+        await manualPair(parseOrigin(message.portalOrigin, 'portal address'), message.code);
         return { ok: true };
-      }
-      case 'canvas.canvas.set': {
-        const canvasOrigin = parseOrigin(message.canvasOrigin, 'Canvas address');
-        if (!(await hasPermission(canvasOrigin))) throw new UserError('no_permission', 'Allow the extension to access this Canvas site first.');
-        const s = await readState(storage);
-        await storage.set({ canvasOrigin });
-        // A different school starts from a clean sync history.
-        if (s.canvasOrigin && s.canvasOrigin !== canvasOrigin) await storage.remove(['lastSyncAt', 'lastAttemptAt', 'lastResult', 'lastFetchedAt', 'lastCourseIds']);
+      case 'canvas.canvas.set':
+        await setCanvas(parseOrigin(message.canvasOrigin, 'Canvas address'));
         return { ok: true };
-      }
+      case 'canvas.intent.resume':
+        return resumeIntent();
       case 'canvas.sync.now': {
         const outcome = await runSyncOnce('manual');
         return { ok: outcome.ok, error: outcome.ok ? undefined : outcome.message, outcome };
@@ -293,7 +402,7 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
     await runSyncOnce('alarm');
   }
 
-  return { handleMessage, onTabUpdated, onAlarm, ensureAlarm, runSyncOnce, disconnect };
+  return { handleMessage, onTabUpdated, onAlarm, ensureAlarm, runSyncOnce, disconnect, resumeIntent, onInstalled };
 }
 
 export type { Stored };

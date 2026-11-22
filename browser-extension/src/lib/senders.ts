@@ -2,6 +2,7 @@ export interface SenderLike {
   id?: string;
   url?: string;
   tab?: { id?: number };
+  frameId?: number;
 }
 
 // The popup (or the same page opened in a tab) is an extension page: it carries

@@ -20,20 +20,24 @@
     </section>
 
     <section id="connect" aria-labelledby="connect-h">
-      <h2 id="connect-h">Connect to your portal</h2>
-      <label for="portal">Portal address</label>
-      <input id="portal" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://portal.example.com">
-      <div class="row"><button id="connect-btn" type="button">Connect</button></div>
-      <details>
-        <summary>Have a pairing code?</summary>
+      <h2 id="connect-h">Connect</h2>
+      <p class="hint">Open your portal's browser-extension page and click <strong>Connect this browser</strong>. The extension sets itself up and starts syncing.</p>
+      <div class="row"><button id="open-portal" type="button">Open the portal to connect</button></div>
+      <details id="manual-connect">
+        <summary>Another portal, or a pairing code</summary>
+        <label for="portal">Portal address</label>
+        <input id="portal" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://portal.example.com">
+        <div class="row"><button id="connect-btn" type="button" class="secondary">Connect with this address</button></div>
         <label for="code">Pairing code</label>
         <input id="code" type="text" autocomplete="off" spellcheck="false">
         <div class="row"><button id="pair-btn" type="button" class="secondary">Pair with code</button></div>
+        <p class="hint">Get a code on the portal's browser-extension page. Without an address, the code is used with the default portal.</p>
       </details>
     </section>
 
     <section id="canvas" aria-labelledby="canvas-h">
       <h2 id="canvas-h">Canvas site</h2>
+      <p id="canvas-hint" class="hint" hidden></p>
       <label for="canvas-origin">Canvas address</label>
       <input id="canvas-origin" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://school.instructure.com">
       <div class="row"><button id="canvas-btn" type="button" class="secondary">Save Canvas site</button></div>

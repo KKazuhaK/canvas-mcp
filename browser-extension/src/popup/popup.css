@@ -25,3 +25,6 @@ summary { cursor: pointer; margin-top: 8px; color: var(--accent); }
 [hidden] { display: none !important; }
 .skips { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .skips:empty { display: none; }
+.hint { margin: 0 0 4px; color: var(--muted); font-size: 13px; }
+#manual-connect label { margin-top: 8px; }
+#manual-connect .hint { margin-top: 8px; font-size: 12px; }
