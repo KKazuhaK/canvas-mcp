@@ -37,7 +37,7 @@ for (const size of [16, 32, 48, 128]) {
 }
 
 const manifest = JSON.parse(await readFile(join(root, 'src/manifest.json'), 'utf8'));
-// Release builds stamp the release version (x.y.z, from the v* tag) into the manifest.
+// Release builds use the version in src/manifest.json; EXTENSION_VERSION (x.y.z) overrides it locally.
 if (process.env.EXTENSION_VERSION) {
   if (!/^(0|[1-9]\d{0,4})(\.(0|[1-9]\d{0,4})){2}$/.test(process.env.EXTENSION_VERSION)) {
     throw new Error(`EXTENSION_VERSION must be x.y.z, got ${process.env.EXTENSION_VERSION}`);

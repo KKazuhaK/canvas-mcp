@@ -1,9 +1,10 @@
 # Store listings: Canvas MCP Sync
 
 What to enter when the extension is first listed in each store by hand. After
-the first listing, `.github/workflows/browser-extension-release.yml` uploads
-each stable release automatically (the workflow header lists the variables and
-secrets). Keep this file in step with [PRIVACY.md](PRIVACY.md) and
+the first listing, `.github/workflows/browser-extension-release.yml` submits
+each new extension version (a version bump in `src/manifest.json` merged to
+`selfhost`) automatically; [STORE-PUBLISHING.md](STORE-PUBLISHING.md) covers
+the API credentials and how to store them. Keep this file in step with [PRIVACY.md](PRIVACY.md) and
 `src/manifest.json`.
 
 ## Before the first upload
@@ -14,11 +15,14 @@ secrets). Keep this file in step with [PRIVACY.md](PRIVACY.md) and
   which needs the listing to exist (see "Firefox Add-ons" below).
 - Package for the first upload: the `canvas-mcp-sync-chrome-<version>.zip`
   (Chrome Web Store and Edge Add-ons) and `canvas-mcp-sync-firefox-<version>.zip`
-  plus `canvas-mcp-sync-source-<version>.zip` (Firefox Add-ons) attached to the
-  latest stable release. Use a release built with the id above: a Firefox zip
-  from an older release carries `canvas-mcp-sync@canvas-mcp.invalid`.
-- Store versions only go up. Every release stamps its tag version into the
-  manifest, so each stable release is a new store version.
+  plus `canvas-mcp-sync-source-<version>.zip` (Firefox Add-ons) attached to an
+  `extension-v<version>` release (see "Order of work" in
+  [STORE-PUBLISHING.md](STORE-PUBLISHING.md)). Use a release built with the id
+  above: a Firefox zip from an older release carries
+  `canvas-mcp-sync@canvas-mcp.invalid`.
+- Store versions only go up. The store version is `version` in
+  `src/manifest.json`: bump it for every extension change. Each bump merged to
+  `selfhost` is released and submitted.
 - Screenshots (1280x800 PNG; Chrome and Edge need at least one, Firefox
   recommends one): the popup connected to a Portal with the last sync time, and
   the Portal's Browser extension page after pairing. Use a test account; do
@@ -124,7 +128,7 @@ it there before the date it shows.
 - Source code: upload `canvas-mcp-sync-source-<version>.zip`. Build steps for
   the reviewer:
 
-> Node 24. cd browser-extension && npm ci && CANVAS_SYNC_FIREFOX_ADDON_ID=canvas-mcp-sync@mcp.kazuhahub.com EXTENSION_VERSION=<version> npm run build:firefox. Output: browser-extension/dist/firefox. esbuild bundles src/background.ts, src/link.ts and src/popup; the output is not minified.
+> Node 24. cd browser-extension && npm ci && CANVAS_SYNC_FIREFOX_ADDON_ID=canvas-mcp-sync@mcp.kazuhahub.com npm run build:firefox. Output: browser-extension/dist/firefox. esbuild bundles src/background.ts, src/link.ts and src/popup; the output is not minified.
 
 - Data collection: the manifest already declares `authenticationInfo`,
   `personallyIdentifyingInfo`, `personalCommunications` and `websiteContent`

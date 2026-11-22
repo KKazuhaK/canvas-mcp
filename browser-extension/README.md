@@ -30,21 +30,26 @@ what the extension reads, where it sends it, and what it keeps.
 
 ## Release builds
 
-Publishing a stable `v<x.y.z>` release runs
-`.github/workflows/browser-extension-release.yml`, which attaches the Chrome and
-Firefox zips and this folder's source to the release and, when store
-credentials are configured, submits the version to the Chrome Web Store,
-Microsoft Edge Add-ons and Firefox Add-ons. [STORE-LISTING.md](STORE-LISTING.md)
-has what to enter when each store listing is first created by hand. To reproduce a release build exactly (Node 24):
+The extension's version is `version` in `src/manifest.json`, separate from the
+server version. Merging a change to that version into `selfhost` runs
+`.github/workflows/browser-extension-release.yml`, which creates the release
+`extension-v<version>` with the Chrome and Firefox zips and this folder's
+source and, when store credentials are configured, submits the version to the
+Chrome Web Store, Microsoft Edge Add-ons and Firefox Add-ons. A stable server
+release (`v<x.y.z>`) also gets the zips but submits nothing.
+[STORE-PUBLISHING.md](STORE-PUBLISHING.md) sets up the stores and their
+credentials; [STORE-LISTING.md](STORE-LISTING.md) has what to enter when each
+store listing is first created by hand. To reproduce a release build exactly (Node 24):
 
 ```sh
 cd browser-extension
 npm ci
-EXTENSION_VERSION=x.y.z npm run build
-EXTENSION_VERSION=x.y.z CANVAS_SYNC_FIREFOX_ADDON_ID=<gecko id> npm run build:firefox
+npm run build
+CANVAS_SYNC_FIREFOX_ADDON_ID=<gecko id> npm run build:firefox
 ```
 
-`EXTENSION_VERSION` replaces the manifest version; `release-tools/` pins the
+Release builds use the manifest version as is. `EXTENSION_VERSION=x.y.z`
+overrides it for a local build; `release-tools/` pins the
 `web-ext` used for Firefox submission.
 
 ## Load
