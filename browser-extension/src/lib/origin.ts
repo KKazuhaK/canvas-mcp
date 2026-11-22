@@ -35,3 +35,15 @@ export function sameOrigin(url: string | undefined, origin: string): boolean {
     return false;
   }
 }
+
+// Whether a tab's URL is worth offering as the Canvas site. The tab the popup opens from is often
+// the portal itself or an unrelated page, so only Canvas-looking https hosts qualify.
+export function looksLikeCanvas(url: string, portalOrigin = ''): boolean {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'https:' || (portalOrigin && u.origin === portalOrigin)) return false;
+    return u.hostname.endsWith('.instructure.com') || u.hostname.startsWith('canvas.');
+  } catch {
+    return false;
+  }
+}

@@ -43,7 +43,18 @@ export interface Stored {
   needsReconnect?: boolean;
   backoffUntil?: number;
   pairing?: Pairing;
+  /** A Canvas address the portal suggested; used once the person allows access to it. */
+  suggestedCanvasOrigin?: string;
+  /** What the popup asked for before a permission prompt closed it (see the controller's resumeIntent). */
+  pendingIntent?: Intent;
+  /** Why a request the popup could not see through failed; shown the next time it opens. */
+  notice?: string;
 }
+
+export type Intent =
+  | { type: 'pair.start'; portalOrigin: string; at: number }
+  | { type: 'pair.manual'; portalOrigin: string; code: string; at: number }
+  | { type: 'canvas.set'; canvasOrigin: string; at: number };
 
 export const STORAGE_KEYS: (keyof Stored)[] = [
   'portalOrigin',
@@ -57,6 +68,9 @@ export const STORAGE_KEYS: (keyof Stored)[] = [
   'needsReconnect',
   'backoffUntil',
   'pairing',
+  'suggestedCanvasOrigin',
+  'pendingIntent',
+  'notice',
 ];
 
 export interface StorageArea {

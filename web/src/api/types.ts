@@ -449,6 +449,8 @@ export interface ExtensionPairing {
   code: string
   /** ISO 8601 UTC. */
   expiresAt: string
+  /** The Canvas site the extension should read (https origin), when the portal knows it. */
+  canvasOrigin?: string | null
 }
 export type ExtensionReason = 'token_preferred' | 'school_unknown' | 'user_mismatch'
 export interface ExtensionResource {

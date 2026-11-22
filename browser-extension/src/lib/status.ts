@@ -45,6 +45,7 @@ export function describeStatus(s: Stored, now: number): StatusView {
   }
   let error: string | null = null;
   if (s.needsReconnect && !connected) error = 'The portal no longer accepts this browser. Connect again to continue.';
+  else if (s.notice) error = s.notice;
   else if (s.pairing?.status === 'error' && s.pairing.message) error = s.pairing.message;
   else if (s.lastResult && !s.lastResult.ok) error = s.lastResult.message;
   else if (s.lastResult?.code === 'partial') error = s.lastResult.message;

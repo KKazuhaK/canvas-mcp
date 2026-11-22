@@ -95,8 +95,11 @@ requirements.
   read the pairing code from the Portal tab you opened.
 - `activeTab`: to read the address of the tab you open the extension from, so
   it can fill in your Canvas address.
-- Host access, requested when you set it up, for the Canvas and Portal
-  addresses you enter only.
+- Host access to the default Portal, where a small script lets the Portal's
+  "Connect this browser" button hand over a one-time pairing code. It reads
+  nothing else on the page.
+- Host access, requested when you set it up, for your Canvas site and any other
+  Portal address you enter only.
 
 ## Contact
 

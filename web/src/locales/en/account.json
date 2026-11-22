@@ -337,7 +337,7 @@
       "title": "Connection",
       "connected": "Connected",
       "notConnected": "Not connected",
-      "notConnectedBody": "No browser extension is paired with your account. Install the extension, open it and choose this Portal, or show a pairing code below.",
+      "notConnectedBody": "No browser extension is paired with your account. Install the extension, then connect it from the card above.",
       "canvasHost": "Canvas site",
       "paired": "Paired",
       "lastSync": "Last sync"
@@ -371,13 +371,22 @@
       "title": "Pair the extension",
       "fromExtension": "The extension asked to pair with your account.",
       "returnToExtension": "Return to the extension; it will finish connecting.",
-      "manualHelp": "Pairing normally starts from the extension. If it asks for a code instead, show one here and enter it in the extension.",
+      "manualHelp": "If the extension cannot connect automatically, show a pairing code here and enter it in the extension.",
       "show": "Show pairing code",
       "again": "Get a new code",
       "codeLabel": "Pairing code",
       "copyLabel": "Copy pairing code",
       "expiresIn": "Single use. Expires in {{time}}.",
-      "expired": "The code expired."
+      "expired": "The code expired.",
+      "connectBrowser": "Connect this browser",
+      "reconnectBrowser": "Reconnect this browser",
+      "browserDetected": "The Canvas MCP Sync extension is installed in this browser. Connect it with one click; it sets itself up and starts syncing.",
+      "browserConnected": "This browser's extension is connected to your account.",
+      "installFirst": "The extension was not found in this browser. Install Canvas MCP Sync, then come back to this page and connect it with one click.",
+      "linked": "This browser is connected. The first sync has started.",
+      "needsCanvasAccess": "Almost done: the extension opened a tab. Allow it to read your Canvas site there, and syncing starts.",
+      "noAnswer": "The extension did not answer. Reload this page and try again.",
+      "orCode": "Or pair with a code"
     }
   }
 }
