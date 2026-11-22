@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Browser extension 1.15.1: the first store release of the 1.15.0 extension changes (one-click pairing, sooner sync, stale-data reminders). Extension versions now come from `browser-extension/src/manifest.json`, and a bump there publishes to the stores.
+
 ## [1.15.0] — 2026-11-22
 
 ### Added
