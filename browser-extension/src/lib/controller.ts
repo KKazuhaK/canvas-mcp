@@ -1,6 +1,7 @@
 import { runFetches, type FetchResult } from './canvas-fetch.ts';
 import type { FetchJob } from './allowlist.ts';
 import { INTENT_TTL_MS } from './defaults.ts';
+import { IGNORED_SNOOZE_MS, reminderDue } from './reminder.ts';
 import { UserError } from './errors.ts';
 import { hostPattern, parseOrigin, sameOrigin } from './origin.ts';
 import { updateFetched } from './fetched.ts';
@@ -421,12 +422,29 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
     if (alarm.name === STARTUP_ALARM) {
       // A recent sync (from the previous session) is fresh enough.
       const s = await readState(storage);
-      if (s.lastSyncAt && env.now() - Date.parse(s.lastSyncAt) < MIN_SYNC_GAP_MS) return;
-      await runSyncOnce('alarm');
+      if (!s.lastSyncAt || env.now() - Date.parse(s.lastSyncAt) >= MIN_SYNC_GAP_MS) await runSyncOnce('alarm');
+      await maybeRemind();
       return;
     }
     if (alarm.name !== ALARM_NAME) return;
     await runSyncOnce('alarm');
+    await maybeRemind();
+  }
+
+  const reminderUrl = () => api.runtime.getURL('reminder.html');
+  /**
+   * A background sync needs Canvas signed in. When it keeps failing and the data gets older than the
+   * person's chosen age, open the extension's reminder page (never Canvas itself).
+   */
+  async function maybeRemind() {
+    const s = await readState(storage);
+    if (!isConnected(s) || !s.canvasOrigin) return;
+    const now = env.now();
+    if (!reminderDue(s, now)) return;
+    if ((await api.tabs.query({ url: reminderUrl() })).some((t) => t.url?.split(/[?#]/)[0] === reminderUrl())) return;
+    // Ignoring the page snoozes it, so it comes back later instead of on every check.
+    await storage.set({ snoozeUntil: now + IGNORED_SNOOZE_MS });
+    await api.tabs.create({ url: reminderUrl() });
   }
 
   async function onStartup() {
@@ -434,7 +452,7 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
     if (api.alarms && isConnected(await readState(storage))) await api.alarms.create(STARTUP_ALARM, { delayInMinutes: FIRST_ALARM_MINUTES });
   }
 
-  return { handleMessage, onTabUpdated, onAlarm, onStartup, ensureAlarm, runSyncOnce, disconnect, resumeIntent, onInstalled };
+  return { handleMessage, onTabUpdated, onAlarm, onStartup, maybeRemind, ensureAlarm, runSyncOnce, disconnect, resumeIntent, onInstalled };
 }
 
 export type { Stored };

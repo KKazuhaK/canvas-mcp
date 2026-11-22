@@ -49,6 +49,16 @@
         <button id="sync-btn" type="button">Sync now</button>
         <button id="disconnect-btn" type="button" class="danger">Disconnect</button>
       </div>
+      <div class="remind-row">
+        <label for="remind-after">Remind me when data is older than</label>
+        <select id="remind-after">
+          <option value="24">1 day</option>
+          <option value="72">3 days</option>
+          <option value="168">1 week</option>
+          <option value="0">Never</option>
+        </select>
+        <p class="hint">The extension never opens Canvas by itself. When background sync cannot run (for example while you are signed out of Canvas) and your data gets old, it opens a reminder.</p>
+      </div>
     </section>
   </main>
   <script type="module" src="popup.js"></script>

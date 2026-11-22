@@ -158,3 +158,24 @@ test('a browser start syncs once a minute later, unless the last sync is recent'
   await signedOut.c.onStartup();
   assert.equal(signedOut.alarms.get(STARTUP_ALARM), undefined);
 });
+
+test('reminder: stale data opens the reminder page once, never Canvas, and an ignored one snoozes', async () => {
+  const { reminderDue, remindHours } = await import('../src/lib/reminder.ts');
+  const old = new Date(NOW - 30 * 3600_000).toISOString();
+  const s = setup({ storage: { portalOrigin: PORTAL, uploadToken: TOKEN, canvasOrigin: CANVAS, lastSyncAt: old } });
+  await s.c.maybeRemind();
+  assert.deepEqual(s.created.map((t) => t.url), [`chrome-extension://${EXT_ID}/reminder.html`]);
+  assert.equal(s.storage.data.snoozeUntil, NOW + 12 * 3600_000);
+  await s.c.maybeRemind();
+  assert.equal(s.created.length, 1, 'snoozed, and already open');
+  // Off, fresh, or not set up: nothing opens.
+  for (const extra of [{ remindAfterHours: 0 }, { lastSyncAt: new Date(NOW - 3600_000).toISOString() }, { canvasOrigin: undefined }]) {
+    const quiet = setup({ storage: { portalOrigin: PORTAL, uploadToken: TOKEN, canvasOrigin: CANVAS, lastSyncAt: old, ...extra } });
+    await quiet.c.maybeRemind();
+    assert.equal(quiet.created.length, 0, JSON.stringify(extra));
+  }
+  assert.equal(remindHours(undefined), 24);
+  assert.equal(remindHours(7), 24);
+  assert.equal(reminderDue({ connectedAt: new Date(NOW - 25 * 3600_000).toISOString() }, NOW), true);
+  assert.equal(reminderDue({ lastSyncAt: old, snoozeUntil: NOW + 1 }, NOW), false);
+});

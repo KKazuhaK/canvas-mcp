@@ -22,12 +22,14 @@ const esTarget = target === 'firefox' ? 'firefox142' : 'chrome120';
 // The Chrome service worker is an ES module; Firefox runs a classic background script.
 await build({ ...common, entryPoints: [join(root, 'src/background.ts')], outfile: join(out, 'background.js'), format: target === 'firefox' ? 'iife' : 'esm', target: esTarget });
 await build({ ...common, entryPoints: [join(root, 'src/popup/popup.ts')], outfile: join(out, 'popup.js'), format: 'esm', target: esTarget });
+await build({ ...common, entryPoints: [join(root, 'src/popup/reminder.ts')], outfile: join(out, 'reminder.js'), format: 'esm', target: esTarget });
 // Injected with scripting.executeScript({files}), so it must be a classic script.
 await build({ ...common, entryPoints: [join(root, 'src/link.ts')], outfile: join(out, 'link.js'), format: 'iife', target: esTarget });
 // Declared as a content script on the default portal only.
 await build({ ...common, entryPoints: [join(root, 'src/bridge.ts')], outfile: join(out, 'bridge.js'), format: 'iife', target: esTarget });
 
 await copyFile(join(root, 'src/popup/popup.html'), join(out, 'popup.html'));
+await copyFile(join(root, 'src/popup/reminder.html'), join(out, 'reminder.html'));
 await copyFile(join(root, 'src/popup/popup.css'), join(out, 'popup.css'));
 await mkdir(join(out, 'icons'));
 for (const size of [16, 32, 48, 128]) {

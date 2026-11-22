@@ -49,6 +49,12 @@ export interface Stored {
   pendingIntent?: Intent;
   /** Why a request the popup could not see through failed; shown the next time it opens. */
   notice?: string;
+  /** When this browser was paired (ISO 8601): the age of the data before its first sync. */
+  connectedAt?: string;
+  /** Remind when the data is older than this many hours; 0 turns reminders off (see reminder.ts). */
+  remindAfterHours?: number;
+  /** No reminder before this time (epoch ms). */
+  snoozeUntil?: number;
 }
 
 export type Intent =
@@ -71,6 +77,9 @@ export const STORAGE_KEYS: (keyof Stored)[] = [
   'suggestedCanvasOrigin',
   'pendingIntent',
   'notice',
+  'connectedAt',
+  'remindAfterHours',
+  'snoozeUntil',
 ];
 
 export interface StorageArea {
@@ -90,7 +99,8 @@ export const isConnected = (s: Stored): boolean =>
   !!s.portalOrigin && typeof s.uploadToken === 'string' && TOKEN_RE.test(s.uploadToken);
 
 export async function saveConnection(area: StorageArea, portalOrigin: string, uploadToken: string): Promise<void> {
-  await area.set({ portalOrigin, uploadToken, needsReconnect: false });
+  await area.set({ portalOrigin, uploadToken, needsReconnect: false, connectedAt: new Date().toISOString() });
+  await area.remove('snoozeUntil');
   await area.remove(['lastResult', 'lastSyncAt', 'lastAttemptAt', 'lastFetchedAt', 'lastCourseIds', 'backoffUntil']);
 }
 

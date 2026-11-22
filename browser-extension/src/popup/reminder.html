@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Update your Canvas data</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body class="page">
+  <main>
+    <h1>Time to update your Canvas data</h1>
+    <p id="age" class="hint">Checking when your data was last updated…</p>
+    <p>The extension syncs in the background only while you are signed in to Canvas. Open Canvas in this browser and it syncs as soon as the page loads.</p>
+    <div class="row"><button id="open-canvas" type="button">Open Canvas and update</button></div>
+    <h2>Not now</h2>
+    <div class="row">
+      <button type="button" class="secondary" data-snooze="24" data-label="tomorrow">Remind me tomorrow</button>
+      <button type="button" class="secondary" data-snooze="72" data-label="in 3 days">In 3 days</button>
+      <button type="button" class="secondary" data-snooze="168" data-label="in a week">In a week</button>
+    </div>
+    <h2>Reminder settings</h2>
+    <label for="remind-after">Remind me when the data is older than</label>
+    <select id="remind-after">
+      <option value="24">1 day</option>
+      <option value="72">3 days</option>
+      <option value="168">1 week</option>
+      <option value="0">Never (no reminders)</option>
+    </select>
+    <p id="message" class="message" role="status"></p>
+  </main>
+  <script type="module" src="reminder.js"></script>
+</body>
+</html>
