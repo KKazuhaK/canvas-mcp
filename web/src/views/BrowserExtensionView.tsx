@@ -10,6 +10,7 @@ import { useLocation } from 'react-router'
 import type { ExtensionBinding, ExtensionResource } from '@/api/types'
 import ConfirmDialog from '@/components/ConfirmDialog'
 import ErrorNotice from '@/components/ErrorNotice'
+import CompanionSync from '@/components/extension/CompanionSync'
 import ExtensionPairingCard, { extensionStateFromHash } from '@/components/extension/ExtensionPairingCard'
 import PageHeader from '@/components/PageHeader'
 import RelativeTimeText from '@/components/RelativeTimeText'
@@ -30,7 +31,15 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
-function StatusCard({ binding, onDisconnect }: { binding: ExtensionBinding | null; onDisconnect: () => void }) {
+function StatusCard({
+  binding,
+  onDisconnect,
+  onSynced,
+}: {
+  binding: ExtensionBinding | null
+  onDisconnect: () => void
+  onSynced: () => void
+}) {
   const { t } = useTranslation()
   const notSynced = t('account:extension.notSyncedYet')
   const columns: Column<ExtensionResource>[] = [
@@ -92,6 +101,7 @@ function StatusCard({ binding, onDisconnect }: { binding: ExtensionBinding | nul
                 ? t('account:extension.reason.active')
                 : t(`account:extension.reason.${binding.reason ?? 'inactive'}`)}
             </Typography>
+            <CompanionSync lastUploadAt={binding.lastUploadAt} onSynced={onSynced} />
             <Box sx={{ display: 'grid', gap: 1 }}>
               <Typography variant="h3" component="h3">
                 {t('account:extension.resources.title')}
@@ -152,6 +162,7 @@ export default function BrowserExtensionView() {
         {status.data ? (
           <StatusCard
             binding={status.data.binding}
+            onSynced={() => void status.refetch()}
             onDisconnect={() => {
               remove.reset()
               setConfirming(true)

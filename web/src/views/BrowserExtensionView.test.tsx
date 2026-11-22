@@ -263,7 +263,7 @@ describe('Browser extension: manual code', () => {
 })
 
 /** Stands in for the extension's page bridge: answers this page's messages on the shared channel. */
-function fakeExtension(opts: { connected?: boolean; result?: Record<string, unknown>; silent?: boolean } = {}) {
+function fakeExtension(opts: { connected?: boolean; result?: Record<string, unknown>; silent?: boolean; synced?: Record<string, unknown> } = {}) {
   const fromPage: Record<string, unknown>[] = []
   const reply = (message: Record<string, unknown>) =>
     window.dispatchEvent(
@@ -275,6 +275,7 @@ function fakeExtension(opts: { connected?: boolean; result?: Record<string, unkn
     fromPage.push(data)
     if (data.type === 'hello') reply({ type: 'ready', version: '0.1.0', connected: !!opts.connected })
     if (data.type === 'connect' && !opts.silent) reply({ type: 'result', ok: true, ...opts.result })
+    if (data.type === 'sync') reply({ type: 'synced', ok: true, updated: 4, ...opts.synced })
   }
   window.addEventListener('message', onMessage)
   return { fromPage, stop: () => window.removeEventListener('message', onMessage) }
@@ -342,6 +343,67 @@ describe('Browser extension: one click from this page', () => {
       new MessageEvent('message', { data: { channel: 'canvas-companion', from: 'extension', type: 'ready', connected: false }, origin: 'https://evil.example', source: window }),
     )
     expect(await screen.findByText(/The extension was not found in this browser/, {}, { timeout: 3000 })).toBeInTheDocument()
+  })
+})
+
+describe('Browser extension: sync now', () => {
+  const synced = (minutesAgo: number) => ({
+    ...BINDING,
+    canvasHost: 'canvas.example.edu',
+    active: true,
+    lastUploadAt: new Date(Date.now() - minutesAgo * 60_000).toISOString(),
+  })
+  const syncs = (ext: ReturnType<typeof fakeExtension>) => ext.fromPage.filter((m) => m.type === 'sync')
+
+  it('refreshes everything through the extension and reads the status again', async () => {
+    const user = userEvent.setup()
+    const ext = fakeExtension({ connected: true })
+    try {
+      const { seen } = await open('/browser-extension', { binding: synced(5) })
+      await user.click(await screen.findByRole('button', { name: 'Sync now' }))
+      expect(await screen.findByText('Synced: 4 items updated.')).toBeInTheDocument()
+      expect(syncs(ext)).toEqual([expect.objectContaining({ force: true })])
+      await waitFor(() => expect(seen.filter((r) => r.url === '/me/extension' && r.method === 'GET').length).toBeGreaterThan(1))
+    } finally {
+      ext.stop()
+    }
+  })
+
+  it('syncs by itself when the data is more than an hour old, only what is due', async () => {
+    const ext = fakeExtension({ connected: true, synced: { updated: 0 } })
+    try {
+      await open('/browser-extension', { binding: synced(3 * 60) })
+      expect(await screen.findByText('Synced. Nothing had changed.')).toBeInTheDocument()
+      expect(syncs(ext)).toEqual([expect.objectContaining({ force: false })])
+    } finally {
+      ext.stop()
+    }
+  })
+
+  it('does not sync by itself when the data is fresh, and shows a failed sync', async () => {
+    const user = userEvent.setup()
+    const ext = fakeExtension({ connected: true, synced: { ok: false, error: 'Sign in to Canvas first.' } })
+    try {
+      await open('/browser-extension', { binding: synced(5) })
+      await screen.findByRole('button', { name: 'Sync now' })
+      expect(syncs(ext)).toEqual([])
+      await user.click(screen.getByRole('button', { name: 'Sync now' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent('Sign in to Canvas first.')
+    } finally {
+      ext.stop()
+    }
+  })
+
+  it('has no Sync now when this browser is not the connected one', async () => {
+    const ext = fakeExtension({ connected: false })
+    try {
+      await open('/browser-extension', { binding: synced(3 * 60) })
+      await screen.findByRole('button', { name: 'Connect this browser' })
+      expect(screen.queryByRole('button', { name: 'Sync now' })).toBeNull()
+      expect(syncs(ext)).toEqual([])
+    } finally {
+      ext.stop()
+    }
   })
 })
 

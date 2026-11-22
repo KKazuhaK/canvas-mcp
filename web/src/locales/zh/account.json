@@ -387,6 +387,15 @@
       "needsCanvasAccess": "就差一步：扩展打开了一个新标签页，请在那里允许它读取你的 Canvas 站点，随后即开始同步。",
       "noAnswer": "扩展没有响应。请刷新此页面后重试。",
       "orCode": "或使用配对码"
+    },
+    "sync": {
+      "now": "立即同步",
+      "running": "正在同步…",
+      "done_one": "同步完成：更新了 {{count}} 项。",
+      "done_other": "同步完成：更新了 {{count}} 项。",
+      "unchanged": "同步完成，没有变化。",
+      "noAnswer": "扩展没有响应。请确认已在此浏览器登录 Canvas 后重试。",
+      "lastError": "此浏览器上次同步失败：{{message}}"
     }
   }
 }

@@ -36,8 +36,10 @@ in Canvas.
 ## When it runs
 
 When a Canvas page finishes loading (at most once every 10 minutes after a
-successful sync, or once a minute while syncs are failing), every hour in the
-background, and when you press **Sync now**.
+successful sync, or once a minute while syncs are failing), every 30 minutes in
+the background and once shortly after the browser starts, when you open the
+Portal's browser-extension page with data more than an hour old, and when you
+press **Sync now** (in the popup or on that page).
 
 ## What it sends, and where
 
@@ -90,7 +92,7 @@ requirements.
 ## Permissions
 
 - `storage`: the settings and status above.
-- `alarms`: the hourly sync.
+- `alarms`: the sync every 30 minutes and once after the browser starts.
 - `scripting`: to run the read requests inside your open Canvas tab, and to
   read the pairing code from the Portal tab you opened.
 - `activeTab`: to read the address of the tab you open the extension from, so

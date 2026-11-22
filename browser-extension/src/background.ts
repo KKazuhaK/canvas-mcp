@@ -32,4 +32,4 @@ api.alarms?.onAlarm.addListener((alarm) => {
 });
 api.runtime.onInstalled?.addListener((details) => void controller.onInstalled(details).catch(() => {}));
 api.permissions?.onAdded?.addListener(() => void controller.resumeIntent().catch(() => {}));
-api.runtime.onStartup?.addListener(() => void controller.ensureAlarm().catch(() => {}));
+api.runtime.onStartup?.addListener(() => void controller.onStartup().catch(() => {}));

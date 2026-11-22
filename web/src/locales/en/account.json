@@ -387,6 +387,15 @@
       "needsCanvasAccess": "Almost done: the extension opened a tab. Allow it to read your Canvas site there, and syncing starts.",
       "noAnswer": "The extension did not answer. Reload this page and try again.",
       "orCode": "Or pair with a code"
+    },
+    "sync": {
+      "now": "Sync now",
+      "running": "Syncing…",
+      "done_one": "Synced: {{count}} item updated.",
+      "done_other": "Synced: {{count}} items updated.",
+      "unchanged": "Synced. Nothing had changed.",
+      "noAnswer": "The extension did not answer. Make sure you are signed in to Canvas in this browser, then try again.",
+      "lastError": "This browser's last sync failed: {{message}}"
     }
   }
 }
