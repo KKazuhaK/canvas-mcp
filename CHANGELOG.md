@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.1] — 2026-11-22
+
+### Fixed
+
+- Browser extension: no Portal is built in. The manifest no longer names `canvas.mcp.kazuhahub.com` (a required host permission and a content script) and nothing opens on install. Opened on any Portal's browser-extension page, the popup offers that Portal; after the person allows access, the page bridge is registered for it at runtime and the page pairs by itself. The extension is 1.15.2.
+
 ### Changed
 
-- Browser extension 1.15.1: the first store release of the 1.15.0 extension changes (one-click pairing, sooner sync, stale-data reminders). Extension versions now come from `browser-extension/src/manifest.json`, and a bump there publishes to the stores.
+- Browser extension 1.15.2: the first store release of the 1.15.0 extension changes (one-click pairing, sooner sync, stale-data reminders). Extension versions now come from `browser-extension/src/manifest.json`, and a bump there publishes to the stores.
 
 ## [1.15.0] — 2026-11-22
 
