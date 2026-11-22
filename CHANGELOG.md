@@ -7,12 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.0] — 2026-11-22
+
 ### Added
+
+- **Browser extension: one-click pairing from the Portal.** The browser-extension page detects Canvas MCP Sync and offers "Connect this browser". A page bridge, declared only for the default Portal and answered only in the top frame, takes a one-time pairing code, so nothing is typed or shown. `POST /api/v1/me/extension/pairing` also returns `canvasOrigin` (the enrolled school, else the server's only school, else `null`) as a hint. When the extension may already read that site, it starts syncing at once; otherwise it opens a tab that asks for access with one click. The popup's address and pairing-code fields are now the fallback.
+- **Browser extension: syncs sooner.** The periodic sync runs every 30 minutes (was hourly), with its first run a minute after pairing. One more sync runs a minute after a browser start. The Portal page has "Sync now", and opening it syncs by itself when the data is more than an hour old.
+- **Browser extension: stale-data reminder.** When background sync cannot run (for example while signed out of Canvas) and the data is older than the chosen age (1 day by default, 3 days, 1 week or never), the extension opens its own reminder page, never Canvas itself. The page offers to open Canvas or to snooze, and closes once a sync succeeds.
 
 - Self-hosted: `GET /api/v1/readiness` reports whether a person's Portal connection works (`ready`, `needs_setup`, `degraded`, `expiring`, `expired`, `revoked`), so a hub such as MCPHub no longer shows "Connected" for someone who never saved a Canvas token. It accepts exactly the tokens `/mcp` accepts (including a trusted issuer's), follows the credential path `/mcp` uses (a saved token, else browser sync judged by the same age and status rules), writes nothing itself (authentication has the same side effects as an `/mcp` call) and never returns a token. See `deploy/selfhost/CONFIGURATION.md`, "Readiness endpoint".
 
 ### Fixed
 
+- Browser extension: saving the Canvas site (or connecting) no longer has to be entered again after the browser's site-access prompt. Chrome closes the popup during that prompt; the request is now saved first and finished in the background once access is granted.
+- Browser extension: the Canvas address is prefilled only from a tab that looks like Canvas, not from whatever page the popup was opened on.
 - Self-hosted: an SSO lock no longer refuses a trusted hub. With `lock_first_sso` on, every account that had signed in with Entra was locked to Entra, and MCPHub's federated connection then failed with HTTP 403 (`federated_method_not_allowed`, shown in MCPHub as "Access revoked"). The lock now governs SSO providers only; an account's explicit provider allowlist still refuses the hub.
 
 ## [1.14.9] — 2026-11-19
