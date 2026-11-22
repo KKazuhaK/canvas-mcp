@@ -54,6 +54,12 @@ export function makeChrome(opts: MockOpts = {}) {
       },
       get: async (id: number) => tabs.find((t) => t.id === id),
       query: async () => tabs,
+      remove: async (ids: number | number[]) => {
+        for (const id of Array.isArray(ids) ? ids : [ids]) {
+          const i = tabs.findIndex((t) => t.id === id);
+          if (i >= 0) tabs.splice(i, 1);
+        }
+      },
     },
     scripting: {
       executeScript: async (d: any) => {

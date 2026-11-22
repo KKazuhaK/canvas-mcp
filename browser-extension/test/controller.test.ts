@@ -292,3 +292,22 @@ test('page visits and the alarm are budgeted once synced before; Sync now and th
   assert.equal(typeof timing.totalMs, 'number');
   assert.ok(timing.slowest.length > 0 && timing.slowest.length <= 5);
 });
+
+test('opening Canvas with old data syncs at once, and a successful sync closes an open reminder', async () => {
+  const reminder = { id: 7, url: `chrome-extension://${EXT_ID}/reminder.html`, status: 'complete' };
+  const s = setup(
+    {
+      storage: { ...connected, lastSyncAt: new Date(NOW - 30 * 3600_000).toISOString(), snoozeUntil: NOW + 3600_000 },
+      permissions: granted,
+      tabs: [...canvasTab, reminder],
+      executeScript: tabScript,
+    },
+    syncFetch(),
+  );
+  await s.c.onTabUpdated(5, { status: 'complete' }, { url: `${CANVAS}/courses` });
+  await new Promise((r) => setTimeout(r, 1700)); // the 1.5 s page-load debounce
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(s.storage.data.lastSyncAt, new Date(NOW).toISOString());
+  assert.deepEqual(s.tabs.map((t) => t.id), [5], 'the reminder tab was closed');
+  assert.equal(s.storage.data.snoozeUntil, undefined);
+});
