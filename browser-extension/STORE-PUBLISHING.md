@@ -42,7 +42,7 @@ release must be higher.
 
 1. **Pick the first version.** Server releases built before this workflow
    change stamped their own tag version into the extension (the zips on v1.14.x
-   carry 1.14.x; v1.15.0, if it was cut first, carries 1.15.0), while
+   carry 1.14.x, and v1.15.0 carries 1.15.0), while
    `src/manifest.json` still says `0.1.0`. Before anything goes to a store, set
    `version` in `src/manifest.json` above the highest of those (for example
    `1.15.1`) and merge it to `selfhost`. With no store configured yet, that creates the release
@@ -75,9 +75,9 @@ Google Cloud project for the API.
    Dashboard](https://chrome.google.com/webstore/devconsole), choose **New
    item**, upload the Chrome zip and fill in the listing and privacy tabs from
    [store-listing.md](store-listing.md). Submit it for review.
-2. **IDs (variables).** The extension id is the 32-letter id of the item in
-   the dashboard (also in the item's URL). The publisher id is shown in the
-   dashboard's **Account** page.
+2. **IDs (variables).** The extension id is the 32-letter id on the item's
+   **Package** tab (also in the item's URL). The publisher id is under
+   **Publisher > Settings** in the dashboard.
 3. **API access.** In the [Google Cloud console](https://console.cloud.google.com/):
    1. Create or pick a project and enable the **Chrome Web Store API**.
    2. Under **Google Auth Platform** (formerly OAuth consent screen), configure
