@@ -312,6 +312,11 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
     if (outcome.ok && outcome.courseIds) patch.lastCourseIds = outcome.courseIds;
     if (outcome.retryAfterMs) patch.backoffUntil = env.now() + outcome.retryAfterMs;
     await storage.set(patch);
+    if (outcome.ok) {
+      // The data is fresh again: any open reminder has done its job.
+      await storage.remove('snoozeUntil');
+      await closeReminders().catch(() => {});
+    }
     if (outcome.reconnect) await markDisconnected(storage);
   }
 
@@ -432,6 +437,12 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
   }
 
   const reminderUrl = () => api.runtime.getURL('reminder.html');
+  const isReminder = (t: { url?: string }) => t.url?.split(/[?#]/)[0] === reminderUrl();
+  async function closeReminders() {
+    if (!api.tabs.remove) return;
+    const ids = (await api.tabs.query({ url: reminderUrl() })).filter(isReminder).flatMap((t) => (t.id === undefined ? [] : [t.id]));
+    if (ids.length) await api.tabs.remove(ids);
+  }
   /**
    * A background sync needs Canvas signed in. When it keeps failing and the data gets older than the
    * person's chosen age, open the extension's reminder page (never Canvas itself).
@@ -441,7 +452,7 @@ export function createController(api: typeof chrome, env: ControllerEnv) {
     if (!isConnected(s) || !s.canvasOrigin) return;
     const now = env.now();
     if (!reminderDue(s, now)) return;
-    if ((await api.tabs.query({ url: reminderUrl() })).some((t) => t.url?.split(/[?#]/)[0] === reminderUrl())) return;
+    if ((await api.tabs.query({ url: reminderUrl() })).some(isReminder)) return;
     // Ignoring the page snoozes it, so it comes back later instead of on every check.
     await storage.set({ snoozeUntil: now + IGNORED_SNOOZE_MS });
     await api.tabs.create({ url: reminderUrl() });
