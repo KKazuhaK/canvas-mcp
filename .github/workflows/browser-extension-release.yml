@@ -324,22 +324,36 @@ jobs:
           if [ -z "$token" ]; then echo "no access token in the response; check the CHROME_* secrets" >&2; exit 1; fi
           echo "::add-mask::$token"
           auth=(-H "Authorization: Bearer $token")
+          # Prints the API's answer; on an HTTP error it also prints the error
+          # body (the reason a publish was refused) as an annotation.
+          call() {
+            local body
+            if ! body=$(curl -sS --fail-with-body "${auth[@]}" "$@"); then
+              echo "::error title=Chrome Web Store::$(jq -c '.error // .' <<< "$body" 2>/dev/null || printf %s "$body")" >&2
+              printf '%s\n' "$body" >&2
+              return 1
+            fi
+            printf '%s\n' "$body"
+          }
 
-          upload=$(curl -sS --fail-with-body -X POST "${auth[@]}" -H "Content-Type: application/zip" \
+          upload=$(call -X POST -H "Content-Type: application/zip" \
             --data-binary "@canvas-mcp-sync-chrome-${VERSION}.zip" "$api/upload/v2/${ITEM}:upload?uploadType=media")
           echo "$upload"
           state=$(echo "$upload" | jq -r .uploadState)
           for _ in 1 2 3 4 5 6 7 8 9 10; do
             [ "$state" = IN_PROGRESS ] || break
             sleep 6
-            state=$(curl -sS --fail-with-body "${auth[@]}" "$api/v2/${ITEM}:fetchStatus" | jq -r '.lastAsyncUploadState // "IN_PROGRESS"')
+            state=$(call "$api/v2/${ITEM}:fetchStatus" | jq -r '.lastAsyncUploadState // "IN_PROGRESS"')
           done
           if [ "$state" != SUCCEEDED ]; then echo "upload ended in state $state" >&2; exit 1; fi
 
-          publish=$(curl -sS --fail-with-body -X POST "${auth[@]}" -H "Content-Type: application/json" \
+          publish=$(call -X POST -H "Content-Type: application/json" \
             -d '{}' "$api/v2/${ITEM}:publish")
           echo "$publish"
-          echo "$publish" | jq -e '.state | IN("PENDING_REVIEW", "STAGED", "PUBLISHED", "PUBLISHED_TO_TESTERS")' > /dev/null
+          if ! echo "$publish" | jq -e '.state | IN("PENDING_REVIEW", "STAGED", "PUBLISHED", "PUBLISHED_TO_TESTERS")' > /dev/null; then
+            echo "::error title=Chrome Web Store::publish answered state $(jq -r '.state // "none"' <<< "$publish")"
+            exit 1
+          fi
 
   edge-add-ons:
     name: Submit to Microsoft Edge Add-ons
